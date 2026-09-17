@@ -97,6 +97,22 @@ fn make_test_enterprise_at(
     authority: MandateAuthority,
     location: EnterpriseLocation,
 ) -> EnterpriseId {
+    make_test_enterprise_kind_at(
+        fixture,
+        rival,
+        authority,
+        location,
+        EnterpriseKind::Protection,
+    )
+}
+
+fn make_test_enterprise_kind_at(
+    fixture: &mut Fixture,
+    rival: OrganizationId,
+    authority: MandateAuthority,
+    location: EnterpriseLocation,
+    kind: EnterpriseKind,
+) -> EnterpriseId {
     let cash = insert_account(
         &mut fixture.state,
         FinancialAccountDraft {
@@ -117,7 +133,7 @@ fn make_test_enterprise_at(
         &fixture.registry,
         &fixture.state,
         EnterpriseDraft {
-            kind: EnterpriseKind::Protection,
+            kind,
             organization: rival,
             authority,
             location,
@@ -270,7 +286,9 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
         // Exact public-face summary excludes accounts, profits, economic cycles, and cases.
         assert_eq!(
             information.summary(),
-            format!("Activity at {location} appears active under Rival Manager for Visible Rival.")
+            format!(
+                "Observed protection activity at {location} appears active under Rival Manager for Visible Rival."
+            )
         );
         assert!(is_valid_persisted_surveillance_information(
             record,
@@ -297,7 +315,7 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
             .contains(&EntityRef::Organization(rival))
     );
     assert!(report.entries()[0].summary.contains(
-        "Surveillance produced 4 usable target observations: personnel around Visible Rival; activity at Zulu Ward; activity at Yarrow Ward; activity at Xenia Ward."
+        "Surveillance produced 4 usable target observations: personnel around Visible Rival; protection activity at Zulu Ward; protection activity at Yarrow Ward; protection activity at Xenia Ward."
     ));
     // Existing after-action reports carry findings and target links, not source citations.
     assert_eq!(
@@ -371,7 +389,7 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
     );
     assert_eq!(
         information.summary(),
-        "Activity at Zulu Ward appears active under Rival Manager for Visible Rival."
+        "Observed protection activity at Zulu Ward appears active under Rival Manager for Visible Rival."
     );
     // Later inactivity cannot retroactively erase the frozen discovery/provenance.
     validate_suspend_enterprise(&fixture.state, enterprises[1])
@@ -470,6 +488,97 @@ fn direct_enterprise_surveillance_adds_neighborhood_patrol_intelligence() {
         bincode::serialize(&restored).unwrap(),
         bincode::serialize(&fixture.state).unwrap()
     );
+}
+
+#[test]
+fn colocated_rackets_remain_distinguishable_in_surveillance_and_after_action() {
+    let mut fixture = fixture(100, false);
+    let (rival, authority) = make_test_rival(&mut fixture);
+    let neighborhood = fixture.neighborhood;
+    let business = insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Shared Club".to_owned(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(rival),
+        },
+    )
+    .unwrap();
+    let kinds = [
+        EnterpriseKind::Protection,
+        EnterpriseKind::Bookmaking,
+        EnterpriseKind::LoanSharking,
+    ];
+    let enterprises = kinds.map(|kind| {
+        make_test_enterprise_kind_at(
+            &mut fixture,
+            rival,
+            authority,
+            EnterpriseLocation::Business(business),
+            kind,
+        )
+    });
+    let operation = authorize_surveillance(&mut fixture, EntityRef::Organization(rival));
+    resolve_with_zero_variance(&mut fixture, operation);
+    let result = fixture
+        .state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .resolution()
+        .unwrap();
+    let observations: Vec<_> = result
+        .discovered_information()
+        .iter()
+        .map(|id| fixture.state.intelligence().get_information(*id).unwrap())
+        .filter(|item| matches!(item.subject(), EntityRef::Enterprise(_)))
+        .collect();
+    assert_eq!(observations.len(), 3);
+    let after_action = fixture
+        .state
+        .intelligence()
+        .get_information(result.after_action_information())
+        .unwrap();
+    for ((observation, enterprise), label) in
+        observations
+            .iter()
+            .zip(enterprises)
+            .zip(["protection", "bookmaking", "loan-sharking"])
+    {
+        assert_eq!(observation.subject(), EntityRef::Enterprise(enterprise));
+        assert_eq!(
+            observation.summary(),
+            format!(
+                "Observed {label} activity at Shared Club appears active under Rival Manager for Visible Rival."
+            )
+        );
+        assert!(
+            after_action
+                .summary()
+                .contains(&format!("{label} activity at Shared Club"))
+        );
+    }
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for observation in observations {
+        assert_eq!(
+            restored
+                .intelligence()
+                .get_information(observation.id())
+                .unwrap()
+                .summary(),
+            observation.summary()
+        );
+    }
 }
 
 #[test]

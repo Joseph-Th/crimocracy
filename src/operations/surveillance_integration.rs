@@ -152,6 +152,7 @@ struct EnterpriseSnapshot {
     manager_name: String,
     location: EnterpriseLocation,
     location_name: String,
+    kind: crate::enterprises::EnterpriseKind,
     status: EnterpriseStatus,
 }
 
@@ -566,6 +567,7 @@ fn resolve_enterprise_snapshot(
         manager_name: manager.name().to_owned(),
         location: enterprise.location(),
         location_name: enterprise_location_name(state, enterprise.location()),
+        kind: enterprise.kind(),
         status: enterprise.status(),
     }
 }
@@ -780,12 +782,17 @@ fn enterprise_observation(
         specificity,
         signal: None,
         summary: enterprise_summary(
+            enterprise.kind,
             &enterprise.organization_name,
             &enterprise.manager_name,
             &enterprise.location_name,
             enterprise.status,
         ),
-        finding: format!("activity at {}", enterprise.location_name),
+        finding: format!(
+            "{} activity at {}",
+            enterprise_kind_label(enterprise.kind),
+            enterprise.location_name
+        ),
     }
 }
 
@@ -1123,15 +1130,32 @@ fn investigation_summary(
 }
 
 fn enterprise_summary(
+    kind: crate::enterprises::EnterpriseKind,
     organization_name: &str,
     manager_name: &str,
     location_name: &str,
     status: EnterpriseStatus,
 ) -> String {
     format!(
-        "Activity at {location_name} appears {} under {manager_name} for {organization_name}.",
+        "Observed {} activity at {location_name} appears {} under {manager_name} for {organization_name}.",
+        enterprise_kind_label(kind),
         enterprise_status_label(status)
     )
+}
+
+/// The racket kind is visibly part of the operation (a card room, a still, collectors walking
+/// the street), so a watcher can tell two rackets apart even when they share one venue.
+fn enterprise_kind_label(kind: crate::enterprises::EnterpriseKind) -> &'static str {
+    match kind {
+        crate::enterprises::EnterpriseKind::Protection => "protection",
+        crate::enterprises::EnterpriseKind::Gambling => "gambling",
+        crate::enterprises::EnterpriseKind::AlcoholDistribution => "liquor",
+        crate::enterprises::EnterpriseKind::Bookmaking => "bookmaking",
+        crate::enterprises::EnterpriseKind::LoanSharking => "loan-sharking",
+        crate::enterprises::EnterpriseKind::Fencing => "fencing",
+        crate::enterprises::EnterpriseKind::Speakeasy => "speakeasy",
+        crate::enterprises::EnterpriseKind::LaborRacketeering => "labor",
+    }
 }
 
 fn enterprise_location_name(state: &AppState, location: EnterpriseLocation) -> String {
