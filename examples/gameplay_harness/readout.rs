@@ -1772,7 +1772,7 @@ pub fn print_experience_readout(
         optional_dollars(press.accounted_balance_cents),
     );
     println!(
-        "  - Visibility leverage: the branches drew {} vice inquiries this comparison, and the vice-heat probe demonstrates the full chain deterministically every run - clean districts never roll attention; sustained casework compounds a per-case street surcharge onto every cycle and can convert into a dedicated inquiry on the racket itself, taxing every book in that district (including rivals') until it shelves. Going dark or moving districts are the honest counters.",
+        "  - Visibility leverage: the branches drew {} vice inquiries this comparison, and the vice-heat probe demonstrates the full chain deterministically every run - clean districts never roll attention; sustained casework compounds a per-case street surcharge onto every cycle and can convert into a dedicated inquiry on the racket itself, taxing every book in that district (including rivals') until it shelves. Suspending a racket stops its future cycles; moving districts avoids unrelated-case surcharges. PRESS instead keeps its home racket open while stopping new street jobs, so its remaining vice risk is deliberate.",
         rush.vice_inquiries_drawn + press.vice_inquiries_drawn + recon.vice_inquiries_drawn,
     );
     println!(

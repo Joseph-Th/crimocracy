@@ -77,10 +77,16 @@ fn validate_current_laundering_window(
     let BusinessOwner::Organization(organization) = business.owner() else {
         return Ok(false);
     };
+    let ownership = state
+        .world
+        .get_business_ownership_change_for_version(economy.business(), business.version())
+        .ok_or_else(|| invalid_economy(economy))?;
+    // Resumption resets loss counting and scheduling, not the laundering budget. Only a
+    // settlement or ownership change supersedes the current owner's retained provenance.
     let window_start = [
         Some(economy.established_at()),
         economy.last_cycle_at(),
-        economy.loss_streak_anchor(),
+        Some(ownership.changed_at()),
     ]
     .into_iter()
     .flatten()

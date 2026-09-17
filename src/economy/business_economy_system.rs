@@ -540,6 +540,7 @@ impl ValidatedBusinessCycle {
                 BusinessOperatingStatus::Suspended,
                 None,
                 None,
+                false,
             );
         }
         Ok(cycle)

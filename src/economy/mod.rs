@@ -336,6 +336,7 @@ impl EconomyState {
         // Installed only when the economy returns to Active: restarts the chronic-loss grace
         // window so pre-suspension losses cannot instantly re-suspend a resumed business.
         loss_streak_anchor: Option<SimTime>,
+        reset_laundering_window: bool,
     ) {
         let (was_active, old_next_cycle_at) = {
             let record = self
@@ -367,15 +368,12 @@ impl EconomyState {
             .expect("validated business economy disappeared before status commit");
         record.status = status;
         record.next_cycle_at = next_cycle_at;
-        let resets_operating_cycle = loss_streak_anchor.is_some();
         if let Some(anchor) = loss_streak_anchor {
             record.loss_streak_anchor = Some(anchor);
         }
-        if resets_operating_cycle {
-            // Resume and acquisition restart both schedule a complete new operating cycle.
-            // Carrying the prior window's laundering volume into that new cycle would make the
-            // buyer/resumed operator inherit capacity consumption from a cycle that no longer
-            // exists.
+        if reset_laundering_window {
+            // Only acquisition starts a new owner's laundering window. Same-owner resumption
+            // retains consumed capacity and provenance until the next actual settlement.
             record.laundered_this_cycle = Money::ZERO;
             record.laundering_transactions_this_cycle.clear();
         }

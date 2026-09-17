@@ -71,9 +71,17 @@ impl ValidatedBusinessEconomyStatusChange {
             BusinessEconomyStatusChange::Resume | BusinessEconomyStatusChange::Restart
         )
         .then_some(state.now());
-        state
-            .economy
-            .set_status(self.business, status, next_cycle_at, loss_streak_anchor);
+        let reset_laundering_window = match self.change {
+            BusinessEconomyStatusChange::Suspend | BusinessEconomyStatusChange::Resume => false,
+            BusinessEconomyStatusChange::Restart => true,
+        };
+        state.economy.set_status(
+            self.business,
+            status,
+            next_cycle_at,
+            loss_streak_anchor,
+            reset_laundering_window,
+        );
         Ok(())
     }
 }

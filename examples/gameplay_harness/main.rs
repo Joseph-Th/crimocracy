@@ -19,6 +19,7 @@ mod contracts;
 mod model;
 mod observe;
 mod options;
+mod posture;
 mod probes;
 mod readout;
 mod scenario;
@@ -318,6 +319,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 
     println!("\n--- REPEAT-TAKE PROBE ---");
     run_repeat_take_probe(&registry, primary_seeds)?;
+
+    println!("\n--- ENTERPRISE POSTURE PROBE ---");
+    posture::run_enterprise_posture_probe(&registry, primary_seeds, Some(&artifact_dir))?;
 
     println!("\n--- LEGAL FOUNDATION CHECK ---");
     run_legal_foundation_check(&registry)?;

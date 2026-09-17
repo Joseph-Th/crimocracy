@@ -86,7 +86,7 @@ pub(super) fn run_press_response(
         if narrative {
             match metrics.followup_case_active {
                 Some(true) => println!(
-                    "[VERIFY]  Detectives around {police_name} are still actively developing the case. Keep the district dark."
+                    "[VERIFY]  Detectives around {police_name} are still actively developing the case. Stop new street jobs; the home racket remains open, earning income and risking further vice attention."
                 ),
                 Some(false) => println!(
                     "[VERIFY]  No active case machinery around {police_name}; the matter appears shelved."
@@ -742,7 +742,7 @@ fn run_stand_down_and_diversify(
         discover_second_opportunity(scenario, narrative, metrics)?;
         if narrative {
             println!(
-                "[DECIDE]  The second score is real, but {police_name} is still developing the case. Leadership holds the district dark and takes nothing; the opportunity will be allowed to lapse."
+                "[DECIDE]  The second score is real, but {police_name} is still developing the case. Leadership declines another street job and lets the opportunity lapse. The home racket stays open: we accept its ongoing vice risk to keep earning."
             );
         }
     }
@@ -817,7 +817,7 @@ fn poll_case_activity(
     // threat: through the channel, not the calendar. The query only produces a fresh
     // disclosure when the institution actually has new word (an active read early, the
     // shelved read once the file goes cold); otherwise it returns nothing and the
-    // organization holds dark on the last thing it heard.
+    // organization keeps new street jobs on hold based on the last thing it heard.
     let read = read_police_contact(scenario, EntityRef::Operation(burglary), narrative, metrics)?;
     if matches!(read, Some((false, _))) {
         metrics.cold_case_confirmed = Some(true);
@@ -873,11 +873,11 @@ fn narrate_stand_down_heartbeat(
         })
         .unwrap_or_default();
     let channel_line = match read {
-        Some((true, _)) => "the channel still reads the case as actively developing - holding dark",
+        Some((true, _)) => "the case is still developing - no new street jobs, racket still open",
         Some((false, _)) => "the channel confirms the case has cooled",
         // Leadership cannot know when the file will go cold; until the channel says
-        // otherwise the last confirmed read stands and the district stays dark.
-        None => "no fresh word from the channel - last read stands, holding dark",
+        // otherwise the last confirmed read stands and new street jobs stay on hold.
+        None => "no fresh word - no new street jobs, racket still open",
     };
     println!(
         "[WAIT] {}: {}; {} capital review(s) so far, accounted books at {}, racket reserve at {}; rivals hold {} home-district racket(s).",
