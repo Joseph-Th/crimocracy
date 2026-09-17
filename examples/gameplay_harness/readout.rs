@@ -687,24 +687,101 @@ pub fn print_organization_closing_view(
                 dimension,
             );
             let baseline = registry.reputation().baseline();
-            if score != baseline {
-                let band = match score.cmp(&baseline) {
-                    std::cmp::Ordering::Greater => match score - baseline {
-                        1..=3 => "slightly elevated",
-                        4..=7 => "markedly elevated",
-                        _ => "severely elevated",
-                    },
-                    std::cmp::Ordering::Less => match baseline - score {
-                        1..=3 => "slightly diminished",
-                        4..=7 => "markedly diminished",
-                        _ => "severely diminished",
-                    },
-                    std::cmp::Ordering::Equal => {
-                        unreachable!("touched standing differs from baseline")
-                    }
-                };
+            if let Some(band) = standing_band(score, baseline) {
                 println!("  - Standing {audience:?}/{dimension:?}: {band}.");
             }
+        }
+    }
+}
+
+/// Presentation-only distance from the authored baseline on the 0..=100 score scale.
+/// A few ordinary successes are a slight shift, not an extreme standing. These bands
+/// are not gameplay thresholds; neutral wording works for both competence and fear.
+fn standing_band(score: u8, baseline: u8) -> Option<&'static str> {
+    match (score.cmp(&baseline), score.abs_diff(baseline)) {
+        (std::cmp::Ordering::Equal, _) => None,
+        (std::cmp::Ordering::Greater, 1..=9) => Some("slightly above baseline"),
+        (std::cmp::Ordering::Greater, 10..=24) => Some("noticeably above baseline"),
+        (std::cmp::Ordering::Greater, _) => Some("far above baseline"),
+        (std::cmp::Ordering::Less, 1..=9) => Some("slightly below baseline"),
+        (std::cmp::Ordering::Less, 10..=24) => Some("noticeably below baseline"),
+        (std::cmp::Ordering::Less, _) => Some("far below baseline"),
+    }
+}
+
+#[cfg(test)]
+mod standing_tests {
+    use super::*;
+    use crimocracy::reputation::reputation_system::{apply_reputation_delta, resolve_score};
+    use crimocracy::reputation::{AudienceKind, ReputationDimension};
+
+    #[test]
+    fn standing_stays_slight_when_three_authored_success_shifts_accumulate() {
+        let registry = crimocracy::build_registry();
+        let mut scenario = build_scenario(
+            &registry,
+            EvaluationSeeds::defaults(),
+            ScenarioProfile::NightTrap,
+        )
+        .unwrap();
+        let baseline = registry.reputation().baseline();
+        let initial = resolve_score(
+            &registry,
+            scenario.state.reputation(),
+            scenario.player,
+            AudienceKind::Underworld,
+            ReputationDimension::Competence,
+        );
+        assert_eq!(initial, baseline);
+        assert_eq!(standing_band(initial, baseline), None);
+
+        // Exercise the canonical score owner, not a fabricated reputation record.
+        // This isolates presentation of authored shifts from operation RNG and decay.
+        let shift = registry.reputation().achieved_underworld_competence();
+        for successes in 1..=3 {
+            apply_reputation_delta(
+                &registry,
+                &mut scenario.state,
+                scenario.player,
+                AudienceKind::Underworld,
+                ReputationDimension::Competence,
+                shift,
+            )
+            .unwrap();
+            let score = resolve_score(
+                &registry,
+                scenario.state.reputation(),
+                scenario.player,
+                AudienceKind::Underworld,
+                ReputationDimension::Competence,
+            );
+            assert_eq!(
+                i16::from(score) - i16::from(baseline),
+                successes * i16::from(shift)
+            );
+            assert_eq!(
+                standing_band(score, baseline),
+                Some("slightly above baseline")
+            );
+        }
+    }
+
+    #[test]
+    fn standing_bands_use_baseline_distance_at_both_boundaries_and_score_rails() {
+        for baseline in [40_u8, 50] {
+            assert_eq!(standing_band(baseline, baseline), None);
+            for (distance, above, below) in [
+                (1, "slightly above baseline", "slightly below baseline"),
+                (9, "slightly above baseline", "slightly below baseline"),
+                (10, "noticeably above baseline", "noticeably below baseline"),
+                (24, "noticeably above baseline", "noticeably below baseline"),
+                (25, "far above baseline", "far below baseline"),
+            ] {
+                assert_eq!(standing_band(baseline + distance, baseline), Some(above));
+                assert_eq!(standing_band(baseline - distance, baseline), Some(below));
+            }
+            assert_eq!(standing_band(100, baseline), Some("far above baseline"));
+            assert_eq!(standing_band(0, baseline), Some("far below baseline"));
         }
     }
 }
@@ -1632,7 +1709,7 @@ pub fn print_experience_readout(
     println!(
         "  - Witness counterplay: PRESS's after-action says the score was witnessed, leadership answers with one pressure operation against the publicly known shopkeeper, and that operation visibly {}.",
         if press.witness_pressure_aborted {
-            "aborts when another police response arrives - quiet counter-play inside standing patrol windows gambles: a blind guess in a watched district risks a response whether or not the case machinery is active, so walking away is the disciplined play, and the RECON second act proves the mirror image by standing down whenever its own casing creates heat the contact cannot clear"
+            "aborts when another police response arrives - a blind guess in a watched district risks a response whether or not the case machinery is active, so walking away is the disciplined play. This pressure attempt does not establish how RECON's separate casing resolved"
         } else {
             match press.witness_pressure_outcome {
                 Some(OperationObjectiveOutcome::Achieved) => "achieves its objective",

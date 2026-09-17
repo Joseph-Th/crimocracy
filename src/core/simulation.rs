@@ -446,7 +446,7 @@ fn apply_reputation_phase(
 ) {
     crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
     for operation in resolved_operations {
-        let (organization, approach, objective_outcome, exposure_level) = {
+        let (organization, kind, approach, objective_outcome, exposure_level) = {
             let record = state
                 .operations()
                 .get_operation(*operation)
@@ -456,6 +456,7 @@ fn apply_reputation_phase(
                 .expect("resolved operation carries its resolution");
             (
                 record.responsible_organization(),
+                record.kind(),
                 record.approach(),
                 resolution.objective_outcome(),
                 resolution.exposure().level(),
@@ -465,6 +466,7 @@ fn apply_reputation_phase(
             registry,
             state,
             organization,
+            kind,
             approach,
             objective_outcome,
             exposure_level,

@@ -701,6 +701,9 @@ pub struct RunMetrics {
     pub second_burglary_outcome: Option<OperationObjectiveOutcome>,
     pub second_burglary_terminal_minute: Option<u64>,
     pub second_act_recon_information: usize,
+    /// Actual canonical second-scout schedule and the held observation used to choose it.
+    pub second_scout_scheduled_minute: Option<u64>,
+    pub second_scout_patrol_observed_minute: Option<u64>,
     pub second_act_property_acquired_value_cents: Option<i64>,
     pub second_act_property_realized_cash_cents: Option<i64>,
     /// Debrief knowledge after a standing abort: the district-scoped PoliceActivity record

@@ -117,12 +117,69 @@ fn run_recon_second_act(
             scenario.variation.alternate_target_name()
         );
     }
+    // The policy clock is an earliest readiness time, not permission to ignore yesterday's
+    // patrol observation. Protect the scout as well as the eventual burglary, using only
+    // organization-held information about this district (never live patrol schedules).
+    let patrol = scenario
+        .state
+        .intelligence()
+        .information_for_holder_by_topic(
+            KnowledgeHolder::Organization(scenario.player),
+            InformationTopic::PoliceActivity,
+        )
+        .filter(|record| {
+            record.subject() == EntityRef::Neighborhood(scenario.neighborhood)
+                && matches!(
+                    record.signal(),
+                    Some(InformationSignal::PatrolPattern { .. })
+                )
+        })
+        .max_by_key(|record| (record.observed_at(), record.recorded_at(), record.id()))
+        .ok_or("RECON has no held district patrol pattern for planning its second scout")?;
+    let duration = scenario
+        .registry
+        .get_operation(OperationKind::Surveillance)
+        .execution()
+        .duration();
+    let ready_at = scenario
+        .state
+        .now()
+        .max(scenario.timeline.recon_second_act_surveillance_at);
+    let scout_at = choose_safe_start_from_patrol_signal(
+        ready_at,
+        patrol
+            .signal()
+            .expect("selected patrol observation has semantics"),
+        duration,
+        SimDuration::from_minutes(60),
+        scenario.timeline.second_opportunity_valid_until,
+    )?;
+    if narrative {
+        println!(
+            "[REUSE INTEL] Patrol observation from {}: {} Scout ready at {}; schedule {}m of surveillance at {} with a 60m patrol buffer. Known patrol windows constrain looking as well as taking; this reduces risk, not guarantees safety.",
+            format_day_minute(patrol.observed_at().as_minutes()),
+            patrol.summary(),
+            format_day_minute(ready_at.as_minutes()),
+            duration.as_minutes(),
+            format_day_minute(scout_at.as_minutes()),
+        );
+    }
+    metrics.second_scout_patrol_observed_minute = Some(patrol.observed_at().as_minutes());
     let recon = authorize_surveillance_target(
         scenario,
         EntityRef::Business(scenario.alternate_target),
         &title,
-        scenario.timeline.recon_second_act_surveillance_at,
+        scout_at,
     )?;
+    metrics.second_scout_scheduled_minute = Some(
+        scenario
+            .state
+            .operations()
+            .get_operation(recon)
+            .expect("authorized scout persists")
+            .scheduled_for()
+            .as_minutes(),
+    );
     run_until_operation_terminal(scenario, recon, narrative, metrics)?;
     let resolution = scenario
         .state

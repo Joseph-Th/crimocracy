@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn recon_observed_trace_checks_contact_before_committing_another_score() {
+    fn recon_reuses_patrol_knowledge_to_protect_the_second_scout() {
         let registry = crimocracy::build_registry();
         let metrics = play_session(
             &registry,
@@ -689,18 +689,17 @@ mod tests {
             SessionRunMode::FullQuiet,
         )
         .expect("full recon session completes");
-        assert!(
-            metrics.self_heat_check_required,
-            "default second casing reports trace exposure"
+        assert_eq!(metrics.second_scout_patrol_observed_minute, Some(121));
+        assert_eq!(metrics.second_scout_scheduled_minute, Some(1_440 + 330));
+        assert!(!metrics.self_heat_check_required);
+        assert!(!metrics.self_heat_case_opened);
+        assert_eq!(metrics.self_heat_case_active, None);
+        assert_eq!(metrics.contact_reads, 0);
+        assert_eq!(
+            metrics.second_burglary_outcome,
+            Some(OperationObjectiveOutcome::Achieved)
         );
-        assert!(
-            metrics.self_heat_case_opened,
-            "contact discloses the casing file"
-        );
-        assert_eq!(metrics.self_heat_case_active, Some(true));
-        assert!(metrics.contact_reads > 0);
-        assert_eq!(metrics.second_burglary, None);
-        assert!(metrics.second_opportunity_expired);
+        assert!(!metrics.second_opportunity_expired);
     }
 
     #[test]

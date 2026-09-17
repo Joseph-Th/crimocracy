@@ -1094,6 +1094,8 @@ pub fn persist_run_artifact(
         "second_burglary_outcome": metrics.second_burglary_outcome.map(|outcome| format!("{outcome:?}")),
         "second_burglary_terminal_minute": metrics.second_burglary_terminal_minute,
         "second_act_recon_information": metrics.second_act_recon_information,
+        "second_scout_scheduled_minute": metrics.second_scout_scheduled_minute,
+        "second_scout_patrol_observed_minute": metrics.second_scout_patrol_observed_minute,
         "second_act_property_acquired_value_cents": metrics.second_act_property_acquired_value_cents,
         "second_act_property_realized_cash_cents": metrics.second_act_property_realized_cash_cents,
         "second_act_planning_topics": metrics.second_act_planning_topics.iter().map(|topic| format!("{topic:?}")).collect::<Vec<_>>(),

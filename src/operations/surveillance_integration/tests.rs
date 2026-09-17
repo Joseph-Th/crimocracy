@@ -307,6 +307,67 @@ fn detain_character_for_surveillance_test(
 }
 
 #[test]
+fn successful_surveillance_ticks_deliver_knowledge_without_public_competence() {
+    use crate::reputation::reputation_system::resolve_score;
+    use crate::reputation::{AudienceKind, ReputationDimension};
+    let mut fixture = fixture(100, false);
+    crate::world::world_system::designate_player_organization(&mut fixture.state, fixture.crew)
+        .expect("crew can be designated player");
+    let business = fixture.business;
+    let surveillance = authorize_surveillance(&mut fixture, EntityRef::Business(business));
+    let duration = fixture
+        .registry
+        .get_operation(OperationKind::Surveillance)
+        .execution()
+        .duration();
+    for _ in 0..=duration.as_minutes() {
+        run_tick(&fixture.registry, &mut fixture.state);
+    }
+    let resolution = fixture
+        .state
+        .operations()
+        .get_operation(surveillance)
+        .and_then(|operation| operation.resolution())
+        .expect("scout completes through ticks");
+    assert_eq!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Achieved
+    );
+    assert!(!resolution.discovered_information().is_empty());
+    assert_eq!(
+        resolution.exposure().level(),
+        crate::operations::OperationExposureLevel::None
+    );
+    assert_eq!(
+        resolve_score(
+            &fixture.registry,
+            fixture.state.reputation(),
+            fixture.crew,
+            AudienceKind::Underworld,
+            ReputationDimension::Competence
+        ),
+        fixture.registry.reputation().baseline()
+    );
+    assert!(
+        !fixture
+            .state
+            .reports()
+            .reports_for(fixture.crew)
+            .any(|report| report.kind() == crate::reports::ReportKind::Standing)
+    );
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("surveillance state saves"),
+    )
+    .expect("surveillance state restores");
+    assert_eq!(
+        serde_json::to_value(build_save(&fixture.registry, &restored).unwrap()).unwrap(),
+        serde_json::to_value(build_save(&fixture.registry, &fixture.state).unwrap()).unwrap(),
+    );
+    validate_state(&fixture.state).expect("surveillance state remains valid");
+}
+
+#[test]
 fn achieved_business_surveillance_creates_actionable_patrol_and_access_intelligence() {
     let mut fixture = fixture(100, true);
     let business = fixture.business;

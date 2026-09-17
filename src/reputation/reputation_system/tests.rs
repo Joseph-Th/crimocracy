@@ -151,6 +151,7 @@ fn operation_consequences_move_exactly_the_modeled_audiences() {
         &registry,
         &mut state,
         organization,
+        OperationKind::Burglary,
         OperationApproach::Violent,
         OperationObjectiveOutcome::Achieved,
         OperationExposureLevel::Identifying,
@@ -198,6 +199,60 @@ fn operation_consequences_move_exactly_the_modeled_audiences() {
 }
 
 #[test]
+fn surveillance_rewards_no_public_competence_but_keeps_exposure_consequences() {
+    for exposure in [
+        OperationExposureLevel::None,
+        OperationExposureLevel::Trace,
+        OperationExposureLevel::Witnessed,
+        OperationExposureLevel::Identifying,
+    ] {
+        let (registry, mut state, organization) = make_state_with_player();
+        let shifts = apply_operation_reputation_consequences(
+            &registry,
+            &mut state,
+            organization,
+            OperationKind::Surveillance,
+            OperationApproach::Covert,
+            OperationObjectiveOutcome::Achieved,
+            exposure,
+        )
+        .expect("surveillance consequences apply through the same owner");
+        assert_eq!(
+            resolve_score(
+                &registry,
+                state.reputation(),
+                organization,
+                AudienceKind::Underworld,
+                ReputationDimension::Competence
+            ),
+            registry.reputation().baseline(),
+        );
+        let expected_fear = match exposure {
+            OperationExposureLevel::None | OperationExposureLevel::Trace => 0,
+            OperationExposureLevel::Witnessed => {
+                registry.reputation().witnessed_exposure_police_fear()
+            }
+            OperationExposureLevel::Identifying => {
+                registry.reputation().identifying_exposure_police_fear()
+            }
+        };
+        assert_eq!(shifts.len(), usize::from(expected_fear > 0));
+        assert_eq!(standing_reports(&state, organization), shifts.len());
+        assert_eq!(
+            resolve_score(
+                &registry,
+                state.reputation(),
+                organization,
+                AudienceKind::Police,
+                ReputationDimension::Fear
+            ),
+            registry.reputation().baseline() + expected_fear as u8,
+        );
+        validate_invariants(&state);
+    }
+}
+
+#[test]
 fn operation_consequences_do_not_report_clamped_scores_as_movement() {
     let (registry, mut state, organization) = make_state();
 
@@ -215,6 +270,7 @@ fn operation_consequences_do_not_report_clamped_scores_as_movement() {
         &registry,
         &mut state,
         organization,
+        OperationKind::Burglary,
         OperationApproach::Violent,
         OperationObjectiveOutcome::Achieved,
         OperationExposureLevel::Identifying,
@@ -694,6 +750,7 @@ fn player_standing_shifts_surface_as_notable_standing_reports() {
         &registry,
         &mut state,
         organization,
+        OperationKind::Burglary,
         OperationApproach::Covert,
         OperationObjectiveOutcome::Achieved,
         OperationExposureLevel::Identifying,
@@ -728,6 +785,7 @@ fn non_player_organizations_keep_their_standing_private() {
         &registry,
         &mut state,
         organization,
+        OperationKind::Burglary,
         OperationApproach::Violent,
         OperationObjectiveOutcome::Achieved,
         OperationExposureLevel::Witnessed,
@@ -748,6 +806,7 @@ fn shifts_that_move_nothing_produce_no_feedback() {
         &registry,
         &mut state,
         organization,
+        OperationKind::Burglary,
         OperationApproach::Covert,
         OperationObjectiveOutcome::Failed,
         OperationExposureLevel::None,
@@ -766,6 +825,7 @@ fn player_feedback_id_exhaustion_leaves_reputation_unchanged() {
         &registry,
         &mut state,
         organization,
+        OperationKind::Burglary,
         OperationApproach::Violent,
         OperationObjectiveOutcome::Achieved,
         OperationExposureLevel::Identifying,

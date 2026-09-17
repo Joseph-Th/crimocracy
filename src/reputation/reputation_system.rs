@@ -4,7 +4,9 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{IdExhaustionError, IdKind, OrganizationId};
 use crate::core::state::AppState;
-use crate::operations::{OperationApproach, OperationExposureLevel, OperationObjectiveOutcome};
+use crate::operations::{
+    OperationApproach, OperationExposureLevel, OperationKind, OperationObjectiveOutcome,
+};
 use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
@@ -113,14 +115,16 @@ pub struct AppliedStandingShift {
 }
 
 /// Deterministic consequence pass over an operation that reached terminal resolution this
-/// tick. Success builds underworld competence; witnessed exposure raises police fear;
-/// violent approaches raise business fear. The exact clamped shifts and any required player
+/// tick. Non-surveillance success builds underworld competence; surveillance rewards knowledge,
+/// not public standing. For every kind, witnessed exposure raises police fear and visible
+/// violence raises business and resident fear. The exact clamped shifts and any required player
 /// feedback report are planned before mutation, so a report-allocation failure cannot leave
 /// player standing changed without its causal artifact.
 pub(crate) fn apply_operation_reputation_consequences(
     registry: &Registry,
     state: &mut AppState,
     organization: OrganizationId,
+    kind: OperationKind,
     approach: OperationApproach,
     objective_outcome: OperationObjectiveOutcome,
     exposure_level: OperationExposureLevel,
@@ -137,10 +141,23 @@ pub(crate) fn apply_operation_reputation_consequences(
     let config = registry.reputation();
     let mut shifts = Vec::new();
 
-    let competence_delta = match objective_outcome {
-        OperationObjectiveOutcome::Achieved => config.achieved_underworld_competence(),
-        OperationObjectiveOutcome::Partial => config.partial_underworld_competence(),
-        OperationObjectiveOutcome::Failed => 0,
+    let competence_delta = match kind {
+        OperationKind::Surveillance => 0,
+        OperationKind::Burglary
+        | OperationKind::Robbery
+        | OperationKind::Hijacking
+        | OperationKind::Smuggling
+        | OperationKind::Intimidation
+        | OperationKind::WitnessPressure
+        | OperationKind::DocumentTheft
+        | OperationKind::GamblingEvent
+        | OperationKind::Extraction
+        | OperationKind::Sabotage
+        | OperationKind::Arson => match objective_outcome {
+            OperationObjectiveOutcome::Achieved => config.achieved_underworld_competence(),
+            OperationObjectiveOutcome::Partial => config.partial_underworld_competence(),
+            OperationObjectiveOutcome::Failed => 0,
+        },
     };
     shifts.extend(resolve_shift(
         registry,
