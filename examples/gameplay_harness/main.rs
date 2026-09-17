@@ -16,6 +16,7 @@
 //! sensitivity varies the world while matched branches keep one fixed policy treatment.
 
 mod contracts;
+mod leverage;
 mod model;
 mod observe;
 mod options;
@@ -295,6 +296,12 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
                 );
             }
         }
+        leverage::print_and_write_comparison(
+            &registry,
+            narrative_seeds,
+            [&rush, &press, &recon],
+            &artifact_dir,
+        )?;
         narrative_sets.push((narrative_seeds, rush, press, recon));
     }
 
@@ -800,6 +807,8 @@ mod tests {
         .expect("full recon session completes");
         assert_eq!(metrics.second_scout_patrol_observed_minute, Some(121));
         assert_eq!(metrics.second_scout_scheduled_minute, Some(1_440 + 330));
+        assert!(metrics.second_scout_attached_patrol);
+        assert_eq!(metrics.second_scout_topics_covered, Some(1));
         assert!(!metrics.self_heat_check_required);
         assert!(!metrics.self_heat_case_opened);
         assert_eq!(metrics.self_heat_case_active, None);

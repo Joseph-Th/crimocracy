@@ -64,6 +64,7 @@ pub(super) fn run_press_response(
             EntityRef::Organization(police),
             &counterintelligence_title,
             heat_check_at,
+            BTreeSet::new(),
         )?;
         run_until_operation_terminal(scenario, counterintelligence, narrative, metrics)?;
         // The quiet word was scheduled into the same morning gap and is already terminal by

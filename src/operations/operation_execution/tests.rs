@@ -365,6 +365,20 @@ fn make_operation_fixture() -> (Registry, AppState, OrganizationId, OperationId)
 }
 
 fn make_intelligence_operation_fixture() -> (Registry, AppState, OperationId) {
+    make_intelligence_operation_fixture_with_reports(
+        &[
+            (InformationTopic::Personnel, 0),
+            (InformationTopic::Relationship, 0),
+            (InformationTopic::PoliceActivity, 0),
+        ],
+        1,
+    )
+}
+
+fn make_intelligence_operation_fixture_with_reports(
+    reports: &[(InformationTopic, u32)],
+    actual_start: u32,
+) -> (Registry, AppState, OperationId) {
     let registry = build_registry();
     let mut state = AppState::new(0x1A7E_1933);
     let organization = insert_organization(
@@ -400,11 +414,13 @@ fn make_intelligence_operation_fixture() -> (Registry, AppState, OperationId) {
     )
     .expect("prepared leader should validate");
     let mut intelligence = BTreeSet::new();
-    for topic in [
-        InformationTopic::Personnel,
-        InformationTopic::Relationship,
-        InformationTopic::PoliceActivity,
-    ] {
+    for &(topic, observed_at) in reports {
+        if state.now() < SimTime::from_minutes(u64::from(observed_at)) {
+            state.advance_clock(SimDuration::from_minutes(
+                observed_at
+                    - u32::try_from(state.now().as_minutes()).expect("fixture time fits u32"),
+            ));
+        }
         let information = validate_record_information(
             &state,
             InformationDraft {
@@ -413,10 +429,10 @@ fn make_intelligence_operation_fixture() -> (Registry, AppState, OperationId) {
                 topic,
                 source_entity: None,
                 subject: EntityRef::Business(target),
-                observed_at: state.now(),
+                observed_at: SimTime::from_minutes(u64::from(observed_at)),
                 reliability: Reliability::DirectAccess,
                 specificity: Specificity::Precise,
-                summary: format!("Fresh precise planning information for {topic:?}."),
+                summary: format!("Precise planning information for {topic:?}."),
             },
         )
         .expect("planning information should validate")
@@ -440,12 +456,16 @@ fn make_intelligence_operation_fixture() -> (Registry, AppState, OperationId) {
             intelligence,
             constraints: Vec::new(),
             contingencies: Vec::new(),
-            scheduled_for: SimTime::from_minutes(1),
+            scheduled_for: SimTime::from_minutes(state.now().as_minutes() + 1),
         },
     )
     .expect("prepared operation should validate")
     .commit(&mut state)
     .expect("prepared operation should commit");
+    let before_start = actual_start - 1;
+    state.advance_clock(SimDuration::from_minutes(
+        before_start - u32::try_from(state.now().as_minutes()).expect("fixture time fits u32"),
+    ));
     let start = run_tick(&registry, &mut state);
     assert_eq!(start.started_operations, vec![operation]);
     state.advance_clock(SimDuration::from_minutes(20));
@@ -2137,6 +2157,7 @@ fn after_action_summary_contextualizes_adverse_variance() {
         factors,
         OperationExposureLevel::None,
         65,
+        &[],
     );
     assert!(!achieved.contains("unplanned circumstances"));
     assert!(!achieved.contains("crew overcame them"));
@@ -2147,6 +2168,7 @@ fn after_action_summary_contextualizes_adverse_variance() {
         factors,
         OperationExposureLevel::None,
         65,
+        &[],
     );
     assert!(partial.contains("reduced the result"));
 
@@ -2156,6 +2178,7 @@ fn after_action_summary_contextualizes_adverse_variance() {
         factors,
         OperationExposureLevel::None,
         65,
+        &[],
     );
     assert!(failed.contains("contributed to the failure"));
 }
@@ -2184,6 +2207,7 @@ fn practical_objective_failure_does_not_misattribute_tactical_success() {
         factors,
         OperationExposureLevel::None,
         65,
+        &[],
     );
     assert!(summary.starts_with("Objective failed."));
     assert!(!summary.contains("Assigned-role competence"));
@@ -2217,6 +2241,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         neutral,
         OperationExposureLevel::None,
         65,
+        &[],
     );
     assert!(routine.starts_with("Objective achieved."));
     assert!(!routine.contains("Assigned-role competence"));
@@ -2240,6 +2265,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         thin,
         OperationExposureLevel::None,
         65,
+        &[],
     );
     assert!(thin_crew.contains("Assigned-role competence was competent."));
 
@@ -2255,6 +2281,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         informed,
         OperationExposureLevel::None,
         65,
+        &[],
     );
     assert!(planned.contains("Planning intelligence covered 2 of 4 relevant areas"));
     assert!(planned.contains("reduced execution uncertainty"));
@@ -2271,6 +2298,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         gapped,
         OperationExposureLevel::None,
         65,
+        &[],
     );
     assert!(gapped_plan.contains("Planning intelligence covered 1 of 4 relevant areas"));
     assert!(gapped_plan.contains("large gaps remained in the plan's information"));
@@ -2285,6 +2313,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         pressured,
         OperationExposureLevel::None,
         65,
+        &[],
     );
     assert!(rushed.contains("compressed the execution window"));
 
@@ -2294,6 +2323,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         neutral,
         OperationExposureLevel::Witnessed,
         65,
+        &[],
     );
     assert!(witnessed.contains("witnessed or otherwise clearly observed"));
 }
@@ -2911,6 +2941,8 @@ fn police_arrival_abort_persists_decision_provenance_and_after_action_artifacts(
         .get_information(artifacts.information())
         .expect("abort information should persist");
     assert!(information.summary().contains(decision_summary.as_str()));
+    assert!(information.summary().contains("required. Objective"));
+    assert!(!information.summary().contains("required.. Objective"));
     let report = state
         .reports()
         .get_report(artifacts.report())
@@ -3107,6 +3139,113 @@ fn completed_operation_remains_valid_after_leader_leaves_organization() {
         OperationStatus::Completed
     );
     validate_invariants(&restored);
+}
+
+#[test]
+fn after_action_names_missing_usable_topics_at_actual_start() {
+    let max_age = build_registry()
+        .get_operation(OperationKind::Intimidation)
+        .execution()
+        .max_intelligence_age()
+        .as_minutes();
+    let cases = [
+        (vec![], 1, 0, "personnel, police activity, relationships"),
+        (
+            vec![
+                (InformationTopic::Personnel, 0),
+                (InformationTopic::Personnel, 0),
+            ],
+            1,
+            1,
+            "police activity, relationships",
+        ),
+        // Old duplicates cannot displace the best personnel report; the police report
+        // was usable at scheduling but has expired by the delayed actual start.
+        (
+            vec![
+                (InformationTopic::PoliceActivity, 0),
+                (InformationTopic::Personnel, max_age / 2),
+                (InformationTopic::Personnel, 0),
+            ],
+            max_age,
+            1,
+            "police activity, relationships",
+        ),
+        // Freshness truncation can leave an attached report with zero usable score
+        // even just before the maximum age, not only at the expiration boundary.
+        (
+            vec![(InformationTopic::Personnel, 0)],
+            max_age - 1,
+            0,
+            "personnel, police activity, relationships",
+        ),
+        (
+            vec![
+                (InformationTopic::Relationship, 0),
+                (InformationTopic::Personnel, 0),
+                (InformationTopic::PoliceActivity, 0),
+            ],
+            1,
+            3,
+            "",
+        ),
+    ];
+    for (reports, actual_start, covered, missing) in cases {
+        let (registry, mut state, operation) =
+            make_intelligence_operation_fixture_with_reports(&reports, actual_start);
+        // Resolution-time aging must not change the actual-start coverage.
+        state.advance_clock(SimDuration::from_minutes(max_age));
+        let plan = decide_operation_resolution(
+            &registry,
+            &state,
+            operation,
+            OperationResolutionRandomness::new(0, 0),
+        )
+        .expect("due operation should resolve");
+        assert_eq!(plan.outcome.factors.intelligence_topics_covered(), covered);
+        assert_eq!(plan.outcome.factors.intelligence_topics_relevant(), 3);
+        validate_operation_resolution_plan(&registry, &state, plan)
+            .expect("coverage resolution should validate")
+            .commit(&mut state)
+            .expect("coverage resolution should commit");
+        let resolution = state
+            .operations()
+            .get_operation(operation)
+            .expect("operation should persist")
+            .resolution()
+            .expect("resolution should persist");
+        let information = state
+            .intelligence()
+            .get_information(resolution.after_action_information())
+            .expect("after-action information should persist");
+        let report = state
+            .reports()
+            .get_report(resolution.after_action_report())
+            .expect("after-action report should persist");
+        assert_eq!(report.entries()[0].summary, information.summary());
+        if missing.is_empty() {
+            assert!(
+                information
+                    .summary()
+                    .contains("Planning intelligence covered all 3 relevant areas")
+            );
+            assert!(
+                !information
+                    .summary()
+                    .contains("Missing usable planning intelligence")
+            );
+        } else {
+            assert!(information.summary().contains(&format!(
+                "Planning intelligence covered {covered} of 3 relevant areas"
+            )));
+            assert!(
+                information
+                    .summary()
+                    .contains(&format!("Missing usable planning intelligence: {missing}."))
+            );
+        }
+        validate_state(&state).expect("coverage reporting should preserve valid state");
+    }
 }
 
 #[test]

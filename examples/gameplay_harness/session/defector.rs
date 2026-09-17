@@ -64,6 +64,7 @@ pub(super) fn run_defector_trail(
             EntityRef::Organization(rival),
             &title,
             scheduled_for,
+            BTreeSet::new(),
         )?;
         run_until_operation_terminal(scenario, operation, narrative, metrics)?;
         let resolution = scenario

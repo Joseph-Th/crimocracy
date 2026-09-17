@@ -1,6 +1,7 @@
 //! Deterministic operation after-action narrative rendering.
 
 use super::OperationResolutionFactors;
+use crate::intelligence::InformationTopic;
 use crate::operations::{OperationExposureLevel, OperationObjectiveOutcome};
 use crate::world::QualitativeBand;
 
@@ -18,6 +19,7 @@ pub(super) fn build_after_action_summary(
     factors: OperationResolutionFactors,
     exposure: OperationExposureLevel,
     high_police_presence_threshold: u8,
+    missing_intelligence_topics: &[InformationTopic],
 ) -> String {
     let mut parts = vec![format!("Objective {}.", outcome_label(outcome))];
     // Practical blockers can turn a tactically successful execution into an objective failure.
@@ -78,7 +80,7 @@ pub(super) fn build_after_action_summary(
         ),
         (Some(_), false) => {}
     }
-    if factors.intelligence_topics_covered() > 0 {
+    if factors.intelligence_topics_relevant() > 0 {
         let covered = factors.intelligence_topics_covered();
         let relevant = factors.intelligence_topics_relevant();
         let coverage = if covered == relevant {
@@ -93,6 +95,14 @@ pub(super) fn build_after_action_summary(
             "; large gaps remained in the plan's information."
         };
         parts.push(format!("{coverage}{confidence}"));
+        if !missing_intelligence_topics.is_empty() {
+            let missing = missing_intelligence_topics
+                .iter()
+                .map(|topic| information_topic_label(*topic))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("Missing usable planning intelligence: {missing}."));
+        }
     }
     // A chosen approach that reduced difficulty is the expected case, not news; only an
     // approach that hurt execution earns a sentence.
@@ -138,6 +148,22 @@ pub(super) fn outcome_label(outcome: OperationObjectiveOutcome) -> &'static str 
         OperationObjectiveOutcome::Achieved => "achieved",
         OperationObjectiveOutcome::Partial => "partially achieved",
         OperationObjectiveOutcome::Failed => "failed",
+    }
+}
+
+fn information_topic_label(topic: InformationTopic) -> &'static str {
+    match topic {
+        InformationTopic::General => "general information",
+        InformationTopic::TargetSecurity => "target security",
+        InformationTopic::Personnel => "personnel",
+        InformationTopic::Schedule => "schedule",
+        InformationTopic::PoliceActivity => "police activity",
+        InformationTopic::Route => "route",
+        InformationTopic::FinancialPerformance => "financial performance",
+        InformationTopic::Relationship => "relationships",
+        InformationTopic::LegalActivity => "legal activity",
+        InformationTopic::MarketAccess => "market access",
+        InformationTopic::OperationalOutcome => "operational outcomes",
     }
 }
 

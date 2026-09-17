@@ -548,7 +548,7 @@ fn build_abort_summary(
             Ok(format!(
                 "{} was aborted after leadership reviewed an execution exception: {}. Objective resolution was not completed.",
                 operation.title(),
-                decision.summary()
+                decision.summary().trim_end().trim_end_matches('.')
             ))
         }
         OperationAbortCause::ParticipantDetained(character) => {

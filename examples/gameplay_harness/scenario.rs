@@ -883,6 +883,7 @@ pub fn authorize_surveillance(scenario: &mut Scenario) -> Result<OperationId, Bo
         EntityRef::Business(scenario.target),
         &title,
         scenario.state.now() + SimDuration::ONE_MINUTE,
+        BTreeSet::new(),
     )
 }
 
@@ -891,6 +892,7 @@ pub fn authorize_surveillance_target(
     target: EntityRef,
     title: &str,
     scheduled_for: SimTime,
+    intelligence: BTreeSet<InformationId>,
 ) -> Result<OperationId, Box<dyn Error>> {
     Ok(validate_authorize_operation(
         scenario.registry,
@@ -903,7 +905,7 @@ pub fn authorize_surveillance_target(
             objective: OperationObjective::GatherInformation { target },
             approach: OperationApproach::Covert,
             roles: BTreeMap::from([(RoleKind::Surveillance, scenario.scout)]),
-            intelligence: BTreeSet::new(),
+            intelligence,
             constraints: Vec::new(),
             contingencies: Vec::new(),
             scheduled_for,

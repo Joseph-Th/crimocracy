@@ -412,6 +412,11 @@ pub(crate) fn decide_operation_resolution(
         decide_surveillance_intelligence(registry, state, record, objective_outcome)?;
     // Every after-action summary leads with the operation title so executive-brief entries stay
     // identifiable when several operations resolve into the same brief window.
+    let missing_intelligence_topics =
+        resolution_factors::resolve_intelligence_coverage(registry, state, operation)
+            .into_iter()
+            .filter_map(|(topic, score)| (score == 0).then_some(topic))
+            .collect::<Vec<_>>();
     let mut summary = format!("{}: ", record.title());
     summary.push_str(&build_after_action_summary(
         objective_outcome,
@@ -419,6 +424,7 @@ pub(crate) fn decide_operation_resolution(
         factors,
         exposure.level(),
         execution.high_police_presence_narrative_threshold(),
+        &missing_intelligence_topics,
     ));
     // A depleted haul must narrate even when recent scores left nothing to carry home:
     // silencing the clause would make an Achieved outcome look like an ordinary score.

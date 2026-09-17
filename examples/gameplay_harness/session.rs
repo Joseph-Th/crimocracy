@@ -287,7 +287,7 @@ fn capture_witness_pressure_outcome(
     Ok(())
 }
 
-fn discover_initial_opportunity(
+pub(crate) fn discover_initial_opportunity(
     scenario: &mut Scenario,
     narrative: bool,
 ) -> Result<OpportunityId, Box<dyn Error>> {
@@ -1067,6 +1067,9 @@ pub fn maybe_capture_matched_financials(
         return Ok(());
     }
     let view = resolve_financial_view(scenario, metrics)?;
+    metrics.matched_player_window = Some(crate::leverage::WindowEvidence::snapshot(
+        scenario, metrics,
+    )?);
     metrics.matched_legitimate_net_cents = Some(view.legitimate_net_cents);
     metrics.matched_enterprise_net_cents = Some(view.enterprise_net_cents);
     Ok(())

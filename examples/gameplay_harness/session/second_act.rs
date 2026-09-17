@@ -165,12 +165,22 @@ fn run_recon_second_act(
         );
     }
     metrics.second_scout_patrol_observed_minute = Some(patrol.observed_at().as_minutes());
+    let patrol_id = patrol.id();
+    let scout_intelligence = BTreeSet::from([patrol_id]);
     let recon = authorize_surveillance_target(
         scenario,
         EntityRef::Business(scenario.alternate_target),
         &title,
         scout_at,
+        scout_intelligence,
     )?;
+    metrics.second_scout_attached_patrol = scenario
+        .state
+        .operations()
+        .get_operation(recon)
+        .expect("authorized scout persists")
+        .intelligence()
+        .contains(&patrol_id);
     metrics.second_scout_scheduled_minute = Some(
         scenario
             .state
@@ -188,6 +198,7 @@ fn run_recon_second_act(
         .expect("second-score surveillance must persist")
         .resolution()
         .expect("completed second-score surveillance must have a resolution");
+    metrics.second_scout_topics_covered = Some(resolution.factors().intelligence_topics_covered());
     let discovered_information = resolution.discovered_information().clone();
     metrics.second_act_recon_information = discovered_information.len();
     // The crew knows its exposure, not whether institutional intake opened a file.

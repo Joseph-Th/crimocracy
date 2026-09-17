@@ -662,6 +662,7 @@ pub struct RunMetrics {
     pub matched_financial_boundary_minute: Option<u64>,
     pub matched_legitimate_net_cents: Option<i64>,
     pub matched_enterprise_net_cents: Option<i64>,
+    pub matched_player_window: Option<crate::leverage::WindowEvidence>,
     pub discovered_surveillance_information: usize,
     pub player_legal_activity_information: usize,
     pub player_report_count: usize,
@@ -704,6 +705,8 @@ pub struct RunMetrics {
     pub second_act_recon_information: usize,
     /// Actual canonical second-scout schedule and the held observation used to choose it.
     pub second_scout_scheduled_minute: Option<u64>,
+    pub second_scout_attached_patrol: bool,
+    pub second_scout_topics_covered: Option<u8>,
     pub second_scout_patrol_observed_minute: Option<u64>,
     pub second_act_property_acquired_value_cents: Option<i64>,
     pub second_act_property_realized_cash_cents: Option<i64>,

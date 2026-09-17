@@ -530,11 +530,14 @@ fn weighted_ability(
     i16::try_from(weighted).expect("weighted operation ability must fit i16")
 }
 
-pub(crate) fn resolve_intelligence_factors(
+/// Best usable score per relevant topic, including zeroes, in stable topic order.
+/// Both resolution arithmetic and its narrative use the attached reports at actual start
+/// (scheduled start before execution), never hidden target facts or resolution-time aging.
+pub(super) fn resolve_intelligence_coverage(
     registry: &Registry,
     state: &AppState,
     operation: OperationId,
-) -> (Rating, i8, u8, u8) {
+) -> BTreeMap<InformationTopic, u8> {
     let record = state
         .operations
         .get_operation(operation)
@@ -562,14 +565,30 @@ pub(crate) fn resolve_intelligence_factors(
             .or_insert(score);
     }
 
-    let relevant_topics = execution.relevant_intelligence_topics();
-    let covered = relevant_topics
+    execution
+        .relevant_intelligence_topics()
         .iter()
-        .filter(|topic| best_by_topic.get(topic).is_some_and(|score| *score > 0))
-        .count();
-    let total = relevant_topics.iter().fold(0_u32, |total, topic| {
-        total + u32::from(best_by_topic.get(topic).copied().unwrap_or(0))
-    });
+        .map(|topic| (*topic, best_by_topic.get(topic).copied().unwrap_or(0)))
+        .collect()
+}
+
+pub(crate) fn resolve_intelligence_factors(
+    registry: &Registry,
+    state: &AppState,
+    operation: OperationId,
+) -> (Rating, i8, u8, u8) {
+    let record = state
+        .operations
+        .get_operation(operation)
+        .expect("operation intelligence must reference an existing operation");
+    let execution = registry.get_operation(record.kind()).execution();
+    let coverage = resolve_intelligence_coverage(registry, state, operation);
+    let relevant_topics = execution.relevant_intelligence_topics();
+    let covered = coverage.values().filter(|score| **score > 0).count();
+    let total = coverage
+        .values()
+        .map(|score| u32::from(*score))
+        .sum::<u32>();
     let count = u32::try_from(relevant_topics.len())
         .expect("authored operation intelligence topic count must fit u32");
     let average = total
