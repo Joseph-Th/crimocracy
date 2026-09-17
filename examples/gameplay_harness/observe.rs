@@ -361,9 +361,8 @@ fn observe_recruitment(
                     entry.summary
                 );
             }
-            // The departure report names no destination and no cause. The organization can
-            // still read the obvious: a crew member who just saw police take an outside
-            // offer is fear talking, while a clean crew member who leaves is something else.
+            // A departure report names neither destination nor motive. Recent police
+            // exposure supports a leadership hypothesis, not certainty about an outside offer.
             if narrative
                 && matches!(
                     attempt.outcome(),
@@ -378,7 +377,7 @@ fn observe_recruitment(
                     .map(|character| character.name().to_owned())
                     .unwrap_or_else(|| "The departed member".to_owned());
                 println!(
-                    "[INTERPRET] {name} saw police at the score; fear made the outside offer land where loyalty might otherwise have held."
+                    "[INTERPRET] {name} left after police reached the score. Leadership suspects fear played a part; the departure report confirms neither motive nor destination."
                 );
             }
         }

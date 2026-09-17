@@ -304,8 +304,28 @@ pub(super) fn build_cycle_report_summary(
     drew_vice_attention: bool,
     plan_suspends: bool,
 ) -> String {
+    let kind = match record.kind() {
+        EnterpriseKind::Protection => "Protection",
+        EnterpriseKind::Gambling => "Gambling",
+        EnterpriseKind::AlcoholDistribution => "Alcohol distribution",
+        EnterpriseKind::Bookmaking => "Bookmaking",
+        EnterpriseKind::LoanSharking => "Loan sharking",
+        EnterpriseKind::Fencing => "Fencing",
+        EnterpriseKind::Speakeasy => "Speakeasy",
+        EnterpriseKind::LaborRacketeering => "Labor racketeering",
+    };
+    let mandate = state
+        .delegation
+        .get_mandate(record.authority().mandate)
+        .expect("enterprise authority must reference a persisted mandate");
+    let manager = state
+        .world
+        .get_character(mandate.manager())
+        .expect("enterprise mandate must reference a persisted manager")
+        .name();
+    let location = resolve_enterprise_location_name(state, record);
     let base = format!(
-        "Enterprise cycle reported gross {}, operating cost {}",
+        "{kind} at {location}, managed by {manager}: Enterprise cycle reported gross {}, operating cost {}",
         crate::finance::helpers::format_money_cents(economics.gross_revenue.cents()),
         crate::finance::helpers::format_money_cents(economics.operating_cost.cents()),
     );
@@ -512,7 +532,7 @@ pub(super) fn build_vice_incident_draft(
     }
 }
 
-/// Human-facing venue description used in vice-inquiry titles.
+/// Human-facing venue description used in cycle reports and vice-inquiry titles.
 fn resolve_enterprise_location_name(
     state: &crate::core::state::AppState,
     record: &crate::enterprises::EnterpriseRecord,

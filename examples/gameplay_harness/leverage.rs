@@ -155,10 +155,14 @@ pub fn print_and_write_comparison(
             .checked_sub(baseline.earned_after_paid_wages_cents)
             .ok_or("window comparison overflow")?;
         println!(
-            "[LEVERAGE] {}: earned {} ({:+} cents vs no jobs); take {}, street surcharge {}, held property {}. {} jobs / {} crew-minutes; {} departures, {} leadership exceptions, {} unpaid wages.",
+            "[LEVERAGE] {}: earned {} ({} vs no jobs); take {}, street surcharge {}, held property {}. {} jobs / {} crew-minutes; {} departures, {} leadership exceptions, {} unpaid wages.",
             run.strategy.ok_or("comparison strategy missing")?.label(),
             format_cents(window.earned_after_paid_wages_cents),
-            delta,
+            if delta > 0 {
+                format!("+{}", format_cents(delta))
+            } else {
+                format_cents(delta)
+            },
             format_cents(window.realized_take_cents),
             format_cents(window.street_surcharge_cents),
             format_cents(window.held_property_cents),

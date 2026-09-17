@@ -99,12 +99,28 @@ fn notable_settlement_reaches_executive_brief_without_pending_decisions() {
         .unwrap();
     let report = fixture.state.reports().get_report(brief).unwrap();
     assert_eq!(report.kind(), ReportKind::ExecutiveBrief);
+    let entry = report
+        .entries()
+        .iter()
+        .find(|entry| entry.sources.contains(&information))
+        .expect("manager's notable settlement must reach the executive brief");
+    assert_eq!(entry.sources, vec![information]);
     assert!(
-        report
-            .entries()
-            .iter()
-            .any(|entry| entry.sources.contains(&information)),
-        "manager's notable settlement must reach the executive brief"
+        entry.summary.starts_with(
+            "Protection at Market Ward, managed by Enterprise Manager: Enterprise cycle reported gross "
+        ),
+        "delivered settlement must identify the kind, location, and responsible manager: {}",
+        entry.summary
+    );
+    assert_eq!(
+        entry.summary,
+        fixture
+            .state
+            .intelligence()
+            .get_information(information)
+            .expect("settlement source information must persist")
+            .summary(),
+        "the executive brief must preserve the exact source-linked settlement summary"
     );
 }
 
@@ -3756,12 +3772,32 @@ fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
         Money::from_cents(5_000),
         "a peer inquiry created by an earlier settlement at the same instant cannot retroactively tax this cycle"
     );
-    validate_enterprise_cycle_plan(&fixture.state, second_plan)
+    let second_cycle = validate_enterprise_cycle_plan(&fixture.state, second_plan)
         .expect(
             "same-minute peer cycle must remain valid against the phase-consistent pressure view",
         )
         .commit(&mut fixture.state)
         .expect("same-minute peer cycle should commit");
+    let information = fixture
+        .state
+        .enterprises()
+        .get_cycle(second_cycle)
+        .expect("business-hosted cycle must persist")
+        .information()
+        .expect("new street heat must produce a manager report");
+    let summary = fixture
+        .state
+        .intelligence()
+        .get_information(information)
+        .expect("business-hosted settlement information must persist")
+        .summary();
+    assert!(
+        summary.starts_with(
+            "Gambling at Peer Settlement Card Room, managed by Enterprise Manager: Enterprise cycle reported gross "
+        ),
+        "business-hosted settlements must name the venue rather than only its district: {summary}"
+    );
+    assert!(summary.contains("street surcharge while police work stays heavy in Market Ward"));
 
     fixture
         .state

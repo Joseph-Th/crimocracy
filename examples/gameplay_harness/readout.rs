@@ -462,7 +462,7 @@ pub fn print_organization_closing_view(
                 String::new()
             },
             if metrics.police_arrived {
-                ". The departed crew saw police at the score, and fear made the outside offer land where loyalty might otherwise have held".to_owned()
+                ". The departure followed police reaching the score; leadership suspects fear played a part, but the report names neither motive nor destination".to_owned()
             } else {
                 String::new()
             },

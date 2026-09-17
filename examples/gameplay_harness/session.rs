@@ -778,6 +778,26 @@ fn capture_campaign_audit_metrics(scenario: &Scenario, metrics: &mut RunMetrics)
     }
 }
 
+/// The shared opening beat every branch plays: discover the authored street opportunity,
+/// plan and authorize the first burglary from player-visible information, resolve it, and
+/// dispose of any property. Posture setup reuses exactly this arc so matched branches
+/// compare one policy difference, not two different crimes.
+pub(crate) fn run_initial_burglary(
+    scenario: &mut Scenario,
+    strategy: Strategy,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<OperationId, Box<dyn Error>> {
+    let opportunity = discover_initial_opportunity(scenario, narrative)?;
+    let plan = prepare_initial_burglary_plan(scenario, strategy, narrative, metrics)?;
+    let burglary =
+        authorize_initial_burglary(scenario, strategy, opportunity, plan, narrative, metrics)?;
+    resolve_initial_burglary(scenario, strategy, burglary, narrative, metrics)?;
+    liquidate_initial_property(scenario, burglary, narrative, metrics)?;
+    capture_initial_case_diagnostics(scenario, burglary, narrative, metrics);
+    Ok(burglary)
+}
+
 fn run_post_burglary_campaign(
     scenario: &mut Scenario,
     strategy: Strategy,
@@ -932,19 +952,7 @@ pub fn play_session_with_fixture_view(
         print_starting_player_view(&scenario);
     }
 
-    let opportunity = discover_initial_opportunity(&mut scenario, narrative)?;
-    let plan = prepare_initial_burglary_plan(&mut scenario, strategy, narrative, &mut metrics)?;
-    let burglary = authorize_initial_burglary(
-        &mut scenario,
-        strategy,
-        opportunity,
-        plan,
-        narrative,
-        &mut metrics,
-    )?;
-    resolve_initial_burglary(&mut scenario, strategy, burglary, narrative, &mut metrics)?;
-    liquidate_initial_property(&mut scenario, burglary, narrative, &mut metrics)?;
-    capture_initial_case_diagnostics(&scenario, burglary, narrative, &mut metrics);
+    let burglary = run_initial_burglary(&mut scenario, strategy, narrative, &mut metrics)?;
 
     run_post_burglary_campaign(
         &mut scenario,
