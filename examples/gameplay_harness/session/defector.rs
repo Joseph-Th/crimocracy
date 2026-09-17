@@ -103,7 +103,8 @@ pub(super) fn run_defector_trail(
                     .get_information(*information)
                     .expect("personnel-watch information must persist");
                 if record.topic() == InformationTopic::Personnel
-                    && record.subject() == EntityRef::Organization(rival)
+                    && (record.subject() == EntityRef::Organization(rival)
+                        || matches!(record.subject(), EntityRef::Enterprise(_)))
                 {
                     println!(
                         "[LEARN]   {:?} / {:?}: {}",

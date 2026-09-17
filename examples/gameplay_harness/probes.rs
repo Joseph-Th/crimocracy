@@ -1146,6 +1146,7 @@ pub fn persist_run_artifact(
         "economy": economy,
         "second_act": second_act,
         "feedback": feedback,
+        "known_rackets": metrics.known_rackets,
     });
     let payload = serde_json::json!({
         "identity": identity,

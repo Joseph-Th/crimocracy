@@ -856,6 +856,7 @@ fn run_post_burglary_campaign(
     metrics.legitimate_net_cents = Some(financials.legitimate_net_cents);
     metrics.enterprise_net_cents = Some(financials.enterprise_net_cents);
     capture_campaign_audit_metrics(scenario, metrics);
+    metrics.known_rackets = known_racket_observations(scenario);
     if narrative {
         print_organization_closing_view(scenario, metrics, &financials);
         print_second_act_recap(scenario, strategy, metrics);

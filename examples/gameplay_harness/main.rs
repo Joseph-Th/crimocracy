@@ -23,6 +23,7 @@ mod options;
 mod posture;
 mod probes;
 mod readout;
+mod rival_intelligence;
 mod scenario;
 mod session;
 
@@ -32,6 +33,7 @@ pub use observe::*;
 pub use options::*;
 pub use probes::*;
 pub use readout::*;
+pub use rival_intelligence::*;
 pub use scenario::*;
 pub use session::*;
 
@@ -329,6 +331,13 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 
     println!("\n--- ENTERPRISE POSTURE PROBE ---");
     posture::run_enterprise_posture_probe(&registry, primary_seeds, Some(&artifact_dir))?;
+
+    println!("\n--- RIVAL INTELLIGENCE PROBE ---");
+    rival_intelligence::run_rival_intelligence_probe(
+        &registry,
+        primary_seeds,
+        Some(&artifact_dir),
+    )?;
 
     println!("\n--- LEGAL FOUNDATION CHECK ---");
     run_legal_foundation_check(&registry)?;
@@ -786,6 +795,16 @@ mod tests {
             !metrics.replacement_recruited,
             "do not hire a redundant specialist after recovery"
         );
+        assert!(
+            !metrics.known_rackets.is_empty(),
+            "the existing rival watch must teach more than the defector's destination"
+        );
+        assert!(metrics.known_rackets.iter().all(|sighting| {
+            matches!(
+                sighting.subject,
+                crimocracy::core::entity::EntityRef::Enterprise(_)
+            ) && sighting.observed_minute >= 1_440
+        }));
         assert_eq!(metrics.replacement, None);
         assert_eq!(
             metrics.payroll_paid_cents, 25_600,

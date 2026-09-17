@@ -94,7 +94,7 @@ pub(super) fn build_after_action_summary(
         } else {
             "; large gaps remained in the plan's information."
         };
-        parts.push(format!("{coverage}{confidence}"));
+        parts.push(format!("Before departure: {coverage}{confidence}"));
         if !missing_intelligence_topics.is_empty() {
             let missing = missing_intelligence_topics
                 .iter()

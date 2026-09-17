@@ -115,6 +115,7 @@ enum SurveillanceTargetSnapshot {
         id: OrganizationId,
         name: String,
         active_members: Vec<(CharacterId, String)>,
+        active_enterprises: Vec<EnterpriseSnapshot>,
         // Present for law-enforcement/legal-authority targets when surveillance can tie visible
         // authority activity to a case originated by the surveiller's own prior activity.
         law_enforcement_sightline: Option<CaseActivitySignal>,
@@ -127,22 +128,26 @@ enum SurveillanceTargetSnapshot {
         status: InvestigationStatus,
         lead: Option<(CharacterId, String)>,
     },
-    Enterprise {
-        id: EnterpriseId,
-        organization: OrganizationId,
-        organization_name: String,
-        manager: CharacterId,
-        manager_name: String,
-        location: EnterpriseLocation,
-        location_name: String,
-        status: EnterpriseStatus,
-    },
+    Enterprise(EnterpriseSnapshot),
     Operation {
         id: OperationId,
         organization: OrganizationId,
         organization_name: String,
         status: OperationStatus,
     },
+}
+
+/// Only visibly observable enterprise facts, shared by direct and organization surveillance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnterpriseSnapshot {
+    id: EnterpriseId,
+    organization: OrganizationId,
+    organization_name: String,
+    manager: CharacterId,
+    manager_name: String,
+    location: EnterpriseLocation,
+    location_name: String,
+    status: EnterpriseStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -437,10 +442,25 @@ fn resolve_target_snapshot(
             } else {
                 None
             };
+            // The organization index is EnterpriseId ordered. Snapshot the bounded selection
+            // itself so additions, lifecycle changes, and every displayed dependency are
+            // re-derived at validation without reading ledgers or institutional case truth.
+            let active_enterprises = if organization.kind() == OrganizationKind::Criminal {
+                state
+                    .enterprises
+                    .enterprises_for_organization(id)
+                    .filter(|enterprise| enterprise.status() == EnterpriseStatus::Active)
+                    .take(3)
+                    .map(|enterprise| resolve_enterprise_snapshot(state, enterprise))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             Ok(SurveillanceTargetSnapshot::Organization {
                 id,
                 name: organization.name().to_owned(),
                 active_members,
+                active_enterprises,
                 law_enforcement_sightline,
             })
         }
@@ -480,24 +500,9 @@ fn resolve_target_snapshot(
                 .enterprises
                 .get_enterprise(id)
                 .ok_or(SurveillanceError::MissingTarget(target))?;
-            let organization = state
-                .world
-                .get_organization(enterprise.organization())
-                .expect("enterprise organization must exist in valid state");
-            let manager = state
-                .world
-                .get_character(enterprise.manager())
-                .expect("enterprise manager must exist in valid state");
-            Ok(SurveillanceTargetSnapshot::Enterprise {
-                id,
-                organization: enterprise.organization(),
-                organization_name: organization.name().to_owned(),
-                manager: enterprise.manager(),
-                manager_name: manager.name().to_owned(),
-                location: enterprise.location(),
-                location_name: enterprise_location_name(state, enterprise.location()),
-                status: enterprise.status(),
-            })
+            Ok(SurveillanceTargetSnapshot::Enterprise(
+                resolve_enterprise_snapshot(state, enterprise),
+            ))
         }
         EntityRef::Operation(id) => {
             let operation = state
@@ -519,6 +524,30 @@ fn resolve_target_snapshot(
         | EntityRef::FinancialAccount(_)
         | EntityRef::DecisionRequest(_)
         | EntityRef::Mandate(_) => Err(SurveillanceError::UnsupportedTarget(target)),
+    }
+}
+
+fn resolve_enterprise_snapshot(
+    state: &AppState,
+    enterprise: &crate::enterprises::EnterpriseRecord,
+) -> EnterpriseSnapshot {
+    let organization = state
+        .world
+        .get_organization(enterprise.organization())
+        .expect("enterprise organization must exist in valid state");
+    let manager = state
+        .world
+        .get_character(enterprise.manager())
+        .expect("enterprise manager must exist in valid state");
+    EnterpriseSnapshot {
+        id: enterprise.id(),
+        organization: enterprise.organization(),
+        organization_name: organization.name().to_owned(),
+        manager: enterprise.manager(),
+        manager_name: manager.name().to_owned(),
+        location: enterprise.location(),
+        location_name: enterprise_location_name(state, enterprise.location()),
+        status: enterprise.status(),
     }
 }
 
@@ -628,6 +657,7 @@ fn build_observations(
             id,
             name,
             active_members,
+            active_enterprises,
             law_enforcement_sightline,
         } => match law_enforcement_sightline {
             Some(activity) => vec![SurveillanceObservation {
@@ -640,15 +670,23 @@ fn build_observations(
                 summary: authority_sightline_summary(name, *activity, outcome),
                 finding: format!("case activity at {name}"),
             }],
-            None => vec![SurveillanceObservation {
-                topic: InformationTopic::Personnel,
-                subject: EntityRef::Organization(*id),
-                reliability,
-                specificity,
-                signal: organization_personnel_signal(active_members, outcome),
-                summary: organization_summary(name, active_members, outcome),
-                finding: format!("personnel around {name}"),
-            }],
+            None => {
+                let mut observations = vec![SurveillanceObservation {
+                    topic: InformationTopic::Personnel,
+                    subject: EntityRef::Organization(*id),
+                    reliability,
+                    specificity,
+                    signal: organization_personnel_signal(active_members, outcome),
+                    summary: organization_summary(name, active_members, outcome),
+                    finding: format!("personnel around {name}"),
+                }];
+                if outcome == OperationObjectiveOutcome::Achieved {
+                    observations.extend(active_enterprises.iter().map(|enterprise| {
+                        enterprise_observation(enterprise, reliability, specificity)
+                    }));
+                }
+                observations
+            }
         },
         SurveillanceTargetSnapshot::Investigation {
             id,
@@ -668,24 +706,9 @@ fn build_observations(
             summary: investigation_summary(title, owner_name, *status, lead.as_ref(), outcome),
             finding: format!("the status of {title}"),
         }],
-        SurveillanceTargetSnapshot::Enterprise {
-            id,
-            organization_name,
-            manager_name,
-            location_name,
-            status,
-            organization: _,
-            manager: _,
-            location: _,
-        } => vec![SurveillanceObservation {
-            topic: InformationTopic::Personnel,
-            subject: EntityRef::Enterprise(*id),
-            reliability,
-            specificity,
-            signal: None,
-            summary: enterprise_summary(organization_name, manager_name, location_name, *status),
-            finding: format!("activity at {location_name}"),
-        }],
+        SurveillanceTargetSnapshot::Enterprise(enterprise) => {
+            vec![enterprise_observation(enterprise, reliability, specificity)]
+        }
         SurveillanceTargetSnapshot::Operation {
             id,
             organization_name,
@@ -704,6 +727,27 @@ fn build_observations(
             ),
             finding: format!("activity linked to {organization_name}"),
         }],
+    }
+}
+
+fn enterprise_observation(
+    enterprise: &EnterpriseSnapshot,
+    reliability: Reliability,
+    specificity: Specificity,
+) -> SurveillanceObservation {
+    SurveillanceObservation {
+        topic: InformationTopic::Personnel,
+        subject: EntityRef::Enterprise(enterprise.id),
+        reliability,
+        specificity,
+        signal: None,
+        summary: enterprise_summary(
+            &enterprise.organization_name,
+            &enterprise.manager_name,
+            &enterprise.location_name,
+            enterprise.status,
+        ),
+        finding: format!("activity at {}", enterprise.location_name),
     }
 }
 

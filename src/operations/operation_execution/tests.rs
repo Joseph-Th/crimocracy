@@ -2283,7 +2283,9 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         65,
         &[],
     );
-    assert!(planned.contains("Planning intelligence covered 2 of 4 relevant areas"));
+    assert!(
+        planned.contains("Before departure: Planning intelligence covered 2 of 4 relevant areas")
+    );
     assert!(planned.contains("reduced execution uncertainty"));
 
     // Coverage below half the relevant areas reads as an honest planning gap instead of
@@ -2300,7 +2302,10 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         65,
         &[],
     );
-    assert!(gapped_plan.contains("Planning intelligence covered 1 of 4 relevant areas"));
+    assert!(
+        gapped_plan
+            .contains("Before departure: Planning intelligence covered 1 of 4 relevant areas")
+    );
     assert!(gapped_plan.contains("large gaps remained in the plan's information"));
 
     let pressured = OperationResolutionFactors {

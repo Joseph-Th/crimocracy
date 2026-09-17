@@ -19,6 +19,67 @@ use std::error::Error;
 
 use crate::*;
 
+/// Historical observations, not a projection of live rival enterprise records.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct KnownRacketObservation {
+    pub information: crimocracy::core::id::InformationId,
+    pub subject: EntityRef,
+    pub source_operation: OperationId,
+    pub observed_minute: u64,
+    pub reliability: crimocracy::intelligence::Reliability,
+    pub specificity: crimocracy::intelligence::Specificity,
+    pub summary: String,
+}
+
+pub fn known_racket_observations(scenario: &Scenario) -> Vec<KnownRacketObservation> {
+    let mut latest = BTreeMap::new();
+    for information in scenario
+        .state
+        .intelligence()
+        .information_for_holder(KnowledgeHolder::Organization(scenario.player))
+    {
+        if information.topic() != InformationTopic::Personnel
+            || !matches!(information.subject(), EntityRef::Enterprise(_))
+        {
+            continue;
+        }
+        let Some(EntityRef::Operation(source)) = information.source_entity() else {
+            continue;
+        };
+        let Some(operation) = scenario.state.operations().get_operation(source) else {
+            continue;
+        };
+        // Source is our own watch of a known rival. Never inspect the observed racket's
+        // live owner/status/books to decide what the player knows now.
+        if operation.responsible_organization() != scenario.player
+            || !matches!(operation.objective(),
+                crimocracy::operations::OperationObjective::GatherInformation {
+                    target: EntityRef::Organization(rival)
+                } if *rival == scenario.rival || *rival == scenario.second_rival)
+        {
+            continue;
+        }
+        let observation = KnownRacketObservation {
+            information: information.id(),
+            subject: information.subject(),
+            source_operation: source,
+            observed_minute: information.observed_at().as_minutes(),
+            reliability: information.reliability(),
+            specificity: information.specificity(),
+            summary: information.summary().to_owned(),
+        };
+        let entry = latest
+            .entry(observation.subject)
+            .or_insert_with(|| observation.clone());
+        if (observation.observed_minute, observation.information)
+            > (entry.observed_minute, entry.information)
+        {
+            *entry = observation;
+        }
+    }
+    latest.into_values().collect()
+}
+
 pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: &RunMetrics) {
     let target = scenario.variation.alternate_target_name();
     match strategy {
@@ -624,9 +685,28 @@ pub fn print_organization_closing_view(
             .expect("second rival must persist")
             .name()
             .to_owned();
-        println!(
-            "  - Known rivals around {home_district}: {rival_name} and {second_rival_name}. Their current racket totals have not been reported through our channels.",
-        );
+        println!("  - Known rivals around {home_district}: {rival_name} and {second_rival_name}.",);
+        if metrics.known_rackets.is_empty() {
+            println!(
+                "  - No racket locations learned yet. Watching a rival can reveal a bounded operating footprint; its whole portfolio and books remain unknown."
+            );
+        } else {
+            println!(
+                "  - Observed rival footprint (historical sightings, not a complete or current portfolio):"
+            );
+            for observation in &metrics.known_rackets {
+                println!(
+                    "      {} [{:?}/{:?}]: {}",
+                    format_day_minute(observation.observed_minute),
+                    observation.reliability,
+                    observation.specificity,
+                    observation.summary,
+                );
+            }
+            println!(
+                "    These named activities can be watched directly using their source reports; no rival revenue or case contents were disclosed."
+            );
+        }
     }
     // Wage runway from the books the organization actually holds: headcount is a standing
     // carrying cost, and growth (or heat-taxed income) is what makes it bind. Early sessions

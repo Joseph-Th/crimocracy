@@ -671,6 +671,8 @@ pub struct RunMetrics {
     /// organizations operate in the home district at session end, derived through the
     /// canonical territory-influence surface. Never read by acting policy.
     pub rival_home_enterprises: u32,
+    /// Player-held, provenance-bearing sightings; never substituted with live rival records.
+    pub known_rackets: Vec<crate::readout::KnownRacketObservation>,
     pub autonomous_recruitment_attempts: u32,
     pub player_personnel_departures: u32,
     /// Refused autonomous poaching approaches against this organization's members. Each one

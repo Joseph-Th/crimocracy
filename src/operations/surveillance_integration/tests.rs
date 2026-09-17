@@ -44,6 +44,8 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod enterprise_discovery;
+
 struct Fixture {
     registry: Registry,
     state: AppState,
