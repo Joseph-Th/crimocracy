@@ -132,20 +132,32 @@ pub fn decide_executive_brief(
             candidate.entry_index,
         )
     });
-    let source_candidates = deduplicate_source_candidates(source_candidates);
+    let mut ordered_candidates = deduplicate_source_candidates(source_candidates);
     let max_source_entries = usize::from(definition.max_source_entries());
-    let omitted = source_candidates.len().saturating_sub(max_source_entries);
+    let omitted_tail: Vec<_> = if ordered_candidates.len() > max_source_entries {
+        ordered_candidates.split_off(max_source_entries)
+    } else {
+        Vec::new()
+    };
+    let omitted = omitted_tail.len();
+    // The omitted tail may include Exception or Crisis items, so the disclosure carries
+    // the highest attention actually omitted instead of a fixed Notable claim. Sorting
+    // keeps higher attention first, so the tail head holds that maximum.
+    let omitted_attention = omitted_tail
+        .iter()
+        .map(|candidate| candidate.entry.attention)
+        .max()
+        .unwrap_or(AttentionClass::Routine);
     entries.extend(
-        source_candidates
+        ordered_candidates
             .into_iter()
-            .take(max_source_entries)
             .map(|candidate| candidate.entry),
     );
     if omitted > 0 {
-        // The omitted tail may include Exception or Crisis items, so avoid mislabeling them as
-        // only "notable": report the count without overclaiming a specific attention class.
+        // The disclosure carries the highest attention actually omitted: the tail may hold
+        // Exception or Crisis items, and stamping them Notable would mislabel their class.
         entries.push(ReportEntry {
-            attention: AttentionClass::Notable,
+            attention: omitted_attention,
             summary: format!("{omitted} additional items remain available in underlying reports."),
             sources: Vec::new(),
             entities: BTreeSet::new(),

@@ -12,6 +12,7 @@ use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::{
     InformationRecord, InformationSignal, InformationSourceKind, KnowledgeHolder,
+    downgraded_reliability_for_contact_derivation, downgraded_specificity_for_contact_derivation,
 };
 use crate::registry::Registry;
 use crate::social::RelationshipRecord;
@@ -480,11 +481,31 @@ fn validate_contact_derived_provenance(
             .is_none()
         || information.source_entity() != Some(source_record.holder().entity())
         || !matches!(source_record.holder(), KnowledgeHolder::Character(_))
-        || !derived_information_matches_source(information, source_record)
+        || !derived_contact_information_matches_source(information, source_record)
     {
         return Err(invalid_provenance(information, source));
     }
     Ok(())
+}
+
+/// Contact-channel re-derivation: identity, timing, signal, and summary cross the hop
+/// untouched, but epistemic grade steps down one rung per
+/// [`downgraded_reliability_for_contact_derivation`]. Internal transfers keep the exact
+/// grade via [`derived_information_matches_source`]; the two paths must not share a
+/// matcher.
+fn derived_contact_information_matches_source(
+    information: &InformationRecord,
+    source: &InformationRecord,
+) -> bool {
+    information.topic() == source.topic()
+        && information.subject() == source.subject()
+        && information.observed_at() == source.observed_at()
+        && information.reliability()
+            == downgraded_reliability_for_contact_derivation(source.reliability())
+        && information.specificity()
+            == downgraded_specificity_for_contact_derivation(source.specificity())
+        && information.signal() == source.signal()
+        && information.summary() == source.summary()
 }
 
 fn derived_information_matches_source(
@@ -643,8 +664,10 @@ fn validate_contact_disclosure(
         || disclosed.subject() != source.subject()
         || disclosed.observed_at() != source.observed_at()
         || disclosed.recorded_at() != disclosure.disclosed_at()
-        || disclosed.reliability() != source.reliability()
-        || disclosed.specificity() != source.specificity()
+        || disclosed.reliability()
+            != downgraded_reliability_for_contact_derivation(source.reliability())
+        || disclosed.specificity()
+            != downgraded_specificity_for_contact_derivation(source.specificity())
         || disclosed.summary() != source.summary()
         || disclosed.derived_from().len() != 1
         || !disclosed.derived_from().contains(&source.id())

@@ -21,12 +21,17 @@ pub(crate) fn resolve_information_score(
         .as_minutes()
         .checked_sub(information.observed_at().as_minutes())
         .expect("planning information must not be observed in the future");
+    // Freshness resolves in permille, not percent: a percent-scale factor truncates the
+    // gate to zero up to 5% before the authored `max_age` for mid-quality records
+    // (e.g. Mixed/General surveillance loses all planning value at 95% of its window),
+    // silently shortening the authored intelligence-age contract in a quality-dependent
+    // way. Permille keeps every grade usable until the final tenth of a percent.
     let freshness = if age >= max_age {
         0_u32
     } else {
-        u32::try_from((max_age - age) * 100 / max_age)
+        u32::try_from((max_age - age) * 1_000 / max_age)
             .expect("bounded intelligence freshness must fit u32")
     };
-    let score = reliability * specificity * freshness / 10_000;
+    let score = reliability * specificity * freshness / 100_000;
     u8::try_from(score).expect("bounded information score must fit u8")
 }

@@ -18,7 +18,7 @@ use crate::decisions::{
     RecruitmentApprovalRequestDraft,
 };
 use crate::delegation::delegation_system::{
-    set_policy, validate_assign_mandate, validate_revoke_mandate,
+    validate_assign_mandate, validate_revoke_mandate, validate_set_policy,
 };
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::history::HistoryEventKind;
@@ -829,13 +829,15 @@ fn organization_policy_change_reopens_pending_approval_route_for_autonomous_recr
     .expect("approval route should validate")
     .commit(&mut fixture.state)
     .expect("approval route should commit");
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
-    .expect("organization policy should become delegated");
+    .expect("organization policy should become delegated")
+    .commit(&registry, &mut fixture.state)
+    .expect("organization policy should commit");
 
     fixture
         .state
@@ -1151,20 +1153,24 @@ fn resolved_organization_sourced_approval_remains_valid_history_after_policy_aba
     .commit(&mut fixture.state)
     .expect("approval rejection should commit");
 
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
-    .expect("later delegated policy should establish version two");
-    set_policy(
+    .expect("later delegated policy should establish version two")
+    .commit(&registry, &mut fixture.state)
+    .expect("delegated policy commit should establish version two");
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
     )
-    .expect("later approval-required policy should establish version three");
+    .expect("later approval-required policy should establish version three")
+    .commit(&registry, &mut fixture.state)
+    .expect("approval-required policy commit should establish version three");
 
     let decision = fixture
         .state
@@ -1200,13 +1206,15 @@ fn organization_policy_change_cancels_superseded_recruitment_approval() {
     .commit(&mut fixture.state)
     .expect("approval request should commit");
 
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
-    .expect("organization should atomically delegate recruitment and retire the old approval");
+    .expect("organization should atomically delegate recruitment and retire the old approval")
+    .commit(&registry, &mut fixture.state)
+    .expect("delegating policy commit should retire the old approval");
     let decision = fixture
         .state
         .decisions()
@@ -1281,13 +1289,15 @@ fn organization_policy_change_preserves_mandate_sourced_recruitment_approval() {
     .commit(&mut fixture.state)
     .expect("mandate-sourced approval should commit");
 
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
-    .expect("underlying organization policy may change beneath a mandate override");
+    .expect("underlying organization policy may change beneath a mandate override")
+    .commit(&registry, &mut fixture.state)
+    .expect("organization policy commit should preserve the mandate override");
     assert_eq!(
         fixture
             .state
@@ -1333,20 +1343,24 @@ fn noop_or_unrelated_policy_write_preserves_organization_sourced_recruitment_app
     .commit(&mut fixture.state)
     .expect("organization-sourced approval should commit");
 
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
     )
-    .expect("writing the already-effective recruitment policy should be a no-op");
-    set_policy(
+    .expect("writing the already-effective recruitment policy should be a no-op")
+    .commit(&registry, &mut fixture.state)
+    .expect("no-op policy commit should preserve the pending approval");
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
     )
-    .expect("an unrelated organization policy should change independently");
+    .expect("an unrelated organization policy should change independently")
+    .commit(&registry, &mut fixture.state)
+    .expect("unrelated policy commit should preserve the pending approval");
 
     assert_eq!(
         fixture
@@ -1407,18 +1421,16 @@ fn organization_policy_version_exhaustion_preserves_pending_approval_atomically(
     .commit(&mut fixture.state)
     .expect("approval request at maximum policy version should commit");
 
-    let error = set_policy(
+    let error = validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
     .expect_err("exhausted policy version must reject before cancelling the approval");
     assert!(matches!(
         error,
-        crate::delegation::delegation_system::DelegationError::World(
-            crate::world::world_system::WorldError::VersionCapacity(_)
-        )
+        crate::delegation::delegation_system::DelegationError::VersionCapacity(_)
     ));
     let resolved = resolve_policy_for_manager(
         &fixture.state,
@@ -1549,13 +1561,15 @@ fn delegated_recruitment_persists_exact_mandate_and_policy_authority() {
 fn delegated_recruitment_token_rejects_organization_policy_aba_without_mutation() {
     let registry = build_registry();
     let mut fixture = fixture();
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
-    .expect("delegated organization policy should validate");
+    .expect("delegated organization policy should validate")
+    .commit(&registry, &mut fixture.state)
+    .expect("delegated organization policy should commit");
     let mandate = assign_personnel_mandate(&mut fixture, None);
     let token = validate_delegated_recruitment_attempt(
         &fixture.registry,
@@ -1564,20 +1578,24 @@ fn delegated_recruitment_token_rejects_organization_policy_aba_without_mutation(
         protection_draft(&fixture),
     )
     .expect("organization policy should initially authorize recruitment");
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
     )
-    .expect("policy revocation should validate");
-    set_policy(
+    .expect("policy revocation should validate")
+    .commit(&registry, &mut fixture.state)
+    .expect("policy revocation should commit");
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
-    .expect("policy may visibly return to its original setting");
+    .expect("policy may visibly return to its original setting")
+    .commit(&registry, &mut fixture.state)
+    .expect("policy ABA return should commit");
     let error = token
         .commit(&mut fixture.state)
         .expect_err("stale delegated recruitment must not survive change-away-and-back ABA");
@@ -1610,13 +1628,15 @@ fn delegated_recruitment_token_rejects_organization_policy_aba_without_mutation(
 fn historical_organization_policy_snapshot_survives_later_toggle() {
     let registry = build_registry();
     let mut fixture = fixture();
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
-    .expect("delegated organization policy should establish version two");
+    .expect("delegated organization policy should establish version two")
+    .commit(&registry, &mut fixture.state)
+    .expect("delegated policy commit should establish version two");
     let mandate = assign_personnel_mandate(&mut fixture, None);
     let attempt = validate_delegated_recruitment_attempt(
         &fixture.registry,
@@ -1627,13 +1647,15 @@ fn historical_organization_policy_snapshot_survives_later_toggle() {
     .expect("version-two delegated policy should authorize the attempt")
     .commit(&mut fixture.state)
     .expect("delegated attempt should commit");
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut fixture.state,
+        &fixture.state,
         fixture.target,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
     )
-    .expect("later policy change should establish version three");
+    .expect("later policy change should establish version three")
+    .commit(&registry, &mut fixture.state)
+    .expect("later policy commit should establish version three");
     validate_state(&fixture.state)
         .expect("a version-two delegated attempt remains valid history under version three");
     assert_eq!(

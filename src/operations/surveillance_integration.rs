@@ -721,9 +721,7 @@ fn build_observations(
             subject: EntityRef::Investigation(*id),
             reliability,
             specificity,
-            signal: Some(InformationSignal::CaseActivity(
-                crate::legal::case_knowledge::activity_for_status(*status),
-            )),
+            signal: investigation_case_signal(*status, outcome),
             summary: investigation_summary(title, owner_name, *status, lead.as_ref(), outcome),
             finding: format!("the status of {title}"),
         }],
@@ -826,7 +824,11 @@ fn patrol_summary(
             police_presence_label(patrol.baseline_presence)
         );
     }
-    let observed_windows = observed_patrol_windows(patrol);
+    // The crew reads the precinct's daily rhythm from the watch — shift patterns, loitering
+    // officers, told hours — not just the minutes it stared at one corner. The typed signal
+    // carries the same deployment rhythm, so casing can protect later work planned around
+    // it. A watch deliberately scheduled away from patrol still learns the rhythm it avoided.
+    let observed_windows = deployment_patrol_windows(patrol);
     let windows = observed_windows
         .iter()
         .copied()
@@ -835,7 +837,7 @@ fn patrol_summary(
     let minute = u16::try_from(observed_at.as_minutes() % u64::from(DAY_MINUTES_U16))
         .expect("minute-of-day remainder must fit u16");
     format!(
-        "Observed patrol activity around {neighborhood_name} follows a recurring pattern: {}. Around {}, activity was {}.",
+        "The crew reads a recurring patrol rhythm around {neighborhood_name} from this watch: {}. Around {}, activity was {}.",
         windows.join(", "),
         format_day_minute(rounded_day_minute(minute, bucket_minutes)),
         police_presence_label(patrol.current_presence.unwrap_or(patrol.baseline_presence))
@@ -850,14 +852,14 @@ fn patrol_pattern_signal(
     if outcome != OperationObjectiveOutcome::Achieved || patrol.deployments.is_empty() {
         return None;
     }
-    let intervals = observed_patrol_windows(patrol)
+    let intervals = deployment_patrol_windows(patrol)
         .into_iter()
         .flat_map(|window| approximate_patrol_intervals(window, bucket_minutes))
         .collect::<BTreeSet<_>>();
     (!intervals.is_empty()).then_some(InformationSignal::PatrolPattern { intervals })
 }
 
-fn observed_patrol_windows(patrol: &PatrolPatternSnapshot) -> Vec<PatrolWindow> {
+fn deployment_patrol_windows(patrol: &PatrolPatternSnapshot) -> Vec<PatrolWindow> {
     patrol
         .deployments
         .iter()
@@ -1117,6 +1119,14 @@ fn investigation_summary(
     lead: Option<&(CharacterId, String)>,
     outcome: OperationObjectiveOutcome,
 ) -> String {
+    // A Partial read is undependable: like the authority-sightline channel, it hedges
+    // instead of stating the live file status, so watching the file directly cannot yield
+    // precisely the knowledge the indirect channel deliberately withholds.
+    if outcome == OperationObjectiveOutcome::Partial {
+        return format!(
+            "Visible activity around the {title} file remained difficult to judge; a dependable read on whether the matter is still being actively developed was not established."
+        );
+    }
     let lead_clause = if outcome == OperationObjectiveOutcome::Achieved {
         lead.map(|(_, name)| format!(" {name} appears to be directing the visible work."))
             .unwrap_or_default()
@@ -1127,6 +1137,15 @@ fn investigation_summary(
         "Visible activity around the {title} file indicates the matter is {} under {owner_name}.{lead_clause}",
         investigation_status_label(status)
     )
+}
+
+fn investigation_case_signal(
+    status: InvestigationStatus,
+    outcome: OperationObjectiveOutcome,
+) -> Option<InformationSignal> {
+    (outcome == OperationObjectiveOutcome::Achieved).then(|| {
+        InformationSignal::CaseActivity(crate::legal::case_knowledge::activity_for_status(status))
+    })
 }
 
 fn enterprise_summary(

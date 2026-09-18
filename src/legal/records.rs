@@ -562,7 +562,6 @@ pub enum InvestigationWorkOutcome {
 pub struct InvestigationWorkFactors {
     pub(super) investigation_capability: Rating,
     pub(super) source_support: Rating,
-    pub(super) source_evidence_count: u8,
     pub(super) difficulty: u8,
     pub(super) variance: i8,
 }
@@ -574,10 +573,6 @@ impl InvestigationWorkFactors {
 
     pub fn source_support(self) -> Rating {
         self.source_support
-    }
-
-    pub fn source_evidence_count(self) -> u8 {
-        self.source_evidence_count
     }
 
     pub fn difficulty(self) -> u8 {

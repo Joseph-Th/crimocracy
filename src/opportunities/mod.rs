@@ -37,7 +37,7 @@ pub enum OpportunityStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpportunityResolution {
-    Dismissed { at: SimTime },
+    Dismissed { at: SimTime, report: ReportId },
     Expired { at: SimTime, report: ReportId },
     Converted { at: SimTime, operation: OperationId },
 }
@@ -45,7 +45,9 @@ pub enum OpportunityResolution {
 impl OpportunityResolution {
     pub fn at(self) -> SimTime {
         match self {
-            Self::Dismissed { at } | Self::Expired { at, .. } | Self::Converted { at, .. } => at,
+            Self::Dismissed { at, .. } | Self::Expired { at, .. } | Self::Converted { at, .. } => {
+                at
+            }
         }
     }
 
@@ -58,8 +60,8 @@ impl OpportunityResolution {
 
     pub fn report(self) -> Option<ReportId> {
         match self {
-            Self::Expired { report, .. } => Some(report),
-            Self::Dismissed { .. } | Self::Converted { .. } => None,
+            Self::Dismissed { report, .. } | Self::Expired { report, .. } => Some(report),
+            Self::Converted { .. } => None,
         }
     }
 }
@@ -196,13 +198,13 @@ impl OpportunityState {
                             .insert(id);
                     }
                 }
-                Some(OpportunityResolution::Expired { report, .. }) => {
+                Some(OpportunityResolution::Expired { report, .. })
+                | Some(OpportunityResolution::Dismissed { report, .. }) => {
                     self.by_report.insert(report, id);
                 }
                 Some(OpportunityResolution::Converted { operation, .. }) => {
                     self.by_operation.insert(operation, id);
                 }
-                Some(OpportunityResolution::Dismissed { .. }) => {}
             }
         }
     }
@@ -259,6 +261,30 @@ impl OpportunityState {
             })
     }
 
+    /// The open opportunity for the same organization and operation kind whose target set
+    /// intersects `targets`, if any. Exact-set equality alone lets `{A}` and `{A,B}` coexist
+    /// over the same target; converting one leaves the other open until it expires with a
+    /// redundant report even though the target already has committed work.
+    pub fn find_open_operation_overlapping(
+        &self,
+        organization: OrganizationId,
+        operation_kind: OperationKind,
+        targets: &BTreeSet<EntityRef>,
+    ) -> Option<&OpportunityRecord> {
+        self.open_by_context
+            .iter()
+            .filter(|(key, _)| {
+                key.organization == organization && key.operation_kind == operation_kind
+            })
+            .filter(|(key, _)| !key.targets.is_disjoint(targets))
+            .map(|(_, id)| {
+                self.records
+                    .get(id)
+                    .expect("open opportunity context index must reference an opportunity")
+            })
+            .next()
+    }
+
     pub(crate) fn opportunities(&self) -> impl Iterator<Item = &OpportunityRecord> {
         self.records.values()
     }
@@ -295,8 +321,13 @@ impl OpportunityState {
         self.records.insert(id, record);
     }
 
-    fn dismiss(&mut self, id: OpportunityId, at: SimTime) {
-        self.resolve(id, OpportunityResolution::Dismissed { at });
+    fn dismiss(&mut self, id: OpportunityId, at: SimTime, report: ReportId) {
+        self.resolve(id, OpportunityResolution::Dismissed { at, report });
+        let previous = self.by_report.insert(report, id);
+        debug_assert!(
+            previous.is_none(),
+            "one opportunity lifecycle report may describe only one opportunity"
+        );
     }
 
     fn expire(&mut self, id: OpportunityId, at: SimTime, report: ReportId) {
@@ -417,7 +448,8 @@ impl OpportunityState {
         true
     }
 
-    /// Every report reverse lookup must be either the opportunity's discovery or expiry report.
+    /// Every report reverse lookup must be the opportunity's discovery, dismissal, or
+    /// expiry report.
     fn report_index_is_consistent(&self) -> bool {
         for (report, id) in &self.by_report {
             let Some(record) = self.records.get(id) else {
@@ -428,10 +460,12 @@ impl OpportunityState {
                 Some(OpportunityResolution::Expired {
                     report: resolution_report,
                     ..
+                })
+                | Some(OpportunityResolution::Dismissed {
+                    report: resolution_report,
+                    ..
                 }) => resolution_report == *report,
-                None
-                | Some(OpportunityResolution::Dismissed { .. })
-                | Some(OpportunityResolution::Converted { .. }) => false,
+                None | Some(OpportunityResolution::Converted { .. }) => false,
             };
             if !is_discovery_report && !is_resolution_report {
                 return false;

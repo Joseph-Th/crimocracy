@@ -1,4 +1,9 @@
 //! Directional character relationships; `relationship_system` is the sole mutation path.
+//!
+//! Relationship damage is permanent in the current model: resentment produced by payroll
+//! shortfalls (and any future grievance source) has no decay lane, unlike reputation
+//! impressions which age out. A long campaign therefore accumulates the full history of
+//! unpaid grievances rather than a decaying recent average.
 
 pub mod relationship_system;
 

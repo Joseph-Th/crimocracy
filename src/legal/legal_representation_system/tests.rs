@@ -8,8 +8,8 @@ use crate::contacts::contact_system::{
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_tick;
-use crate::delegation::delegation_system::set_policy;
 use crate::delegation::delegation_system::validate_assign_mandate;
+use crate::delegation::delegation_system::validate_set_policy;
 use crate::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::finance::{FinancialAccountDraft, LedgerPosting};
@@ -228,13 +228,15 @@ fn automatic_legal_support_aggregates_split_organization_liquidity() {
         Money::from_cents(2_500)
     );
 
-    set_policy(
+    validate_set_policy(
         &fx.registry,
-        &mut fx.state,
+        &fx.state,
         fx.sponsor,
         PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
     )
-    .expect("automatic legal-support policy should validate");
+    .expect("automatic legal-support policy should validate")
+    .commit(&fx.registry, &mut fx.state)
+    .expect("automatic legal-support policy should commit");
     let retained = apply_automatic_legal_support(&fx.registry, &mut fx.state)
         .expect("aggregate sponsor liquidity should fund automatic counsel");
     assert_eq!(retained.len(), 1);
@@ -739,13 +741,15 @@ fn automatic_legal_support_policy_retains_counsel_through_the_tick() {
     let mut fx = fixture();
     // Flip the sponsor's standing policy to automatic support through the canonical
     // owner path; the default CaseByCase setting never acts on its own.
-    set_policy(
+    validate_set_policy(
         &fx.registry,
-        &mut fx.state,
+        &fx.state,
         fx.sponsor,
         PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
     )
-    .expect("automatic legal-support policy should validate");
+    .expect("automatic legal-support policy should validate")
+    .commit(&fx.registry, &mut fx.state)
+    .expect("automatic legal-support policy should commit");
     let payer_before = fx
         .state
         .finance()
@@ -796,13 +800,15 @@ fn automatic_legal_support_policy_retains_counsel_through_the_tick() {
 #[test]
 fn automatic_legal_support_surfaces_commit_failure_instead_of_silently_skipping_counsel() {
     let mut fx = fixture();
-    set_policy(
+    validate_set_policy(
         &fx.registry,
-        &mut fx.state,
+        &fx.state,
         fx.sponsor,
         PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
     )
-    .expect("automatic legal-support policy should validate");
+    .expect("automatic legal-support policy should validate")
+    .commit(&fx.registry, &mut fx.state)
+    .expect("automatic legal-support policy should commit");
     let payer_before = fx
         .state
         .finance()
@@ -835,13 +841,15 @@ fn automatic_legal_support_surfaces_commit_failure_instead_of_silently_skipping_
 #[test]
 fn automatic_legal_support_skips_detained_counsel_for_a_later_viable_channel() {
     let mut fx = fixture();
-    set_policy(
+    validate_set_policy(
         &fx.registry,
-        &mut fx.state,
+        &fx.state,
         fx.sponsor,
         PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
     )
-    .expect("automatic legal-support policy should validate");
+    .expect("automatic legal-support policy should validate")
+    .commit(&fx.registry, &mut fx.state)
+    .expect("automatic legal-support policy should commit");
 
     let replacement_counsel = insert_character(
         &mut fx.state,
@@ -954,13 +962,15 @@ fn automatic_legal_support_skips_detained_counsel_for_a_later_viable_channel() {
 #[test]
 fn automatic_legal_support_prefers_stronger_later_counsel() {
     let mut fx = fixture();
-    set_policy(
+    validate_set_policy(
         &fx.registry,
-        &mut fx.state,
+        &fx.state,
         fx.sponsor,
         PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
     )
-    .expect("automatic legal-support policy should validate");
+    .expect("automatic legal-support policy should validate")
+    .commit(&fx.registry, &mut fx.state)
+    .expect("automatic legal-support policy should commit");
 
     let stronger_counsel = insert_character(
         &mut fx.state,

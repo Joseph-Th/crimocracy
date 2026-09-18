@@ -38,7 +38,7 @@ pub enum OrganizationFinancialReportError {
     Report(#[from] ReportError),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NotableFinancialItem {
     Business {
         cycle: BusinessCycleId,
@@ -66,6 +66,42 @@ enum NotableFinancialItem {
         operation: OperationId,
         information: InformationId,
     },
+}
+
+impl NotableFinancialItem {
+    /// Stable ordering key for same-minute entries: the underlying record ids first, so
+    /// entries order by the records they describe rather than by enum declaration order.
+    /// The trailing tag only breaks exact raw-id collisions across different id types.
+    fn sort_key(self) -> (u32, u32, u32, u8) {
+        match self {
+            Self::Business {
+                cycle,
+                business,
+                information,
+            } => (cycle.raw(), business.raw(), information.raw(), 0),
+            Self::Enterprise {
+                cycle,
+                enterprise,
+                information,
+            } => (cycle.raw(), enterprise.raw(), information.raw(), 1),
+            Self::OperationProperty {
+                operation,
+                information,
+            } => (operation.raw(), information.raw(), 0, 2),
+            Self::OperationPropertyDisposition {
+                operation,
+                information,
+            } => (operation.raw(), information.raw(), 0, 3),
+            Self::OperationCash {
+                operation,
+                information,
+            } => (operation.raw(), information.raw(), 0, 4),
+            Self::OperationCashDisposition {
+                operation,
+                information,
+            } => (operation.raw(), information.raw(), 0, 5),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -140,7 +176,7 @@ pub fn validate_organization_financial_report(
         period_end,
     )?);
     notable.extend(operation_summary.notable);
-    notable.sort_by_key(|(occurred_at, item)| (*occurred_at, *item));
+    notable.sort_by_key(|(occurred_at, item)| (*occurred_at, item.sort_key()));
     for (_, item) in notable {
         entries.push(build_notable_entry(state, item)?);
     }
@@ -214,7 +250,12 @@ fn resolve_operation_financial_summary(
     let mut summary = OperationFinancialSummary::default();
     for operation in state.operations().operations_for_organization(recipient) {
         if let Some(resolution) = operation.resolution() {
-            if resolution.resolved_at() <= period_end {
+            // Held value and notable chronology read the same record through the same gate:
+            // only completed operations can hold proceeds, so an abort path that ever
+            // recorded proceeds could not inflate "held" value the chronology never shows.
+            let completed_hold = operation.status() == OperationStatus::Completed
+                && resolution.resolved_at() <= period_end;
+            if completed_hold {
                 if let Some(proceeds) = resolution.property_proceeds()
                     && !operation
                         .property_disposition()

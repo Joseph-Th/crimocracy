@@ -86,19 +86,23 @@ fn organization_policy_versions_advance_only_on_real_changes_and_survive_restore
     assert_eq!(initial.source, PolicySource::Organization(organization));
     assert_eq!(initial.source_version, 1);
 
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut state,
+        &state,
         organization,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
+    .expect("first real organization-policy change should validate")
+    .commit(&registry, &mut state)
     .expect("first real organization-policy change should commit");
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut state,
+        &state,
         organization,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
     )
+    .expect("second real organization-policy change should validate")
+    .commit(&registry, &mut state)
     .expect("second real organization-policy change should commit");
     let returned = resolve_policy_for_manager(
         &state,
@@ -114,7 +118,9 @@ fn organization_policy_versions_advance_only_on_real_changes_and_survive_restore
         "source version must distinguish an ABA policy cycle from an unchanged policy"
     );
 
-    set_policy(&registry, &mut state, organization, returned.setting)
+    validate_set_policy(&registry, &state, organization, returned.setting)
+        .expect("identical policy set should validate")
+        .commit(&registry, &mut state)
         .expect("identical policy set should be a no-op");
     assert_eq!(
         resolve_policy_for_manager(
@@ -145,6 +151,66 @@ fn organization_policy_versions_advance_only_on_real_changes_and_survive_restore
     );
     validate_state(&restored).expect("restored policy versions should remain structurally valid");
     validate_invariants(&restored);
+}
+
+#[test]
+fn stale_policy_token_rejects_change_away_and_back_without_mutation() {
+    let (registry, mut state, authority) = make_authority_fixture();
+    let organization = state
+        .delegation()
+        .get_mandate(authority.mandate)
+        .expect("mandate fixture should persist")
+        .organization();
+
+    let token = validate_set_policy(
+        &registry,
+        &state,
+        organization,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("policy change should validate at version one");
+    // A second change lands first, then returns to the original setting: the held token
+    // must not survive the change-away-and-back cycle even though the setting matches.
+    validate_set_policy(
+        &registry,
+        &state,
+        organization,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("second validation should succeed at version one")
+    .commit(&registry, &mut state)
+    .expect("second change should commit version two");
+    validate_set_policy(
+        &registry,
+        &state,
+        organization,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
+    )
+    .expect("return validation should succeed at version two")
+    .commit(&registry, &mut state)
+    .expect("return change should commit version three");
+
+    let before = bincode::serialize(&state).expect("fixture state should serialize");
+    let error = token
+        .commit(&registry, &mut state)
+        .expect_err("stale policy token must reject after ABA");
+    assert!(
+        matches!(
+            error,
+            DelegationError::StaleOrganizationPolicy {
+                expected: 1,
+                found: 3,
+                ..
+            }
+        ),
+        "stale rejection must name the superseded version, got {error:?}"
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("fixture state should serialize"),
+        before,
+        "rejected policy commit must leave authoritative state unchanged"
+    );
+    validate_invariants(&state);
 }
 
 #[test]

@@ -1360,7 +1360,13 @@ fn save_round_trip_preserves_budget_history_and_remaining_authority() {
     assert_eq!(usage.used, Money::from_cents(1_000));
     assert_eq!(usage.remaining, Money::from_cents(1_500));
     assert_eq!(
-        restored.finance().transactions_for_mandate(mandate).count(),
+        restored
+            .finance()
+            .transactions()
+            .filter(|transaction| transaction
+                .budget_usage()
+                .is_some_and(|usage| usage.mandate() == mandate))
+            .count(),
         1
     );
     let persisted_usage = restored
@@ -2036,6 +2042,67 @@ fn make_laundering_fixture_for_kind(kind: OrganizationKind) -> LaunderingFixture
         accounted,
         business,
     }
+}
+
+/// A suspended front names its real state: the books exist but cannot route revenue,
+/// so the rejection must say suspended rather than missing.
+#[test]
+fn laundering_names_suspended_economy_instead_of_missing_books() {
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+    crate::economy::business_economy_system::validate_suspend_business_economy(
+        &fixture.state,
+        fixture.business,
+    )
+    .expect("suspension should validate")
+    .commit(&mut fixture.state)
+    .expect("suspension should commit");
+    // Seed street cash so validation reaches the economy gate instead of failing early
+    // on an empty source account.
+    let reserve = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("reserve account should validate");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Move take to street".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: reserve,
+                    amount: Money::from_cents(-1_000_000),
+                },
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: Money::from_cents(1_000_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("seed transfer should validate")
+    .commit(&mut fixture.state)
+    .expect("seed transfer should commit");
+    let error = validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: Money::from_cents(100),
+        },
+    )
+    .err()
+    .expect("suspended front must reject laundering");
+    assert_eq!(error, LaunderingError::EconomySuspended(fixture.business));
+    validate_invariants(&fixture.state);
 }
 
 #[test]

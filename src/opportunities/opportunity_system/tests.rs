@@ -268,6 +268,32 @@ fn authorize_matching_operation(fixture: &mut OpportunityFixture) -> OperationId
 }
 
 #[test]
+fn mid_quality_information_keeps_planning_value_until_the_authored_age_limit() {
+    let mut fixture = make_fixture();
+    let max_age = fixture
+        .registry
+        .get_operation(OperationKind::Burglary)
+        .execution()
+        .max_intelligence_age();
+    // The fixture source is GenerallyReliable/General. Percent-scale freshness truncated
+    // its planning value to zero at 97% of the authored window; permille resolution keeps
+    // every grade usable until the final tenth of a percent.
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(max_age.as_minutes() * 97 / 100));
+    let valid_until = fixture.state.now() + SimDuration::from_minutes(60);
+    validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, valid_until),
+    )
+    .expect("mid-quality information at 97% of its authored window must carry planning value")
+    .commit(&mut fixture.state)
+    .expect("near-expiry discovery should commit");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn stale_information_cannot_make_a_target_newly_actionable() {
     let mut fixture = make_fixture();
     let max_age = fixture
@@ -872,10 +898,11 @@ fn duplicate_open_opportunity_is_rejected_but_dismissal_allows_later_rediscovery
             .expect("duplicate open opportunity should fail"),
         OpportunityError::ExistingOpenOpportunity(opportunity)
     );
-    validate_dismiss_opportunity(&fixture.state, opportunity)
-        .expect("open opportunity should be dismissible")
-        .commit(&mut fixture.state)
-        .expect("dismissal should commit");
+    let dismissal_report =
+        validate_dismiss_opportunity(&fixture.registry, &fixture.state, opportunity)
+            .expect("open opportunity should be dismissible")
+            .commit(&mut fixture.state)
+            .expect("dismissal should commit");
     assert_eq!(
         fixture
             .state
@@ -885,12 +912,87 @@ fn duplicate_open_opportunity_is_rejected_but_dismissal_allows_later_rediscovery
             .status(),
         OpportunityStatus::Dismissed
     );
+    let dismissal = fixture
+        .state
+        .reports()
+        .get_report(dismissal_report)
+        .expect("dismissal lifecycle report should persist");
+    assert_eq!(
+        dismissal.title(),
+        dismissal_report_title(
+            fixture
+                .registry
+                .get_operation(OperationKind::Burglary)
+                .display_name()
+        )
+    );
+    assert_eq!(dismissal.entries().len(), 1);
+    assert_eq!(
+        dismissal.entries()[0].summary,
+        dismissal_report_summary(
+            fixture
+                .state
+                .opportunities()
+                .get_opportunity(opportunity)
+                .expect("dismissed opportunity should persist")
+                .summary()
+        )
+    );
     let replacement =
         validate_discover_operation_opportunity(&fixture.registry, &fixture.state, draft)
             .expect("dismissed opportunity should not block a later rediscovery")
             .commit(&mut fixture.state)
             .expect("replacement opportunity should commit");
     assert_ne!(replacement, opportunity);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn overlapping_target_set_is_rejected_as_duplicate_open_work() {
+    let mut fixture = make_fixture();
+    let first = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(120)),
+    )
+    .expect("single-target opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("single-target opportunity should commit");
+    let owner_intel = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::TargetSecurity,
+            source_entity: None,
+            subject: EntityRef::Character(fixture.leader),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::General,
+            summary: "The property's watchman is a known fixture personality.".to_owned(),
+        },
+    )
+    .expect("second target information should validate")
+    .commit(&mut fixture.state)
+    .expect("second target information should commit");
+    assert_eq!(
+        validate_discover_operation_opportunity(
+            &fixture.registry,
+            &fixture.state,
+            OperationOpportunityDraft {
+                targets: BTreeSet::from([
+                    EntityRef::Business(fixture.business),
+                    EntityRef::Character(fixture.leader),
+                ]),
+                source_information: BTreeSet::from([fixture.source, owner_intel]),
+                ..opportunity_draft(&fixture, SimTime::from_minutes(120))
+            },
+        )
+        .err()
+        .expect("overlapping superset discovery must fail"),
+        OpportunityError::ExistingOpenOpportunity(first),
+        "a superset over an already-open target must not create a duplicate"
+    );
     validate_invariants(&fixture.state);
 }
 
@@ -1483,7 +1585,7 @@ fn exhausted_opportunity_version_rejects_lifecycle_change_without_mutation() {
         .expect("opportunity should persist")
         .version = u32::MAX;
 
-    let error = match validate_dismiss_opportunity(&fixture.state, opportunity) {
+    let error = match validate_dismiss_opportunity(&fixture.registry, &fixture.state, opportunity) {
         Ok(_) => panic!("exhausted opportunity version must reject before creating a token"),
         Err(error) => error,
     };

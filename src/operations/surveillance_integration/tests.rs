@@ -441,7 +441,7 @@ fn achieved_business_surveillance_creates_actionable_patrol_and_access_intellige
             ]),
         })
     );
-    assert!(police.summary().contains("recurring pattern"));
+    assert!(police.summary().contains("recurring patrol rhythm"));
     assert!(police.summary().contains("roughly 02:00-04:00"));
     assert!(!police.summary().contains("patrol-deployment"));
 
@@ -600,7 +600,7 @@ fn foreign_operation_surveillance_requires_prior_organization_knowledge() {
 }
 
 #[test]
-fn achieved_surveillance_carries_every_observed_patrol_window_in_typed_signal() {
+fn achieved_surveillance_carries_the_deployment_rhythm_in_typed_signal() {
     let mut fixture = fixture(100, false);
     let windows = [60_u16, 180, 300, 420, 540]
         .into_iter()
@@ -1353,6 +1353,40 @@ fn resumed_case_does_not_grant_unrelated_organization_authority_sightline() {
     validate_state(&fixture.state)
         .expect("resumed unrelated-case sightline should remain structurally valid");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn partial_investigation_watch_carries_no_definitive_case_status_signal() {
+    assert_eq!(
+        investigation_case_signal(
+            InvestigationStatus::Active,
+            OperationObjectiveOutcome::Partial
+        ),
+        None,
+        "a partial file watch must not bank the exact live case status"
+    );
+    assert_eq!(
+        investigation_case_signal(
+            InvestigationStatus::Active,
+            OperationObjectiveOutcome::Achieved
+        ),
+        Some(InformationSignal::CaseActivity(CaseActivitySignal::Active))
+    );
+    let hedged = investigation_summary(
+        "Harbor Ledger Inquiry",
+        "Northside Precinct",
+        InvestigationStatus::Active,
+        None,
+        OperationObjectiveOutcome::Partial,
+    );
+    assert!(
+        hedged.contains("difficult to judge"),
+        "a partial file watch must hedge instead of stating the live status, got: {hedged}"
+    );
+    assert!(
+        !hedged.contains("indicates the matter is"),
+        "a partial file watch must not state the exact status, got: {hedged}"
+    );
 }
 
 #[test]

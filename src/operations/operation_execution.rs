@@ -428,21 +428,21 @@ pub(crate) fn decide_operation_resolution(
     ));
     // A depleted haul must narrate even when recent scores left nothing to carry home:
     // silencing the clause would make an Achieved outcome look like an ordinary score.
-    let mut depleted_clause_written = false;
+    // Property and cash proceeds are mutually exclusive per kind, so at most one
+    // depleted-by-recent-take clause can ever apply; no guard flag is needed.
     if let Some(proceeds) = property_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
         summary.push_str(&held_property_clause(proceeds.estimated_value().cents()));
     }
-    if property_proceeds_plan.depleted_by_recent_take && !depleted_clause_written {
+    if property_proceeds_plan.depleted_by_recent_take {
         summary.push(' ');
         summary.push_str(depleted_take_clause(record.kind()));
-        depleted_clause_written = true;
     }
     if let Some(proceeds) = cash_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
         summary.push_str(&held_cash_clause(record.kind(), proceeds.amount().cents()));
     }
-    if cash_proceeds_plan.depleted_by_recent_take && !depleted_clause_written {
+    if cash_proceeds_plan.depleted_by_recent_take {
         summary.push(' ');
         summary.push_str(depleted_take_clause(record.kind()));
     }

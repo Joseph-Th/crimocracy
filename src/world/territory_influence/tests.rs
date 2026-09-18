@@ -236,7 +236,6 @@ fn influence_counts_active_district_rackets_per_organization() {
 
     let summary = resolve_neighborhood_influence(&fixture.state, fixture.neighborhood)
         .expect("influence should resolve");
-    assert_eq!(summary.neighborhood, fixture.neighborhood);
     assert_eq!(
         summary.standings.len(),
         1,

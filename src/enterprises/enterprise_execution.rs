@@ -148,6 +148,10 @@ pub enum EnterpriseError {
     },
     #[error("financial account {0} does not exist")]
     MissingAccount(FinancialAccountId),
+    #[error(
+        "pre-opened settlement account {account} does not match the establishment draft's settlement account"
+    )]
+    SettlementOpeningsMismatch { account: FinancialAccountId },
     #[error("financial account {account} is not owned by organization {organization}")]
     AccountOwnerMismatch {
         account: FinancialAccountId,
@@ -780,6 +784,13 @@ impl ValidatedEnterpriseCycle {
                 .intelligence
                 .get_information(source)
                 .expect("just-committed manager information persists");
+            // The draft below re-verifies plan-established facts rather than discovering new
+            // ones: the recipient, title, kind, entities, and summary were all fixed at plan
+            // validation (the summary is the plan-validated information text, and empty
+            // summaries are rejected there), the source committed two lines above, and
+            // organizations, characters, and enterprises are never deleted. No failure
+            // variant of the report validator is reachable from a validated plan, so a
+            // rejection here signals state corruption, not a routine settlement outcome.
             validate_record_report(
                 state,
                 ReportDraft {

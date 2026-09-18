@@ -129,7 +129,9 @@ pub(crate) fn validate_establish_enterprise_with_openings(
             AccountKind::Settlement,
         )
     {
-        return Err(EnterpriseError::MissingAccount(draft.settlement_account));
+        return Err(EnterpriseError::SettlementOpeningsMismatch {
+            account: draft.settlement_account,
+        });
     }
     validate_establish_enterprise_with_optional_openings(registry, state, draft, Some(openings))
 }

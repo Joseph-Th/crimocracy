@@ -261,6 +261,14 @@ pub(crate) fn expiry_report_summary(summary: &str) -> String {
     format!("Opportunity expired: {summary}")
 }
 
+pub(crate) fn dismissal_report_title(display_name: &str) -> String {
+    format!("{display_name} opportunity dismissed")
+}
+
+pub(crate) fn dismissal_report_summary(summary: &str) -> String {
+    format!("Opportunity dismissed: {summary}")
+}
+
 fn validate_discovery_state(
     registry: &Registry,
     state: &AppState,
@@ -365,6 +373,16 @@ fn validate_discovery_state(
     ) {
         return Err(OpportunityError::ExistingOpenOpportunity(existing.id()));
     }
+    // Same-target work already has an open opportunity even when the target sets differ:
+    // discovering `{A,B}` while `{A}` is open would leave a duplicate that outlives the
+    // conversion of either one and expires with a redundant report.
+    if let Some(existing) = state.opportunities.find_open_operation_overlapping(
+        draft.organization,
+        draft.operation_kind,
+        &draft.targets,
+    ) {
+        return Err(OpportunityError::ExistingOpenOpportunity(existing.id()));
+    }
     Ok(())
 }
 
@@ -461,10 +479,12 @@ pub(crate) fn source_information_proves_operation_basis(
 pub struct ValidatedOpportunityDismissal {
     opportunity: OpportunityId,
     expected_version: u32,
+    report: ValidatedReport,
 }
 
 impl ValidatedOpportunityDismissal {
-    pub fn commit(self, state: &mut AppState) -> Result<(), OpportunityError> {
+    pub fn commit(self, state: &mut AppState) -> Result<ReportId, OpportunityError> {
+        state.ids.reserve_many(&[(IdKind::Report, 1)])?;
         let record = validate_open_opportunity(state, self.opportunity)?;
         if record.version() != self.expected_version {
             return Err(OpportunityError::StaleOpportunity {
@@ -475,21 +495,47 @@ impl ValidatedOpportunityDismissal {
         }
         ensure_version_can_advance(record.version(), "opportunity")?;
         validate_not_expired(state, record)?;
-        state.opportunities.dismiss(self.opportunity, state.now());
-        Ok(())
+        let report = self
+            .report
+            .commit(state)
+            .expect("dismissal report ID was preflighted before mutation");
+        state
+            .opportunities
+            .dismiss(self.opportunity, state.now(), report);
+        Ok(report)
     }
 }
 
 pub fn validate_dismiss_opportunity(
+    registry: &Registry,
     state: &AppState,
     opportunity: OpportunityId,
 ) -> Result<ValidatedOpportunityDismissal, OpportunityError> {
     let record = validate_open_opportunity(state, opportunity)?;
     ensure_version_can_advance(record.version(), "opportunity")?;
     validate_not_expired(state, record)?;
+    let definition = registry.get_operation(record.context().operation_kind());
+    let mut entities = record.context().targets().clone();
+    entities.insert(EntityRef::Organization(record.organization()));
+    let report = validate_record_report(
+        state,
+        ReportDraft {
+            recipient: record.organization(),
+            kind: ReportKind::Opportunity,
+            title: dismissal_report_title(definition.display_name()),
+            entries: vec![ReportEntry {
+                attention: AttentionClass::Notable,
+                summary: dismissal_report_summary(record.summary()),
+                sources: record.source_information().iter().copied().collect(),
+                entities,
+                decision: None,
+            }],
+        },
+    )?;
     Ok(ValidatedOpportunityDismissal {
         opportunity,
         expected_version: record.version(),
+        report,
     })
 }
 

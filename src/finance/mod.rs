@@ -281,19 +281,8 @@ impl FinanceState {
             })
     }
 
-    pub fn transactions_for_mandate(
-        &self,
-        mandate: MandateId,
-    ) -> impl Iterator<Item = &LedgerTransactionRecord> {
-        self.transactions_by_mandate
-            .get(&mandate)
-            .into_iter()
-            .flatten()
-            .map(|id| {
-                self.transactions
-                    .get(id)
-                    .expect("mandate transaction index must reference a transaction")
-            })
+    pub(crate) fn transactions(&self) -> impl Iterator<Item = &LedgerTransactionRecord> {
+        self.transactions.values()
     }
 
     /// The running charged total for one (mandate, period) window, maintained at ledger
@@ -308,6 +297,18 @@ impl FinanceState {
             .get(&(mandate, period_start, period_end))
             .copied()
             .unwrap_or(Money::ZERO)
+    }
+
+    fn insert_account(&mut self, record: FinancialAccountRecord) {
+        self.accounts_by_owner
+            .entry(record.owner())
+            .or_default()
+            .insert(record.id());
+        let previous = self.accounts.insert(record.id(), record);
+        debug_assert!(
+            previous.is_none(),
+            "Index Uniqueness: duplicate financial account ID inserted"
+        );
     }
 
     pub(crate) fn budget_used_entries(
@@ -338,22 +339,6 @@ impl FinanceState {
                 .transactions
                 .iter()
                 .all(|(id, transaction)| *id == transaction.id())
-    }
-
-    pub(crate) fn transactions(&self) -> impl Iterator<Item = &LedgerTransactionRecord> {
-        self.transactions.values()
-    }
-
-    fn insert_account(&mut self, record: FinancialAccountRecord) {
-        self.accounts_by_owner
-            .entry(record.owner())
-            .or_default()
-            .insert(record.id());
-        let previous = self.accounts.insert(record.id(), record);
-        debug_assert!(
-            previous.is_none(),
-            "Index Uniqueness: duplicate financial account ID inserted"
-        );
     }
 
     fn apply_transaction(

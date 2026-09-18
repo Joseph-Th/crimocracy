@@ -186,6 +186,35 @@ pub enum Specificity {
     Precise,
 }
 
+/// Epistemic cost of a trusted-intermediary hop: a contact tells the sponsor what the
+/// contact knows, so the sponsor's record cannot claim the contact's first-hand grade.
+/// `DirectAccess` means the holder observed directly; heard-through-a-channel knowledge
+/// steps one rung down each ladder, flooring at the bottom. Observed time, subject,
+/// signal, and summary cross the hop unchanged so typed consumer checks still work.
+pub(crate) fn downgraded_reliability_for_contact_derivation(
+    reliability: Reliability,
+) -> Reliability {
+    match reliability {
+        Reliability::DirectAccess => Reliability::GenerallyReliable,
+        Reliability::GenerallyReliable => Reliability::Mixed,
+        Reliability::Mixed => Reliability::Unreliable,
+        Reliability::Unreliable => Reliability::Unknown,
+        Reliability::Unknown => Reliability::Unknown,
+    }
+}
+
+/// See [`downgraded_reliability_for_contact_derivation`].
+pub(crate) fn downgraded_specificity_for_contact_derivation(
+    specificity: Specificity,
+) -> Specificity {
+    match specificity {
+        Specificity::Precise => Specificity::Specific,
+        Specificity::Specific => Specificity::General,
+        Specificity::General => Specificity::Vague,
+        Specificity::Vague => Specificity::Vague,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct InformationSource {
     holder: KnowledgeHolder,

@@ -487,6 +487,44 @@ fn source_entry_limit_preserves_priority_and_discloses_overflow() {
     assert_eq!(plan.entries[0].attention, AttentionClass::Crisis);
     assert_eq!(plan.entries[1].attention, AttentionClass::Crisis);
     assert!(plan.entries[8].summary.contains("2 additional items"));
+    assert_eq!(
+        plan.entries[8].attention,
+        AttentionClass::Notable,
+        "the overflow disclosure carries the highest omitted attention, not a fixed class"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn overflow_disclosure_carries_the_highest_omitted_attention_class() {
+    let mut fixture = make_test_brief_fixture();
+    let entries = (0..10)
+        .map(|index| {
+            entry(
+                AttentionClass::Crisis,
+                &format!("Crisis source item {index}."),
+            )
+        })
+        .collect::<Vec<_>>();
+    record_report(
+        &mut fixture.state,
+        fixture.organization,
+        "Dense crisis report",
+        entries,
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let plan = decide_executive_brief(&fixture.registry, &fixture.state, fixture.organization)
+        .expect("dense crisis set should still produce a bounded brief");
+    assert_eq!(plan.entries.len(), 9);
+    assert!(plan.entries[8].summary.contains("2 additional items"));
+    assert_eq!(
+        plan.entries[8].attention,
+        AttentionClass::Crisis,
+        "omitted Crisis items must not be mislabeled as merely notable"
+    );
     validate_invariants(&fixture.state);
 }
 

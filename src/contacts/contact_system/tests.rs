@@ -478,8 +478,11 @@ fn police_contact_disclosure_preserves_personal_source_provenance_and_save_round
         ContactKind::Police
     );
     let source_character = fixture.source;
-    let source =
-        record_source_information(&mut fixture, KnowledgeHolder::Character(source_character));
+    let source = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(source_character),
+        InformationTopic::LegalActivity,
+    );
     let disclosure = validate_contact_disclosure(&fixture.state, contact, source)
         .expect("personally held police information should be disclosable")
         .commit(&mut fixture.state)
@@ -507,8 +510,10 @@ fn police_contact_disclosure_preserves_personal_source_provenance_and_save_round
         Some(EntityRef::Character(fixture.source))
     );
     assert_eq!(disclosed.derived_from(), &BTreeSet::from([source]));
-    assert_eq!(disclosed.reliability(), Reliability::GenerallyReliable);
-    assert_eq!(disclosed.specificity(), Specificity::Specific);
+    // The channel hop costs one epistemic rung: heard-through-a-contact knowledge cannot
+    // keep the contact's first-hand GenerallyReliable/Specific grade.
+    assert_eq!(disclosed.reliability(), Reliability::Mixed);
+    assert_eq!(disclosed.specificity(), Specificity::General);
     assert_eq!(
         fixture
             .state
@@ -607,8 +612,11 @@ fn active_contact_locks_memberships_until_termination_then_history_survives_move
     );
 
     let source_character = fixture.source;
-    let source =
-        record_source_information(&mut fixture, KnowledgeHolder::Character(source_character));
+    let source = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(source_character),
+        InformationTopic::LegalActivity,
+    );
     let disclosure = validate_contact_disclosure(&fixture.state, contact, source)
         .expect("active contact disclosure should validate")
         .commit(&mut fixture.state)

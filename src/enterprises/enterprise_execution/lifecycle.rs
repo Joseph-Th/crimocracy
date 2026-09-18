@@ -28,6 +28,11 @@ pub struct ValidatedEnterpriseStatusChange {
 
 impl ValidatedEnterpriseStatusChange {
     pub fn commit(self, state: &mut AppState) -> Result<(), EnterpriseError> {
+        // Version pins are the only staleness guard this token needs: unlike disruption
+        // tokens, which freeze a validate-time horizon and must reject a held-across-tick
+        // commit, every time-derived value here (next cycle, loss anchor, change instant)
+        // is anchored at the commit instant, so a clock advance with unchanged content
+        // commits correctly rather than spuriously rejecting.
         let record = state
             .enterprises
             .get_enterprise(self.enterprise)

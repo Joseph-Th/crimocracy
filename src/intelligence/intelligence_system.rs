@@ -118,8 +118,12 @@ pub(crate) fn validate_contact_information_derivation(
         source_entity: Some(EntityRef::Character(contact)),
         subject: source_record.subject(),
         observed_at: source_record.observed_at(),
-        reliability: source_record.reliability(),
-        specificity: source_record.specificity(),
+        reliability: super::downgraded_reliability_for_contact_derivation(
+            source_record.reliability(),
+        ),
+        specificity: super::downgraded_specificity_for_contact_derivation(
+            source_record.specificity(),
+        ),
         summary: source_record.summary().to_owned(),
     };
     validate_information_draft(state, &draft)?;

@@ -600,23 +600,21 @@ pub fn find_pending_disclosure_sources(
     sources
 }
 
-/// Topics each contact channel credibly knows through its institution.
+/// Topics each contact channel credibly knows through its institution. A topic is listed
+/// only when production knowledge can actually reach the contact character's hands:
+/// case leads carry LegalActivity to the investigating officer, business books carry
+/// FinancialPerformance to a character owner, and recruitment/informant flows carry
+/// Personnel to the characters who live them. Press keeps its General forward surface for
+/// the unmodeled press systems (see STATUS exclusions); every other entry here has a
+/// live production producer behind it.
 fn disclosable_topics(kind: ContactKind) -> &'static [InformationTopic] {
     match kind {
-        // Law enforcement gathers exactly the security and patrol picture it enforces.
-        ContactKind::Police => &[
-            InformationTopic::General,
-            InformationTopic::PoliceActivity,
-            InformationTopic::LegalActivity,
-            InformationTopic::TargetSecurity,
-            InformationTopic::Schedule,
-            InformationTopic::Route,
-        ],
-        ContactKind::Legal => &[InformationTopic::General, InformationTopic::LegalActivity],
-        ContactKind::Political => &[InformationTopic::General, InformationTopic::MarketAccess],
+        // Law enforcement relays what its own casework puts in the officer's hands.
+        ContactKind::Police => &[InformationTopic::LegalActivity],
+        ContactKind::Legal => &[InformationTopic::LegalActivity],
+        ContactKind::Political => &[InformationTopic::MarketAccess],
         ContactKind::Press => &[InformationTopic::General],
         ContactKind::Labor | ContactKind::Professional => &[
-            InformationTopic::General,
             InformationTopic::FinancialPerformance,
             InformationTopic::Personnel,
         ],

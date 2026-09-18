@@ -33,7 +33,6 @@ pub struct TerritoryStanding {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NeighborhoodInfluenceSummary {
-    pub neighborhood: NeighborhoodId,
     /// Ascending organization order; organizations with no district footprint are absent.
     pub standings: Vec<TerritoryStanding>,
 }
@@ -115,10 +114,7 @@ pub fn resolve_neighborhood_influence(
         })
         .collect();
 
-    Ok(NeighborhoodInfluenceSummary {
-        neighborhood,
-        standings,
-    })
+    Ok(NeighborhoodInfluenceSummary { standings })
 }
 
 #[cfg(test)]

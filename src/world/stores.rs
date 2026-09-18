@@ -426,13 +426,6 @@ impl WorldState {
                     .expect("business ownership-version index must reference a change record")
             })
     }
-    pub fn business_owner_at(&self, business: BusinessId, at: SimTime) -> Option<BusinessOwner> {
-        self.business_ownership_history(business)
-            .filter(|change| change.changed_at() <= at)
-            .max_by_key(|change| (change.changed_at(), change.resulting_business_version()))
-            .map(BusinessOwnershipChangeRecord::new_owner)
-    }
-
     /// Returns whether `owner` could have held, and definitely held, the business at one
     /// simulation timestamp. Ownership changes are ordered among themselves by business version,
     /// but cross-domain events sharing the same minute have no persisted sub-minute order. The

@@ -118,6 +118,17 @@ pub enum DelegationError {
     },
     #[error("pending recruitment approvals for mandate {0} changed after validation")]
     RecruitmentApprovalSetChanged(MandateId),
+    #[error("pending recruitment approvals for organization {0} changed after policy validation")]
+    RecruitmentPolicyApprovalSetChanged(OrganizationId),
+    #[error(
+        "organization {organization} policy {policy:?} changed after validation; expected version {expected}, found {found}"
+    )]
+    StaleOrganizationPolicy {
+        organization: OrganizationId,
+        policy: PolicyKind,
+        expected: u32,
+        found: u32,
+    },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]
@@ -130,20 +141,84 @@ pub enum DelegationError {
 /// governance layer coordinates policy changes with any decision-owned lifecycle that the
 /// effective policy can permanently supersede. All fallible cancellation preflight happens
 /// before the world-owned setting changes, so the composite mutation is atomic on failure.
-pub fn set_policy(
-    registry: &Registry,
-    state: &mut AppState,
+#[derive(Debug)]
+pub struct ValidatedPolicyChange {
     organization: OrganizationId,
     setting: PolicySetting,
-) -> Result<(), DelegationError> {
+    /// Version held at validation; `None` when the setting is already current and the
+    /// commit is a no-op that must not invalidate held policy snapshots.
+    expected_policy_version: Option<u32>,
+    approval_cancellations: Option<ValidatedRecruitmentApprovalCancellations>,
+}
+
+impl ValidatedPolicyChange {
+    pub fn commit(self, registry: &Registry, state: &mut AppState) -> Result<(), DelegationError> {
+        let Some(expected_version) = self.expected_policy_version else {
+            return Ok(());
+        };
+        let organization_record = state
+            .world
+            .get_organization(self.organization)
+            .ok_or(DelegationError::MissingOrganization(self.organization))?;
+        let current_version = organization_record
+            .policy_version(self.setting.kind())
+            .ok_or(DelegationError::MissingOrganizationPolicy {
+                organization: self.organization,
+                policy: self.setting.kind(),
+            })?;
+        if current_version != expected_version {
+            return Err(DelegationError::StaleOrganizationPolicy {
+                organization: self.organization,
+                policy: self.setting.kind(),
+                expected: expected_version,
+                found: current_version,
+            });
+        }
+        // Same currency contract mandate revision/revocation enforce at commit: a changed
+        // approval set between validation and commit rejects the operation instead of
+        // cancelling state the preflight never saw. Checked before any mutation so a
+        // rejected operation leaves authoritative state unchanged.
+        if let Some(ref cancellations) = self.approval_cancellations
+            && !cancellations.is_current(state)
+        {
+            return Err(DelegationError::RecruitmentPolicyApprovalSetChanged(
+                self.organization,
+            ));
+        }
+        set_world_policy(registry, state, self.organization, self.setting)?;
+        if let Some(cancellations) = self.approval_cancellations {
+            cancellations.commit_preflighted(state);
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_set_policy(
+    registry: &Registry,
+    state: &AppState,
+    organization: OrganizationId,
+    setting: PolicySetting,
+) -> Result<ValidatedPolicyChange, DelegationError> {
     let organization_record = state
         .world
         .get_organization(organization)
         .ok_or(DelegationError::MissingOrganization(organization))?;
     registry.get_policy(setting.kind());
     if organization_record.policy(setting.kind()) == Some(setting) {
-        return Ok(());
+        return Ok(ValidatedPolicyChange {
+            organization,
+            setting,
+            expected_policy_version: None,
+            approval_cancellations: None,
+        });
     }
+    let expected_policy_version = organization_record.policy_version(setting.kind()).ok_or(
+        DelegationError::MissingOrganizationPolicy {
+            organization,
+            policy: setting.kind(),
+        },
+    )?;
+    ensure_version_can_advance(expected_policy_version, "organization policy")?;
 
     let approval_cancellations = matches!(setting, PolicySetting::IndependentRecruitment(_))
         .then(|| {
@@ -154,12 +229,12 @@ pub fn set_policy(
         })
         .transpose()?;
 
-    set_world_policy(registry, state, organization, setting)?;
-    if let Some(cancellations) = approval_cancellations {
-        debug_assert!(cancellations.is_current(state));
-        cancellations.commit_preflighted(state);
-    }
-    Ok(())
+    Ok(ValidatedPolicyChange {
+        organization,
+        setting,
+        expected_policy_version: Some(expected_policy_version),
+        approval_cancellations,
+    })
 }
 
 #[derive(Debug)]

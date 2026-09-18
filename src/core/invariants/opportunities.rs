@@ -280,8 +280,8 @@ fn validate_opportunity_resolution(
 ) -> Result<(), StateValidationError> {
     match opportunity.resolution() {
         None => validate_open_opportunity(state, opportunity),
-        Some(OpportunityResolution::Dismissed { at }) => {
-            validate_dismissed_opportunity(state, opportunity, at)
+        Some(OpportunityResolution::Dismissed { at, report }) => {
+            validate_dismissed_opportunity(state, opportunity, at, report)
         }
         Some(OpportunityResolution::Expired { at, report }) => {
             validate_expired_opportunity(state, opportunity, at, report)
@@ -310,13 +310,30 @@ fn validate_dismissed_opportunity(
     state: &AppState,
     opportunity: &OpportunityRecord,
     at: crate::core::time::SimTime,
+    report: crate::core::id::ReportId,
 ) -> Result<(), StateValidationError> {
+    let dismissal_report = state
+        .reports
+        .get_report(report)
+        .ok_or_else(|| invalid_opportunity(opportunity))?;
+    let expected_summary =
+        crate::opportunities::opportunity_system::dismissal_report_summary(opportunity.summary());
     if opportunity.version() != 2
         || at < opportunity.discovered_at()
         || at > state.now()
         || opportunity
             .valid_until()
             .is_some_and(|valid_until| at >= valid_until)
+        || dismissal_report.recipient() != opportunity.organization()
+        || dismissal_report.kind() != ReportKind::Opportunity
+        || dismissal_report.generated_at() < at
+        || dismissal_report.generated_at() > state.now()
+        || !opportunity_report_entry_matches(opportunity, dismissal_report, &expected_summary)
+        || state
+            .opportunities
+            .opportunity_for_report(report)
+            .map(|record| record.id())
+            != Some(opportunity.id())
     {
         return Err(invalid_opportunity(opportunity));
     }

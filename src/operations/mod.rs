@@ -159,15 +159,6 @@ pub enum OperationApproach {
     Opportunistic,
 }
 
-pub const ALL_OPERATION_APPROACHES: [OperationApproach; 6] = [
-    OperationApproach::Covert,
-    OperationApproach::Deceptive,
-    OperationApproach::Intimidating,
-    OperationApproach::Violent,
-    OperationApproach::InsideAssistance,
-    OperationApproach::Opportunistic,
-];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RoleKind {
     Driver,

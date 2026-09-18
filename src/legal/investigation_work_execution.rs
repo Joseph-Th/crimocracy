@@ -77,8 +77,6 @@ pub enum InvestigationWorkError {
         investigator: CharacterId,
         work: InvestigationWorkId,
     },
-    #[error("investigation evidence set is too large to persist as one work item")]
-    SourceEvidenceCountOverflow,
     #[error(
         "investigation {investigation} changed after work validation; expected version {expected}, found {found}"
     )]
@@ -643,13 +641,10 @@ pub(crate) fn resolve_work_factors_and_margin(
             work.investigator(),
         ))?;
     let source_support = resolve_source_support(definition, state, work)?;
-    let source_evidence_count = u8::try_from(work.source_evidence().len())
-        .map_err(|_| InvestigationWorkError::SourceEvidenceCountOverflow)?;
     let difficulty = definition.base_difficulty();
     let factors = InvestigationWorkFactors {
         investigation_capability,
         source_support,
-        source_evidence_count,
         difficulty,
         variance,
     };
@@ -693,8 +688,6 @@ pub(crate) fn validate_historical_work_factors(
         .ok_or(InvestigationWorkError::MissingInvestigationCapability(
             work.investigator(),
         ))?;
-    let source_evidence_count = u8::try_from(work.source_evidence().len())
-        .map_err(|_| InvestigationWorkError::SourceEvidenceCountOverflow)?;
     let expected_difficulty = definition.base_difficulty();
     let support_valid = match work.kind() {
         InvestigationWorkKind::EvidenceReview => {
@@ -712,7 +705,6 @@ pub(crate) fn validate_historical_work_factors(
         }),
     };
     if factors.investigation_capability() != investigation_capability
-        || factors.source_evidence_count() != source_evidence_count
         || factors.difficulty() != expected_difficulty
         || !support_valid
     {

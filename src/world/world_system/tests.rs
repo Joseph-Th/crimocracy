@@ -496,16 +496,18 @@ fn business_ownership_transfer_updates_indexes_and_preserves_versioned_history()
         state.world().business_ownership_history(business).count(),
         2
     );
-    assert_eq!(
-        state.world().business_owner_at(business, SimTime::ZERO),
-        Some(BusinessOwner::Organization(first_owner))
-    );
-    assert_eq!(
-        state
-            .world()
-            .business_owner_at(business, SimTime::from_minutes(15)),
-        Some(BusinessOwner::Organization(second_owner))
-    );
+    assert!(state.world().has_business_owner_during(
+        business,
+        BusinessOwner::Organization(first_owner),
+        SimTime::ZERO,
+        SimTime::ZERO,
+    ));
+    assert!(state.world().has_business_owner_during(
+        business,
+        BusinessOwner::Organization(second_owner),
+        SimTime::from_minutes(15),
+        SimTime::from_minutes(15),
+    ));
 
     state.advance_clock(SimDuration::from_minutes(5));
     validate_transfer_business_ownership(
@@ -554,12 +556,12 @@ fn business_ownership_transfer_updates_indexes_and_preserves_versioned_history()
         state.world().business_ownership_history(business).count(),
         3
     );
-    assert_eq!(
-        state
-            .world()
-            .business_owner_at(business, SimTime::from_minutes(20)),
-        Some(BusinessOwner::Character(individual_owner))
-    );
+    assert!(state.world().has_business_owner_during(
+        business,
+        BusinessOwner::Character(individual_owner),
+        SimTime::from_minutes(20),
+        SimTime::from_minutes(20),
+    ));
     assert!(state.world().has_business_owner_during(
         business,
         BusinessOwner::Organization(second_owner),

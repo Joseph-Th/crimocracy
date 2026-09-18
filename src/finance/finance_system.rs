@@ -638,6 +638,8 @@ pub enum LaunderingError {
     NotCashIntensive(crate::core::id::BusinessId),
     #[error("business {0} has no active operating economy to route laundered revenue through")]
     MissingBusinessEconomy(crate::core::id::BusinessId),
+    #[error("business {0}'s operating economy is suspended and cannot route laundered revenue")]
+    EconomySuspended(crate::core::id::BusinessId),
     #[error(
         "street-cash account {account} holds {balance_cents} cents and cannot launder {requested_cents}"
     )]
@@ -820,7 +822,7 @@ pub fn validate_launder_funds(
         .get_business_economy(draft.business)
         .ok_or(LaunderingError::MissingBusinessEconomy(draft.business))?;
     if economy.status() != crate::economy::BusinessOperatingStatus::Active {
-        return Err(LaunderingError::MissingBusinessEconomy(draft.business));
+        return Err(LaunderingError::EconomySuspended(draft.business));
     }
     ensure_version_can_advance(economy.version(), "business economy")?;
     // Plausibility: the front can hide only the authored fraction of what it legitimately

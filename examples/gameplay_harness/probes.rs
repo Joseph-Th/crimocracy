@@ -1304,7 +1304,9 @@ pub fn run_opportunity_portfolio_probe(
         },
     )?
     .commit(&mut scenario.state)?;
-    validate_dismiss_opportunity(&scenario.state, dismissable)?.commit(&mut scenario.state)?;
+    let dismissal_report =
+        validate_dismiss_opportunity(scenario.registry, &scenario.state, dismissable)?
+            .commit(&mut scenario.state)?;
     let dismissed = scenario
         .state
         .opportunities()
@@ -1312,6 +1314,14 @@ pub fn run_opportunity_portfolio_probe(
         .expect("dismissed opportunity must persist");
     if dismissed.status() != OpportunityStatus::Dismissed || dismissed.resolution().is_none() {
         return Err("dismiss lifecycle did not produce expected Dismissed state".into());
+    }
+    if scenario
+        .state
+        .reports()
+        .get_report(dismissal_report)
+        .is_none()
+    {
+        return Err("dismiss lifecycle must persist its lifecycle report".into());
     }
     println!(
         "[PORTFOLIO] Selected {} from player-visible source quality, converted it into {}, left the weaker opportunity to expire, and dismissed a decoy through the canonical lifecycle.",
