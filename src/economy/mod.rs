@@ -39,6 +39,16 @@ pub struct BusinessEconomyRecord {
     /// suspension so the authored losing-cycle threshold applies to losses suffered since the
     /// restart instead of resurrecting pre-suspension history on the first losing cycle.
     loss_streak_anchor: Option<SimTime>,
+    /// Positive operating cash already present when these books were established or when a new
+    /// owner restarted them. This is retained working capital, not earned surplus, so owner draws
+    /// cannot convert the business's opening float into organization wealth. Losses may consume
+    /// the floor; later earnings must replenish it before another owner draw is available.
+    operating_capital_floor: Money,
+    /// Account/business revisions and time at which `operating_capital_floor` was observed.
+    /// These make the frozen floor auditable from persisted ledger and ownership history.
+    capital_floor_account_version: u32,
+    capital_floor_business_version: u32,
+    capital_floor_set_at: SimTime,
     /// Street-cash volume this front has absorbed since its last operating cycle. The
     /// laundering plausibility budget is per cycle, so splitting one large sum into many
     /// transfers cannot hide more than the front's authored share of legitimate earnings.
@@ -77,6 +87,18 @@ impl BusinessEconomyRecord {
     }
     pub(crate) fn loss_streak_anchor(&self) -> Option<SimTime> {
         self.loss_streak_anchor
+    }
+    pub fn operating_capital_floor(&self) -> Money {
+        self.operating_capital_floor
+    }
+    pub(crate) fn capital_floor_account_version(&self) -> u32 {
+        self.capital_floor_account_version
+    }
+    pub(crate) fn capital_floor_business_version(&self) -> u32 {
+        self.capital_floor_business_version
+    }
+    pub(crate) fn capital_floor_set_at(&self) -> SimTime {
+        self.capital_floor_set_at
     }
     pub fn is_disrupted(&self, now: SimTime) -> bool {
         self.disrupted_through.is_some_and(|through| now <= through)
@@ -337,6 +359,7 @@ impl EconomyState {
         // window so pre-suspension losses cannot instantly re-suspend a resumed business.
         loss_streak_anchor: Option<SimTime>,
         reset_laundering_window: bool,
+        capital_floor: Option<OperatingCapitalFloor>,
     ) {
         let (was_active, old_next_cycle_at) = {
             let record = self
@@ -376,6 +399,12 @@ impl EconomyState {
             // retains consumed capacity and provenance until the next actual settlement.
             record.laundered_this_cycle = Money::ZERO;
             record.laundering_transactions_this_cycle.clear();
+        }
+        if let Some(capital_floor) = capital_floor {
+            record.operating_capital_floor = capital_floor.amount;
+            record.capital_floor_account_version = capital_floor.account_version;
+            record.capital_floor_business_version = capital_floor.business_version;
+            record.capital_floor_set_at = capital_floor.set_at;
         }
         record.version = advance_version_preflighted(record.version);
     }
@@ -433,6 +462,13 @@ impl EconomyState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        self.business_records_have_consistent_indexes()
+            && self.settlement_account_index_is_consistent()
+            && self.active_schedule_index_is_consistent()
+            && self.cycle_indexes_are_consistent()
+    }
+
+    fn business_records_have_consistent_indexes(&self) -> bool {
         for (stored_business, record) in &self.businesses {
             if *stored_business != record.business() {
                 return false;
@@ -454,6 +490,13 @@ impl EconomyState {
                 return false;
             }
         }
+        true
+    }
+
+    fn settlement_account_index_is_consistent(&self) -> bool {
+        if self.by_settlement_account.len() != self.businesses.len() {
+            return false;
+        }
         for (account, business) in &self.by_settlement_account {
             if !self
                 .businesses
@@ -463,7 +506,22 @@ impl EconomyState {
                 return false;
             }
         }
+        true
+    }
+
+    fn active_schedule_index_is_consistent(&self) -> bool {
+        let expected_schedule_entries = self
+            .businesses
+            .values()
+            .filter(|record| {
+                record.status() == BusinessOperatingStatus::Active
+                    && record.next_cycle_at().is_some()
+            })
+            .count();
         for (time, businesses) in &self.active_by_next_cycle {
+            if businesses.is_empty() {
+                return false;
+            }
             for business in businesses {
                 if !self.businesses.get(business).is_some_and(|record| {
                     record.status() == BusinessOperatingStatus::Active
@@ -473,6 +531,14 @@ impl EconomyState {
                 }
             }
         }
+        self.active_by_next_cycle
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            == expected_schedule_entries
+    }
+
+    fn cycle_indexes_are_consistent(&self) -> bool {
         for (stored_id, cycle) in &self.cycles {
             if *stored_id != cycle.id() {
                 return false;
@@ -486,6 +552,9 @@ impl EconomyState {
             }
         }
         for (business, ids) in &self.cycles_by_business {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self
                     .cycles
@@ -496,7 +565,11 @@ impl EconomyState {
                 }
             }
         }
-        true
+        self.cycles_by_business
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            == self.cycles.len()
     }
 }
 
@@ -506,10 +579,19 @@ pub struct BusinessEconomyDraft {
     pub settlement_account: FinancialAccountId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct OperatingCapitalFloor {
+    pub amount: Money,
+    pub account_version: u32,
+    pub business_version: u32,
+    pub set_at: SimTime,
+}
+
 fn build_business_economy_record(
     draft: BusinessEconomyDraft,
     established_at: SimTime,
     next_cycle_at: SimTime,
+    capital_floor: OperatingCapitalFloor,
 ) -> BusinessEconomyRecord {
     BusinessEconomyRecord {
         business: draft.business,
@@ -521,6 +603,10 @@ fn build_business_economy_record(
         last_cycle_at: None,
         disrupted_through: None,
         loss_streak_anchor: None,
+        operating_capital_floor: capital_floor.amount,
+        capital_floor_account_version: capital_floor.account_version,
+        capital_floor_business_version: capital_floor.business_version,
+        capital_floor_set_at: capital_floor.set_at,
         laundered_this_cycle: Money::ZERO,
         laundering_transactions_this_cycle: BTreeSet::new(),
         version: 1,

@@ -2,9 +2,10 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{InformationId, LedgerTransactionId, ReportId};
+use crate::core::id::{FinancialAccountId, InformationId, LedgerTransactionId, ReportId};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
+use crate::core::time::SimTime;
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
@@ -12,19 +13,81 @@ use crate::intelligence::{
 use crate::operations::property_disposition::{
     write_deposit_memo, write_deposit_summary, write_disposition_summary, write_liquidation_memo,
 };
-use crate::operations::{OperationRecord, OperationResolutionRecord};
+use crate::operations::{
+    OperationCashDispositionRecord, OperationPropertyDispositionRecord, OperationRecord,
+    OperationResolutionRecord,
+};
 use crate::reports::ReportKind;
 use crate::world::{BusinessFunction, BusinessOwner};
 use std::collections::BTreeSet;
+
+#[derive(Default)]
+pub(super) struct DispositionInvariantContext {
+    transactions: BTreeSet<LedgerTransactionId>,
+    information: BTreeSet<InformationId>,
+    reports: BTreeSet<ReportId>,
+    memo: String,
+    summary: String,
+}
+
+#[derive(Clone, Copy)]
+struct CommonDisposition {
+    disposed_at: SimTime,
+    realized_value: Money,
+    cash_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
+    transaction: LedgerTransactionId,
+    information: InformationId,
+    report: ReportId,
+}
+
+#[derive(Clone, Copy)]
+struct DispositionArtifactSpec<'a> {
+    source_entity: EntityRef,
+    report_title: &'a str,
+    expected_summary: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct DispositionValidationSpec {
+    disposition: CommonDisposition,
+    source_entity: EntityRef,
+    report_title: &'static str,
+}
+
+impl From<OperationCashDispositionRecord> for CommonDisposition {
+    fn from(record: OperationCashDispositionRecord) -> Self {
+        Self {
+            disposed_at: record.disposed_at(),
+            realized_value: record.realized_value(),
+            cash_account: record.cash_account(),
+            settlement_account: record.settlement_account(),
+            transaction: record.transaction(),
+            information: record.information(),
+            report: record.report(),
+        }
+    }
+}
+
+impl From<OperationPropertyDispositionRecord> for CommonDisposition {
+    fn from(record: OperationPropertyDispositionRecord) -> Self {
+        Self {
+            disposed_at: record.disposed_at(),
+            realized_value: record.realized_value(),
+            cash_account: record.cash_account(),
+            settlement_account: record.settlement_account(),
+            transaction: record.transaction(),
+            information: record.information(),
+            report: record.report(),
+        }
+    }
+}
 
 pub(super) fn validate_operation_property_disposition(
     state: &AppState,
     operation: &OperationRecord,
     resolution: &OperationResolutionRecord,
-    transactions: &mut BTreeSet<LedgerTransactionId>,
-    information_ids: &mut BTreeSet<InformationId>,
-    reports: &mut BTreeSet<ReportId>,
-    text_scratch: &mut String,
+    context: &mut DispositionInvariantContext,
 ) -> Result<(), StateValidationError> {
     let Some(disposition) = operation.property_disposition() else {
         return Ok(());
@@ -33,13 +96,8 @@ pub(super) fn validate_operation_property_disposition(
         operation: operation.id(),
     };
     let proceeds = resolution.property_proceeds().ok_or_else(invalid)?;
-    if disposition.disposed_at() < resolution.resolved_at()
-        || disposition.disposed_at() > state.now()
-        || disposition.realized_value().cents() <= 0
+    if disposition.realized_value().cents() <= 0
         || disposition.realized_value().cents() > proceeds.estimated_value().cents()
-        || !transactions.insert(disposition.transaction())
-        || !information_ids.insert(disposition.information())
-        || !reports.insert(disposition.report())
     {
         return Err(invalid());
     }
@@ -76,130 +134,40 @@ pub(super) fn validate_operation_property_disposition(
         return Err(invalid());
     }
 
-    let cash = state
-        .finance
-        .get_account(disposition.cash_account())
-        .ok_or_else(invalid)?;
-    let settlement = state
-        .finance
-        .get_account(disposition.settlement_account())
-        .ok_or_else(invalid)?;
-    let expected_owner = FinancialOwner::Organization(operation.responsible_organization());
-    if disposition.cash_account() == disposition.settlement_account()
-        || cash.owner() != expected_owner
-        || settlement.owner() != expected_owner
-        || !matches!(
-            cash.kind(),
-            AccountKind::StreetCash | AccountKind::ConcealedCash
-        )
-        || settlement.kind() != AccountKind::Settlement
-        || settlement_account_was_enterprise_reserved_at(
-            state,
-            disposition.settlement_account(),
-            disposition.disposed_at(),
-        )
-    {
-        return Err(invalid());
-    }
-
-    let transaction = state
-        .finance
-        .get_transaction(disposition.transaction())
-        .ok_or_else(invalid)?;
-    let negative_value = disposition
-        .realized_value()
-        .cents()
-        .checked_neg()
-        .map(Money::from_cents)
-        .ok_or_else(invalid)?;
-    let has_cash_posting = transaction.postings().iter().any(|posting| {
-        posting.account == disposition.cash_account()
-            && posting.amount == disposition.realized_value()
-    });
-    let has_settlement_posting = transaction.postings().iter().any(|posting| {
-        posting.account == disposition.settlement_account() && posting.amount == negative_value
-    });
-    text_scratch.clear();
-    write_liquidation_memo(text_scratch, operation.id(), disposition.venue())
+    context.memo.clear();
+    write_liquidation_memo(&mut context.memo, operation.id(), disposition.venue())
         .expect("String buffer writes are infallible");
-    if transaction.occurred_at() != disposition.disposed_at()
-        || transaction.memo() != text_scratch.as_str()
-        || transaction.postings().len() != 2
-        || !has_cash_posting
-        || !has_settlement_posting
-        || transaction.budget_usage().is_some()
-    {
-        return Err(invalid());
-    }
-
     // The disposition summary is re-rendered once per record from the same template the
     // commit path used and compared against both the persisted information and the
     // persisted report entry.
-    text_scratch.clear();
+    context.summary.clear();
     write_disposition_summary(
-        text_scratch,
+        &mut context.summary,
         operation.title(),
         venue.name(),
         proceeds.estimated_value(),
         disposition.realized_value(),
     )
     .expect("String buffer writes are infallible");
-    let expected_summary = text_scratch.as_str();
-    let information = state
-        .intelligence
-        .get_information(disposition.information())
-        .ok_or_else(invalid)?;
-    if information.holder() != KnowledgeHolder::Organization(operation.responsible_organization())
-        || information.source_kind() != InformationSourceKind::Accountant
-        || information.topic() != InformationTopic::FinancialPerformance
-        || information.source_entity() != Some(EntityRef::Business(disposition.venue()))
-        || information.subject() != EntityRef::Operation(operation.id())
-        || information.observed_at() != disposition.disposed_at()
-        || information.recorded_at() != disposition.disposed_at()
-        || information.reliability() != Reliability::DirectAccess
-        || information.specificity() != Specificity::Precise
-        || information.summary() != expected_summary
-    {
-        return Err(invalid());
-    }
-    let report = state
-        .reports
-        .get_report(disposition.report())
-        .ok_or_else(invalid)?;
-    if report.recipient() != operation.responsible_organization()
-        || report.kind() != ReportKind::Financial
-        || report.title() != "Property disposition"
-        || report.generated_at() != disposition.disposed_at()
-        || report.entries().len() != 1
-    {
-        return Err(invalid());
-    }
-    let entry = &report.entries()[0];
-    if entry.attention != AttentionClass::Notable
-        || entry.summary != expected_summary
-        || !entry.sources.is_empty()
-        || entry.entities.len() != 2
-        || !entry
-            .entities
-            .contains(&EntityRef::Operation(operation.id()))
-        || !entry
-            .entities
-            .contains(&EntityRef::Business(disposition.venue()))
-        || entry.decision.is_some()
-    {
-        return Err(invalid());
-    }
-    Ok(())
+    validate_common_disposition(
+        state,
+        operation,
+        resolution,
+        DispositionValidationSpec {
+            disposition: disposition.into(),
+            source_entity: EntityRef::Business(disposition.venue()),
+            report_title: "Property disposition",
+        },
+        context,
+        invalid(),
+    )
 }
 
 pub(super) fn validate_operation_cash_disposition(
     state: &AppState,
     operation: &OperationRecord,
     resolution: &OperationResolutionRecord,
-    transactions: &mut BTreeSet<LedgerTransactionId>,
-    information_ids: &mut BTreeSet<InformationId>,
-    reports: &mut BTreeSet<ReportId>,
-    text_scratch: &mut String,
+    context: &mut DispositionInvariantContext,
 ) -> Result<(), StateValidationError> {
     let Some(disposition) = operation.cash_disposition() else {
         return Ok(());
@@ -208,26 +176,73 @@ pub(super) fn validate_operation_cash_disposition(
         operation: operation.id(),
     };
     let proceeds = resolution.cash_proceeds().ok_or_else(invalid)?;
-    if disposition.disposed_at() < resolution.resolved_at()
-        || disposition.disposed_at() > state.now()
-        || disposition.realized_value() != proceeds.amount()
-        || !transactions.insert(disposition.transaction())
-        || !information_ids.insert(disposition.information())
-        || !reports.insert(disposition.report())
-    {
+    if disposition.realized_value() != proceeds.amount() {
         return Err(invalid());
     }
+    context.memo.clear();
+    write_deposit_memo(&mut context.memo, operation.id())
+        .expect("String buffer writes are infallible");
+    context.summary.clear();
+    write_deposit_summary(&mut context.summary, operation.title(), proceeds.amount())
+        .expect("String buffer writes are infallible");
+    validate_common_disposition(
+        state,
+        operation,
+        resolution,
+        DispositionValidationSpec {
+            disposition: disposition.into(),
+            source_entity: proceeds.target(),
+            report_title: "Cash deposit",
+        },
+        context,
+        invalid(),
+    )
+}
 
+fn validate_common_disposition(
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &OperationResolutionRecord,
+    spec: DispositionValidationSpec,
+    context: &mut DispositionInvariantContext,
+    invalid: StateValidationError,
+) -> Result<(), StateValidationError> {
+    let disposition = spec.disposition;
+    if disposition.disposed_at < resolution.resolved_at()
+        || disposition.disposed_at > state.now()
+        || !context.transactions.insert(disposition.transaction)
+        || !context.information.insert(disposition.information)
+        || !context.reports.insert(disposition.report)
+    {
+        return Err(invalid);
+    }
+    validate_disposition_accounts(state, operation, disposition, &invalid)?;
+    validate_disposition_transaction(state, disposition, context.memo.as_str(), &invalid)?;
+    let artifacts = DispositionArtifactSpec {
+        source_entity: spec.source_entity,
+        report_title: spec.report_title,
+        expected_summary: context.summary.as_str(),
+    };
+    validate_disposition_information(state, operation, disposition, artifacts, &invalid)?;
+    validate_disposition_report(state, operation, disposition, artifacts, &invalid)
+}
+
+fn validate_disposition_accounts(
+    state: &AppState,
+    operation: &OperationRecord,
+    disposition: CommonDisposition,
+    invalid: &StateValidationError,
+) -> Result<(), StateValidationError> {
     let cash = state
         .finance
-        .get_account(disposition.cash_account())
-        .ok_or_else(invalid)?;
+        .get_account(disposition.cash_account)
+        .ok_or_else(|| invalid.clone())?;
     let settlement = state
         .finance
-        .get_account(disposition.settlement_account())
-        .ok_or_else(invalid)?;
+        .get_account(disposition.settlement_account)
+        .ok_or_else(|| invalid.clone())?;
     let expected_owner = FinancialOwner::Organization(operation.responsible_organization());
-    if disposition.cash_account() == disposition.settlement_account()
+    if disposition.cash_account == disposition.settlement_account
         || cash.owner() != expected_owner
         || settlement.owner() != expected_owner
         || !matches!(
@@ -237,87 +252,107 @@ pub(super) fn validate_operation_cash_disposition(
         || settlement.kind() != AccountKind::Settlement
         || settlement_account_was_enterprise_reserved_at(
             state,
-            disposition.settlement_account(),
-            disposition.disposed_at(),
+            disposition.settlement_account,
+            disposition.disposed_at,
         )
     {
-        return Err(invalid());
+        return Err(invalid.clone());
     }
+    Ok(())
+}
 
+fn validate_disposition_transaction(
+    state: &AppState,
+    disposition: CommonDisposition,
+    expected_memo: &str,
+    invalid: &StateValidationError,
+) -> Result<(), StateValidationError> {
     let transaction = state
         .finance
-        .get_transaction(disposition.transaction())
-        .ok_or_else(invalid)?;
+        .get_transaction(disposition.transaction)
+        .ok_or_else(|| invalid.clone())?;
     let negative_value = disposition
-        .realized_value()
+        .realized_value
         .cents()
         .checked_neg()
         .map(Money::from_cents)
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid.clone())?;
     let has_cash_posting = transaction.postings().iter().any(|posting| {
-        posting.account == disposition.cash_account()
-            && posting.amount == disposition.realized_value()
+        posting.account == disposition.cash_account && posting.amount == disposition.realized_value
     });
     let has_settlement_posting = transaction.postings().iter().any(|posting| {
-        posting.account == disposition.settlement_account() && posting.amount == negative_value
+        posting.account == disposition.settlement_account && posting.amount == negative_value
     });
-    text_scratch.clear();
-    write_deposit_memo(text_scratch, operation.id()).expect("String buffer writes are infallible");
-    if transaction.occurred_at() != disposition.disposed_at()
-        || transaction.memo() != text_scratch.as_str()
+    if transaction.occurred_at() != disposition.disposed_at
+        || transaction.memo() != expected_memo
         || transaction.postings().len() != 2
         || !has_cash_posting
         || !has_settlement_posting
         || transaction.budget_usage().is_some()
     {
-        return Err(invalid());
+        return Err(invalid.clone());
     }
+    Ok(())
+}
 
-    text_scratch.clear();
-    write_deposit_summary(text_scratch, operation.title(), proceeds.amount())
-        .expect("String buffer writes are infallible");
-    let summary = text_scratch.as_str();
+fn validate_disposition_information(
+    state: &AppState,
+    operation: &OperationRecord,
+    disposition: CommonDisposition,
+    artifacts: DispositionArtifactSpec<'_>,
+    invalid: &StateValidationError,
+) -> Result<(), StateValidationError> {
     let information = state
         .intelligence
-        .get_information(disposition.information())
-        .ok_or_else(invalid)?;
+        .get_information(disposition.information)
+        .ok_or_else(|| invalid.clone())?;
     if information.holder() != KnowledgeHolder::Organization(operation.responsible_organization())
         || information.source_kind() != InformationSourceKind::Accountant
         || information.topic() != InformationTopic::FinancialPerformance
-        || information.source_entity() != Some(proceeds.target())
+        || information.source_entity() != Some(artifacts.source_entity)
         || information.subject() != EntityRef::Operation(operation.id())
-        || information.observed_at() != disposition.disposed_at()
-        || information.recorded_at() != disposition.disposed_at()
+        || information.observed_at() != disposition.disposed_at
+        || information.recorded_at() != disposition.disposed_at
         || information.reliability() != Reliability::DirectAccess
         || information.specificity() != Specificity::Precise
-        || information.summary() != summary
+        || information.summary() != artifacts.expected_summary
     {
-        return Err(invalid());
+        return Err(invalid.clone());
     }
+    Ok(())
+}
+
+fn validate_disposition_report(
+    state: &AppState,
+    operation: &OperationRecord,
+    disposition: CommonDisposition,
+    artifacts: DispositionArtifactSpec<'_>,
+    invalid: &StateValidationError,
+) -> Result<(), StateValidationError> {
     let report = state
         .reports
-        .get_report(disposition.report())
-        .ok_or_else(invalid)?;
+        .get_report(disposition.report)
+        .ok_or_else(|| invalid.clone())?;
     if report.recipient() != operation.responsible_organization()
         || report.kind() != ReportKind::Financial
-        || report.title() != "Cash deposit"
-        || report.generated_at() != disposition.disposed_at()
+        || report.title() != artifacts.report_title
+        || report.generated_at() != disposition.disposed_at
         || report.entries().len() != 1
     {
-        return Err(invalid());
+        return Err(invalid.clone());
     }
     let entry = &report.entries()[0];
     if entry.attention != AttentionClass::Notable
-        || entry.summary != summary
+        || entry.summary != artifacts.expected_summary
         || !entry.sources.is_empty()
         || entry.entities.len() != 2
         || !entry
             .entities
             .contains(&EntityRef::Operation(operation.id()))
-        || !entry.entities.contains(&proceeds.target())
+        || !entry.entities.contains(&artifacts.source_entity)
         || entry.decision.is_some()
     {
-        return Err(invalid());
+        return Err(invalid.clone());
     }
     Ok(())
 }

@@ -343,8 +343,7 @@ fn validate_dismissed_opportunity(
             .is_some_and(|valid_until| at >= valid_until)
         || dismissal_report.recipient() != opportunity.organization()
         || dismissal_report.kind() != ReportKind::Opportunity
-        || dismissal_report.generated_at() < at
-        || dismissal_report.generated_at() > state.now()
+        || dismissal_report.generated_at() != at
         || !opportunity_report_entry_matches(opportunity, dismissal_report, &expected_summary)
         || state
             .opportunities

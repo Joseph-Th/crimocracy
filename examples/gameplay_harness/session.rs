@@ -631,14 +631,13 @@ fn resolve_initial_burglary(
             abort.phase(),
             abort.cause(),
         );
-        if let Some(artifacts) = abort.artifacts() {
-            let report = scenario
-                .state
-                .reports()
-                .get_report(artifacts.report())
-                .expect("started abort must persist its after-action report");
-            print_report("ABORT REPORT", report, scenario);
-        }
+        let artifacts = abort.artifacts();
+        let report = scenario
+            .state
+            .reports()
+            .get_report(artifacts.report())
+            .expect("started abort must persist its after-action report");
+        print_report("ABORT REPORT", report, scenario);
         if strategy == Strategy::Rush {
             println!(
                 "[DECIDE]  The standing abort protected the crew. Walk away from {} tonight; the police rhythm there is not beaten by speed alone.",
@@ -660,7 +659,7 @@ fn resolve_initial_burglary(
     {
         let debrief_information = burglary_record
             .abort_record()
-            .and_then(|abort| abort.artifacts())
+            .map(|abort| abort.artifacts())
             .and_then(|artifacts| artifacts.police_activity_information());
         if let Some(information) = debrief_information {
             metrics.player_police_activity_information =

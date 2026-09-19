@@ -8,7 +8,8 @@ use crate::core::simulation::run_tick;
 use crate::economy::BusinessEconomyDraft;
 use crate::economy::business_reporting::resolve_organization_business_financial_summary;
 use crate::finance::finance_system::{
-    LaunderingDraft, insert_account, validate_launder_funds, validate_record_transaction,
+    FinanceError, LaunderingDraft, insert_account, validate_launder_funds,
+    validate_record_business_transaction, validate_record_transaction,
 };
 use crate::finance::{
     FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
@@ -231,6 +232,10 @@ struct BusinessEconomyRecordWire {
     last_cycle_at: Option<SimTime>,
     disrupted_through: Option<SimTime>,
     loss_streak_anchor: Option<SimTime>,
+    operating_capital_floor: Money,
+    capital_floor_account_version: u32,
+    capital_floor_business_version: u32,
+    capital_floor_set_at: SimTime,
     laundered_this_cycle: Money,
     laundering_transactions_this_cycle: BTreeSet<crate::core::id::LedgerTransactionId>,
     version: u32,
@@ -318,6 +323,10 @@ fn business_economy_wire(
         last_cycle_at: record.last_cycle_at(),
         disrupted_through: record.disrupted_through(),
         loss_streak_anchor: record.loss_streak_anchor(),
+        operating_capital_floor: record.operating_capital_floor(),
+        capital_floor_account_version: record.capital_floor_account_version(),
+        capital_floor_business_version: record.capital_floor_business_version(),
+        capital_floor_set_at: record.capital_floor_set_at(),
         laundered_this_cycle: record.laundered_this_cycle(),
         laundering_transactions_this_cycle: record.laundering_transactions_this_cycle().clone(),
         version: record.version(),
@@ -510,6 +519,77 @@ fn resume_retains_laundering_window_until_settlement() {
 }
 
 #[test]
+fn suspend_and_resume_preserve_operating_capital_floor_snapshot() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    let opening_capital = Money::from_cents(25_000);
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Opening capital before lifecycle toggle".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.settlement,
+                    amount: opening_capital
+                        .checked_neg()
+                        .expect("opening capital must negate"),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount: opening_capital,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("opening capital should validate")
+    .commit(&mut fixture.state)
+    .expect("opening capital should commit");
+    establish_business_economy(&registry, &mut fixture);
+
+    let before = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("economy should persist");
+    let floor_before = (
+        before.operating_capital_floor(),
+        before.capital_floor_account_version(),
+        before.capital_floor_business_version(),
+        before.capital_floor_set_at(),
+    );
+
+    validate_suspend_business_economy(&fixture.state, fixture.business)
+        .expect("active economy should suspend")
+        .commit(&mut fixture.state)
+        .expect("suspension should commit");
+    validate_resume_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("suspended economy should resume")
+        .commit(&mut fixture.state)
+        .expect("resumption should commit");
+
+    let resumed = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("resumed economy should persist");
+    assert_eq!(
+        (
+            resumed.operating_capital_floor(),
+            resumed.capital_floor_account_version(),
+            resumed.capital_floor_business_version(),
+            resumed.capital_floor_set_at(),
+        ),
+        floor_before,
+        "same-owner lifecycle toggles must not convert retained working capital into distributable surplus"
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("resumed retained-capital economy should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn acquisition_restarts_laundering_window_without_prior_ownership_provenance() {
     use crate::economy::business_acquisition::{
         BusinessAcquisitionDraft, validate_acquire_business,
@@ -610,6 +690,166 @@ fn acquisition_restarts_laundering_window_without_prior_ownership_provenance() {
             crate::core::invariants::StateValidationError::InvalidBusinessEconomy { business }
         ) if business == fixture.business
     ));
+}
+
+#[test]
+fn acquisition_rebases_operating_capital_floor_to_inherited_cash() {
+    use crate::economy::business_acquisition::{
+        BusinessAcquisitionDraft, validate_acquire_business,
+    };
+
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    let opening_capital = Money::from_cents(20_000);
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Seller opening capital".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.settlement,
+                    amount: opening_capital
+                        .checked_neg()
+                        .expect("opening capital must negate"),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount: opening_capital,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("seller opening capital should validate")
+    .commit(&mut fixture.state)
+    .expect("seller opening capital should commit");
+    establish_business_economy(&registry, &mut fixture);
+
+    let later_cash = Money::from_cents(5_000);
+    validate_record_business_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Seller retained earnings".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.settlement,
+                    amount: later_cash.checked_neg().expect("later cash must negate"),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount: later_cash,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("seller retained earnings should validate")
+    .commit(&mut fixture.state)
+    .expect("seller retained earnings should commit");
+    let inherited_cash = opening_capital
+        .checked_add(later_cash)
+        .expect("fixture inherited cash should fit");
+
+    let price = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .acquisition_cost();
+    let funding = fund_laundering(&mut fixture, price);
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Fixture acquisition capitalization".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding.street_account,
+                    amount: price.checked_neg().expect("purchase price must negate"),
+                },
+                LedgerPosting {
+                    account: funding.accounted_account,
+                    amount: price,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("purchase funding should validate")
+    .commit(&mut fixture.state)
+    .expect("purchase funding should commit");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    validate_transfer_business_ownership(
+        &fixture.state,
+        fixture.business,
+        BusinessOwner::Independent,
+    )
+    .expect("seller should release the business")
+    .commit(&mut fixture.state)
+    .expect("independent ownership should commit");
+
+    validate_acquire_business(
+        &registry,
+        &fixture.state,
+        BusinessAcquisitionDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            funding_accounts: BTreeSet::from([funding.accounted_account]),
+        },
+    )
+    .expect("independent business should be purchasable")
+    .commit(&mut fixture.state)
+    .expect("acquisition should restart existing books");
+
+    let record = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("acquired economy should persist");
+    let operating = fixture
+        .state
+        .finance()
+        .get_account(fixture.operating)
+        .expect("operating account should persist");
+    let business = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .expect("acquired business should persist");
+    assert_eq!(record.operating_capital_floor(), inherited_cash);
+    assert_eq!(record.capital_floor_account_version(), operating.version());
+    assert_eq!(record.capital_floor_business_version(), business.version());
+    assert_eq!(record.capital_floor_set_at(), fixture.state.now());
+
+    let destination = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("owner destination should validate");
+    let error = validate_sweep_business_profits(
+        &fixture.state,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination,
+            amount: Money::from_cents(1),
+        },
+    )
+    .expect_err("buyer must not immediately sweep inherited operating cash");
+    assert_eq!(
+        error,
+        BusinessProfitSweepError::InsufficientEarnedSurplus {
+            business: fixture.business,
+            available_cents: 0,
+            requested_cents: 1,
+        }
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("acquired retained-capital economy should remain registry-valid");
+    validate_invariants(&fixture.state);
 }
 
 #[test]
@@ -2256,6 +2496,177 @@ fn chronic_losing_business_surfaces_losses_then_suspends_at_the_authored_thresho
 }
 
 #[test]
+fn owner_sweep_preserves_opening_operating_capital_until_later_profit_is_earned() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    let opening_capital = Money::from_cents(25_000);
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Opening operating capital".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.settlement,
+                    amount: opening_capital
+                        .checked_neg()
+                        .expect("opening capital must negate"),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount: opening_capital,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("opening capital should validate")
+    .commit(&mut fixture.state)
+    .expect("opening capital should commit");
+    establish_business_economy(&registry, &mut fixture);
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("economy should persist")
+            .operating_capital_floor(),
+        opening_capital
+    );
+    let destination = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("accounted destination should validate");
+
+    let error = validate_sweep_business_profits(
+        &fixture.state,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination,
+            amount: Money::from_cents(1),
+        },
+    )
+    .expect_err("opening operating capital is not earned owner profit");
+    assert_eq!(
+        error,
+        BusinessProfitSweepError::InsufficientEarnedSurplus {
+            business: fixture.business,
+            available_cents: 0,
+            requested_cents: 1,
+        }
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+        .expect("ordinary business cycle should decide");
+    let earned = plan.economics.net_cash;
+    assert!(
+        earned > Money::ZERO,
+        "fixture cycle must earn positive profit"
+    );
+    validate_business_cycle_plan(&fixture.state, plan)
+        .expect("ordinary cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("ordinary cycle should commit");
+    validate_sweep_business_profits(
+        &fixture.state,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination,
+            amount: earned,
+        },
+    )
+    .expect("later earnings above retained capital should be distributable")
+    .commit(&mut fixture.state)
+    .expect("earned-profit sweep should commit");
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.operating)
+            .expect("operating account should persist")
+            .balance(),
+        opening_capital,
+        "owner draw must leave the opening operating float in the business"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(destination)
+            .expect("accounted destination should persist")
+            .balance(),
+        earned
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("retained-capital economy should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn restore_rejects_business_capital_floor_not_derived_from_pinned_ledger_version() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    let opening_capital = Money::from_cents(25_000);
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Opening operating capital for restore audit".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.settlement,
+                    amount: opening_capital
+                        .checked_neg()
+                        .expect("opening capital must negate"),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount: opening_capital,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("opening capital should validate")
+    .commit(&mut fixture.state)
+    .expect("opening capital should commit");
+    establish_business_economy(&registry, &mut fixture);
+    let record = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("economy should persist");
+    let mut corrupted = business_economy_wire(record);
+    corrupted.operating_capital_floor = Money::from_cents(opening_capital.cents() - 1);
+
+    let error = restore_save(
+        &registry,
+        replace_serialized_economy(
+            build_save(&registry, &fixture.state)
+                .expect("valid retained-capital economy should save before corruption"),
+            record,
+            &corrupted,
+        ),
+    )
+    .expect_err("capital floor must be derivable from its pinned account version");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBusinessEconomy { business }
+        ) if business == fixture.business
+    ));
+}
+
+#[test]
 fn owner_sweep_moves_till_cash_into_accounted_funds() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture();
@@ -2270,7 +2681,7 @@ fn owner_sweep_moves_till_cash_into_accounted_funds() {
     .expect("accounted destination should validate");
     // Fund the till the way settlement does: credit operating against the settlement sink.
     let seed = Money::from_cents(25_000);
-    validate_record_transaction(
+    validate_record_business_transaction(
         &fixture.state,
         LedgerTransactionDraft {
             occurred_at: fixture.state.now(),
@@ -2325,6 +2736,117 @@ fn owner_sweep_moves_till_cash_into_accounted_funds() {
     validate_state_against_registry(&registry, &fixture.state)
         .expect("swept economy should validate against the registry");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn generic_ledger_cannot_post_through_an_established_business_till() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    let amount = Money::from_cents(5_000);
+    let funding = fund_laundering(&mut fixture, amount);
+    let before =
+        bincode::serialize(&fixture.state).expect("protected-ledger fixture should serialize");
+
+    let credit_error = match validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Forbidden direct till capitalization".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding.street_account,
+                    amount: amount.checked_neg().expect("test amount must negate"),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount,
+                },
+            ],
+            authorization: None,
+        },
+    ) {
+        Ok(_) => panic!("generic ledger must not bypass laundering through a business till"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        credit_error,
+        FinanceError::ProtectedBusinessOperatingAccount(fixture.operating)
+    );
+
+    let debit_error = match validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Forbidden direct till withdrawal".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount: amount.checked_neg().expect("test amount must negate"),
+                },
+                LedgerPosting {
+                    account: funding.accounted_account,
+                    amount,
+                },
+            ],
+            authorization: None,
+        },
+    ) {
+        Ok(_) => panic!("generic ledger must not bypass the canonical owner profit sweep"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        debit_error,
+        FinanceError::ProtectedBusinessOperatingAccount(fixture.operating)
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected ledger state should serialize"),
+        before,
+        "protected generic postings must be state-neutral"
+    );
+}
+
+#[test]
+fn generic_ledger_token_becomes_stale_when_its_account_becomes_a_business_till() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    let amount = Money::from_cents(5_000);
+    let funding = fund_laundering(&mut fixture, amount);
+    let held = validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Pre-establishment till capitalization".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding.street_account,
+                    amount: amount.checked_neg().expect("test amount must negate"),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("unattached operating account may receive opening capital");
+
+    establish_business_economy(&registry, &mut fixture);
+    let before = bincode::serialize(&fixture.state)
+        .expect("newly established protected-ledger fixture should serialize");
+    let error = held
+        .commit(&mut fixture.state)
+        .expect_err("generic token must stale when its target becomes a protected till");
+    assert_eq!(
+        error,
+        FinanceError::ProtectedBusinessOperatingAccount(fixture.operating)
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected stale token state should serialize"),
+        before,
+        "stale generic till token must reject before balances or ids move"
+    );
 }
 
 #[test]
@@ -2418,7 +2940,7 @@ fn profit_sweep_rejects_stale_economy_after_settlement() {
     )
     .expect("accounted destination should validate");
     let seed = Money::from_cents(50_000);
-    validate_record_transaction(
+    validate_record_business_transaction(
         &fixture.state,
         LedgerTransactionDraft {
             occurred_at: fixture.state.now(),

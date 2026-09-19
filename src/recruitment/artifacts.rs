@@ -77,6 +77,25 @@ pub(crate) fn recruitment_join_history_summary(
     format!("{candidate} joined {organization} after recruitment by {recruiter}.")
 }
 
+/// Exact campaign-history entity policy for accepted recruitment. Defections deliberately expose
+/// only the departing character; a first-time join can name the recruiter and destination.
+pub(crate) fn recruitment_history_entities(
+    candidate: CharacterId,
+    recruiter: CharacterId,
+    target_organization: OrganizationId,
+    had_previous_organization: bool,
+) -> BTreeSet<EntityRef> {
+    if had_previous_organization {
+        BTreeSet::from([EntityRef::Character(candidate)])
+    } else {
+        BTreeSet::from([
+            EntityRef::Character(candidate),
+            EntityRef::Character(recruiter),
+            EntityRef::Organization(target_organization),
+        ])
+    }
+}
+
 pub(crate) fn recruitment_outcome_summary(
     candidate: &str,
     recruiter: &str,
@@ -110,7 +129,12 @@ pub(super) fn validate_recruitment_history_event(
         HistoryEventDraft {
             kind: HistoryEventKind::Recruitment,
             summary: recruitment_defection_history_summary(candidate.name()),
-            entities: BTreeSet::from([EntityRef::Character(plan.draft.candidate)]),
+            entities: recruitment_history_entities(
+                plan.draft.candidate,
+                plan.draft.recruiter,
+                plan.draft.target_organization,
+                true,
+            ),
         }
     } else {
         let recruiter = state
@@ -128,11 +152,12 @@ pub(super) fn validate_recruitment_history_event(
                 organization.name(),
                 recruiter.name(),
             ),
-            entities: BTreeSet::from([
-                EntityRef::Character(plan.draft.candidate),
-                EntityRef::Character(plan.draft.recruiter),
-                EntityRef::Organization(plan.draft.target_organization),
-            ]),
+            entities: recruitment_history_entities(
+                plan.draft.candidate,
+                plan.draft.recruiter,
+                plan.draft.target_organization,
+                false,
+            ),
         }
     };
     Ok(Some(validate_record_event(state, event)?))

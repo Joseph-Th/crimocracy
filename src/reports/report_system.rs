@@ -6,7 +6,8 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
-use crate::reports::{ReportDraft, ReportKind, ReportRecord};
+use crate::intelligence::intelligence_system::PlannedInformationSource;
+use crate::reports::{ReportDraft, ReportEntry, ReportKind, ReportRecord};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -44,9 +45,22 @@ pub enum ReportError {
 
 pub struct ValidatedReport {
     draft: ReportDraft,
+    planned_information: Option<PlannedInformationSource>,
 }
 impl ValidatedReport {
     pub fn commit(self, state: &mut AppState) -> Result<ReportId, ReportError> {
+        if let Some(planned) = self.planned_information {
+            let information = state
+                .intelligence
+                .get_information(planned.id())
+                .ok_or(ReportError::MissingInformation(planned.id()))?;
+            if information.holder() != planned.holder() {
+                return Err(ReportError::InformationUnavailable {
+                    information: planned.id(),
+                    recipient: self.draft.recipient,
+                });
+            }
+        }
         let id = state.ids.next_report()?;
         state.reports.insert(ReportRecord {
             id,
@@ -69,12 +83,35 @@ pub fn validate_record_report(
     if draft.kind == ReportKind::ExecutiveBrief {
         return Err(ReportError::ReservedKind(draft.kind));
     }
-    validate_report_draft(state, draft)
+    validate_report_draft_with_planned_information(state, draft, None)
+}
+
+/// Validates a report whose source information is part of the same larger atomic operation and
+/// therefore has a predicted ID but is not persisted yet. The caller owns allocator freshness;
+/// this report owner only treats the exact planned ID/holder pair as available while validating
+/// the otherwise-normal report contract.
+pub(crate) fn validate_record_report_with_planned_information(
+    state: &AppState,
+    draft: ReportDraft,
+    planned: PlannedInformationSource,
+) -> Result<ValidatedReport, ReportError> {
+    if draft.kind == ReportKind::ExecutiveBrief {
+        return Err(ReportError::ReservedKind(draft.kind));
+    }
+    validate_report_draft_with_planned_information(state, draft, Some(planned))
 }
 
 pub(crate) fn validate_report_draft(
     state: &AppState,
     draft: ReportDraft,
+) -> Result<ValidatedReport, ReportError> {
+    validate_report_draft_with_planned_information(state, draft, None)
+}
+
+fn validate_report_draft_with_planned_information(
+    state: &AppState,
+    draft: ReportDraft,
+    planned: Option<PlannedInformationSource>,
 ) -> Result<ValidatedReport, ReportError> {
     if draft.title.trim().is_empty() {
         return Err(ReportError::EmptyTitle);
@@ -83,45 +120,80 @@ pub(crate) fn validate_report_draft(
         return Err(ReportError::MissingOrganization(draft.recipient));
     }
     for (index, entry) in draft.entries.iter().enumerate() {
-        if entry.summary.trim().is_empty() {
-            return Err(ReportError::EmptyEntry(index));
-        }
-        for source in &entry.sources {
-            let information = state
-                .intelligence
-                .get_information(*source)
-                .ok_or(ReportError::MissingInformation(*source))?;
-            let is_available = match information.holder() {
-                KnowledgeHolder::Organization(organization) => organization == draft.recipient,
-                KnowledgeHolder::Character(_) => false,
-            };
-            if !is_available {
-                return Err(ReportError::InformationUnavailable {
-                    information: *source,
-                    recipient: draft.recipient,
-                });
-            }
-        }
-        for entity in &entry.entities {
-            if !is_entity_present(state, *entity) {
-                return Err(ReportError::MissingEntity(*entity));
-            }
-        }
-        if let Some(decision) = entry.decision {
-            let record = state
-                .decisions
-                .get_decision(decision)
-                .ok_or(ReportError::MissingDecision(decision))?;
-            if record.recipient() != draft.recipient {
-                return Err(ReportError::DecisionRecipientMismatch {
-                    decision,
-                    decision_recipient: record.recipient(),
-                    report_recipient: draft.recipient,
-                });
-            }
+        validate_report_entry(state, draft.recipient, index, entry, planned)?;
+    }
+    Ok(ValidatedReport {
+        draft,
+        planned_information: planned,
+    })
+}
+
+fn validate_report_entry(
+    state: &AppState,
+    recipient: OrganizationId,
+    index: usize,
+    entry: &ReportEntry,
+    planned: Option<PlannedInformationSource>,
+) -> Result<(), ReportError> {
+    if entry.summary.trim().is_empty() {
+        return Err(ReportError::EmptyEntry(index));
+    }
+    for source in &entry.sources {
+        validate_report_source(state, recipient, *source, planned)?;
+    }
+    for entity in &entry.entities {
+        if !is_entity_present(state, *entity) {
+            return Err(ReportError::MissingEntity(*entity));
         }
     }
-    Ok(ValidatedReport { draft })
+    if let Some(decision) = entry.decision {
+        validate_report_decision(state, recipient, decision)?;
+    }
+    Ok(())
+}
+
+fn validate_report_source(
+    state: &AppState,
+    recipient: OrganizationId,
+    source: InformationId,
+    planned: Option<PlannedInformationSource>,
+) -> Result<(), ReportError> {
+    let holder = state
+        .intelligence
+        .get_information(source)
+        .map(|information| information.holder())
+        .or_else(|| {
+            planned
+                .filter(|planned| planned.id() == source)
+                .map(PlannedInformationSource::holder)
+        })
+        .ok_or(ReportError::MissingInformation(source))?;
+    if holder != KnowledgeHolder::Organization(recipient) {
+        return Err(ReportError::InformationUnavailable {
+            information: source,
+            recipient,
+        });
+    }
+    Ok(())
+}
+
+fn validate_report_decision(
+    state: &AppState,
+    recipient: OrganizationId,
+    decision: DecisionRequestId,
+) -> Result<(), ReportError> {
+    let record = state
+        .decisions
+        .get_decision(decision)
+        .ok_or(ReportError::MissingDecision(decision))?;
+    if record.recipient() != recipient {
+        return Err(ReportError::DecisionRecipientMismatch {
+            decision,
+            decision_recipient: record.recipient(),
+            report_recipient: recipient,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -244,6 +316,180 @@ mod tests {
                 information,
                 recipient,
             }
+        );
+    }
+
+    #[test]
+    fn report_can_validate_against_one_exact_planned_organization_information_source() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xB12E_F195);
+        let recipient = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Planned Source Recipient".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("report recipient fixture should validate");
+        let information = validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(recipient),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: crate::intelligence::InformationTopic::General,
+                source_entity: None,
+                subject: EntityRef::Organization(recipient),
+                observed_at: state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: "Future information source for the same atomic report.".to_owned(),
+            },
+        )
+        .expect("planned information should validate");
+        let planned = information.planned_source(&state);
+
+        validate_record_report_with_planned_information(
+            &state,
+            ReportDraft {
+                recipient,
+                kind: ReportKind::Financial,
+                title: "Planned-source report".to_owned(),
+                entries: vec![ReportEntry {
+                    attention: AttentionClass::Notable,
+                    summary: "The source will be committed by the same atomic operation."
+                        .to_owned(),
+                    sources: vec![planned.id()],
+                    entities: BTreeSet::from([EntityRef::Organization(recipient)]),
+                    decision: None,
+                }],
+            },
+            planned,
+        )
+        .expect("the exact planned organization-held source should validate");
+        assert!(state.intelligence().get_information(planned.id()).is_none());
+    }
+
+    #[test]
+    fn planned_information_source_does_not_authorize_a_different_missing_source() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xB12E_F196);
+        let recipient = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Exact Planned Source Recipient".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("report recipient fixture should validate");
+        let information = validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(recipient),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: crate::intelligence::InformationTopic::General,
+                source_entity: None,
+                subject: EntityRef::Organization(recipient),
+                observed_at: state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: "Future exact information source.".to_owned(),
+            },
+        )
+        .expect("planned information should validate");
+        let planned = information.planned_source(&state);
+        let missing = InformationId::from_raw(
+            planned
+                .id()
+                .raw()
+                .checked_add(1)
+                .expect("fixture planned information id must leave one successor"),
+        );
+
+        let error = match validate_record_report_with_planned_information(
+            &state,
+            ReportDraft {
+                recipient,
+                kind: ReportKind::Financial,
+                title: "Wrong planned source".to_owned(),
+                entries: vec![ReportEntry {
+                    attention: AttentionClass::Notable,
+                    summary: "A different absent source must still be rejected.".to_owned(),
+                    sources: vec![missing],
+                    entities: BTreeSet::from([EntityRef::Organization(recipient)]),
+                    decision: None,
+                }],
+            },
+            planned,
+        ) {
+            Ok(_) => panic!("planned source authorization must be exact"),
+            Err(error) => error,
+        };
+        assert_eq!(error, ReportError::MissingInformation(missing));
+    }
+
+    #[test]
+    fn planned_source_report_cannot_commit_before_its_information() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xB12E_F197);
+        let recipient = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Planned Commit Recipient".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("report recipient fixture should validate");
+        let information = validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(recipient),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: crate::intelligence::InformationTopic::General,
+                source_entity: None,
+                subject: EntityRef::Organization(recipient),
+                observed_at: state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: "Future source must exist before its report commits.".to_owned(),
+            },
+        )
+        .expect("planned information should validate");
+        let planned = information.planned_source(&state);
+        let report = validate_record_report_with_planned_information(
+            &state,
+            ReportDraft {
+                recipient,
+                kind: ReportKind::Financial,
+                title: "Premature planned-source report".to_owned(),
+                entries: vec![ReportEntry {
+                    attention: AttentionClass::Notable,
+                    summary: "This report must wait for its source.".to_owned(),
+                    sources: vec![planned.id()],
+                    entities: BTreeSet::from([EntityRef::Organization(recipient)]),
+                    decision: None,
+                }],
+            },
+            planned,
+        )
+        .expect("planned-source report should validate before the composite commit");
+        let before_report_id = state.ids.next_raw(crate::core::id::IdKind::Report);
+
+        let error = report
+            .commit(&mut state)
+            .expect_err("planned-source report must not commit before its source exists");
+        assert_eq!(error, ReportError::MissingInformation(planned.id()));
+        assert_eq!(
+            state.ids.next_raw(crate::core::id::IdKind::Report),
+            before_report_id
+        );
+        assert!(
+            state
+                .reports()
+                .latest_for_kind(recipient, ReportKind::Financial)
+                .is_none()
         );
     }
 }

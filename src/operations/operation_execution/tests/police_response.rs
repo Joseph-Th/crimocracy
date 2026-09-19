@@ -553,6 +553,72 @@ fn police_arrival_before_entry_executes_standing_abort_contingency() {
 }
 
 #[test]
+fn restore_rejects_police_abort_information_detached_from_its_operation() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::AbortOnPoliceArrivalBeforeEntry],
+        );
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let response = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.police_response())
+        .expect("observable operation should dispatch a police response");
+    let response_due = state
+        .legal()
+        .get_police_response(response)
+        .expect("police response should persist")
+        .arrival_due_at();
+    while state.now() < response_due {
+        run_tick(&registry, &mut state);
+    }
+    let police_information = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.abort_record())
+        .map(|abort| abort.artifacts())
+        .and_then(|artifacts| artifacts.police_activity_information())
+        .expect("police-arrival abort should persist district police information");
+    let summary = state
+        .intelligence()
+        .get_information(police_information)
+        .expect("abort police information should persist")
+        .summary()
+        .to_owned();
+    assert!(summary.starts_with("The crew of "));
+
+    let mut bytes = bincode::serialize(
+        &build_save(&registry, &state).expect("canonical police-abort state should save"),
+    )
+    .expect("save envelope should serialize");
+    let needle = summary.as_bytes();
+    let matches: Vec<_> = bytes
+        .windows(needle.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == needle).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "the operation-specific police debrief should occur once in persisted state"
+    );
+    let start = matches[0];
+    bytes[start] = b'X';
+    let corrupted: SaveEnvelope =
+        bincode::deserialize(&bytes).expect("same-length debrief corruption should deserialize");
+    let error = restore_save(&registry, corrupted)
+        .expect_err("restore must reject police information detached from its abort operation");
+    assert_eq!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidOperationAbort { operation }
+        )
+    );
+}
+
+#[test]
 fn post_entry_police_arrival_raises_provenance_backed_decision() {
     let (registry, mut state, police, neighborhood, operation) =
         make_exposed_business_operation_fixture_with_contingencies(

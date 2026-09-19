@@ -3458,7 +3458,10 @@ fn cold_case_decay_scopes_custody_to_each_case_and_defers_detained_files() {
                     .is_some_and(|record| record.subject() == EntityRef::Character(subject))
             })
             .collect();
-        assert!(evidence.len() >= 1, "arrest requires case evidence to cite");
+        assert!(
+            !evidence.is_empty(),
+            "arrest requires case evidence to cite"
+        );
         // A second independent exhibit supplies the corroboration the custody bar needs.
         let corroborating = validate_add_evidence(
             state,

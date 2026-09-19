@@ -12,6 +12,7 @@ use crate::enterprises::enterprise_execution::{
 use crate::enterprises::{EnterpriseDraft, EnterpriseKind};
 use crate::finance::finance_system::insert_account;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+use crate::operations::operation_execution::resolve_operation_police_alert_context;
 
 fn make_test_rival(fixture: &mut Fixture) -> (OrganizationId, MandateAuthority) {
     let rival = insert_organization(
@@ -200,6 +201,63 @@ fn assert_unknown_enterprise(fixture: &Fixture, enterprise: EnterpriseId) {
         OperationError::MissingEntity(EntityRef::Enterprise(enterprise)),
     );
     assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+}
+
+#[test]
+fn organization_surveillance_uses_active_enterprise_footprint_for_police_geography() {
+    let mut fixture = fixture(100, false);
+    let (rival, authority) = make_test_rival(&mut fixture);
+    let enterprise = make_test_enterprise(&mut fixture, rival, authority, "Racket Footprint Ward");
+    let EnterpriseLocation::Neighborhood(neighborhood) = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("enterprise should persist")
+        .location()
+    else {
+        panic!("fixture enterprise should be neighborhood-scoped");
+    };
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .businesses_owned_by_organization(rival)
+            .count(),
+        0,
+        "the test must prove geography comes from the racket rather than owned real estate"
+    );
+
+    let operation = authorize_surveillance(&mut fixture, EntityRef::Organization(rival));
+    let alert = resolve_operation_police_alert_context(
+        &fixture.registry,
+        &fixture.state,
+        operation,
+        fixture.state.now() + SimDuration::ONE_MINUTE,
+    );
+    assert_eq!(
+        alert.neighborhood(),
+        Some(neighborhood),
+        "an active neighborhood racket must keep organization-target surveillance geographically attributable"
+    );
+
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("active enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("enterprise suspension should commit");
+    let suspended_alert = resolve_operation_police_alert_context(
+        &fixture.registry,
+        &fixture.state,
+        operation,
+        fixture.state.now() + SimDuration::ONE_MINUTE,
+    );
+    assert_eq!(
+        suspended_alert.neighborhood(),
+        None,
+        "a suspended racket is historical context, not a current operating venue"
+    );
+    validate_state(&fixture.state)
+        .expect("enterprise-backed surveillance geography should stay valid");
+    validate_invariants(&fixture.state);
 }
 
 #[test]

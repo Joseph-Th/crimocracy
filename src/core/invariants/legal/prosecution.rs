@@ -23,7 +23,6 @@ struct SeenProsecutionArtifacts {
     referrals: BTreeSet<crate::core::id::ProsecutionReferralId>,
     information: BTreeSet<crate::core::id::InformationId>,
     reports: BTreeSet<crate::core::id::ReportId>,
-    text: String,
 }
 
 struct ProsecutionCaseRefs<'a> {
@@ -203,6 +202,7 @@ fn validate_resolved_case(
     {
         return Err(invalid());
     }
+    validate_resolved_case_chronology(state, case, refs, resolved_at)?;
     let information_id = case.resolution_information().ok_or_else(invalid)?;
     let report_id = case.resolution_report().ok_or_else(invalid)?;
     let information = state
@@ -211,25 +211,66 @@ fn validate_resolved_case(
         .ok_or_else(invalid)?;
     let report = state.reports.get_report(report_id).ok_or_else(invalid)?;
     let (expected_title, resolution) = resolved_case_rendering(case.status());
-    seen.text.clear();
+    let mut expected_summary = String::new();
     write_resolution_summary(
-        &mut seen.text,
+        &mut expected_summary,
         resolution,
         refs.office.name(),
         refs.defendant.name(),
         lead.name(),
     )
     .expect("String buffer writes are infallible");
-    let Some(entry) = report.entries().first() else {
-        return Err(invalid());
-    };
+    validate_resolution_information(
+        case,
+        resolution_prosecutor,
+        resolved_at,
+        information,
+        &expected_summary,
+        seen,
+    )?;
+    validate_resolution_report(
+        case,
+        resolution_prosecutor,
+        resolved_at,
+        report,
+        expected_title,
+        &expected_summary,
+        seen,
+    )?;
+    Ok(())
+}
+
+fn validate_resolved_case_chronology(
+    state: &AppState,
+    case: &ProsecutionCaseRecord,
+    refs: &ProsecutionCaseRefs<'_>,
+    resolved_at: crate::core::time::SimTime,
+) -> Result<(), StateValidationError> {
     if resolved_at < case.opened_at()
         || resolved_at > state.now()
         || state
             .legal
             .open_prosecution_case_for(case.arrest(), case.prosecutor_office())
             .is_some_and(|open| open.id() == case.id())
-        || !seen.information.insert(information_id)
+        || (refs.arrest.status() == ArrestStatus::Detained
+            && !state
+                .legal
+                .has_open_prosecution_case_for_arrest(case.arrest()))
+    {
+        return Err(invalid_case(case));
+    }
+    Ok(())
+}
+
+fn validate_resolution_information(
+    case: &ProsecutionCaseRecord,
+    resolution_prosecutor: crate::core::id::CharacterId,
+    resolved_at: crate::core::time::SimTime,
+    information: &crate::intelligence::InformationRecord,
+    expected_summary: &str,
+    seen: &mut SeenProsecutionArtifacts,
+) -> Result<(), StateValidationError> {
+    if !seen.information.insert(information.id())
         || information.holder() != KnowledgeHolder::Organization(case.prosecutor_office())
         || information.source_kind() != InformationSourceKind::AfterAction
         || information.topic() != InformationTopic::LegalActivity
@@ -240,24 +281,38 @@ fn validate_resolved_case(
         || information.reliability() != Reliability::DirectAccess
         || information.specificity() != Specificity::Precise
         || !information.derived_from().is_empty()
-        || information.summary() != seen.text
-        || !seen.reports.insert(report_id)
+        || information.summary() != expected_summary
+    {
+        return Err(invalid_case(case));
+    }
+    Ok(())
+}
+
+fn validate_resolution_report(
+    case: &ProsecutionCaseRecord,
+    resolution_prosecutor: crate::core::id::CharacterId,
+    resolved_at: crate::core::time::SimTime,
+    report: &crate::reports::ReportRecord,
+    expected_title: &str,
+    expected_summary: &str,
+    seen: &mut SeenProsecutionArtifacts,
+) -> Result<(), StateValidationError> {
+    let Some(entry) = report.entries().first() else {
+        return Err(invalid_case(case));
+    };
+    if !seen.reports.insert(report.id())
         || report.recipient() != case.prosecutor_office()
         || report.kind() != ReportKind::Legal
         || report.title() != expected_title
         || report.generated_at() != resolved_at
         || report.entries().len() != 1
         || entry.attention != AttentionClass::Notable
-        || entry.summary != information.summary()
+        || entry.summary != expected_summary
         || !entry.sources.is_empty()
         || entry.decision.is_some()
         || !case_entities_are_valid(case, &entry.entities, resolution_prosecutor)
-        || (refs.arrest.status() == ArrestStatus::Detained
-            && !state
-                .legal
-                .has_open_prosecution_case_for_arrest(case.arrest()))
     {
-        return Err(invalid());
+        return Err(invalid_case(case));
     }
     Ok(())
 }
@@ -311,19 +366,13 @@ fn validate_referral(
     let invalid = || StateValidationError::InvalidProsecutionReferral {
         referral: referral.id(),
     };
-    let information = state
-        .intelligence
-        .get_information(referral.information())
-        .ok_or_else(invalid)?;
-    let report = state
-        .reports
-        .get_report(referral.report())
-        .ok_or_else(invalid)?;
     let prosecutor = state
         .world
         .get_character(referral.prosecutor())
         .ok_or_else(invalid)?;
     let is_initial = referral.id() == case.initial_referral();
+    validate_referral_identity(state, case, referral, prosecutor, is_initial, seen)?;
+    validate_referral_evidence(state, case, referral, referred_evidence)?;
     let expected_title = if is_initial {
         "Prosecution case referral"
     } else {
@@ -336,9 +385,33 @@ fn validate_referral(
         referral.evidence().len(),
         is_initial,
     );
-    let Some(entry) = report.entries().first() else {
-        return Err(invalid());
-    };
+    let information = state
+        .intelligence
+        .get_information(referral.information())
+        .ok_or_else(invalid)?;
+    validate_referral_information(case, referral, information, &expected_summary, seen)?;
+    let report = state
+        .reports
+        .get_report(referral.report())
+        .ok_or_else(invalid)?;
+    validate_referral_report(
+        case,
+        referral,
+        report,
+        expected_title,
+        &expected_summary,
+        seen,
+    )
+}
+
+fn validate_referral_identity(
+    state: &AppState,
+    case: &ProsecutionCaseRecord,
+    referral: &ProsecutionReferralRecord,
+    prosecutor: &CharacterRecord,
+    is_initial: bool,
+    seen: &mut SeenProsecutionArtifacts,
+) -> Result<(), StateValidationError> {
     if !seen.referrals.insert(referral.id())
         || referral.prosecution_case() != case.id()
         || referral.source_investigation() != case.source_investigation()
@@ -359,19 +432,43 @@ fn validate_referral(
             .resolved_at()
             .is_some_and(|resolved_at| referral.referred_at() > resolved_at)
         || (is_initial && referral.referred_at() != case.opened_at())
-        || referral.evidence().iter().any(|evidence_id| {
-            state
-                .legal
-                .get_evidence(*evidence_id)
-                .is_none_or(|evidence| {
-                    evidence.investigation() != case.source_investigation()
-                        || evidence.custodian() != case.source_authority()
-                        || !evidence_concerns_defendant(evidence, case.defendant())
-                        || evidence.discovered_at() > referral.referred_at()
-                })
-                || !referred_evidence.insert(*evidence_id)
-        })
-        || !seen.information.insert(referral.information())
+    {
+        return Err(invalid_referral(referral));
+    }
+    Ok(())
+}
+
+fn validate_referral_evidence(
+    state: &AppState,
+    case: &ProsecutionCaseRecord,
+    referral: &ProsecutionReferralRecord,
+    referred_evidence: &mut BTreeSet<crate::core::id::EvidenceId>,
+) -> Result<(), StateValidationError> {
+    if referral.evidence().iter().any(|evidence_id| {
+        state
+            .legal
+            .get_evidence(*evidence_id)
+            .is_none_or(|evidence| {
+                evidence.investigation() != case.source_investigation()
+                    || evidence.custodian() != case.source_authority()
+                    || !evidence_concerns_defendant(evidence, case.defendant())
+                    || evidence.discovered_at() > referral.referred_at()
+            })
+            || !referred_evidence.insert(*evidence_id)
+    }) {
+        return Err(invalid_referral(referral));
+    }
+    Ok(())
+}
+
+fn validate_referral_information(
+    case: &ProsecutionCaseRecord,
+    referral: &ProsecutionReferralRecord,
+    information: &crate::intelligence::InformationRecord,
+    expected_summary: &str,
+    seen: &mut SeenProsecutionArtifacts,
+) -> Result<(), StateValidationError> {
+    if !seen.information.insert(referral.information())
         || information.holder() != KnowledgeHolder::Organization(case.prosecutor_office())
         || information.source_kind() != InformationSourceKind::AfterAction
         || information.topic() != InformationTopic::LegalActivity
@@ -383,21 +480,44 @@ fn validate_referral(
         || information.specificity() != Specificity::Precise
         || !information.derived_from().is_empty()
         || information.summary() != expected_summary
-        || !seen.reports.insert(referral.report())
+    {
+        return Err(invalid_referral(referral));
+    }
+    Ok(())
+}
+
+fn validate_referral_report(
+    case: &ProsecutionCaseRecord,
+    referral: &ProsecutionReferralRecord,
+    report: &crate::reports::ReportRecord,
+    expected_title: &str,
+    expected_summary: &str,
+    seen: &mut SeenProsecutionArtifacts,
+) -> Result<(), StateValidationError> {
+    let Some(entry) = report.entries().first() else {
+        return Err(invalid_referral(referral));
+    };
+    if !seen.reports.insert(referral.report())
         || report.recipient() != case.prosecutor_office()
         || report.kind() != ReportKind::Legal
         || report.title() != expected_title
         || report.generated_at() != referral.referred_at()
         || report.entries().len() != 1
         || entry.attention != AttentionClass::Notable
-        || entry.summary != information.summary()
+        || entry.summary != expected_summary
         || !entry.sources.is_empty()
         || entry.decision.is_some()
         || !case_entities_are_valid(case, &entry.entities, referral.prosecutor())
     {
-        return Err(invalid());
+        return Err(invalid_referral(referral));
     }
     Ok(())
+}
+
+fn invalid_referral(referral: &ProsecutionReferralRecord) -> StateValidationError {
+    StateValidationError::InvalidProsecutionReferral {
+        referral: referral.id(),
+    }
 }
 
 fn case_entities_are_valid(

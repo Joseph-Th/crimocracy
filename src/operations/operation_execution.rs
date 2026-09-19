@@ -55,8 +55,8 @@ use crate::operations::operation_objective::{
 };
 use crate::operations::surveillance_integration::{
     SurveillanceError, SurveillanceIntelligencePlan, decide_surveillance_intelligence,
-    surveillance_after_action_clause, validate_surveillance_information,
-    validate_surveillance_plan_snapshot,
+    persisted_surveillance_after_action_clause, surveillance_after_action_clause,
+    validate_surveillance_information, validate_surveillance_plan_snapshot,
 };
 use crate::operations::{
     OperationExposureFactors, OperationExposureLevel, OperationExposureRecord, OperationKind,
@@ -417,76 +417,26 @@ pub(crate) fn decide_operation_resolution(
             .into_iter()
             .filter_map(|(topic, score)| (score == 0).then_some(topic))
             .collect::<Vec<_>>();
-    let mut summary = format!("{}: ", record.title());
-    summary.push_str(&build_after_action_summary(
-        objective_outcome,
-        base_objective_outcome,
-        factors,
-        exposure.level(),
-        execution.high_police_presence_narrative_threshold(),
-        &missing_intelligence_topics,
-    ));
-    // A depleted haul must narrate even when recent scores left nothing to carry home:
-    // silencing the clause would make an Achieved outcome look like an ordinary score.
-    // Property and cash proceeds are mutually exclusive per kind, so at most one
-    // depleted-by-recent-take clause can ever apply; no guard flag is needed.
-    if let Some(proceeds) = property_proceeds_plan.proceeds.as_ref() {
-        summary.push(' ');
-        summary.push_str(&held_property_clause(proceeds.estimated_value().cents()));
-    }
-    if property_proceeds_plan.depleted_by_recent_take {
-        summary.push(' ');
-        summary.push_str(depleted_take_clause(record.kind()));
-    }
-    if let Some(proceeds) = cash_proceeds_plan.proceeds.as_ref() {
-        summary.push(' ');
-        summary.push_str(&held_cash_clause(record.kind(), proceeds.amount().cents()));
-    }
-    if cash_proceeds_plan.depleted_by_recent_take {
-        summary.push(' ');
-        summary.push_str(depleted_take_clause(record.kind()));
-    }
-    if let Some(clause) = surveillance_after_action_clause(surveillance.as_ref(), objective_outcome)
-    {
-        summary.push(' ');
-        summary.push_str(&clause);
-    }
-    if let Some(blocker) = objective_blocker {
-        summary.push(' ');
-        summary.push_str(blocker_clause(record.kind(), blocker));
-    }
-    if objective_outcome != OperationObjectiveOutcome::Failed
-        && matches!(
-            (record.kind(), record.objective()),
-            (
-                OperationKind::Sabotage | OperationKind::Arson,
-                OperationObjective::DisruptBusiness {
-                    target: EntityRef::Business(_)
-                }
-            )
-        )
-    {
-        summary.push(' ');
-        summary.push_str(SABOTAGE_DISRUPTION_CLAUSE);
-    }
-    let mut history_entities = BTreeSet::from([
-        EntityRef::Operation(operation),
-        EntityRef::Organization(record.responsible_organization()),
-        EntityRef::Character(record.leader()),
-    ]);
-    history_entities.extend(record.objective().referenced_entities());
-    history_entities.extend(record.roles().values().copied().map(EntityRef::Character));
-    if police_response_arrived {
-        let response_id = record
-            .police_response()
-            .expect("arrived operation police response must remain linked from the operation");
-        let response = state
-            .legal
-            .get_police_response(response_id)
-            .expect("operation police-response link must reference a persisted response");
-        history_entities.insert(EntityRef::Organization(response.authority()));
-        history_entities.insert(EntityRef::Neighborhood(response.neighborhood()));
-    }
+    let summary = compose_after_action_summary(
+        record,
+        execution,
+        AfterActionNarrativeContext {
+            objective_outcome,
+            tactical_outcome: base_objective_outcome,
+            factors,
+            exposure_level: exposure.level(),
+            missing_intelligence_topics: &missing_intelligence_topics,
+            property_proceeds_plan: &property_proceeds_plan,
+            cash_proceeds_plan: &cash_proceeds_plan,
+            surveillance_clause: surveillance_after_action_clause(
+                surveillance.as_ref(),
+                objective_outcome,
+            ),
+            objective_blocker,
+        },
+    );
+    let history_entities =
+        resolve_completion_history_entities(state, record, police_response_arrived);
 
     Ok(OperationResolutionPlan {
         snapshot: OperationResolutionSnapshot {
@@ -513,6 +463,177 @@ pub(crate) fn decide_operation_resolution(
             history_entities,
         },
     })
+}
+
+struct AfterActionNarrativeContext<'a> {
+    objective_outcome: OperationObjectiveOutcome,
+    tactical_outcome: OperationObjectiveOutcome,
+    factors: OperationResolutionFactors,
+    exposure_level: OperationExposureLevel,
+    missing_intelligence_topics: &'a [crate::intelligence::InformationTopic],
+    property_proceeds_plan: &'a PropertyProceedsPlan,
+    cash_proceeds_plan: &'a CashProceedsPlan,
+    surveillance_clause: Option<String>,
+    objective_blocker: Option<OperationObjectiveBlocker>,
+}
+
+fn compose_after_action_summary(
+    record: &OperationRecord,
+    execution: &crate::registry::OperationExecutionDefinition,
+    context: AfterActionNarrativeContext<'_>,
+) -> String {
+    let mut summary = format!("{}: ", record.title());
+    summary.push_str(&build_after_action_summary(
+        context.objective_outcome,
+        context.tactical_outcome,
+        context.factors,
+        context.exposure_level,
+        execution.high_police_presence_narrative_threshold(),
+        context.missing_intelligence_topics,
+    ));
+    // A depleted haul must narrate even when recent scores left nothing to carry home:
+    // silencing the clause would make an Achieved outcome look like an ordinary score.
+    if let Some(proceeds) = context.property_proceeds_plan.proceeds.as_ref() {
+        summary.push(' ');
+        summary.push_str(&held_property_clause(proceeds.estimated_value().cents()));
+    }
+    if context.property_proceeds_plan.depleted_by_recent_take {
+        summary.push(' ');
+        summary.push_str(depleted_take_clause(record.kind()));
+    }
+    if let Some(proceeds) = context.cash_proceeds_plan.proceeds.as_ref() {
+        summary.push(' ');
+        summary.push_str(&held_cash_clause(record.kind(), proceeds.amount().cents()));
+    }
+    if context.cash_proceeds_plan.depleted_by_recent_take {
+        summary.push(' ');
+        summary.push_str(depleted_take_clause(record.kind()));
+    }
+    if let Some(clause) = context.surveillance_clause {
+        summary.push(' ');
+        summary.push_str(&clause);
+    }
+    if let Some(blocker) = context.objective_blocker {
+        summary.push(' ');
+        summary.push_str(blocker_clause(record.kind(), blocker));
+    }
+    if context.objective_outcome != OperationObjectiveOutcome::Failed
+        && matches!(
+            (record.kind(), record.objective()),
+            (
+                OperationKind::Sabotage | OperationKind::Arson,
+                OperationObjective::DisruptBusiness {
+                    target: EntityRef::Business(_)
+                }
+            )
+        )
+    {
+        summary.push(' ');
+        summary.push_str(SABOTAGE_DISRUPTION_CLAUSE);
+    }
+    summary
+}
+
+/// Re-renders the exact historical organization after-action narrative from persisted operation
+/// facts. This is intentionally separate from resolution planning: it consumes the frozen
+/// outcome/factors/exposure and historical take index rather than current hidden target state.
+/// Restore validation uses it so an information record and report cannot be corrupted together
+/// into a mutually-consistent but false account of what the operation produced.
+pub(crate) fn render_persisted_after_action_summary(
+    registry: &Registry,
+    state: &AppState,
+    record: &OperationRecord,
+    resolution: &OperationResolutionRecord,
+) -> Option<String> {
+    let execution = registry.get_operation(record.kind()).execution();
+    let tactical_outcome = resolve_objective_outcome(execution, resolution.execution_margin());
+    let pre_depletion_outcome =
+        effective_objective_outcome(tactical_outcome, resolution.objective_blocker());
+    let property_proceeds_plan =
+        resolve_property_proceeds(registry, state, record, pre_depletion_outcome).ok()?;
+    let cash_proceeds_plan =
+        resolve_cash_proceeds(registry, state, record, pre_depletion_outcome).ok()?;
+    let expected_outcome = downgrade_empty_take_outcome(
+        execution,
+        pre_depletion_outcome,
+        property_proceeds_plan.proceeds.as_ref(),
+        cash_proceeds_plan.proceeds.as_ref(),
+    );
+    if expected_outcome != resolution.objective_outcome() {
+        return None;
+    }
+    let missing_intelligence_topics =
+        resolution_factors::resolve_intelligence_coverage(registry, state, record.id())
+            .into_iter()
+            .filter_map(|(topic, score)| (score == 0).then_some(topic))
+            .collect::<Vec<_>>();
+    let surveillance_clause = persisted_surveillance_after_action_clause(state, record).ok()?;
+    Some(compose_after_action_summary(
+        record,
+        execution,
+        AfterActionNarrativeContext {
+            objective_outcome: resolution.objective_outcome(),
+            tactical_outcome,
+            factors: resolution.factors(),
+            exposure_level: resolution.exposure().level(),
+            missing_intelligence_topics: &missing_intelligence_topics,
+            property_proceeds_plan: &property_proceeds_plan,
+            cash_proceeds_plan: &cash_proceeds_plan,
+            surveillance_clause,
+            objective_blocker: resolution.objective_blocker(),
+        },
+    ))
+}
+
+/// Canonical causal entity set persisted on both the completed-operation history event and its
+/// after-action report. Restore validation calls the same derivation so objective targets,
+/// participants, and an arrived police response cannot be silently dropped or padded.
+pub(crate) fn resolve_completion_history_entities(
+    state: &AppState,
+    record: &OperationRecord,
+    police_response_arrived: bool,
+) -> BTreeSet<EntityRef> {
+    let mut entities = BTreeSet::from([
+        EntityRef::Operation(record.id()),
+        EntityRef::Organization(record.responsible_organization()),
+        EntityRef::Character(record.leader()),
+    ]);
+    entities.extend(record.objective().referenced_entities());
+    entities.extend(record.roles().values().copied().map(EntityRef::Character));
+    if police_response_arrived {
+        let response_id = record
+            .police_response()
+            .expect("arrived operation police response must remain linked from the operation");
+        let response = state
+            .legal
+            .get_police_response(response_id)
+            .expect("operation police-response link must reference a persisted response");
+        entities.insert(EntityRef::Organization(response.authority()));
+        entities.insert(EntityRef::Neighborhood(response.neighborhood()));
+    }
+    entities
+}
+
+pub(crate) fn completion_history_summary(
+    record: &OperationRecord,
+    outcome: OperationObjectiveOutcome,
+) -> String {
+    format!(
+        "{} ended with objective {}.",
+        record.title(),
+        outcome_label(outcome)
+    )
+}
+
+pub(crate) fn participant_after_action_summary(
+    record: &OperationRecord,
+    outcome: OperationObjectiveOutcome,
+) -> String {
+    format!(
+        "You took part in {}, which ended with objective {}.",
+        record.title(),
+        outcome_label(outcome)
+    )
 }
 
 pub(crate) struct ValidatedOperationResolution {
@@ -789,11 +910,7 @@ pub(crate) fn validate_operation_resolution_plan(
         state,
         HistoryEventDraft {
             kind: HistoryEventKind::Operation,
-            summary: format!(
-                "{} ended with objective {}.",
-                record.title(),
-                outcome_label(plan.outcome.objective_outcome)
-            ),
+            summary: completion_history_summary(record, plan.outcome.objective_outcome),
             entities: plan.narrative.history_entities.clone(),
         },
     )?;
@@ -830,10 +947,9 @@ pub(crate) fn validate_operation_resolution_plan(
                     observed_at: plan.snapshot.resolved_at,
                     reliability: Reliability::DirectAccess,
                     specificity: Specificity::Precise,
-                    summary: format!(
-                        "You took part in {}, which ended with objective {}.",
-                        record.title(),
-                        outcome_label(plan.outcome.objective_outcome)
+                    summary: participant_after_action_summary(
+                        record,
+                        plan.outcome.objective_outcome,
                     ),
                 },
             )
@@ -894,6 +1010,13 @@ fn validate_plan_snapshot(
             expected: plan.snapshot.resolved_at,
             found: state.now(),
         });
+    }
+    // Surveillance owns a richer target snapshot than the generic venue/police derivation.
+    // Check it first so a changed observed organization, enterprise selection, or other
+    // surveillance-specific dependency reports the precise target-staleness error rather than a
+    // secondary police-context change caused by the same target mutation.
+    if let Some(surveillance) = &plan.outcome.surveillance {
+        validate_surveillance_plan_snapshot(state, surveillance)?;
     }
     let current_police_snapshot = resolve_target_police_interval_snapshot(
         state,
@@ -964,9 +1087,6 @@ fn validate_plan_snapshot(
         return Err(OperationResolutionError::StaleObjectiveContext {
             operation: plan.snapshot.operation,
         });
-    }
-    if let Some(surveillance) = &plan.outcome.surveillance {
-        validate_surveillance_plan_snapshot(state, surveillance)?;
     }
     Ok(())
 }

@@ -480,99 +480,110 @@ impl IntelligenceState {
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         // Forward direction plus exact-count agreement replaces per-entry reverse walks:
-        // every record is verified present under its own key(s), and because ids are unique
-        // and each record occupies at most one slot per key, the indexed entry totals can
-        // equal the expected totals only when no stale, duplicate, or foreign entry exists.
-        let mut expected_holder_entries = 0_usize;
-        let mut expected_holder_topic_entries = 0_usize;
-        let mut expected_holder_subject_entries = 0_usize;
-        let mut expected_subject_entries = 0_usize;
-        let mut expected_source_entries = 0_usize;
+        // every record is verified present under its own key(s), and because IDs are unique
+        // and each record occupies at most one slot per key, exact entry totals prove there are
+        // no stale, duplicate, or foreign entries in the partition-style projections.
+        let mut expected = IntelligenceIndexCounts::default();
         for (stored_id, record) in &self.records {
-            if *stored_id != record.id() {
+            if !self.record_indexes_are_consistent(*stored_id, record, &mut expected) {
                 return false;
             }
-            if !self
+        }
+        self.partition_index_counts_match(expected)
+            && self.derived_source_index_is_consistent(expected.source_entries)
+            && self.internal_transfer_by_source_recipient.len() == expected.internal_transfers
+    }
+
+    fn record_indexes_are_consistent(
+        &self,
+        stored_id: InformationId,
+        record: &InformationRecord,
+        expected: &mut IntelligenceIndexCounts,
+    ) -> bool {
+        if stored_id != record.id()
+            || !self
                 .by_holder
                 .get(&record.holder())
                 .is_some_and(|ids| ids.contains(&record.id()))
-            {
-                return false;
-            }
-            if !self
+            || !self
                 .by_holder_topic
                 .get(&(record.holder(), record.topic()))
                 .is_some_and(|ids| ids.contains(&record.id()))
-            {
-                return false;
-            }
-            if !self
+            || !self
                 .by_holder_subject
                 .get(&(record.holder(), record.subject()))
                 .is_some_and(|ids| ids.contains(&record.id()))
-                || !self
-                    .by_subject
-                    .get(&record.subject())
-                    .is_some_and(|ids| ids.contains(&record.id()))
+            || !self
+                .by_subject
+                .get(&record.subject())
+                .is_some_and(|ids| ids.contains(&record.id()))
+        {
+            return false;
+        }
+        for source in record.derived_from() {
+            if !self
+                .derived_by_source
+                .get(source)
+                .is_some_and(|ids| ids.contains(&record.id()))
             {
                 return false;
             }
-            let derived_from = record.derived_from();
-            for source in derived_from {
-                if !self
-                    .derived_by_source
-                    .get(source)
-                    .is_some_and(|ids| ids.contains(&record.id()))
-                {
-                    return false;
-                }
+        }
+        expected.holder_entries += 1;
+        expected.holder_topic_entries += 1;
+        expected.holder_subject_entries += 1;
+        expected.subject_entries += 1;
+        expected.source_entries += record.derived_from().len();
+        if record.source_kind() == InformationSourceKind::InternalReport {
+            if record.derived_from().len() != 1 {
+                return false;
             }
-            expected_holder_entries += 1;
-            expected_holder_topic_entries += 1;
-            expected_holder_subject_entries += 1;
-            expected_subject_entries += 1;
-            expected_source_entries += derived_from.len();
-            if record.source_kind() == InformationSourceKind::InternalReport {
-                if derived_from.len() != 1 {
-                    return false;
-                }
-                let source = *derived_from
-                    .iter()
-                    .next()
-                    .expect("single-source internal report must have one source");
-                if self
-                    .internal_transfer_by_source_recipient
-                    .get(&(source, record.holder()))
-                    != Some(&record.id())
-                {
-                    return false;
-                }
+            let source = *record
+                .derived_from()
+                .iter()
+                .next()
+                .expect("single-source internal report must have one source");
+            if self
+                .internal_transfer_by_source_recipient
+                .get(&(source, record.holder()))
+                != Some(&record.id())
+            {
+                return false;
             }
+            expected.internal_transfers += 1;
         }
-        let indexed_holder_entries: usize = self.by_holder.values().map(BTreeSet::len).sum();
-        if indexed_holder_entries != expected_holder_entries {
-            return false;
-        }
-        let indexed_holder_topic_entries: usize =
-            self.by_holder_topic.values().map(BTreeSet::len).sum();
-        if indexed_holder_topic_entries != expected_holder_topic_entries {
-            return false;
-        }
-        let indexed_holder_subject_entries: usize =
-            self.by_holder_subject.values().map(BTreeSet::len).sum();
-        if indexed_holder_subject_entries != expected_holder_subject_entries {
-            return false;
-        }
-        let indexed_subject_entries: usize = self.by_subject.values().map(BTreeSet::len).sum();
-        if indexed_subject_entries != expected_subject_entries {
-            return false;
-        }
+        true
+    }
+
+    fn partition_index_counts_match(&self, expected: IntelligenceIndexCounts) -> bool {
+        self.by_holder.values().map(BTreeSet::len).sum::<usize>() == expected.holder_entries
+            && self
+                .by_holder_topic
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
+                == expected.holder_topic_entries
+            && self
+                .by_holder_subject
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
+                == expected.holder_subject_entries
+            && self.by_subject.values().map(BTreeSet::len).sum::<usize>()
+                == expected.subject_entries
+    }
+
+    fn derived_source_index_is_consistent(&self, expected_entries: usize) -> bool {
         // Provenance sources must themselves exist, and each reverse entry must name a real
         // derivation edge; this index is not a partition of the records (a source may have
         // no derivations), so it keeps an explicit reverse walk.
-        let indexed_source_entries: usize =
-            self.derived_by_source.values().map(BTreeSet::len).sum();
-        if indexed_source_entries != expected_source_entries {
+        if self
+            .derived_by_source
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            != expected_entries
+        {
             return false;
         }
         for (source, ids) in &self.derived_by_source {
@@ -589,16 +600,18 @@ impl IntelligenceState {
                 }
             }
         }
-        let expected_internal_transfers = self
-            .records
-            .values()
-            .filter(|record| record.source_kind() == InformationSourceKind::InternalReport)
-            .count();
-        if self.internal_transfer_by_source_recipient.len() != expected_internal_transfers {
-            return false;
-        }
         true
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct IntelligenceIndexCounts {
+    holder_entries: usize,
+    holder_topic_entries: usize,
+    holder_subject_entries: usize,
+    subject_entries: usize,
+    source_entries: usize,
+    internal_transfers: usize,
 }
 
 pub struct InformationDraft {

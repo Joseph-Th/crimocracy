@@ -249,108 +249,149 @@ fn resolve_operation_financial_summary(
 ) -> Result<OperationFinancialSummary, OrganizationFinancialReportError> {
     let mut summary = OperationFinancialSummary::default();
     for operation in state.operations().operations_for_organization(recipient) {
-        if let Some(resolution) = operation.resolution() {
-            // Held value and notable chronology read the same record through the same gate:
-            // only completed operations can hold proceeds, so an abort path that ever
-            // recorded proceeds could not inflate "held" value the chronology never shows.
-            let completed_hold = operation.status() == OperationStatus::Completed
-                && resolution.resolved_at() <= period_end;
-            if completed_hold {
-                if let Some(proceeds) = resolution.property_proceeds()
-                    && !operation
-                        .property_disposition()
-                        .is_some_and(|disposition| disposition.disposed_at() <= period_end)
-                {
-                    summary.held_property_count = summary
-                        .held_property_count
-                        .checked_add(1)
-                        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-                    summary.held_property_value = summary
-                        .held_property_value
-                        .checked_add(proceeds.estimated_value())
-                        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-                }
-                if let Some(proceeds) = resolution.cash_proceeds()
-                    && !operation
-                        .cash_disposition()
-                        .is_some_and(|disposition| disposition.disposed_at() <= period_end)
-                {
-                    summary.held_cash_count = summary
-                        .held_cash_count
-                        .checked_add(1)
-                        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-                    summary.held_cash_value = summary
-                        .held_cash_value
-                        .checked_add(proceeds.amount())
-                        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-                }
-            }
-            if operation.status() == OperationStatus::Completed
-                && resolution.resolved_at() >= period_start
-                && resolution.resolved_at() <= period_end
-            {
-                if resolution.property_proceeds().is_some() {
-                    summary.notable.push((
-                        resolution.resolved_at(),
-                        NotableFinancialItem::OperationProperty {
-                            operation: operation.id(),
-                            information: resolution.after_action_information(),
-                        },
-                    ));
-                }
-                if resolution.cash_proceeds().is_some() {
-                    summary.notable.push((
-                        resolution.resolved_at(),
-                        NotableFinancialItem::OperationCash {
-                            operation: operation.id(),
-                            information: resolution.after_action_information(),
-                        },
-                    ));
-                }
-            }
-        }
-        if let Some(disposition) = operation.property_disposition()
-            && disposition.disposed_at() >= period_start
-            && disposition.disposed_at() <= period_end
-        {
-            summary.property_disposition_count = summary
-                .property_disposition_count
-                .checked_add(1)
-                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-            summary.realized_property_cash = summary
-                .realized_property_cash
-                .checked_add(disposition.realized_value())
-                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-            summary.notable.push((
-                disposition.disposed_at(),
-                NotableFinancialItem::OperationPropertyDisposition {
-                    operation: operation.id(),
-                    information: disposition.information(),
-                },
-            ));
-        }
-        if let Some(disposition) = operation.cash_disposition()
-            && disposition.disposed_at() >= period_start
-            && disposition.disposed_at() <= period_end
-        {
-            summary.cash_deposit_count = summary
-                .cash_deposit_count
-                .checked_add(1)
-                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-            summary.deposited_cash = summary
-                .deposited_cash
-                .checked_add(disposition.realized_value())
-                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
-            summary.notable.push((
-                disposition.disposed_at(),
-                NotableFinancialItem::OperationCashDisposition {
-                    operation: operation.id(),
-                    information: disposition.information(),
-                },
-            ));
-        }
+        accumulate_operation_resolution(&mut summary, operation, period_start, period_end)?;
+        accumulate_property_disposition(&mut summary, operation, period_start, period_end)?;
+        accumulate_cash_disposition(&mut summary, operation, period_start, period_end)?;
     }
     Ok(summary)
+}
+
+fn accumulate_operation_resolution(
+    summary: &mut OperationFinancialSummary,
+    operation: &crate::operations::OperationRecord,
+    period_start: SimTime,
+    period_end: SimTime,
+) -> Result<(), OrganizationFinancialReportError> {
+    let Some(resolution) = operation.resolution() else {
+        return Ok(());
+    };
+    // Held value and notable chronology read the same completed-operation gate: an abort path
+    // can never inflate held proceeds that the chronology itself would not recognize.
+    if operation.status() == OperationStatus::Completed && resolution.resolved_at() <= period_end {
+        accumulate_held_operation_proceeds(summary, operation, resolution, period_end)?;
+    }
+    if operation.status() != OperationStatus::Completed
+        || resolution.resolved_at() < period_start
+        || resolution.resolved_at() > period_end
+    {
+        return Ok(());
+    }
+    if resolution.property_proceeds().is_some() {
+        summary.notable.push((
+            resolution.resolved_at(),
+            NotableFinancialItem::OperationProperty {
+                operation: operation.id(),
+                information: resolution.after_action_information(),
+            },
+        ));
+    }
+    if resolution.cash_proceeds().is_some() {
+        summary.notable.push((
+            resolution.resolved_at(),
+            NotableFinancialItem::OperationCash {
+                operation: operation.id(),
+                information: resolution.after_action_information(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn accumulate_held_operation_proceeds(
+    summary: &mut OperationFinancialSummary,
+    operation: &crate::operations::OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+    period_end: SimTime,
+) -> Result<(), OrganizationFinancialReportError> {
+    if let Some(proceeds) = resolution.property_proceeds()
+        && !operation
+            .property_disposition()
+            .is_some_and(|disposition| disposition.disposed_at() <= period_end)
+    {
+        summary.held_property_count = summary
+            .held_property_count
+            .checked_add(1)
+            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+        summary.held_property_value = summary
+            .held_property_value
+            .checked_add(proceeds.estimated_value())
+            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+    }
+    if let Some(proceeds) = resolution.cash_proceeds()
+        && !operation
+            .cash_disposition()
+            .is_some_and(|disposition| disposition.disposed_at() <= period_end)
+    {
+        summary.held_cash_count = summary
+            .held_cash_count
+            .checked_add(1)
+            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+        summary.held_cash_value = summary
+            .held_cash_value
+            .checked_add(proceeds.amount())
+            .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+    }
+    Ok(())
+}
+
+fn accumulate_property_disposition(
+    summary: &mut OperationFinancialSummary,
+    operation: &crate::operations::OperationRecord,
+    period_start: SimTime,
+    period_end: SimTime,
+) -> Result<(), OrganizationFinancialReportError> {
+    let Some(disposition) = operation.property_disposition() else {
+        return Ok(());
+    };
+    if disposition.disposed_at() < period_start || disposition.disposed_at() > period_end {
+        return Ok(());
+    }
+    summary.property_disposition_count = summary
+        .property_disposition_count
+        .checked_add(1)
+        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+    summary.realized_property_cash = summary
+        .realized_property_cash
+        .checked_add(disposition.realized_value())
+        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+    summary.notable.push((
+        disposition.disposed_at(),
+        NotableFinancialItem::OperationPropertyDisposition {
+            operation: operation.id(),
+            information: disposition.information(),
+        },
+    ));
+    Ok(())
+}
+
+fn accumulate_cash_disposition(
+    summary: &mut OperationFinancialSummary,
+    operation: &crate::operations::OperationRecord,
+    period_start: SimTime,
+    period_end: SimTime,
+) -> Result<(), OrganizationFinancialReportError> {
+    let Some(disposition) = operation.cash_disposition() else {
+        return Ok(());
+    };
+    if disposition.disposed_at() < period_start || disposition.disposed_at() > period_end {
+        return Ok(());
+    }
+    summary.cash_deposit_count = summary
+        .cash_deposit_count
+        .checked_add(1)
+        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+    summary.deposited_cash = summary
+        .deposited_cash
+        .checked_add(disposition.realized_value())
+        .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+    summary.notable.push((
+        disposition.disposed_at(),
+        NotableFinancialItem::OperationCashDisposition {
+            operation: operation.id(),
+            information: disposition.information(),
+        },
+    ));
+    Ok(())
 }
 
 fn collect_notable_business_cycles(

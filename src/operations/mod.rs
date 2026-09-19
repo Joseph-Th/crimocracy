@@ -352,7 +352,7 @@ pub struct OperationAbortRecord {
     aborted_at: SimTime,
     phase: OperationAbortPhase,
     cause: OperationAbortCause,
-    artifacts: Option<OperationAbortArtifacts>,
+    artifacts: OperationAbortArtifacts,
 }
 
 impl OperationAbortRecord {
@@ -368,7 +368,7 @@ impl OperationAbortRecord {
         self.cause
     }
 
-    pub fn artifacts(self) -> Option<OperationAbortArtifacts> {
+    pub fn artifacts(self) -> OperationAbortArtifacts {
         self.artifacts
     }
 }

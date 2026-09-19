@@ -148,6 +148,153 @@ fn restore_rejects_cash_proceeds_not_derived_from_operation_economics() {
 }
 
 #[test]
+fn restore_rejects_completed_operation_history_with_detached_summary() {
+    let (registry, mut state, _organization, operation) = make_operation_fixture();
+    run_until_operation_resolved(&registry, &mut state, operation);
+    let resolution = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("fixture operation should complete");
+    let history = state
+        .history()
+        .get_event(resolution.history_event())
+        .expect("completed operation should persist history");
+    let summary = history.summary().to_owned();
+
+    let mut bytes = bincode::serialize(
+        &build_save(&registry, &state).expect("canonical completed operation should save"),
+    )
+    .expect("save envelope should serialize");
+    let needle = summary.as_bytes();
+    let matches: Vec<_> = bytes
+        .windows(needle.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == needle).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "completion history summary should occur once in persisted state"
+    );
+    bytes[matches[0]] = b'X';
+    let corrupted: SaveEnvelope =
+        bincode::deserialize(&bytes).expect("same-length history corruption should deserialize");
+    let error = restore_save(&registry, corrupted)
+        .expect_err("restore must reject history detached from the completed operation outcome");
+    assert_eq!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidOperationHistory { operation }
+        )
+    );
+}
+
+#[test]
+fn restore_rejects_jointly_corrupted_after_action_information_and_report() {
+    let (registry, mut state, _organization, operation) = make_operation_fixture();
+    run_until_operation_resolved(&registry, &mut state, operation);
+    let resolution = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("fixture operation should complete");
+    let summary = state
+        .intelligence()
+        .get_information(resolution.after_action_information())
+        .expect("completed operation should persist organization after-action information")
+        .summary()
+        .to_owned();
+    assert_eq!(
+        state
+            .reports()
+            .get_report(resolution.after_action_report())
+            .expect("completed operation should persist an after-action report")
+            .entries()[0]
+            .summary,
+        summary
+    );
+
+    let mut bytes = bincode::serialize(
+        &build_save(&registry, &state).expect("canonical completed operation should save"),
+    )
+    .expect("save envelope should serialize");
+    let needle = summary.as_bytes();
+    let matches: Vec<_> = bytes
+        .windows(needle.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == needle).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        2,
+        "the canonical organization after-action summary should occur in information and report"
+    );
+    for start in matches {
+        bytes[start] = b'X';
+    }
+    let corrupted: SaveEnvelope = bincode::deserialize(&bytes)
+        .expect("same-length information/report corruption should deserialize");
+    let error = restore_save(&registry, corrupted).expect_err(
+        "restore must reject mutually-consistent after-action text that disagrees with operation facts",
+    );
+    assert_eq!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidOperationAfterAction {
+                operation
+            }
+        )
+    );
+}
+
+#[test]
+fn restore_rejects_corrupted_participant_after_action_knowledge() {
+    let (registry, mut state, _organization, operation) = make_operation_fixture();
+    run_until_operation_resolved(&registry, &mut state, operation);
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("fixture operation should persist");
+    let resolution = operation_record
+        .resolution()
+        .expect("fixture operation should complete");
+    let summary =
+        participant_after_action_summary(operation_record, resolution.objective_outcome());
+    let participant_count = operation_record.participants().len();
+    assert!(participant_count > 0);
+
+    let mut bytes = bincode::serialize(
+        &build_save(&registry, &state).expect("canonical completed operation should save"),
+    )
+    .expect("save envelope should serialize");
+    let needle = summary.as_bytes();
+    let matches: Vec<_> = bytes
+        .windows(needle.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == needle).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        participant_count,
+        "one personal after-action summary must be persisted for every participant"
+    );
+    bytes[matches[0]] = b'X';
+    let corrupted: SaveEnvelope = bincode::deserialize(&bytes)
+        .expect("same-length participant debrief corruption should deserialize");
+    let error = restore_save(&registry, corrupted)
+        .expect_err("restore must reject corrupted participant after-action knowledge");
+    assert_eq!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidOperationAfterAction {
+                operation
+            }
+        )
+    );
+}
+
+#[test]
 fn detention_cancels_pending_operation_decision_and_aborts_operation() {
     let (registry, mut state, police, _neighborhood, operation) =
         make_exposed_business_operation_fixture_with_contingencies(
@@ -967,12 +1114,7 @@ fn sabotage_of_a_suspended_target_aborts_before_start() {
     );
     let summary = state
         .reports()
-        .get_report(
-            abort
-                .artifacts()
-                .expect("pre-start objective cancellation should surface artifacts")
-                .report(),
-        )
+        .get_report(abort.artifacts().report())
         .expect("objective-cancellation report should persist")
         .entries()[0]
         .summary
@@ -2731,7 +2873,7 @@ fn delayed_authorized_operation_aborts_once_entry_window_becomes_impossible() {
     );
     let artifacts = follow_up_record
         .abort_record()
-        .and_then(|abort| abort.artifacts())
+        .map(|abort| abort.artifacts())
         .expect("pre-start deadline miss should surface after-action artifacts");
     assert!(
         state
@@ -2938,9 +3080,7 @@ fn police_arrival_abort_persists_decision_provenance_and_after_action_artifacts(
     assert_eq!(resolution.response(), DecisionResponse::Abort);
     assert_eq!(resolution.resolved_at(), abort.aborted_at());
 
-    let artifacts = abort
-        .artifacts()
-        .expect("abort after execution began should create after-action artifacts");
+    let artifacts = abort.artifacts();
     let information = state
         .intelligence()
         .get_information(artifacts.information())

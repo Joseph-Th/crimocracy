@@ -262,6 +262,8 @@ pub struct EnterpriseState {
     #[serde(skip)]
     by_supporting_business: BTreeMap<BusinessId, BTreeSet<EnterpriseId>>,
     #[serde(skip)]
+    active_by_organization: BTreeMap<OrganizationId, BTreeSet<EnterpriseId>>,
+    #[serde(skip)]
     active_by_mandate: BTreeMap<MandateId, BTreeSet<EnterpriseId>>,
     #[serde(skip)]
     active_by_next_cycle: BTreeMap<SimTime, BTreeSet<EnterpriseId>>,
@@ -285,6 +287,7 @@ impl EnterpriseState {
         self.by_organization.clear();
         self.by_location.clear();
         self.by_supporting_business.clear();
+        self.active_by_organization.clear();
         self.active_by_mandate.clear();
         self.active_by_next_cycle.clear();
         self.by_settlement_account.clear();
@@ -309,6 +312,10 @@ impl EnterpriseState {
             self.by_settlement_account
                 .insert(record.settlement_account(), id);
             if record.status() == EnterpriseStatus::Active {
+                self.active_by_organization
+                    .entry(record.organization())
+                    .or_default()
+                    .insert(id);
                 self.active_by_mandate
                     .entry(record.authority().mandate)
                     .or_default()
@@ -351,6 +358,24 @@ impl EnterpriseState {
                 self.cycles
                     .get(id)
                     .expect("enterprise cycle time index must reference a cycle")
+            })
+    }
+
+    /// Current operating rackets for one organization in stable enterprise-ID order. This
+    /// projection excludes suspended and retired history so current-footprint consumers do not
+    /// rescan an organization's lifetime enterprise record on every query.
+    pub(crate) fn active_for_organization(
+        &self,
+        organization: OrganizationId,
+    ) -> impl Iterator<Item = &EnterpriseRecord> {
+        self.active_by_organization
+            .get(&organization)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("active organization-enterprise index must reference an enterprise")
             })
     }
 
@@ -530,6 +555,10 @@ impl EnterpriseState {
             .entry(record.authority().mandate)
             .or_default()
             .insert(id);
+        self.active_by_organization
+            .entry(record.organization())
+            .or_default()
+            .insert(id);
         let next_cycle_at = record
             .next_cycle_at()
             .expect("new active enterprise must have a scheduled cycle");
@@ -559,7 +588,7 @@ impl EnterpriseState {
             .expect("validated enterprise disappeared before cycle commit")
             .next_cycle_at()
             .expect("active enterprise must have a scheduled cycle");
-        Self::remove_schedule_index(
+        Self::remove_from_set_index(
             &mut self.active_by_next_cycle,
             old_next_cycle_at,
             enterprise_id,
@@ -602,24 +631,30 @@ impl EnterpriseState {
         loss_streak_anchor: Option<SimTime>,
         changed_at: SimTime,
     ) {
-        let (was_active, mandate, old_next_cycle_at) = {
+        let (was_active, organization, mandate, old_next_cycle_at) = {
             let record = self
                 .records
                 .get(&id)
                 .expect("validated enterprise disappeared before status commit");
             (
                 record.runtime.status == EnterpriseStatus::Active,
+                record.organization(),
                 record.assignment.authority.mandate,
                 record.runtime.next_cycle_at,
             )
         };
         let will_be_active = status == EnterpriseStatus::Active;
         if was_active && let Some(old_next_cycle_at) = old_next_cycle_at {
-            Self::remove_schedule_index(&mut self.active_by_next_cycle, old_next_cycle_at, id);
+            Self::remove_from_set_index(&mut self.active_by_next_cycle, old_next_cycle_at, id);
         }
         if was_active && !will_be_active {
-            Self::remove_active_mandate_index(&mut self.active_by_mandate, mandate, id);
+            Self::remove_from_set_index(&mut self.active_by_organization, organization, id);
+            Self::remove_from_set_index(&mut self.active_by_mandate, mandate, id);
         } else if !was_active && will_be_active {
+            self.active_by_organization
+                .entry(organization)
+                .or_default()
+                .insert(id);
             self.active_by_mandate
                 .entry(mandate)
                 .or_default()
@@ -644,28 +679,15 @@ impl EnterpriseState {
         record.runtime.version = advance_version_preflighted(record.runtime.version);
     }
 
-    fn remove_active_mandate_index(
-        index: &mut BTreeMap<MandateId, BTreeSet<EnterpriseId>>,
-        mandate: MandateId,
+    fn remove_from_set_index<K: Ord + Copy>(
+        index: &mut BTreeMap<K, BTreeSet<EnterpriseId>>,
+        key: K,
         enterprise: EnterpriseId,
     ) {
-        if let Some(ids) = index.get_mut(&mandate) {
+        if let Some(ids) = index.get_mut(&key) {
             ids.remove(&enterprise);
             if ids.is_empty() {
-                index.remove(&mandate);
-            }
-        }
-    }
-
-    fn remove_schedule_index(
-        index: &mut BTreeMap<SimTime, BTreeSet<EnterpriseId>>,
-        time: SimTime,
-        enterprise: EnterpriseId,
-    ) {
-        if let Some(ids) = index.get_mut(&time) {
-            ids.remove(&enterprise);
-            if ids.is_empty() {
-                index.remove(&time);
+                index.remove(&key);
             }
         }
     }
@@ -677,6 +699,7 @@ impl EnterpriseState {
             && self.supporting_business_index_is_consistent()
             && self.settlement_account_index_is_consistent()
             && self.cycle_indexes_are_consistent()
+            && self.active_organization_index_is_consistent()
             && self.active_mandate_index_is_consistent()
             && self.active_schedule_index_is_consistent()
     }
@@ -713,6 +736,13 @@ impl EnterpriseState {
             if is_active_indexed != (record.status() == EnterpriseStatus::Active) {
                 return false;
             }
+            let is_active_organization_indexed = self
+                .active_by_organization
+                .get(&record.organization())
+                .is_some_and(|ids| ids.contains(&record.id()));
+            if is_active_organization_indexed != (record.status() == EnterpriseStatus::Active) {
+                return false;
+            }
             let is_schedule_indexed = record.next_cycle_at().is_some_and(|time| {
                 self.active_by_next_cycle
                     .get(&time)
@@ -730,6 +760,9 @@ impl EnterpriseState {
     /// Reverse organization entries must resolve to enterprises owned by that organization.
     fn organization_index_is_consistent(&self) -> bool {
         for (organization, ids) in &self.by_organization {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self
                     .records
@@ -746,6 +779,9 @@ impl EnterpriseState {
     /// Reverse location entries must resolve to enterprises at that exact location.
     fn location_index_is_consistent(&self) -> bool {
         for (location, ids) in &self.by_location {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self
                     .records
@@ -762,6 +798,9 @@ impl EnterpriseState {
     /// Reverse support-business entries must agree with each enterprise's support set.
     fn supporting_business_index_is_consistent(&self) -> bool {
         for (business, ids) in &self.by_supporting_business {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self
                     .records
@@ -804,6 +843,9 @@ impl EnterpriseState {
             }
         }
         for (enterprise, ids) in &self.cycles_by_enterprise {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self
                     .cycles
@@ -815,6 +857,9 @@ impl EnterpriseState {
             }
         }
         for (time, ids) in &self.cycles_by_time {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self
                     .cycles
@@ -837,9 +882,30 @@ impl EnterpriseState {
         true
     }
 
+    /// Only active enterprises may occupy an organization's current operating index.
+    fn active_organization_index_is_consistent(&self) -> bool {
+        for (organization, ids) in &self.active_by_organization {
+            if ids.is_empty() {
+                return false;
+            }
+            for id in ids {
+                if !self.records.get(id).is_some_and(|record| {
+                    record.status() == EnterpriseStatus::Active
+                        && record.organization() == *organization
+                }) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Only active enterprises may occupy a mandate's current responsibility index.
     fn active_mandate_index_is_consistent(&self) -> bool {
         for (mandate, ids) in &self.active_by_mandate {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self.records.get(id).is_some_and(|record| {
                     record.status() == EnterpriseStatus::Active
@@ -855,6 +921,9 @@ impl EnterpriseState {
     /// Only active enterprises with that exact due time may occupy the schedule index.
     fn active_schedule_index_is_consistent(&self) -> bool {
         for (time, ids) in &self.active_by_next_cycle {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self.records.get(id).is_some_and(|record| {
                     record.status() == EnterpriseStatus::Active

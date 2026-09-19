@@ -17,13 +17,15 @@ pub struct ValidatedBusinessEconomyStatusChange {
     expected_version: u32,
     change: BusinessEconomyStatusChange,
     cycle_duration: Option<SimDuration>,
+    restart_capital_floor: Option<OperatingCapitalFloor>,
 }
 
 impl ValidatedBusinessEconomyStatusChange {
     pub fn commit(self, state: &mut AppState) -> Result<(), BusinessEconomyError> {
-        if state.world.get_business(self.business).is_none() {
-            return Err(BusinessEconomyError::MissingBusiness(self.business));
-        }
+        let business = state
+            .world
+            .get_business(self.business)
+            .ok_or(BusinessEconomyError::MissingBusiness(self.business))?;
         let economy = state
             .economy
             .get_business_economy(self.business)
@@ -48,6 +50,26 @@ impl ValidatedBusinessEconomyStatusChange {
                 economy.settlement_account(),
                 Some(self.business),
             )?;
+        }
+        if let Some(capital_floor) = self.restart_capital_floor {
+            if business.version() != capital_floor.business_version {
+                return Err(BusinessEconomyError::StaleBusiness {
+                    business: self.business,
+                    expected: capital_floor.business_version,
+                    found: business.version(),
+                });
+            }
+            let operating = state
+                .finance
+                .get_account(economy.operating_account())
+                .expect("restart account validation proved the operating account exists");
+            if operating.version() != capital_floor.account_version {
+                return Err(BusinessEconomyError::StaleOperatingAccount {
+                    account: economy.operating_account(),
+                    expected: capital_floor.account_version,
+                    found: operating.version(),
+                });
+            }
         }
         let status = match self.change {
             BusinessEconomyStatusChange::Suspend => BusinessOperatingStatus::Suspended,
@@ -81,6 +103,7 @@ impl ValidatedBusinessEconomyStatusChange {
             next_cycle_at,
             loss_streak_anchor,
             reset_laundering_window,
+            self.restart_capital_floor,
         );
         Ok(())
     }
@@ -106,6 +129,7 @@ pub fn validate_suspend_business_economy(
         expected_version: economy.version(),
         change: BusinessEconomyStatusChange::Suspend,
         cycle_duration: None,
+        restart_capital_floor: None,
     })
 }
 
@@ -131,7 +155,7 @@ pub(crate) fn validate_acquisition_restart(
     business: BusinessId,
     cycle_duration: SimDuration,
 ) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
-    let _business_record = validate_business(state, business)?;
+    let business_record = validate_business(state, business)?;
     let economy = state
         .economy
         .get_business_economy(business)
@@ -144,6 +168,11 @@ pub(crate) fn validate_acquisition_restart(
         Some(business),
     )?;
     ensure_version_can_advance(economy.version(), "business economy")?;
+    ensure_version_can_advance(business_record.version(), "business")?;
+    let operating = state
+        .finance
+        .get_account(economy.operating_account())
+        .expect("account validation proved the operating account exists");
     state
         .now()
         .checked_add(cycle_duration)
@@ -153,6 +182,15 @@ pub(crate) fn validate_acquisition_restart(
         expected_version: economy.version(),
         change: BusinessEconomyStatusChange::Restart,
         cycle_duration: Some(cycle_duration),
+        restart_capital_floor: Some(OperatingCapitalFloor {
+            amount: operating.spendable_balance(),
+            account_version: operating.version(),
+            business_version: business_record
+                .version()
+                .checked_add(1)
+                .expect("business version capacity was preflighted"),
+            set_at: state.now(),
+        }),
     })
 }
 
@@ -189,5 +227,6 @@ fn validate_resume_with_cycle_duration(
         expected_version: economy.version(),
         change: BusinessEconomyStatusChange::Resume,
         cycle_duration: Some(cycle_duration),
+        restart_capital_floor: None,
     })
 }

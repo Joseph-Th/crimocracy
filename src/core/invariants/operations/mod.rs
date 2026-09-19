@@ -12,14 +12,17 @@ use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::history::HistoryEventKind;
 use crate::intelligence::{
-    InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
+    InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
 };
 use crate::operations::operation_economics::{
     downgrade_empty_take_outcome, resolve_cash_proceeds, resolve_property_proceeds,
 };
 use crate::operations::operation_execution::{
-    has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
-    resolve_exposure_score, resolve_intelligence_factors, resolve_objective_outcome,
+    completion_history_summary, has_police_response_arrived_by, participant_after_action_summary,
+    render_persisted_after_action_summary, resolve_completion_history_entities,
+    resolve_execution_margin, resolve_exposure_level, resolve_exposure_score,
+    resolve_intelligence_factors, resolve_objective_outcome,
 };
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::{
@@ -91,53 +94,74 @@ fn validate_active_participant_bookings(
         }
     }
     for (participant, operations) in by_participant {
-        for (index, first) in operations.iter().enumerate() {
-            for second in &operations[index + 1..] {
-                let Some((first_start, first_end)) =
-                    resolve_operation_booking_window(registry, first, state.now())
-                else {
-                    continue;
-                };
-                let Some((second_start, second_end)) =
-                    resolve_operation_booking_window(registry, second, state.now())
-                else {
-                    continue;
-                };
-                if !(first_start < second_end && second_start < first_end) {
-                    continue;
-                }
-                // A live operation may legitimately grow into a later authorized booking when
-                // its begin was delayed or a decision pause extended it. Canonical admission
-                // preserves the older reservation and leaves the later operation queued. Prove
-                // that the pair was disjoint when the later authorization happened instead of
-                // trusting status alone; two authorized records never get this exception because
-                // their projected windows are immutable.
-                let dynamic_overlap =
-                    matches!(
-                        (first.status(), second.status()),
-                        (OperationStatus::InProgress, OperationStatus::Authorized)
-                            | (OperationStatus::Authorized, OperationStatus::InProgress)
-                            | (
-                                OperationStatus::AwaitingDecision,
-                                OperationStatus::Authorized
-                            )
-                            | (
-                                OperationStatus::Authorized,
-                                OperationStatus::AwaitingDecision
-                            )
-                    ) && bookings_were_disjoint_at_later_authorization(registry, first, second);
-                if dynamic_overlap {
-                    continue;
-                }
-                return Err(StateValidationError::ActiveOperationParticipantOverlap {
-                    participant,
-                    first: first.id(),
-                    second: second.id(),
-                });
-            }
+        if let Some((first, second)) =
+            find_conflicting_participant_booking_pair(registry, state, &operations)
+        {
+            return Err(StateValidationError::ActiveOperationParticipantOverlap {
+                participant,
+                first: first.id(),
+                second: second.id(),
+            });
         }
     }
     Ok(())
+}
+
+fn find_conflicting_participant_booking_pair<'a>(
+    registry: &Registry,
+    state: &AppState,
+    operations: &[&'a OperationRecord],
+) -> Option<(&'a OperationRecord, &'a OperationRecord)> {
+    operations
+        .iter()
+        .enumerate()
+        .flat_map(|(index, first)| {
+            operations[index + 1..]
+                .iter()
+                .map(move |second| (*first, *second))
+        })
+        .find(|(first, second)| active_booking_pair_conflicts(registry, state, first, second))
+}
+
+fn active_booking_pair_conflicts(
+    registry: &Registry,
+    state: &AppState,
+    first: &OperationRecord,
+    second: &OperationRecord,
+) -> bool {
+    let Some((first_start, first_end)) =
+        resolve_operation_booking_window(registry, first, state.now())
+    else {
+        return false;
+    };
+    let Some((second_start, second_end)) =
+        resolve_operation_booking_window(registry, second, state.now())
+    else {
+        return false;
+    };
+    if !(first_start < second_end && second_start < first_end) {
+        return false;
+    }
+    // A live operation may legitimately grow into a later authorized booking when its begin was
+    // delayed or a decision pause extended it. Canonical admission preserves the older
+    // reservation and leaves the later operation queued. Prove that the pair was disjoint when
+    // the later authorization happened instead of trusting status alone; two authorized records
+    // never get this exception because their projected windows are immutable.
+    let dynamic_overlap =
+        matches!(
+            (first.status(), second.status()),
+            (OperationStatus::InProgress, OperationStatus::Authorized)
+                | (OperationStatus::Authorized, OperationStatus::InProgress)
+                | (
+                    OperationStatus::AwaitingDecision,
+                    OperationStatus::Authorized
+                )
+                | (
+                    OperationStatus::Authorized,
+                    OperationStatus::AwaitingDecision
+                )
+        ) && bookings_were_disjoint_at_later_authorization(registry, first, second);
+    !dynamic_overlap
 }
 
 fn bookings_were_disjoint_at_later_authorization(
@@ -177,6 +201,7 @@ fn validate_operation_against_registry(
     };
     let police_response_arrived =
         validate_authored_operation_resolution(registry, state, operation, execution, resolution)?;
+    validate_authored_after_action_summary(registry, state, operation, resolution)?;
     validate_authored_property_disposition(registry, state, operation, resolution)?;
     validate_authored_operation_exposure(
         state,
@@ -185,6 +210,39 @@ fn validate_operation_against_registry(
         resolution,
         police_response_arrived,
     )
+}
+
+fn validate_authored_after_action_summary(
+    registry: &Registry,
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+) -> Result<(), StateValidationError> {
+    let expected = render_persisted_after_action_summary(registry, state, operation, resolution)
+        .ok_or(StateValidationError::InvalidOperationAfterAction {
+            operation: operation.id(),
+        })?;
+    let information = state
+        .intelligence
+        .get_information(resolution.after_action_information())
+        .ok_or(StateValidationError::InvalidOperationAfterAction {
+            operation: operation.id(),
+        })?;
+    let report = state
+        .reports
+        .get_report(resolution.after_action_report())
+        .ok_or(StateValidationError::InvalidOperationAfterActionReport {
+            operation: operation.id(),
+        })?;
+    if information.summary() != expected
+        || report.entries().len() != 1
+        || report.entries()[0].summary != expected
+    {
+        return Err(StateValidationError::InvalidOperationAfterAction {
+            operation: operation.id(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_authored_operation_plan(
@@ -451,13 +509,39 @@ fn validate_resolution_objective_context(
     resolution: &crate::operations::OperationResolutionRecord,
     base_expected_outcome: OperationObjectiveOutcome,
 ) -> Result<(), StateValidationError> {
-    let invalid = || invalid_operation_definition(operation);
     // Business ownership has append-only history, but different domains share minute-level
     // timestamps. An ownership transfer and an operation resolution with the same `SimTime` have
     // no persisted cross-domain ordering, so distinguish ownership that was possible at some
     // point during that timestamp from ownership that was true for every possible placement of
     // the resolution among the same-minute transfers.
-    let sponsor_ownership_evidence = match operation.objective() {
+    let sponsor_ownership_evidence =
+        resolution_sponsor_ownership_evidence(state, operation, resolution);
+    if base_expected_outcome != OperationObjectiveOutcome::Failed
+        && ownership_mismatch_blocker_is_required(operation, sponsor_ownership_evidence)
+        && resolution.objective_blocker()
+            != Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch)
+    {
+        return Err(invalid_operation_definition(operation));
+    }
+    validate_resolution_objective_blocker(
+        state,
+        operation,
+        resolution,
+        base_expected_outcome,
+        sponsor_ownership_evidence,
+    )?;
+    validate_resolution_extraction_reference(state, operation, resolution)?;
+    Ok(())
+}
+
+type BusinessOwnershipEvidence = (bool, bool);
+
+fn resolution_sponsor_ownership_evidence(
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+) -> Option<BusinessOwnershipEvidence> {
+    let business = match operation.objective() {
         OperationObjective::AcquireProperty {
             target: EntityRef::Business(business),
         }
@@ -466,107 +550,137 @@ fn validate_resolution_objective_context(
         }
         | OperationObjective::DisruptBusiness {
             target: EntityRef::Business(business),
-        } => Some(state.world.business_owner_evidence_at(
-            *business,
-            crate::world::BusinessOwner::Organization(operation.responsible_organization()),
-            resolution.resolved_at(),
-        )),
+        } => *business,
         OperationObjective::AcquireProperty { .. }
         | OperationObjective::ObtainCash { .. }
         | OperationObjective::Frighten { .. }
         | OperationObjective::GatherInformation { .. }
         | OperationObjective::FreeDetainee { .. }
-        | OperationObjective::DisruptBusiness { .. } => None,
+        | OperationObjective::DisruptBusiness { .. } => return None,
     };
-    if base_expected_outcome != OperationObjectiveOutcome::Failed
-        && sponsor_ownership_evidence.is_some_and(|(could_be_owned, definitely_owned)| {
-            match operation
-                .kind()
-                .business_target_ownership()
-                .expect("persisted business-target operation kind must define ownership semantics")
-            {
-                OperationBusinessTargetOwnership::Foreign => definitely_owned,
-                OperationBusinessTargetOwnership::SponsorOwned => !could_be_owned,
-            }
-        })
-        && resolution.objective_blocker()
-            != Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch)
-    {
-        return Err(invalid());
-    }
-    if let Some(blocker) = resolution.objective_blocker() {
-        if base_expected_outcome == OperationObjectiveOutcome::Failed
-            || !blocker_matches_objective(operation, blocker)
-        {
-            return Err(invalid());
-        }
-        match blocker {
-            OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
-                let possible_mismatch = sponsor_ownership_evidence.is_some_and(
-                    |(could_be_owned, definitely_owned)| {
-                        match operation.kind().business_target_ownership().expect(
-                            "persisted business-target operation kind must define ownership semantics",
-                        ) {
-                            OperationBusinessTargetOwnership::Foreign => could_be_owned,
-                            OperationBusinessTargetOwnership::SponsorOwned => !definitely_owned,
-                        }
-                    },
-                );
-                if !possible_mismatch {
-                    return Err(invalid());
-                }
-            }
-            OperationObjectiveBlocker::ExtractionCustodyEnded => {
-                let OperationObjective::FreeDetainee { target } = operation.objective() else {
-                    return Err(invalid());
-                };
-                let arrest = operation
-                    .extraction_arrest()
-                    .and_then(|id| state.legal.get_arrest(id))
-                    .ok_or_else(invalid)?;
-                if arrest.character() != *target
-                    || resolution.extraction_arrest().is_some()
-                    || arrest
-                        .released_at()
-                        .is_none_or(|released_at| released_at > resolution.resolved_at())
-                {
-                    return Err(invalid());
-                }
-            }
-            // Business operating status and witness cooperation/case activity are mutable domains
-            // without complete historical timelines. Their blocker is the persisted validated
-            // resolution snapshot; objective compatibility above is the release-safe proof.
-            OperationObjectiveBlocker::TargetEconomyInactive
-            | OperationObjectiveBlocker::NoPressureableWitnessCase => {}
-        }
-    }
+    Some(state.world.business_owner_evidence_at(
+        business,
+        crate::world::BusinessOwner::Organization(operation.responsible_organization()),
+        resolution.resolved_at(),
+    ))
+}
 
-    match operation.objective() {
-        OperationObjective::FreeDetainee { target } => {
-            if let Some(arrest_id) = resolution.extraction_arrest() {
-                if operation.extraction_arrest() != Some(arrest_id) {
-                    return Err(invalid());
-                }
-                let arrest = state.legal.get_arrest(arrest_id).ok_or_else(invalid)?;
-                if arrest.character() != *target
-                    || arrest.arrested_at() > resolution.resolved_at()
-                    || arrest
-                        .released_at()
-                        .is_some_and(|released_at| released_at < resolution.resolved_at())
-                {
-                    return Err(invalid());
-                }
+fn ownership_mismatch_blocker_is_required(
+    operation: &OperationRecord,
+    evidence: Option<BusinessOwnershipEvidence>,
+) -> bool {
+    evidence.is_some_and(|(could_be_owned, definitely_owned)| {
+        match operation
+            .kind()
+            .business_target_ownership()
+            .expect("persisted business-target operation kind must define ownership semantics")
+        {
+            OperationBusinessTargetOwnership::Foreign => definitely_owned,
+            OperationBusinessTargetOwnership::SponsorOwned => !could_be_owned,
+        }
+    })
+}
+
+fn ownership_mismatch_blocker_is_possible(
+    operation: &OperationRecord,
+    evidence: Option<BusinessOwnershipEvidence>,
+) -> bool {
+    evidence.is_some_and(|(could_be_owned, definitely_owned)| {
+        match operation
+            .kind()
+            .business_target_ownership()
+            .expect("persisted business-target operation kind must define ownership semantics")
+        {
+            OperationBusinessTargetOwnership::Foreign => could_be_owned,
+            OperationBusinessTargetOwnership::SponsorOwned => !definitely_owned,
+        }
+    })
+}
+
+fn validate_resolution_objective_blocker(
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+    base_expected_outcome: OperationObjectiveOutcome,
+    sponsor_ownership_evidence: Option<BusinessOwnershipEvidence>,
+) -> Result<(), StateValidationError> {
+    let Some(blocker) = resolution.objective_blocker() else {
+        return Ok(());
+    };
+    if base_expected_outcome == OperationObjectiveOutcome::Failed
+        || !blocker_matches_objective(operation, blocker)
+    {
+        return Err(invalid_operation_definition(operation));
+    }
+    match blocker {
+        OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
+            if !ownership_mismatch_blocker_is_possible(operation, sponsor_ownership_evidence) {
+                return Err(invalid_operation_definition(operation));
             }
         }
-        OperationObjective::AcquireProperty { .. }
-        | OperationObjective::ObtainCash { .. }
-        | OperationObjective::Frighten { .. }
-        | OperationObjective::GatherInformation { .. }
-        | OperationObjective::DisruptBusiness { .. } => {
-            if resolution.extraction_arrest().is_some() {
-                return Err(invalid());
-            }
+        OperationObjectiveBlocker::ExtractionCustodyEnded => {
+            validate_extraction_custody_ended_blocker(state, operation, resolution)?;
         }
+        // Business operating status and witness cooperation/case activity are mutable domains
+        // without complete historical timelines. Their blocker is the persisted validated
+        // resolution snapshot; objective compatibility above is the release-safe proof.
+        OperationObjectiveBlocker::TargetEconomyInactive
+        | OperationObjectiveBlocker::NoPressureableWitnessCase => {}
+    }
+    Ok(())
+}
+
+fn validate_extraction_custody_ended_blocker(
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+) -> Result<(), StateValidationError> {
+    let OperationObjective::FreeDetainee { target } = operation.objective() else {
+        return Err(invalid_operation_definition(operation));
+    };
+    let arrest = operation
+        .extraction_arrest()
+        .and_then(|id| state.legal.get_arrest(id))
+        .ok_or_else(|| invalid_operation_definition(operation))?;
+    if arrest.character() != *target
+        || resolution.extraction_arrest().is_some()
+        || arrest
+            .released_at()
+            .is_none_or(|released_at| released_at > resolution.resolved_at())
+    {
+        return Err(invalid_operation_definition(operation));
+    }
+    Ok(())
+}
+
+fn validate_resolution_extraction_reference(
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+) -> Result<(), StateValidationError> {
+    let OperationObjective::FreeDetainee { target } = operation.objective() else {
+        if resolution.extraction_arrest().is_some() {
+            return Err(invalid_operation_definition(operation));
+        }
+        return Ok(());
+    };
+    let Some(arrest_id) = resolution.extraction_arrest() else {
+        return Ok(());
+    };
+    if operation.extraction_arrest() != Some(arrest_id) {
+        return Err(invalid_operation_definition(operation));
+    }
+    let arrest = state
+        .legal
+        .get_arrest(arrest_id)
+        .ok_or_else(|| invalid_operation_definition(operation))?;
+    if arrest.character() != *target
+        || arrest.arrested_at() > resolution.resolved_at()
+        || arrest
+            .released_at()
+            .is_some_and(|released_at| released_at < resolution.resolved_at())
+    {
+        return Err(invalid_operation_definition(operation));
     }
     Ok(())
 }
@@ -683,10 +797,7 @@ struct OperationInvariantContext {
     discovered_information: BTreeSet<InformationId>,
     after_action_reports: BTreeSet<crate::core::id::ReportId>,
     history_events: BTreeSet<crate::core::id::HistoryEventId>,
-    disposition_transactions: BTreeSet<crate::core::id::LedgerTransactionId>,
-    disposition_information: BTreeSet<InformationId>,
-    disposition_reports: BTreeSet<crate::core::id::ReportId>,
-    text: String,
+    dispositions: dispositions::DispositionInvariantContext,
     surveillance_signatures: BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)>,
 }
 
@@ -1043,21 +1154,16 @@ fn validate_completed_operation(
         state,
         operation,
         resolution,
-        &mut context.disposition_transactions,
-        &mut context.disposition_information,
-        &mut context.disposition_reports,
-        &mut context.text,
+        &mut context.dispositions,
     )?;
     dispositions::validate_operation_property_disposition(
         state,
         operation,
         resolution,
-        &mut context.disposition_transactions,
-        &mut context.disposition_information,
-        &mut context.disposition_reports,
-        &mut context.text,
+        &mut context.dispositions,
     )?;
     validate_completion_after_action(state, operation, resolution, context)?;
+    validate_participant_after_action_information(state, operation, resolution)?;
     validate_completion_history(state, operation, resolution, context)?;
     validate_operation_discoveries(
         state,
@@ -1067,6 +1173,42 @@ fn validate_completed_operation(
         &mut context.surveillance_signatures,
     )?;
     validate_operation_exposure_links(state, operation, resolution)
+}
+
+fn validate_participant_after_action_information(
+    state: &AppState,
+    operation: &OperationRecord,
+    resolution: &crate::operations::OperationResolutionRecord,
+) -> Result<(), StateValidationError> {
+    let expected_summary =
+        participant_after_action_summary(operation, resolution.objective_outcome());
+    for participant in operation.participants() {
+        let matches = state
+            .intelligence
+            .information_for_holder_subject(
+                KnowledgeHolder::Character(participant),
+                EntityRef::Operation(operation.id()),
+            )
+            .filter(|information| {
+                information.source_kind() == InformationSourceKind::AfterAction
+                    && information.topic() == InformationTopic::OperationalOutcome
+                    && information.source_entity() == Some(EntityRef::Character(operation.leader()))
+                    && information.observed_at() == resolution.resolved_at()
+                    && information.recorded_at() == resolution.resolved_at()
+                    && information.reliability() == Reliability::DirectAccess
+                    && information.specificity() == Specificity::Precise
+                    && information.signal().is_none()
+                    && information.derived_from().is_empty()
+                    && information.summary() == expected_summary
+            })
+            .count();
+        if matches != 1 {
+            return Err(StateValidationError::InvalidOperationAfterAction {
+                operation: operation.id(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_operation_proceeds(
@@ -1110,6 +1252,11 @@ fn validate_completion_after_action(
     resolution: &crate::operations::OperationResolutionRecord,
     context: &mut OperationInvariantContext,
 ) -> Result<(), StateValidationError> {
+    let expected_entities = resolve_completion_history_entities(
+        state,
+        operation,
+        resolution.factors().police_response_arrived(),
+    );
     let information = state
         .intelligence
         .get_information(resolution.after_action_information())
@@ -1126,6 +1273,11 @@ fn validate_completion_after_action(
         || information.source_entity() != Some(EntityRef::Character(operation.leader()))
         || information.subject() != EntityRef::Operation(operation.id())
         || information.observed_at() != resolution.resolved_at()
+        || information.recorded_at() != resolution.resolved_at()
+        || information.reliability() != Reliability::DirectAccess
+        || information.specificity() != Specificity::Precise
+        || information.signal().is_some()
+        || !information.derived_from().is_empty()
     {
         return Err(StateValidationError::InvalidOperationAfterAction {
             operation: operation.id(),
@@ -1149,15 +1301,7 @@ fn validate_completion_after_action(
                 && entry.summary == information.summary()
                 && entry.sources.is_empty()
                 && entry.decision.is_none()
-                && entry
-                    .entities
-                    .contains(&EntityRef::Operation(operation.id()))
-                && entry.entities.contains(&EntityRef::Organization(
-                    operation.responsible_organization(),
-                ))
-                && entry
-                    .entities
-                    .contains(&EntityRef::Character(operation.leader()))
+                && entry.entities == expected_entities
         })
     {
         return Err(StateValidationError::InvalidOperationAfterActionReport {
@@ -1173,6 +1317,12 @@ fn validate_completion_history(
     resolution: &crate::operations::OperationResolutionRecord,
     context: &mut OperationInvariantContext,
 ) -> Result<(), StateValidationError> {
+    let expected_entities = resolve_completion_history_entities(
+        state,
+        operation,
+        resolution.factors().police_response_arrived(),
+    );
+    let expected_summary = completion_history_summary(operation, resolution.objective_outcome());
     let valid = state
         .history
         .get_event(resolution.history_event())
@@ -1180,15 +1330,8 @@ fn validate_completion_history(
             context.history_events.insert(event.id())
                 && event.kind() == HistoryEventKind::Operation
                 && event.occurred_at() == resolution.resolved_at()
-                && event
-                    .entities()
-                    .contains(&EntityRef::Operation(operation.id()))
-                && event.entities().contains(&EntityRef::Organization(
-                    operation.responsible_organization(),
-                ))
-                && event
-                    .entities()
-                    .contains(&EntityRef::Character(operation.leader()))
+                && event.summary() == expected_summary
+                && event.entities() == &expected_entities
         });
     if !valid {
         return Err(StateValidationError::InvalidOperationHistory {

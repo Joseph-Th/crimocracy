@@ -269,9 +269,7 @@ fn due_operation_aborts_before_start_when_objective_became_unavailable() {
             OperationObjectiveBlocker::TargetBusinessOwnershipMismatch,
         )
     );
-    let artifacts = abort
-        .artifacts()
-        .expect("objective-loss cancellation should be visible to leadership");
+    let artifacts = abort.artifacts();
     assert!(
         state
             .intelligence()
@@ -1334,9 +1332,7 @@ fn pre_start_cancellation_records_cause_with_stand_down_artifacts() {
     assert_eq!(abort.aborted_at(), SimTime::ZERO);
     assert_eq!(abort.phase(), OperationAbortPhase::BeforeStart);
     assert_eq!(abort.cause(), OperationAbortCause::AuthorityOrder);
-    let artifacts = abort
-        .artifacts()
-        .expect("pre-start cancellation should persist stand-down artifacts");
+    let artifacts = abort.artifacts();
     let information = state
         .intelligence()
         .get_information(artifacts.information())
@@ -1381,14 +1377,11 @@ fn detention_abort_without_live_custody_rejects_at_commit() {
 #[test]
 fn live_operation_keeps_its_deadline_minute_while_authorized_work_misses_it() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
-    let duration = u32::try_from(
-        registry
-            .get_operation(OperationKind::Intimidation)
-            .execution()
-            .duration()
-            .as_minutes(),
-    )
-    .expect("authored intimidation duration must fit SimDuration");
+    let duration = registry
+        .get_operation(OperationKind::Intimidation)
+        .execution()
+        .duration()
+        .as_minutes();
     // Begin on minute 1 with a deadline exactly at the natural resolution minute.
     let deadline = SimTime::from_minutes(u64::from(1 + duration));
     let mut draft = make_test_draft(organization, leader, target);
@@ -1486,9 +1479,7 @@ fn in_progress_authority_abort_records_causal_artifacts_and_survives_save_round_
     assert_eq!(abort.phase(), OperationAbortPhase::InProgress);
     assert_eq!(abort.cause(), OperationAbortCause::AuthorityOrder);
     assert!(record.resolution().is_none());
-    let artifacts = abort
-        .artifacts()
-        .expect("started abort should produce after-action artifacts");
+    let artifacts = abort.artifacts();
     let information = state
         .intelligence()
         .get_information(artifacts.information())
@@ -1707,9 +1698,7 @@ fn missed_completion_deadline_aborts_before_start_with_visible_provenance() {
         .expect("deadline miss should persist an abort record");
     assert_eq!(abort.phase(), OperationAbortPhase::BeforeStart);
     assert_eq!(abort.cause(), OperationAbortCause::DeadlineMissed);
-    let artifacts = abort
-        .artifacts()
-        .expect("deadline miss should produce visible provenance");
+    let artifacts = abort.artifacts();
     let information = state
         .intelligence()
         .get_information(artifacts.information())
@@ -1774,7 +1763,7 @@ fn in_progress_operation_aborts_when_its_deadline_passes_without_resolution() {
     );
     let artifacts = record
         .abort_record()
-        .and_then(|abort| abort.artifacts())
+        .map(|abort| abort.artifacts())
         .expect("an in-progress deadline miss should be visible");
     assert!(
         state

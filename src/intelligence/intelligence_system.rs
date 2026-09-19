@@ -1,7 +1,9 @@
 //! Knowledge validation and recording; sibling intelligence state never infers hidden truth for callers.
 
 use crate::core::entity::{EntityRef, is_entity_present};
-use crate::core::id::{ArrestId, CharacterId, IdExhaustionError, InformationId, OrganizationId};
+use crate::core::id::{
+    ArrestId, CharacterId, IdExhaustionError, IdKind, InformationId, OrganizationId,
+};
 use crate::core::state::AppState;
 use crate::intelligence::{
     InformationDraft, InformationRecord, InformationSignal, InformationSourceKind,
@@ -143,7 +145,34 @@ pub struct ValidatedInformation {
     derived_from: BTreeSet<InformationId>,
 }
 
+/// Read-only identity/ownership projection for an information record that a validated composite
+/// operation will commit before a dependent artifact. The information owner derives both fields
+/// from its validated token so downstream systems never invent knowledge ownership for a future
+/// record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PlannedInformationSource {
+    id: InformationId,
+    holder: KnowledgeHolder,
+}
+
+impl PlannedInformationSource {
+    pub(crate) fn id(self) -> InformationId {
+        self.id
+    }
+
+    pub(crate) fn holder(self) -> KnowledgeHolder {
+        self.holder
+    }
+}
+
 impl ValidatedInformation {
+    pub(crate) fn planned_source(&self, state: &AppState) -> PlannedInformationSource {
+        PlannedInformationSource {
+            id: InformationId::from_raw(state.ids.next_raw(IdKind::Information)),
+            holder: self.draft.holder,
+        }
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<InformationId, IntelligenceError> {
         let InformationDraft {
             holder,

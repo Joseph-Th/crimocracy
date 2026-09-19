@@ -11,9 +11,10 @@ use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::recruitment::artifacts::{
-    recruitment_defection_history_summary, recruitment_join_history_summary,
-    recruitment_member_report_entities, recruitment_member_report_summary,
-    recruitment_member_report_title, recruitment_outcome_summary,
+    recruitment_defection_history_summary, recruitment_history_entities,
+    recruitment_join_history_summary, recruitment_member_report_entities,
+    recruitment_member_report_summary, recruitment_member_report_title,
+    recruitment_outcome_summary,
 };
 use crate::recruitment::recruitment_system::RecruitmentFactorContext;
 use crate::recruitment::scoring::{
@@ -411,24 +412,16 @@ fn validate_accepted_outcome(
             refs.recruiter.name(),
         )
     };
+    let expected_entities = recruitment_history_entities(
+        attempt.candidate(),
+        attempt.recruiter(),
+        attempt.target_organization(),
+        attempt.previous_organization().is_some(),
+    );
     if history.kind() != HistoryEventKind::Recruitment
         || history.occurred_at() != attempt.occurred_at()
         || history.summary() != expected_summary
-        || !history
-            .entities()
-            .contains(&EntityRef::Character(attempt.candidate()))
-        || (attempt.previous_organization().is_none()
-            && !history
-                .entities()
-                .contains(&EntityRef::Character(attempt.recruiter())))
-        || (attempt.previous_organization().is_some()
-            && history
-                .entities()
-                .contains(&EntityRef::Character(attempt.recruiter())))
-        || history
-            .entities()
-            .contains(&EntityRef::Organization(attempt.target_organization()))
-            == attempt.previous_organization().is_some()
+        || history.entities() != &expected_entities
         || (refs.candidate.version() == attempt.resulting_candidate_version()
             && (refs.candidate.organization() != Some(attempt.target_organization())
                 || refs.candidate.supervisor() != Some(attempt.recruiter())))

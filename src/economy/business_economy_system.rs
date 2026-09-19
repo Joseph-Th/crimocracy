@@ -19,12 +19,12 @@ use crate::core::version::{
     VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
 };
 use crate::economy::{
-    BusinessCycleRecord, BusinessEconomyDraft, BusinessOperatingStatus,
+    BusinessCycleRecord, BusinessEconomyDraft, BusinessOperatingStatus, OperatingCapitalFloor,
     build_business_economy_record,
 };
 use crate::finance::finance_system::{
     FinanceError, ValidatedFinancialAccountOpenings, ValidatedLedgerTransaction,
-    validate_record_transaction,
+    validate_record_business_transaction,
 };
 use crate::finance::{
     AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
@@ -98,6 +98,14 @@ pub enum BusinessEconomyError {
         found: u32,
     },
     #[error(
+        "business operating account {account} changed after capital validation; expected version {expected}, found {found}"
+    )]
+    StaleOperatingAccount {
+        account: FinancialAccountId,
+        expected: u32,
+        found: u32,
+    },
+    #[error(
         "business cycle plan was resolved at {expected:?}, but simulation time is now {found:?}"
     )]
     StaleCycleTime { expected: SimTime, found: SimTime },
@@ -122,11 +130,26 @@ pub enum BusinessEconomyError {
 pub struct ValidatedBusinessEconomyEstablishment {
     draft: BusinessEconomyDraft,
     cycle_duration: SimDuration,
+    capital_floor: OperatingCapitalSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OperatingCapitalSnapshot {
+    amount: Money,
+    account_version: u32,
+    business_version: u32,
 }
 
 impl ValidatedBusinessEconomyEstablishment {
     pub fn commit(self, state: &mut AppState) -> Result<BusinessId, BusinessEconomyError> {
-        validate_business(state, self.draft.business)?;
+        let business_record = validate_business(state, self.draft.business)?;
+        if business_record.version() != self.capital_floor.business_version {
+            return Err(BusinessEconomyError::StaleBusiness {
+                business: self.draft.business,
+                expected: self.capital_floor.business_version,
+                found: business_record.version(),
+            });
+        }
         if state
             .economy
             .get_business_economy(self.draft.business)
@@ -143,6 +166,17 @@ impl ValidatedBusinessEconomyEstablishment {
             self.draft.settlement_account,
             None,
         )?;
+        let operating = state
+            .finance
+            .get_account(self.draft.operating_account)
+            .expect("validated operating account must still exist");
+        if operating.version() != self.capital_floor.account_version {
+            return Err(BusinessEconomyError::StaleOperatingAccount {
+                account: self.draft.operating_account,
+                expected: self.capital_floor.account_version,
+                found: operating.version(),
+            });
+        }
         let business = self.draft.business;
         let established_at = state.now();
         let next_cycle_at = established_at
@@ -152,6 +186,12 @@ impl ValidatedBusinessEconomyEstablishment {
             self.draft,
             established_at,
             next_cycle_at,
+            OperatingCapitalFloor {
+                amount: self.capital_floor.amount,
+                account_version: self.capital_floor.account_version,
+                business_version: self.capital_floor.business_version,
+                set_at: established_at,
+            },
         ));
         Ok(business)
     }
@@ -180,9 +220,12 @@ pub fn validate_establish_business_economy(
         .now()
         .checked_add(cycle_duration)
         .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+    let capital_floor =
+        resolve_operating_capital_snapshot(state, business, draft.operating_account)?;
     Ok(ValidatedBusinessEconomyEstablishment {
         draft,
         cycle_duration,
+        capital_floor,
     })
 }
 
@@ -192,6 +235,7 @@ pub fn validate_establish_business_economy(
 pub(crate) struct ValidatedComposedBusinessEconomyEstablishment {
     draft: BusinessEconomyDraft,
     cycle_duration: SimDuration,
+    resulting_business_version: u32,
 }
 
 impl ValidatedComposedBusinessEconomyEstablishment {
@@ -221,6 +265,18 @@ impl ValidatedComposedBusinessEconomyEstablishment {
             .is_ok(),
             "prevalidated composed economy accounts must match the opened plan"
         );
+        let business_version = state
+            .world
+            .get_business(self.draft.business)
+            .expect("prevalidated composed economy must retain its business")
+            .version();
+        debug_assert_eq!(business_version, self.resulting_business_version);
+        let operating_version = state
+            .finance
+            .get_account(self.draft.operating_account)
+            .expect("prevalidated composed operating account must be open")
+            .version();
+        debug_assert_eq!(operating_version, 1);
         let business = self.draft.business;
         let established_at = state.now();
         let next_cycle_at = established_at
@@ -230,6 +286,12 @@ impl ValidatedComposedBusinessEconomyEstablishment {
             self.draft,
             established_at,
             next_cycle_at,
+            OperatingCapitalFloor {
+                amount: Money::ZERO,
+                account_version: 1,
+                business_version: self.resulting_business_version,
+                set_at: established_at,
+            },
         ));
         business
     }
@@ -241,7 +303,7 @@ pub(crate) fn validate_composed_business_economy_establishment(
     cycle_duration: SimDuration,
     openings: &ValidatedFinancialAccountOpenings,
 ) -> Result<ValidatedComposedBusinessEconomyEstablishment, BusinessEconomyError> {
-    validate_business(state, draft.business)?;
+    let business = validate_business(state, draft.business)?;
     if state.economy.get_business_economy(draft.business).is_some() {
         return Err(BusinessEconomyError::ExistingBusinessEconomy(
             draft.business,
@@ -270,9 +332,30 @@ pub(crate) fn validate_composed_business_economy_establishment(
         .now()
         .checked_add(cycle_duration)
         .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+    ensure_version_can_advance(business.version(), "business")?;
     Ok(ValidatedComposedBusinessEconomyEstablishment {
         draft,
         cycle_duration,
+        resulting_business_version: business
+            .version()
+            .checked_add(1)
+            .expect("business version capacity was preflighted"),
+    })
+}
+
+fn resolve_operating_capital_snapshot(
+    state: &AppState,
+    business: &crate::world::BusinessRecord,
+    operating_account: FinancialAccountId,
+) -> Result<OperatingCapitalSnapshot, BusinessEconomyError> {
+    let operating = state
+        .finance
+        .get_account(operating_account)
+        .ok_or(BusinessEconomyError::MissingAccount(operating_account))?;
+    Ok(OperatingCapitalSnapshot {
+        amount: operating.spendable_balance(),
+        account_version: operating.version(),
+        business_version: business.version(),
     })
 }
 
@@ -541,6 +624,7 @@ impl ValidatedBusinessCycle {
                 None,
                 None,
                 false,
+                None,
             );
         }
         Ok(cycle)
@@ -609,7 +693,7 @@ pub fn validate_business_cycle_plan(
         .ok_or(BusinessEconomyError::ArithmeticOverflow(
             plan.snapshot.business,
         ))?;
-        Some(validate_record_transaction(
+        Some(validate_record_business_transaction(
             state,
             LedgerTransactionDraft {
                 occurred_at: plan.snapshot.occurred_at,
@@ -1060,6 +1144,22 @@ pub enum BusinessProfitSweepError {
         available_cents: i64,
         requested_cents: i64,
     },
+    #[error(
+        "business {business} retained-capital basis belongs to ownership version {basis_version}, but current ownership is version {current_version}"
+    )]
+    StaleCapitalBasis {
+        business: BusinessId,
+        basis_version: u32,
+        current_version: u32,
+    },
+    #[error(
+        "business {business} has only {available_cents} cents of earned surplus above retained capital and cannot sweep {requested_cents}"
+    )]
+    InsufficientEarnedSurplus {
+        business: BusinessId,
+        available_cents: i64,
+        requested_cents: i64,
+    },
     #[error("business {business} ownership changed after sweep validation")]
     StaleBusiness {
         business: BusinessId,
@@ -1141,6 +1241,60 @@ pub fn validate_sweep_business_profits(
     if draft.amount <= Money::ZERO {
         return Err(BusinessProfitSweepError::NonPositiveAmount);
     }
+    let context = resolve_business_profit_sweep_context(state, &draft)?;
+    validate_business_profit_sweep_destination(state, &draft)?;
+    validate_business_profit_sweep_capacity(
+        &draft,
+        context.operating_balance,
+        context.capital_floor,
+    )?;
+    let transaction = validate_record_business_transaction(
+        state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: format!(
+                "Owner withdrawal of {} from {} till",
+                format_money_cents(draft.amount.cents()),
+                context.business_name,
+            ),
+            postings: vec![
+                LedgerPosting {
+                    account: context.operating_account,
+                    amount: draft
+                        .amount
+                        .checked_neg()
+                        .expect("positive sweep amount must negate"),
+                },
+                LedgerPosting {
+                    account: draft.destination,
+                    amount: draft.amount,
+                },
+            ],
+            authorization: None,
+        },
+    )?;
+    Ok(ValidatedBusinessProfitSweep {
+        transaction,
+        business: draft.business,
+        organization: draft.organization,
+        expected_business_version: context.business_version,
+        expected_economy_version: context.economy_version,
+    })
+}
+
+struct BusinessProfitSweepContext {
+    operating_account: FinancialAccountId,
+    operating_balance: Money,
+    capital_floor: Money,
+    business_name: String,
+    business_version: u32,
+    economy_version: u32,
+}
+
+fn resolve_business_profit_sweep_context(
+    state: &AppState,
+    draft: &BusinessProfitSweepDraft,
+) -> Result<BusinessProfitSweepContext, BusinessProfitSweepError> {
     if state.world.get_organization(draft.organization).is_none() {
         return Err(BusinessProfitSweepError::MissingOrganization(
             draft.organization,
@@ -1173,6 +1327,27 @@ pub fn validate_sweep_business_profits(
             account: economy.operating_account(),
         });
     }
+    if economy.capital_floor_business_version() != business_record.version() {
+        return Err(BusinessProfitSweepError::StaleCapitalBasis {
+            business: draft.business,
+            basis_version: economy.capital_floor_business_version(),
+            current_version: business_record.version(),
+        });
+    }
+    Ok(BusinessProfitSweepContext {
+        operating_account: economy.operating_account(),
+        operating_balance: operating.spendable_balance(),
+        capital_floor: economy.operating_capital_floor(),
+        business_name: business_record.name().to_owned(),
+        business_version: business_record.version(),
+        economy_version: economy.version(),
+    })
+}
+
+fn validate_business_profit_sweep_destination(
+    state: &AppState,
+    draft: &BusinessProfitSweepDraft,
+) -> Result<(), BusinessProfitSweepError> {
     let destination = state.finance.get_account(draft.destination).ok_or(
         BusinessProfitSweepError::MissingDestinationAccount(draft.destination),
     )?;
@@ -1187,48 +1362,39 @@ pub fn validate_sweep_business_profits(
             draft.destination,
         ));
     }
+    Ok(())
+}
+
+fn validate_business_profit_sweep_capacity(
+    draft: &BusinessProfitSweepDraft,
+    operating_balance: Money,
+    capital_floor: Money,
+) -> Result<(), BusinessProfitSweepError> {
     // The sweep spends real till liquidity: unlike cycle settlement (which books an
     // obligation when costs exceed cash), an owner cannot withdraw cash the till never held.
-    if operating.spendable_balance() < draft.amount {
+    if operating_balance < draft.amount {
         return Err(BusinessProfitSweepError::InsufficientTillCash {
             business: draft.business,
-            available_cents: operating.spendable_balance().cents(),
+            available_cents: operating_balance.cents(),
             requested_cents: draft.amount.cents(),
         });
     }
-    let business_name = business_record.name().to_owned();
-    let transaction = validate_record_transaction(
-        state,
-        LedgerTransactionDraft {
-            occurred_at: state.now(),
-            memo: format!(
-                "Owner withdrawal of {} from {} till",
-                format_money_cents(draft.amount.cents()),
-                business_name,
-            ),
-            postings: vec![
-                LedgerPosting {
-                    account: economy.operating_account(),
-                    amount: draft
-                        .amount
-                        .checked_neg()
-                        .expect("positive sweep amount must negate"),
-                },
-                LedgerPosting {
-                    account: draft.destination,
-                    amount: draft.amount,
-                },
-            ],
-            authorization: None,
-        },
-    )?;
-    Ok(ValidatedBusinessProfitSweep {
-        transaction,
-        business: draft.business,
-        organization: draft.organization,
-        expected_business_version: business_record.version(),
-        expected_economy_version: economy.version(),
-    })
+    let available_surplus = operating_balance
+        .checked_sub(capital_floor)
+        .ok_or(BusinessProfitSweepError::InsufficientEarnedSurplus {
+            business: draft.business,
+            available_cents: 0,
+            requested_cents: draft.amount.cents(),
+        })?
+        .max(Money::ZERO);
+    if available_surplus < draft.amount {
+        return Err(BusinessProfitSweepError::InsufficientEarnedSurplus {
+            business: draft.business,
+            available_cents: available_surplus.cents(),
+            requested_cents: draft.amount.cents(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

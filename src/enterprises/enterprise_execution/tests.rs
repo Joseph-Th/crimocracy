@@ -20,7 +20,11 @@ use crate::finance::finance_system::{insert_account, validate_record_transaction
 use crate::finance::{
     FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
 };
-use crate::intelligence::InformationTopic;
+use crate::intelligence::intelligence_system::validate_record_information;
+use crate::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
+};
 use crate::legal::arrest_system::validate_arrest;
 use crate::legal::investigation_system::{
     apply_cold_case_decay, validate_add_evidence, validate_incident_intake,
@@ -50,6 +54,74 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod autonomous_expansion;
+
+#[test]
+fn notable_cycle_rejects_changed_information_allocator_before_mutation() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let variance = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .notable_variance_basis_points() as i16;
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(variance, u16::MAX),
+    )
+    .expect("notable enterprise cycle should resolve");
+    let validated = validate_enterprise_cycle_plan(&fixture.state, plan)
+        .expect("notable enterprise cycle should validate");
+    let expected = validated
+        .expected_information_id
+        .expect("notable cycle must predict its manager information id");
+
+    let inserted = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Organization(fixture.organization),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "Unrelated personnel observation consumed the next information id.".to_owned(),
+        },
+    )
+    .expect("unrelated information should validate")
+    .commit(&mut fixture.state)
+    .expect("unrelated information should commit");
+    assert_eq!(inserted, expected);
+    let before = bincode::serialize(&fixture.state).expect("fixture state should serialize");
+
+    let error = validated
+        .commit(&mut fixture.state)
+        .expect_err("held enterprise cycle must stale when its planned information id changes");
+    assert_eq!(
+        error,
+        EnterpriseError::StaleInformationAllocation {
+            expected,
+            found: crate::core::id::InformationId::from_raw(
+                expected
+                    .raw()
+                    .checked_add(1)
+                    .expect("fixture information id must leave one successor"),
+            ),
+        }
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "stale planned report source must reject before any settlement mutation"
+    );
+    validate_invariants(&fixture.state);
+}
 
 #[test]
 fn notable_settlement_reaches_executive_brief_without_pending_decisions() {
@@ -122,6 +194,47 @@ fn notable_settlement_reaches_executive_brief_without_pending_decisions() {
             .summary(),
         "the executive brief must preserve the exact source-linked settlement summary"
     );
+}
+
+#[test]
+fn active_organization_index_rebuilds_from_authoritative_enterprises() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("active enterprise state should save"),
+    )
+    .expect("active enterprise state should restore");
+    assert_eq!(
+        restored
+            .enterprises()
+            .active_for_organization(fixture.organization)
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        vec![enterprise],
+        "restore must rebuild the active organization projection from enterprise records"
+    );
+
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("active enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("enterprise suspension should commit");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("suspended enterprise state should save"),
+    )
+    .expect("suspended enterprise state should restore");
+    assert_eq!(
+        restored
+            .enterprises()
+            .active_for_organization(fixture.organization)
+            .count(),
+        0,
+        "suspended enterprise history must not rebuild into the current organization footprint"
+    );
+    validate_invariants(&restored);
 }
 
 #[test]

@@ -28,6 +28,7 @@ use crate::registry::Registry;
 use crate::reports::report_system::{ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use std::collections::BTreeSet;
+use std::fmt::Write;
 
 pub(crate) fn validate_deadline_missed_operation(
     registry: &Registry,
@@ -95,10 +96,10 @@ pub struct ValidatedOperationAbort {
     aborted_at: SimTime,
     phase: OperationAbortPhase,
     cause: OperationAbortCause,
-    information: Option<ValidatedInformation>,
+    information: ValidatedInformation,
     police_activity_information: Option<ValidatedInformation>,
-    report: Option<ValidatedReport>,
-    history: Option<ValidatedHistoryEvent>,
+    report: ValidatedReport,
+    history: ValidatedHistoryEvent,
 }
 
 impl std::fmt::Debug for ValidatedOperationAbort {
@@ -119,18 +120,13 @@ impl std::fmt::Debug for ValidatedOperationAbort {
 
 impl ValidatedOperationAbort {
     pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
-        let mut budget = Vec::new();
-        if self.information.is_some() {
-            budget.push((IdKind::Information, 1));
-        }
+        let mut budget = vec![
+            (IdKind::Information, 1),
+            (IdKind::HistoryEvent, 1),
+            (IdKind::Report, 1),
+        ];
         if self.police_activity_information.is_some() {
             budget.push((IdKind::Information, 1));
-        }
-        if self.history.is_some() {
-            budget.push((IdKind::HistoryEvent, 1));
-        }
-        if self.report.is_some() {
-            budget.push((IdKind::Report, 1));
         }
         budget
     }
@@ -144,34 +140,28 @@ impl ValidatedOperationAbort {
     }
 
     pub(crate) fn commit_preflighted(self, state: &mut AppState) {
-        let artifacts = match (self.information, self.report, self.history) {
-            (None, None, None) => None,
-            (Some(information), Some(report), Some(history)) => {
-                let information = information
-                    .commit(state)
-                    .expect("operation-abort information ID was preflighted before mutation");
-                let police_activity_information =
-                    self.police_activity_information.map(|information| {
-                        information.commit(state).expect(
-                            "operation-abort police information ID was preflighted before mutation",
-                        )
-                    });
-                let history_event = history
-                    .commit(state)
-                    .expect("operation-abort history ID was preflighted before mutation");
-                let report = report
-                    .commit(state)
-                    .expect("operation-abort report ID was preflighted before mutation");
-                Some(OperationAbortArtifacts {
-                    information,
-                    report,
-                    history_event,
-                    police_activity_information,
-                })
-            }
-            (None, Some(_), _) | (None, _, Some(_)) | (Some(_), None, _) | (Some(_), _, None) => {
-                unreachable!("validated operation abort artifacts are all present or all absent")
-            }
+        let information = self
+            .information
+            .commit(state)
+            .expect("operation-abort information ID was preflighted before mutation");
+        let police_activity_information = self.police_activity_information.map(|information| {
+            information
+                .commit(state)
+                .expect("operation-abort police information ID was preflighted before mutation")
+        });
+        let history_event = self
+            .history
+            .commit(state)
+            .expect("operation-abort history ID was preflighted before mutation");
+        let report = self
+            .report
+            .commit(state)
+            .expect("operation-abort report ID was preflighted before mutation");
+        let artifacts = OperationAbortArtifacts {
+            information,
+            report,
+            history_event,
+            police_activity_information,
         };
         state.operations.abort(
             self.operation,
@@ -369,168 +359,8 @@ fn validate_operation_abort(
         .get_operation(operation)
         .ok_or(OperationError::MissingOperation(operation))?;
     ensure_version_can_advance(record.version(), "operation")?;
-    let phase = match (record.status(), cause) {
-        (OperationStatus::Authorized, OperationAbortCause::AuthorityOrder) => {
-            OperationAbortPhase::BeforeStart
-        }
-        (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed)
-        | (OperationStatus::Authorized, OperationAbortCause::OpportunityExpired(_))
-        | (OperationStatus::Authorized, OperationAbortCause::ObjectiveUnavailable(_))
-        | (OperationStatus::Authorized, OperationAbortCause::ParticipantDetained(_)) => {
-            OperationAbortPhase::BeforeStart
-        }
-        (OperationStatus::InProgress, OperationAbortCause::DeadlineMissed) => {
-            OperationAbortPhase::InProgress
-        }
-        (OperationStatus::AwaitingDecision, OperationAbortCause::DeadlineMissed) => {
-            OperationAbortPhase::AwaitingDecision
-        }
-        (OperationStatus::InProgress, OperationAbortCause::AuthorityOrder) => {
-            OperationAbortPhase::InProgress
-        }
-        (OperationStatus::InProgress, OperationAbortCause::ParticipantDetained(character))
-            if record.participants().contains(&character) =>
-        {
-            OperationAbortPhase::InProgress
-        }
-        (
-            OperationStatus::AwaitingDecision,
-            OperationAbortCause::ParticipantDetained(character),
-        ) if record.participants().contains(&character) => OperationAbortPhase::AwaitingDecision,
-        (OperationStatus::AwaitingDecision, OperationAbortCause::Decision(decision))
-            if state.decisions.pending_for_operation(operation) == Some(decision) =>
-        {
-            OperationAbortPhase::AwaitingDecision
-        }
-        (OperationStatus::InProgress, OperationAbortCause::PoliceArrival(response))
-            if police_arrival_can_abort(state, record, response) =>
-        {
-            OperationAbortPhase::InProgress
-        }
-        (status, cause) => {
-            return Err(OperationError::InvalidAbortCause {
-                operation,
-                status,
-                cause,
-            });
-        }
-    };
-
-    let (information, police_activity_information, report, history) = match (phase, cause) {
-        (
-            OperationAbortPhase::BeforeStart,
-            OperationAbortCause::AuthorityOrder
-            | OperationAbortCause::DeadlineMissed
-            | OperationAbortCause::OpportunityExpired(_)
-            | OperationAbortCause::ObjectiveUnavailable(_)
-            | OperationAbortCause::ParticipantDetained(_),
-        )
-        | (OperationAbortPhase::InProgress, _)
-        | (OperationAbortPhase::AwaitingDecision, _) => {
-            let summary = build_abort_summary(state, record, cause)?;
-            let entities = abort_entities(state, record, cause)?;
-            let information = validate_record_information(
-                state,
-                InformationDraft {
-                    holder: KnowledgeHolder::Organization(record.responsible_organization()),
-                    source_kind: InformationSourceKind::AfterAction,
-                    topic: InformationTopic::OperationalOutcome,
-                    source_entity: Some(EntityRef::Character(record.leader())),
-                    subject: EntityRef::Operation(operation),
-                    observed_at: state.now(),
-                    reliability: Reliability::DirectAccess,
-                    specificity: Specificity::Precise,
-                    summary: summary.clone(),
-                },
-            )
-            .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
-            // A police-arrival abort leaves the organization district-scoped enforcement
-            // knowledge: its own crew saw this authority respond here before entry. Holding
-            // it as PoliceActivity information is what lets later planning in the same
-            // neighborhood learn from the failed approach without fresh surveillance.
-            let police_activity_information = match cause {
-                OperationAbortCause::PoliceArrival(response_id) => {
-                    let response = state
-                        .legal
-                        .get_police_response(response_id)
-                        .ok_or(OperationError::InvalidAbortArtifacts { operation })?;
-                    let authority = state
-                        .world
-                        .get_organization(response.authority())
-                        .ok_or(OperationError::InvalidAbortArtifacts { operation })?;
-                    let neighborhood = state
-                        .world
-                        .get_neighborhood(response.neighborhood())
-                        .ok_or(OperationError::InvalidAbortArtifacts { operation })?;
-                    Some(
-                        validate_record_information(
-                            state,
-                            InformationDraft {
-                                holder: KnowledgeHolder::Organization(
-                                    record.responsible_organization(),
-                                ),
-                                source_kind: InformationSourceKind::AfterAction,
-                                topic: InformationTopic::PoliceActivity,
-                                source_entity: Some(EntityRef::Organization(response.authority())),
-                                subject: EntityRef::Neighborhood(response.neighborhood()),
-                                observed_at: state.now(),
-                                reliability: Reliability::GenerallyReliable,
-                                specificity: Specificity::Specific,
-                                summary: format!(
-                                    "The crew of {} was debriefed after a {} response reached the target before entry; the organization expects active enforcement around {} at that hour.",
-                                    record.title(),
-                                    authority.name(),
-                                    neighborhood.name(),
-                                ),
-                            },
-                        )
-                        .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?,
-                    )
-                }
-                OperationAbortCause::AuthorityOrder
-                | OperationAbortCause::Decision(_)
-                | OperationAbortCause::DeadlineMissed
-                | OperationAbortCause::OpportunityExpired(_)
-                | OperationAbortCause::ObjectiveUnavailable(_)
-                | OperationAbortCause::ParticipantDetained(_) => None,
-            };
-            let report = validate_record_report(
-                state,
-                ReportDraft {
-                    recipient: record.responsible_organization(),
-                    kind: ReportKind::AfterAction,
-                    title: format!("{} after-action report", record.title()),
-                    entries: vec![ReportEntry {
-                        attention: AttentionClass::Notable,
-                        summary: summary.clone(),
-                        sources: Vec::new(),
-                        entities: entities.clone(),
-                        decision: None,
-                    }],
-                },
-            )
-            .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
-            let history = validate_record_event(
-                state,
-                HistoryEventDraft {
-                    kind: HistoryEventKind::Operation,
-                    summary,
-                    entities,
-                },
-            )
-            .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
-            (
-                Some(information),
-                police_activity_information,
-                Some(report),
-                Some(history),
-            )
-        }
-        (OperationAbortPhase::BeforeStart, OperationAbortCause::Decision(_))
-        | (OperationAbortPhase::BeforeStart, OperationAbortCause::PoliceArrival(_)) => {
-            unreachable!("pre-start operation aborts cannot use execution-only causes")
-        }
-    };
+    let phase = resolve_abort_phase(state, record, cause)?;
+    let artifacts = validate_abort_artifacts(state, record, phase, cause)?;
 
     Ok(ValidatedOperationAbort {
         operation,
@@ -539,6 +369,127 @@ fn validate_operation_abort(
         aborted_at: state.now(),
         phase,
         cause,
+        information: artifacts.information,
+        police_activity_information: artifacts.police_activity_information,
+        report: artifacts.report,
+        history: artifacts.history,
+    })
+}
+
+fn resolve_abort_phase(
+    state: &AppState,
+    record: &OperationRecord,
+    cause: OperationAbortCause,
+) -> Result<OperationAbortPhase, OperationError> {
+    let operation = record.id();
+    match (record.status(), cause) {
+        (OperationStatus::Authorized, OperationAbortCause::AuthorityOrder) => {
+            Ok(OperationAbortPhase::BeforeStart)
+        }
+        (OperationStatus::Authorized, OperationAbortCause::DeadlineMissed)
+        | (OperationStatus::Authorized, OperationAbortCause::OpportunityExpired(_))
+        | (OperationStatus::Authorized, OperationAbortCause::ObjectiveUnavailable(_))
+        | (OperationStatus::Authorized, OperationAbortCause::ParticipantDetained(_)) => {
+            Ok(OperationAbortPhase::BeforeStart)
+        }
+        (OperationStatus::InProgress, OperationAbortCause::DeadlineMissed) => {
+            Ok(OperationAbortPhase::InProgress)
+        }
+        (OperationStatus::AwaitingDecision, OperationAbortCause::DeadlineMissed) => {
+            Ok(OperationAbortPhase::AwaitingDecision)
+        }
+        (OperationStatus::InProgress, OperationAbortCause::AuthorityOrder) => {
+            Ok(OperationAbortPhase::InProgress)
+        }
+        (OperationStatus::InProgress, OperationAbortCause::ParticipantDetained(character))
+            if record.participants().contains(&character) =>
+        {
+            Ok(OperationAbortPhase::InProgress)
+        }
+        (
+            OperationStatus::AwaitingDecision,
+            OperationAbortCause::ParticipantDetained(character),
+        ) if record.participants().contains(&character) => {
+            Ok(OperationAbortPhase::AwaitingDecision)
+        }
+        (OperationStatus::AwaitingDecision, OperationAbortCause::Decision(decision))
+            if state.decisions.pending_for_operation(operation) == Some(decision) =>
+        {
+            Ok(OperationAbortPhase::AwaitingDecision)
+        }
+        (OperationStatus::InProgress, OperationAbortCause::PoliceArrival(response))
+            if police_arrival_can_abort(state, record, response) =>
+        {
+            Ok(OperationAbortPhase::InProgress)
+        }
+        (status, cause) => Err(OperationError::InvalidAbortCause {
+            operation,
+            status,
+            cause,
+        }),
+    }
+}
+
+struct ValidatedAbortArtifacts {
+    information: ValidatedInformation,
+    police_activity_information: Option<ValidatedInformation>,
+    report: ValidatedReport,
+    history: ValidatedHistoryEvent,
+}
+
+fn validate_abort_artifacts(
+    state: &AppState,
+    record: &OperationRecord,
+    phase: OperationAbortPhase,
+    cause: OperationAbortCause,
+) -> Result<ValidatedAbortArtifacts, OperationError> {
+    let operation = record.id();
+    let summary = build_abort_summary(state, record, phase, cause, state.now())?;
+    let entities = resolve_abort_entities(state, record, cause)?;
+    let information = validate_record_information(
+        state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(record.responsible_organization()),
+            source_kind: InformationSourceKind::AfterAction,
+            topic: InformationTopic::OperationalOutcome,
+            source_entity: Some(EntityRef::Character(record.leader())),
+            subject: EntityRef::Operation(operation),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: summary.clone(),
+        },
+    )
+    .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
+    let police_activity_information =
+        validate_abort_police_activity_information(state, record, cause)?;
+    let report = validate_record_report(
+        state,
+        ReportDraft {
+            recipient: record.responsible_organization(),
+            kind: ReportKind::AfterAction,
+            title: format!("{} after-action report", record.title()),
+            entries: vec![ReportEntry {
+                attention: AttentionClass::Notable,
+                summary: summary.clone(),
+                sources: Vec::new(),
+                entities: entities.clone(),
+                decision: None,
+            }],
+        },
+    )
+    .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
+    let history = validate_record_event(
+        state,
+        HistoryEventDraft {
+            kind: HistoryEventKind::Operation,
+            summary,
+            entities,
+        },
+    )
+    .map_err(|_| OperationError::InvalidAbortArtifacts { operation })?;
+
+    Ok(ValidatedAbortArtifacts {
         information,
         police_activity_information,
         report,
@@ -546,16 +497,83 @@ fn validate_operation_abort(
     })
 }
 
-fn build_abort_summary(
+/// A police-arrival abort leaves the organization district-scoped enforcement knowledge: its own
+/// crew saw this authority respond here before entry. Other abort causes do not create this second
+/// observation because they reveal no new authority movement.
+fn validate_abort_police_activity_information(
+    state: &AppState,
+    record: &OperationRecord,
+    cause: OperationAbortCause,
+) -> Result<Option<ValidatedInformation>, OperationError> {
+    let OperationAbortCause::PoliceArrival(response_id) = cause else {
+        return Ok(None);
+    };
+    let operation = record.id();
+    let response = state
+        .legal
+        .get_police_response(response_id)
+        .ok_or(OperationError::InvalidAbortArtifacts { operation })?;
+    let authority = state
+        .world
+        .get_organization(response.authority())
+        .ok_or(OperationError::InvalidAbortArtifacts { operation })?;
+    let neighborhood = state
+        .world
+        .get_neighborhood(response.neighborhood())
+        .ok_or(OperationError::InvalidAbortArtifacts { operation })?;
+    let mut summary = String::new();
+    write_abort_police_activity_summary(
+        &mut summary,
+        record.title(),
+        authority.name(),
+        neighborhood.name(),
+    )
+    .expect("String buffer writes are infallible");
+    validate_record_information(
+        state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(record.responsible_organization()),
+            source_kind: InformationSourceKind::AfterAction,
+            topic: InformationTopic::PoliceActivity,
+            source_entity: Some(EntityRef::Organization(response.authority())),
+            subject: EntityRef::Neighborhood(response.neighborhood()),
+            observed_at: state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary,
+        },
+    )
+    .map(Some)
+    .map_err(|_| OperationError::InvalidAbortArtifacts { operation })
+}
+
+/// Canonical player-facing debrief text for the district-scoped police observation created by a
+/// police-arrival abort. Restore validation re-renders this exact content so the artifact cannot
+/// be detached from the operation whose crew actually observed the response.
+pub(crate) fn write_abort_police_activity_summary(
+    output: &mut String,
+    operation_title: &str,
+    authority_name: &str,
+    neighborhood_name: &str,
+) -> std::fmt::Result {
+    write!(
+        output,
+        "The crew of {operation_title} was debriefed after a {authority_name} response reached the target before entry; the organization expects active enforcement around {neighborhood_name} at that hour."
+    )
+}
+
+pub(crate) fn build_abort_summary(
     state: &AppState,
     operation: &OperationRecord,
+    phase: OperationAbortPhase,
     cause: OperationAbortCause,
+    aborted_at: SimTime,
 ) -> Result<String, OperationError> {
     match cause {
         OperationAbortCause::AuthorityOrder => {
             // A pre-start cancellation never reached the objective, so it reads as a
             // stand-down rather than an interrupted execution.
-            if operation.status() == OperationStatus::Authorized {
+            if phase == OperationAbortPhase::BeforeStart {
                 Ok(format!(
                     "{} was cancelled by leadership before execution began. The crew stood down without attempting the objective.",
                     operation.title()
@@ -587,17 +605,14 @@ fn build_abort_summary(
                     operation: operation.id(),
                 })?
                 .name();
-            let phase = match operation.status() {
-                OperationStatus::Authorized => "was cancelled before execution",
-                OperationStatus::InProgress | OperationStatus::AwaitingDecision => {
+            let phase_text = match phase {
+                OperationAbortPhase::BeforeStart => "was cancelled before execution",
+                OperationAbortPhase::InProgress | OperationAbortPhase::AwaitingDecision => {
                     "was aborted during execution"
-                }
-                OperationStatus::Completed | OperationStatus::Aborted => {
-                    unreachable!("terminal operations cannot receive detention aborts")
                 }
             };
             Ok(format!(
-                "{} {phase} because {name} was detained and could no longer participate. Objective resolution was not completed.",
+                "{} {phase_text} because {name} was detained and could no longer participate. Objective resolution was not completed.",
                 operation.title()
             ))
         }
@@ -666,35 +681,32 @@ fn build_abort_summary(
         OperationAbortCause::DeadlineMissed => {
             let deadline = resolve_earliest_operation_deadline(operation)
                 .expect("validated deadline abort must retain a completion deadline");
-            let phase = match operation.status() {
-                OperationStatus::Authorized => "before execution could begin",
-                OperationStatus::InProgress | OperationStatus::AwaitingDecision => {
+            let phase_text = match phase {
+                OperationAbortPhase::BeforeStart => "before execution could begin",
+                OperationAbortPhase::InProgress | OperationAbortPhase::AwaitingDecision => {
                     "before execution could complete"
                 }
-                OperationStatus::Completed | OperationStatus::Aborted => {
-                    unreachable!("terminal operations cannot miss an active deadline")
-                }
             };
-            if operation.status() == OperationStatus::Authorized && state.now() < deadline {
+            if phase == OperationAbortPhase::BeforeStart && aborted_at < deadline {
                 Ok(format!(
                     "{} could no longer meet its completion deadline at minute {} {}.",
                     operation.title(),
                     deadline.as_minutes(),
-                    phase,
+                    phase_text,
                 ))
             } else {
                 Ok(format!(
                     "{} missed its completion deadline at minute {} {}.",
                     operation.title(),
                     deadline.as_minutes(),
-                    phase,
+                    phase_text,
                 ))
             }
         }
     }
 }
 
-fn abort_entities(
+pub(crate) fn resolve_abort_entities(
     state: &AppState,
     record: &OperationRecord,
     cause: OperationAbortCause,

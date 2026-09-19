@@ -403,6 +403,13 @@ impl RecruitmentState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
+        self.records_have_consistent_forward_indexes()
+            && self.candidate_index_is_consistent()
+            && self.candidate_organization_index_is_consistent()
+            && self.approval_decision_index_is_consistent()
+    }
+
+    fn records_have_consistent_forward_indexes(&self) -> bool {
         for (stored_id, record) in &self.records {
             let id = record.id();
             if *stored_id != id {
@@ -429,7 +436,14 @@ impl RecruitmentState {
                 | RecruitmentAuthority::Delegated { .. } => {}
             }
         }
+        true
+    }
+
+    fn candidate_index_is_consistent(&self) -> bool {
         for (candidate, ids) in &self.by_candidate {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self
                     .records
@@ -440,7 +454,14 @@ impl RecruitmentState {
                 }
             }
         }
+        true
+    }
+
+    fn candidate_organization_index_is_consistent(&self) -> bool {
         for (key, ids) in &self.by_candidate_organization {
+            if ids.is_empty() {
+                return false;
+            }
             for id in ids {
                 if !self.records.get(id).is_some_and(|record| {
                     (record.candidate(), record.target_organization()) == *key
@@ -449,6 +470,10 @@ impl RecruitmentState {
                 }
             }
         }
+        true
+    }
+
+    fn approval_decision_index_is_consistent(&self) -> bool {
         for (decision, id) in &self.by_approval_decision {
             if !self.records.get(id).is_some_and(|record| {
                 matches!(

@@ -34,7 +34,7 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId, IdExhaustionError, IdKind,
-    NeighborhoodId, OrganizationId,
+    InformationId, NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
@@ -57,7 +57,7 @@ use crate::finance::finance_system::{
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
-    IntelligenceError, ValidatedInformation, validate_record_information,
+    IntelligenceError, PlannedInformationSource, ValidatedInformation, validate_record_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
@@ -68,7 +68,9 @@ use crate::legal::jurisdiction_system::{
     resolve_case_intake_authority_snapshot, validate_case_intake_authority_snapshot,
 };
 use crate::registry::{EnterpriseDefinition, Registry};
-use crate::reports::report_system::validate_record_report;
+use crate::reports::report_system::{
+    ReportError, ValidatedReport, validate_record_report_with_planned_information,
+};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{
     BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile, OrganizationKind,
@@ -240,6 +242,15 @@ pub enum EnterpriseError {
     Finance(#[from] FinanceError),
     #[error(transparent)]
     Intelligence(#[from] IntelligenceError),
+    #[error(transparent)]
+    Report(#[from] ReportError),
+    #[error(
+        "enterprise cycle information allocation changed after validation; expected {expected}, found {found}"
+    )]
+    StaleInformationAllocation {
+        expected: InformationId,
+        found: InformationId,
+    },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]
@@ -591,6 +602,8 @@ pub struct ValidatedEnterpriseCycle {
     plan: EnterpriseCyclePlan,
     ledger: Option<ValidatedLedgerTransaction>,
     information: Option<ValidatedInformation>,
+    report: Option<ValidatedReport>,
+    expected_information_id: Option<InformationId>,
     incident: Option<crate::legal::investigation_system::ValidatedIncidentIntake>,
 }
 
@@ -668,7 +681,7 @@ fn validate_cash_account_kind(
 }
 
 impl ValidatedEnterpriseCycle {
-    pub fn commit(self, state: &mut AppState) -> Result<EnterpriseCycleId, EnterpriseError> {
+    fn id_budget(&self) -> Result<Vec<(IdKind, u32)>, EnterpriseError> {
         let mut budget = Vec::new();
         if self.ledger.is_some() {
             budget.push((IdKind::LedgerTransaction, 1));
@@ -688,78 +701,26 @@ impl ValidatedEnterpriseCycle {
             budget.push((IdKind::CaseWitness, u32::from(incident.has_witness())));
         }
         budget.push((IdKind::EnterpriseCycle, 1));
-        state.ids.reserve_many(&budget)?;
-        let record = state
-            .enterprises
-            .get_enterprise(self.plan.snapshot.enterprise)
-            .ok_or(EnterpriseError::MissingEnterprise(
-                self.plan.snapshot.enterprise,
-            ))?;
-        if record.version() != self.plan.snapshot.expected_enterprise_version {
-            return Err(EnterpriseError::StaleEnterprise {
-                enterprise: self.plan.snapshot.enterprise,
-                expected: self.plan.snapshot.expected_enterprise_version,
-                found: record.version(),
-            });
-        }
-        ensure_version_can_advance_by(
-            record.version(),
-            1 + u32::from(self.plan.snapshot.suspends_after_settlement),
-            "enterprise",
-        )?;
-        if record.status() != EnterpriseStatus::Active {
-            return Err(EnterpriseError::EnterpriseNotActive(
-                self.plan.snapshot.enterprise,
-            ));
-        }
-        if state.now() != self.plan.snapshot.occurred_at {
-            return Err(EnterpriseError::StaleCycleTime {
-                expected: self.plan.snapshot.occurred_at,
-                found: state.now(),
-            });
-        }
-        ensure_mandate_authority_current(state, self.plan.snapshot.authority)?;
-        validate_legal_pressure_context(state, record, &self.plan.snapshot)?;
-        validate_supporting_business_versions(
-            state,
-            &self.plan.snapshot.supporting_business_versions,
-        )?;
-        if let Some((business_id, expected)) = self.plan.snapshot.host_business_version {
-            let business = state
-                .world
-                .get_business(business_id)
-                .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
-            if business.version() != expected {
-                return Err(EnterpriseError::StaleHostBusiness {
-                    business: business_id,
-                    expected,
-                    found: business.version(),
-                });
+        Ok(budget)
+    }
+
+    fn ensure_current(&self, state: &AppState) -> Result<(), EnterpriseError> {
+        if let Some(expected) = self.expected_information_id {
+            let found = InformationId::from_raw(state.ids.next_raw(IdKind::Information));
+            if found != expected {
+                return Err(EnterpriseError::StaleInformationAllocation { expected, found });
             }
         }
-        validate_supporting_businesses(
-            state,
-            record.organization(),
-            record.location(),
-            record.supporting_businesses(),
-        )?;
-        validate_enterprise_accounts(
-            state,
-            record.organization(),
-            self.plan.accounts.cash_account,
-            self.plan.accounts.settlement_account,
-            Some(record.id()),
-        )?;
-        if let Some(snapshot) = self.plan.vice_authority {
-            validate_vice_intake_authority_snapshot(
-                state,
-                self.plan.snapshot.enterprise,
-                snapshot,
-            )?;
-        }
+        validate_enterprise_cycle_snapshot_current(state, &self.plan)?;
         if let Some(incident) = &self.incident {
             incident.ensure_current(state)?;
         }
+        Ok(())
+    }
+
+    pub fn commit(self, state: &mut AppState) -> Result<EnterpriseCycleId, EnterpriseError> {
+        self.ensure_current(state)?;
+        state.ids.reserve_many(&self.id_budget()?)?;
         // Settlement atomicity rests on the ID budget reserved above: every downstream commit
         // (ledger, information, cycle) consumes pre-reserved IDs and cannot fail after the
         // first one mutates state.
@@ -772,46 +733,11 @@ impl ValidatedEnterpriseCycle {
                 .commit(state)
                 .expect("enterprise-cycle information ID was preflighted before mutation")
         });
-        // Only notable cycles carry manager information. Reuse its exact observed account:
-        // executive briefs consume reports, not raw information or hidden legal records.
-        // All references were checked above and the report ID is in the settlement budget.
-        if let Some(source) = information {
-            let record = state
-                .enterprises
-                .get_enterprise(self.plan.snapshot.enterprise)
-                .expect("preflighted enterprise persists during settlement");
-            let observed = state
-                .intelligence
-                .get_information(source)
-                .expect("just-committed manager information persists");
-            // The draft below re-verifies plan-established facts rather than discovering new
-            // ones: the recipient, title, kind, entities, and summary were all fixed at plan
-            // validation (the summary is the plan-validated information text, and empty
-            // summaries are rejected there), the source committed two lines above, and
-            // organizations, characters, and enterprises are never deleted. No failure
-            // variant of the report validator is reachable from a validated plan, so a
-            // rejection here signals state corruption, not a routine settlement outcome.
-            validate_record_report(
-                state,
-                ReportDraft {
-                    recipient: record.organization(),
-                    kind: ReportKind::Financial,
-                    title: "Enterprise cycle report".to_owned(),
-                    entries: vec![ReportEntry {
-                        attention: self.plan.economics.attention,
-                        summary: observed.summary().to_owned(),
-                        sources: vec![source],
-                        entities: BTreeSet::from([
-                            EntityRef::Enterprise(record.id()),
-                            EntityRef::Character(record.manager()),
-                        ]),
-                        decision: None,
-                    }],
-                },
-            )
-            .expect("preflighted enterprise and its own information support the report")
-            .commit(state)
-            .expect("enterprise report ID was preflighted before mutation");
+        if let Some(report) = self.report {
+            debug_assert_eq!(information, self.expected_information_id);
+            report
+                .commit(state)
+                .expect("enterprise report ID was preflighted before mutation");
         }
         let vice_investigation = self.incident.map(|incident| {
             incident
@@ -863,10 +789,10 @@ impl ValidatedEnterpriseCycle {
     }
 }
 
-pub fn validate_enterprise_cycle_plan(
-    state: &AppState,
-    plan: EnterpriseCyclePlan,
-) -> Result<ValidatedEnterpriseCycle, EnterpriseError> {
+fn validate_enterprise_cycle_snapshot_current<'a>(
+    state: &'a AppState,
+    plan: &EnterpriseCyclePlan,
+) -> Result<&'a crate::enterprises::EnterpriseRecord, EnterpriseError> {
     let record = state
         .enterprises
         .get_enterprise(plan.snapshot.enterprise)
@@ -897,19 +823,7 @@ pub fn validate_enterprise_cycle_plan(
     ensure_mandate_authority_current(state, plan.snapshot.authority)?;
     validate_legal_pressure_context(state, record, &plan.snapshot)?;
     validate_supporting_business_versions(state, &plan.snapshot.supporting_business_versions)?;
-    if let Some((business_id, expected)) = plan.snapshot.host_business_version {
-        let business = state
-            .world
-            .get_business(business_id)
-            .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
-        if business.version() != expected {
-            return Err(EnterpriseError::StaleHostBusiness {
-                business: business_id,
-                expected,
-                found: business.version(),
-            });
-        }
-    }
+    validate_enterprise_cycle_host_business(state, record, &plan.snapshot)?;
     validate_supporting_businesses(
         state,
         record.organization(),
@@ -926,6 +840,36 @@ pub fn validate_enterprise_cycle_plan(
     if let Some(snapshot) = plan.vice_authority {
         validate_vice_intake_authority_snapshot(state, plan.snapshot.enterprise, snapshot)?;
     }
+    Ok(record)
+}
+
+fn validate_enterprise_cycle_host_business(
+    state: &AppState,
+    record: &crate::enterprises::EnterpriseRecord,
+    snapshot: &EnterpriseCycleSnapshot,
+) -> Result<(), EnterpriseError> {
+    let Some((business_id, expected)) = snapshot.host_business_version else {
+        return Ok(());
+    };
+    let business = state
+        .world
+        .get_business(business_id)
+        .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
+    if business.version() != expected {
+        return Err(EnterpriseError::StaleHostBusiness {
+            business: business_id,
+            expected,
+            found: business.version(),
+        });
+    }
+    Ok(())
+}
+
+pub fn validate_enterprise_cycle_plan(
+    state: &AppState,
+    plan: EnterpriseCyclePlan,
+) -> Result<ValidatedEnterpriseCycle, EnterpriseError> {
+    let record = validate_enterprise_cycle_snapshot_current(state, &plan)?;
     debug_assert!(
         match (&plan.vice_incident, plan.vice_authority) {
             (Some(incident), Some(snapshot)) => snapshot.organization == Some(incident.owner),
@@ -967,28 +911,57 @@ pub fn validate_enterprise_cycle_plan(
             },
         )?)
     };
-    let information = match plan.economics.attention {
-        AttentionClass::Notable => Some(validate_record_information(
-            state,
-            InformationDraft {
-                holder: KnowledgeHolder::Organization(record.organization()),
-                source_kind: InformationSourceKind::AfterAction,
-                topic: crate::intelligence::InformationTopic::FinancialPerformance,
-                source_entity: Some(EntityRef::Character(record.manager())),
-                subject: EntityRef::Enterprise(record.id()),
-                observed_at: plan.snapshot.occurred_at,
-                reliability: Reliability::DirectAccess,
-                specificity: Specificity::Precise,
-                summary: build_cycle_report_summary(
-                    state,
-                    record,
-                    &plan.economics,
-                    drew_vice_attention,
-                    plan.snapshot.suspends_after_settlement,
-                ),
-            },
-        )?),
-        AttentionClass::Routine => None,
+    let (information, report, expected_information_id) = match plan.economics.attention {
+        AttentionClass::Notable => {
+            let summary = build_cycle_report_summary(
+                state,
+                record,
+                &plan.economics,
+                drew_vice_attention,
+                plan.snapshot.suspends_after_settlement,
+            );
+            let information = validate_record_information(
+                state,
+                InformationDraft {
+                    holder: KnowledgeHolder::Organization(record.organization()),
+                    source_kind: InformationSourceKind::AfterAction,
+                    topic: crate::intelligence::InformationTopic::FinancialPerformance,
+                    source_entity: Some(EntityRef::Character(record.manager())),
+                    subject: EntityRef::Enterprise(record.id()),
+                    observed_at: plan.snapshot.occurred_at,
+                    reliability: Reliability::DirectAccess,
+                    specificity: Specificity::Precise,
+                    summary: summary.clone(),
+                },
+            )?;
+            let planned_source: PlannedInformationSource = information.planned_source(state);
+            let expected_information_id = planned_source.id();
+            let report = validate_record_report_with_planned_information(
+                state,
+                ReportDraft {
+                    recipient: record.organization(),
+                    kind: ReportKind::Financial,
+                    title: "Enterprise cycle report".to_owned(),
+                    entries: vec![ReportEntry {
+                        attention: plan.economics.attention,
+                        summary,
+                        sources: vec![expected_information_id],
+                        entities: BTreeSet::from([
+                            EntityRef::Enterprise(record.id()),
+                            EntityRef::Character(record.manager()),
+                        ]),
+                        decision: None,
+                    }],
+                },
+                planned_source,
+            )?;
+            (
+                Some(information),
+                Some(report),
+                Some(expected_information_id),
+            )
+        }
+        AttentionClass::Routine => (None, None, None),
         AttentionClass::Exception | AttentionClass::Crisis => {
             unreachable!("enterprise cycle plans only produce routine or notable attention")
         }
@@ -997,6 +970,8 @@ pub fn validate_enterprise_cycle_plan(
         plan,
         ledger,
         information,
+        report,
+        expected_information_id,
         incident,
     })
 }

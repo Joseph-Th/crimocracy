@@ -12,13 +12,14 @@ use crate::delegation::delegation_system::{
 };
 use crate::delegation::{MandateStatus, ResolvedMandateAuthority};
 use crate::economy::business_economy_system::resolve_business_current_gross;
+use crate::economy::{BusinessEconomyRecord, BusinessOperatingStatus};
 use crate::finance::{
     AccountKind, BudgetUsageRecord, FinancialAccountDraft, FinancialAccountRecord, FinancialOwner,
     LedgerPosting, LedgerTransactionDraft, LedgerTransactionRecord, Money, build_budget_usage,
     helpers::apply_basis_point_multiplier,
 };
 use crate::registry::Registry;
-use crate::world::{BusinessOwner, OrganizationKind};
+use crate::world::{BusinessOwner, BusinessRecord, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -42,6 +43,10 @@ pub enum FinanceError {
     DuplicateAccount(FinancialAccountId),
     #[error("ledger transaction contains a zero-value posting for account {0}")]
     ZeroPosting(FinancialAccountId),
+    #[error(
+        "business operating account {0} is attached to a legitimate economy and cannot be posted through the generic ledger path"
+    )]
+    ProtectedBusinessOperatingAccount(FinancialAccountId),
     #[error("ledger transaction postings do not balance to zero; net cents {net_cents}")]
     Unbalanced { net_cents: i64 },
     #[error("ledger transaction posting sum overflowed the balance accumulator")]
@@ -277,6 +282,7 @@ pub struct ValidatedLedgerTransaction {
     budget_usage: Option<BudgetUsageRecord>,
     authority_snapshot: Option<ResolvedMandateAuthority>,
     openings: Option<ValidatedFinancialAccountOpenings>,
+    access: LedgerTransactionAccess,
 }
 
 impl ValidatedLedgerTransaction {
@@ -295,6 +301,13 @@ impl ValidatedLedgerTransaction {
                 .finance
                 .get_account(*account)
                 .ok_or(FinanceError::MissingAccount(*account))?;
+            ensure_transaction_account_access(
+                state,
+                *account,
+                record.owner(),
+                record.kind(),
+                self.access,
+            )?;
             if record.version() != *expected {
                 return Err(FinanceError::StaleAccount {
                     account: *account,
@@ -357,11 +370,33 @@ impl ValidatedLedgerTransaction {
     }
 }
 
+/// Low-level balanced-ledger owner primitive for trusted orchestration and setup.
+///
+/// Domain actions with stronger semantics still use their dedicated validators. In
+/// particular, once a business-owned legitimate operating account is attached to a
+/// live business economy, generic ledger postings can no longer touch that till.
 pub fn validate_record_transaction(
     state: &AppState,
     draft: LedgerTransactionDraft,
 ) -> Result<ValidatedLedgerTransaction, FinanceError> {
-    validate_record_transaction_with_optional_openings(state, draft, None)
+    validate_record_transaction_with_optional_openings(
+        state,
+        draft,
+        None,
+        LedgerTransactionAccess::Generic,
+    )
+}
+
+pub(crate) fn validate_record_business_transaction(
+    state: &AppState,
+    draft: LedgerTransactionDraft,
+) -> Result<ValidatedLedgerTransaction, FinanceError> {
+    validate_record_transaction_with_optional_openings(
+        state,
+        draft,
+        None,
+        LedgerTransactionAccess::BusinessOperating,
+    )
 }
 
 pub(crate) fn validate_record_transaction_with_openings(
@@ -370,13 +405,25 @@ pub(crate) fn validate_record_transaction_with_openings(
     draft: LedgerTransactionDraft,
 ) -> Result<ValidatedLedgerTransaction, FinanceError> {
     openings.ensure_current(state)?;
-    validate_record_transaction_with_optional_openings(state, draft, Some(openings))
+    validate_record_transaction_with_optional_openings(
+        state,
+        draft,
+        Some(openings),
+        LedgerTransactionAccess::Generic,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LedgerTransactionAccess {
+    Generic,
+    BusinessOperating,
 }
 
 fn validate_record_transaction_with_optional_openings(
     state: &AppState,
     draft: LedgerTransactionDraft,
     openings: Option<ValidatedFinancialAccountOpenings>,
+    access: LedgerTransactionAccess,
 ) -> Result<ValidatedLedgerTransaction, FinanceError> {
     if draft.memo.trim().is_empty() {
         return Err(FinanceError::EmptyMemo);
@@ -396,34 +443,12 @@ fn validate_record_transaction_with_optional_openings(
     let mut balances = BTreeMap::new();
     let mut expected_versions = BTreeMap::new();
     for posting in &draft.postings {
-        if !seen.insert(posting.account) {
-            return Err(FinanceError::DuplicateAccount(posting.account));
-        }
-        if posting.amount == Money::ZERO {
-            return Err(FinanceError::ZeroPosting(posting.account));
-        }
-        net_cents = net_cents
-            .checked_add(i128::from(posting.amount.cents()))
-            .ok_or(FinanceError::PostingSumOverflow)?;
-        if net_cents > i128::from(i64::MAX) || net_cents < i128::from(i64::MIN) {
-            return Err(FinanceError::PostingSumOverflow);
-        }
-        if let Some(account) = state.finance.get_account(posting.account) {
-            ensure_version_can_advance(account.version(), "financial account")?;
-            let next = account
-                .balance()
-                .checked_add(posting.amount)
-                .ok_or(FinanceError::BalanceOverflow(posting.account))?;
-            balances.insert(posting.account, next);
-            expected_versions.insert(posting.account, account.version());
-        } else if openings
-            .as_ref()
-            .and_then(|planned| planned.account(posting.account))
-            .is_some()
-        {
-            balances.insert(posting.account, posting.amount);
-        } else {
-            return Err(FinanceError::MissingAccount(posting.account));
+        validate_ledger_posting_shape(&mut seen, &mut net_cents, posting)?;
+        let (balance, expected_version) =
+            resolve_ledger_posting(state, openings.as_ref(), posting, access)?;
+        balances.insert(posting.account, balance);
+        if let Some(expected_version) = expected_version {
+            expected_versions.insert(posting.account, expected_version);
         }
     }
     if net_cents != 0 {
@@ -441,7 +466,76 @@ fn validate_record_transaction_with_optional_openings(
         budget_usage: budget_validation.usage,
         authority_snapshot: budget_validation.authority_snapshot,
         openings,
+        access,
     })
+}
+
+fn validate_ledger_posting_shape(
+    seen: &mut BTreeSet<FinancialAccountId>,
+    net_cents: &mut i128,
+    posting: &LedgerPosting,
+) -> Result<(), FinanceError> {
+    if !seen.insert(posting.account) {
+        return Err(FinanceError::DuplicateAccount(posting.account));
+    }
+    if posting.amount == Money::ZERO {
+        return Err(FinanceError::ZeroPosting(posting.account));
+    }
+    *net_cents = net_cents
+        .checked_add(i128::from(posting.amount.cents()))
+        .ok_or(FinanceError::PostingSumOverflow)?;
+    if *net_cents > i128::from(i64::MAX) || *net_cents < i128::from(i64::MIN) {
+        return Err(FinanceError::PostingSumOverflow);
+    }
+    Ok(())
+}
+
+fn resolve_ledger_posting(
+    state: &AppState,
+    openings: Option<&ValidatedFinancialAccountOpenings>,
+    posting: &LedgerPosting,
+    access: LedgerTransactionAccess,
+) -> Result<(Money, Option<u32>), FinanceError> {
+    if let Some(account) = state.finance.get_account(posting.account) {
+        ensure_transaction_account_access(
+            state,
+            posting.account,
+            account.owner(),
+            account.kind(),
+            access,
+        )?;
+        ensure_version_can_advance(account.version(), "financial account")?;
+        let balance = account
+            .balance()
+            .checked_add(posting.amount)
+            .ok_or(FinanceError::BalanceOverflow(posting.account))?;
+        return Ok((balance, Some(account.version())));
+    }
+    let planned = openings
+        .and_then(|planned| planned.account(posting.account))
+        .ok_or(FinanceError::MissingAccount(posting.account))?;
+    ensure_transaction_account_access(state, posting.account, planned.owner, planned.kind, access)?;
+    Ok((posting.amount, None))
+}
+
+fn ensure_transaction_account_access(
+    state: &AppState,
+    account: FinancialAccountId,
+    owner: FinancialOwner,
+    kind: AccountKind,
+    access: LedgerTransactionAccess,
+) -> Result<(), FinanceError> {
+    if access == LedgerTransactionAccess::Generic
+        && kind == AccountKind::LegitimateOperating
+        && let FinancialOwner::Business(business) = owner
+        && state
+            .economy
+            .get_business_economy(business)
+            .is_some_and(|economy| economy.operating_account() == account)
+    {
+        return Err(FinanceError::ProtectedBusinessOperatingAccount(account));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -757,13 +851,49 @@ pub fn validate_launder_funds(
     if draft.amount.cents() <= 0 {
         return Err(LaunderingError::NonPositiveAmount);
     }
-    let organization = state
+    validate_laundering_organization(state, draft.organization)?;
+    validate_laundering_street_account(state, &draft)?;
+    validate_laundering_accounted_account(state, &draft)?;
+    let (business_record, economy) = validate_laundering_front(state, &draft)?;
+    // Plausibility: the front can hide only the authored fraction of what it legitimately
+    // earns per cycle, and the budget is cumulative — a front that already absorbed volume
+    // this cycle has less plausible room left, so volume requires larger or additional fronts
+    // rather than many small transfers. The basis is the front's current earning power, so a
+    // sabotage-disrupted front cannot hide cash its degraded books cannot explain.
+    let new_cycle_total = validate_laundering_capacity(registry, state, &draft, economy)?;
+    // Both legs must remain material after cent rounding. A zero fee would fail to prove which
+    // front absorbed the transfer, while a zero accounted credit would call a pure front-revenue
+    // transfer "laundering" without cleaning any money.
+    let transaction =
+        validate_laundering_transaction(registry, state, &draft, business_record, economy)?;
+    Ok(ValidatedLaundering {
+        transaction,
+        business: draft.business,
+        organization: draft.organization,
+        expected_business_version: business_record.version(),
+        new_cycle_total,
+        expected_economy_version: economy.version(),
+    })
+}
+
+fn validate_laundering_organization(
+    state: &AppState,
+    organization: crate::core::id::OrganizationId,
+) -> Result<(), LaunderingError> {
+    let record = state
         .world
-        .get_organization(draft.organization)
-        .ok_or(LaunderingError::MissingOrganization(draft.organization))?;
-    if organization.kind() != OrganizationKind::Criminal {
-        return Err(LaunderingError::InvalidOrganizationKind(draft.organization));
+        .get_organization(organization)
+        .ok_or(LaunderingError::MissingOrganization(organization))?;
+    if record.kind() != OrganizationKind::Criminal {
+        return Err(LaunderingError::InvalidOrganizationKind(organization));
     }
+    Ok(())
+}
+
+fn validate_laundering_street_account(
+    state: &AppState,
+    draft: &LaunderingDraft,
+) -> Result<(), LaunderingError> {
     let street = state
         .finance
         .get_account(draft.street_account)
@@ -789,6 +919,13 @@ pub fn validate_launder_funds(
             requested_cents: draft.amount.cents(),
         });
     }
+    Ok(())
+}
+
+fn validate_laundering_accounted_account(
+    state: &AppState,
+    draft: &LaunderingDraft,
+) -> Result<(), LaunderingError> {
     let accounted = state
         .finance
         .get_account(draft.accounted_account)
@@ -804,14 +941,21 @@ pub fn validate_launder_funds(
             draft.accounted_account,
         ));
     }
-    let business_record = state
+    Ok(())
+}
+
+fn validate_laundering_front<'a>(
+    state: &'a AppState,
+    draft: &LaunderingDraft,
+) -> Result<(&'a BusinessRecord, &'a BusinessEconomyRecord), LaunderingError> {
+    let business = state
         .world
         .get_business(draft.business)
         .ok_or(LaunderingError::MissingBusiness(draft.business))?;
-    if business_record.owner() != BusinessOwner::Organization(draft.organization) {
+    if business.owner() != BusinessOwner::Organization(draft.organization) {
         return Err(LaunderingError::ForeignBusiness(draft.business));
     }
-    if !business_record
+    if !business
         .functions()
         .contains(&crate::world::BusinessFunction::CashIntensive)
     {
@@ -821,19 +965,25 @@ pub fn validate_launder_funds(
         .economy
         .get_business_economy(draft.business)
         .ok_or(LaunderingError::MissingBusinessEconomy(draft.business))?;
-    if economy.status() != crate::economy::BusinessOperatingStatus::Active {
+    if economy.status() != BusinessOperatingStatus::Active {
         return Err(LaunderingError::EconomySuspended(draft.business));
     }
     ensure_version_can_advance(economy.version(), "business economy")?;
-    // Plausibility: the front can hide only the authored fraction of what it legitimately
-    // earns per cycle, and the budget is cumulative — a front that already absorbed volume
-    // this cycle has less plausible room left, so volume requires larger or additional fronts
-    // rather than many small transfers. The basis is the front's current earning power, so a
-    // sabotage-disrupted front cannot hide cash its degraded books cannot explain.
+    Ok((business, economy))
+}
+
+fn validate_laundering_capacity(
+    registry: &Registry,
+    state: &AppState,
+    draft: &LaunderingDraft,
+    economy: &BusinessEconomyRecord,
+) -> Result<Money, LaunderingError> {
     let gross_potential = resolve_business_current_gross(registry, state, draft.business)?;
-    let capacity_basis_points = registry.laundering().plausibility_gross_basis_points();
-    let capacity = apply_basis_point_multiplier(gross_potential, capacity_basis_points)
-        .ok_or(LaunderingError::ArithmeticOverflow)?;
+    let capacity = apply_basis_point_multiplier(
+        gross_potential,
+        registry.laundering().plausibility_gross_basis_points(),
+    )
+    .ok_or(LaunderingError::ArithmeticOverflow)?;
     let already_laundered = economy.laundered_this_cycle();
     let remaining = capacity
         .checked_sub(already_laundered)
@@ -845,15 +995,21 @@ pub fn validate_launder_funds(
             capacity_cents: remaining.cents(),
         });
     }
-    let new_cycle_total = already_laundered
+    already_laundered
         .checked_add(draft.amount)
-        .ok_or(LaunderingError::ArithmeticOverflow)?;
-    // Both legs must remain material after cent rounding. A zero fee would fail to prove which
-    // front absorbed the transfer, while a zero accounted credit would call a pure front-revenue
-    // transfer "laundering" without cleaning any money.
+        .ok_or(LaunderingError::ArithmeticOverflow)
+}
+
+fn validate_laundering_transaction(
+    registry: &Registry,
+    state: &AppState,
+    draft: &LaunderingDraft,
+    business: &BusinessRecord,
+    economy: &BusinessEconomyRecord,
+) -> Result<ValidatedLedgerTransaction, LaunderingError> {
     let (fee, credited) =
         resolve_laundering_split(draft.amount, registry.laundering().fee_basis_points())?;
-    let mut postings = vec![
+    let postings = vec![
         LedgerPosting {
             account: draft.street_account,
             amount: Money::ZERO
@@ -864,32 +1020,24 @@ pub fn validate_launder_funds(
             account: draft.accounted_account,
             amount: credited,
         },
+        LedgerPosting {
+            account: economy.operating_account(),
+            amount: fee,
+        },
     ];
-    postings.push(LedgerPosting {
-        account: economy.operating_account(),
-        amount: fee,
-    });
-    let business_name = business_record.name().to_owned();
-    let transaction = validate_record_transaction(
+    Ok(validate_record_business_transaction(
         state,
         LedgerTransactionDraft {
             occurred_at: state.now(),
             memo: format!(
-                "Laundered {} through {business_name}",
-                crate::finance::helpers::format_money_cents(draft.amount.cents())
+                "Laundered {} through {}",
+                crate::finance::helpers::format_money_cents(draft.amount.cents()),
+                business.name(),
             ),
             postings,
             authorization: None,
         },
-    )?;
-    Ok(ValidatedLaundering {
-        transaction,
-        business: draft.business,
-        organization: draft.organization,
-        expected_business_version: business_record.version(),
-        new_cycle_total,
-        expected_economy_version: economy.version(),
-    })
+    )?)
 }
 
 #[cfg(test)]

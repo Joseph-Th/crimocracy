@@ -387,6 +387,10 @@ impl OpportunityState {
 
     /// Every opportunity must occupy exactly the projections implied by its lifecycle state.
     fn records_have_consistent_indexes(&self) -> bool {
+        let mut expected_report_entries = 0_usize;
+        let mut expected_open_context_entries = 0_usize;
+        let mut expected_expiry_entries = 0_usize;
+        let mut expected_operation_entries = 0_usize;
         for (stored_id, record) in &self.records {
             let id = record.id();
             if *stored_id != id {
@@ -395,10 +399,12 @@ impl OpportunityState {
             if self.by_report.get(&record.report()) != Some(&id) {
                 return false;
             }
-            if let Some(report) = record.resolution().and_then(OpportunityResolution::report)
-                && self.by_report.get(&report) != Some(&id)
-            {
-                return false;
+            expected_report_entries += 1;
+            if let Some(report) = record.resolution().and_then(OpportunityResolution::report) {
+                if self.by_report.get(&report) != Some(&id) {
+                    return false;
+                }
+                expected_report_entries += 1;
             }
             let key = OperationOpportunityKey::from_record(record);
             match record.resolution() {
@@ -406,46 +412,37 @@ impl OpportunityState {
                     if self.open_by_context.get(&key) != Some(&id) {
                         return false;
                     }
-                    match record.valid_until() {
-                        Some(at) => {
-                            if !self
-                                .open_by_expiry
-                                .get(&at)
-                                .is_some_and(|ids| ids.contains(&id))
-                            {
-                                return false;
-                            }
+                    expected_open_context_entries += 1;
+                    if let Some(at) = record.valid_until() {
+                        if !self
+                            .open_by_expiry
+                            .get(&at)
+                            .is_some_and(|ids| ids.contains(&id))
+                        {
+                            return false;
                         }
-                        None => {
-                            if self.open_by_expiry.values().any(|ids| ids.contains(&id)) {
-                                return false;
-                            }
-                        }
+                        expected_expiry_entries += 1;
                     }
                 }
                 Some(OpportunityResolution::Converted { operation, .. }) => {
-                    if self.open_by_context.get(&key) == Some(&id)
-                        || self.by_operation.get(&operation) != Some(&id)
-                        || self.open_by_expiry.values().any(|ids| ids.contains(&id))
-                    {
+                    if self.by_operation.get(&operation) != Some(&id) {
                         return false;
                     }
+                    expected_operation_entries += 1;
                 }
                 Some(OpportunityResolution::Dismissed { .. })
-                | Some(OpportunityResolution::Expired { .. }) => {
-                    if self.open_by_context.get(&key) == Some(&id)
-                        || self
-                            .by_operation
-                            .values()
-                            .any(|opportunity| *opportunity == id)
-                        || self.open_by_expiry.values().any(|ids| ids.contains(&id))
-                    {
-                        return false;
-                    }
-                }
+                | Some(OpportunityResolution::Expired { .. }) => {}
             }
         }
-        true
+        self.by_report.len() == expected_report_entries
+            && self.open_by_context.len() == expected_open_context_entries
+            && self
+                .open_by_expiry
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
+                == expected_expiry_entries
+            && self.by_operation.len() == expected_operation_entries
     }
 
     /// Every report reverse lookup must be the opportunity's discovery, dismissal, or

@@ -2,9 +2,10 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::LedgerTransactionId;
+use crate::core::id::{FinancialAccountId, LedgerTransactionId};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
+use crate::core::time::SimTime;
 use crate::economy::{BusinessCycleRecord, BusinessEconomyRecord, BusinessOperatingStatus};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::intelligence::{InformationSourceKind, KnowledgeHolder, Reliability, Specificity};
@@ -18,8 +19,14 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
         .cycles()
         .filter_map(|cycle| cycle.transaction())
         .collect();
+    let capital_floor_snapshots = derive_capital_floor_snapshots(state);
     for economy in state.economy.business_economies() {
-        validate_business_economy_record(state, economy, &mut used_transactions)?;
+        validate_business_economy_record(
+            state,
+            economy,
+            &capital_floor_snapshots,
+            &mut used_transactions,
+        )?;
     }
 
     let mut previous_cycle_at = BTreeMap::new();
@@ -32,6 +39,7 @@ pub(super) fn validate_business_economies(state: &AppState) -> Result<(), StateV
 fn validate_business_economy_record(
     state: &AppState,
     economy: &BusinessEconomyRecord,
+    capital_floor_snapshots: &BTreeMap<(FinancialAccountId, u32), AccountVersionSnapshot>,
     used_transactions: &mut BTreeSet<LedgerTransactionId>,
 ) -> Result<(), StateValidationError> {
     if economy.version() == 0 {
@@ -42,11 +50,178 @@ fn validate_business_economy_record(
         .get_business(economy.business())
         .ok_or_else(|| invalid_economy(economy))?;
     validate_business_economy_accounts(state, economy)?;
+    validate_operating_capital_floor(state, economy, capital_floor_snapshots)?;
     validate_business_economy_schedule(state, economy)?;
     if economy.laundered_this_cycle().cents() < 0
         || !validate_current_laundering_window(state, economy, used_transactions)?
     {
         return Err(invalid_economy(economy));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct AccountVersionSnapshot {
+    balance: Money,
+    previous_touch_at: Option<SimTime>,
+    next_touch_at: Option<SimTime>,
+}
+
+struct AccountReplay {
+    version: u32,
+    balance: Money,
+    previous_touch_at: Option<SimTime>,
+    targets: BTreeSet<u32>,
+    pending: Option<(u32, Money, Option<SimTime>)>,
+}
+
+impl AccountReplay {
+    fn new() -> Self {
+        Self {
+            version: 1,
+            balance: Money::ZERO,
+            previous_touch_at: None,
+            targets: BTreeSet::new(),
+            pending: None,
+        }
+    }
+
+    fn add_target(&mut self, target: u32) {
+        self.targets.insert(target);
+        if target == 1 {
+            self.pending = Some((1, Money::ZERO, None));
+        }
+    }
+
+    fn apply_posting(
+        &mut self,
+        account: FinancialAccountId,
+        amount: Money,
+        occurred_at: SimTime,
+        snapshots: &mut BTreeMap<(FinancialAccountId, u32), AccountVersionSnapshot>,
+    ) {
+        if let Some((version, balance, previous_touch_at)) = self.pending.take() {
+            snapshots.insert(
+                (account, version),
+                AccountVersionSnapshot {
+                    balance,
+                    previous_touch_at,
+                    next_touch_at: Some(occurred_at),
+                },
+            );
+        }
+        let Some(balance) = self.balance.checked_add(amount) else {
+            self.targets.clear();
+            return;
+        };
+        let Some(version) = self.version.checked_add(1) else {
+            self.targets.clear();
+            return;
+        };
+        self.balance = balance;
+        self.version = version;
+        self.previous_touch_at = Some(occurred_at);
+        if self.targets.contains(&version) {
+            self.pending = Some((version, balance, self.previous_touch_at));
+        }
+    }
+
+    fn finish(
+        self,
+        account: FinancialAccountId,
+        snapshots: &mut BTreeMap<(FinancialAccountId, u32), AccountVersionSnapshot>,
+    ) {
+        let Some((version, balance, previous_touch_at)) = self.pending else {
+            return;
+        };
+        snapshots.insert(
+            (account, version),
+            AccountVersionSnapshot {
+                balance,
+                previous_touch_at,
+                next_touch_at: None,
+            },
+        );
+    }
+}
+
+fn derive_capital_floor_snapshots(
+    state: &AppState,
+) -> BTreeMap<(FinancialAccountId, u32), AccountVersionSnapshot> {
+    let mut replay_by_account: BTreeMap<FinancialAccountId, AccountReplay> = BTreeMap::new();
+    for economy in state.economy.business_economies() {
+        replay_by_account
+            .entry(economy.operating_account())
+            .or_insert_with(AccountReplay::new)
+            .add_target(economy.capital_floor_account_version());
+    }
+
+    let mut snapshots = BTreeMap::new();
+    for transaction in state.finance.transactions() {
+        for posting in transaction.postings() {
+            let Some(replay) = replay_by_account.get_mut(&posting.account) else {
+                continue;
+            };
+            replay.apply_posting(
+                posting.account,
+                posting.amount,
+                transaction.occurred_at(),
+                &mut snapshots,
+            );
+        }
+    }
+    for (account, replay) in replay_by_account {
+        replay.finish(account, &mut snapshots);
+    }
+    snapshots
+}
+
+fn validate_operating_capital_floor(
+    state: &AppState,
+    economy: &BusinessEconomyRecord,
+    capital_floor_snapshots: &BTreeMap<(FinancialAccountId, u32), AccountVersionSnapshot>,
+) -> Result<(), StateValidationError> {
+    let invalid = || invalid_economy(economy);
+    if economy.operating_capital_floor() < Money::ZERO
+        || economy.capital_floor_account_version() == 0
+        || economy.capital_floor_business_version() == 0
+        || economy.capital_floor_set_at() < economy.established_at()
+        || economy.capital_floor_set_at() > state.now()
+    {
+        return Err(invalid());
+    }
+    let business = state
+        .world
+        .get_business(economy.business())
+        .ok_or_else(invalid)?;
+    if economy.capital_floor_business_version() > business.version() {
+        return Err(invalid());
+    }
+    let ownership = state
+        .world
+        .get_business_ownership_change_for_version(
+            economy.business(),
+            economy.capital_floor_business_version(),
+        )
+        .ok_or_else(invalid)?;
+    if economy.capital_floor_set_at() < ownership.changed_at() {
+        return Err(invalid());
+    }
+    let snapshot = capital_floor_snapshots
+        .get(&(
+            economy.operating_account(),
+            economy.capital_floor_account_version(),
+        ))
+        .ok_or_else(invalid)?;
+    if economy.operating_capital_floor() != snapshot.balance.max(Money::ZERO)
+        || snapshot
+            .previous_touch_at
+            .is_some_and(|at| at > economy.capital_floor_set_at())
+        || snapshot
+            .next_touch_at
+            .is_some_and(|at| at < economy.capital_floor_set_at())
+    {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -414,125 +589,145 @@ fn validate_business_economies_against_registry(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     for economy in state.economy.business_economies() {
-        if economy.status() == BusinessOperatingStatus::Active {
-            let business = state
-                .world
-                .get_business(economy.business())
+        validate_business_economy_registry_schedule(registry, state, economy)?;
+        validate_business_economy_disruption(registry, state, economy)?;
+        validate_business_laundering_against_registry(registry, state, economy)?;
+    }
+    Ok(())
+}
+
+fn validate_business_economy_registry_schedule(
+    registry: &Registry,
+    state: &AppState,
+    economy: &BusinessEconomyRecord,
+) -> Result<(), StateValidationError> {
+    if economy.status() != BusinessOperatingStatus::Active {
+        return Ok(());
+    }
+    let business = state
+        .world
+        .get_business(economy.business())
+        .ok_or_else(|| invalid_economy(economy))?;
+    let cycle = registry.get_business(business.kind()).economics().cycle();
+    let schedule_base = [
+        Some(economy.established_at()),
+        economy.last_cycle_at(),
+        economy.loss_streak_anchor(),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .expect("established business economy always has a schedule base");
+    let expected_next = schedule_base.checked_add(cycle);
+    if economy.next_cycle_at() != expected_next {
+        return Err(StateValidationError::InvalidBusinessEconomySchedule {
+            business: economy.business(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_business_economy_disruption(
+    registry: &Registry,
+    state: &AppState,
+    economy: &BusinessEconomyRecord,
+) -> Result<(), StateValidationError> {
+    let Some(disrupted_through) = economy.disrupted_through() else {
+        return Ok(());
+    };
+    let duration = registry.business_disruption().duration();
+    // The mutation owner defines disruption endpoints. Reuse it here so restore validation
+    // cannot drift from the inclusive N-minute interval convention or finite-clock clamping.
+    let min_horizon = crate::economy::business_economy_system::resolve_business_disruption_horizon(
+        economy.established_at(),
+        duration,
+    )
+    .as_minutes();
+    let max_horizon = crate::economy::business_economy_system::resolve_business_disruption_horizon(
+        state.now(),
+        duration,
+    )
+    .as_minutes();
+    let horizon = disrupted_through.as_minutes();
+    if horizon < min_horizon || horizon > max_horizon {
+        return Err(StateValidationError::InvalidBusinessEconomySchedule {
+            business: economy.business(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_business_laundering_against_registry(
+    registry: &Registry,
+    state: &AppState,
+    economy: &BusinessEconomyRecord,
+) -> Result<(), StateValidationError> {
+    let laundered = economy.laundered_this_cycle();
+    if laundered == Money::ZERO {
+        return Ok(());
+    }
+    let business = state
+        .world
+        .get_business(economy.business())
+        .ok_or_else(|| invalid_economy(economy))?;
+    let BusinessOwner::Organization(organization) = business.owner() else {
+        return Err(invalid_economy(economy));
+    };
+    let organization = state
+        .world
+        .get_organization(organization)
+        .ok_or_else(|| invalid_economy(economy))?;
+    if organization.kind() != OrganizationKind::Criminal
+        || !business
+            .functions()
+            .contains(&BusinessFunction::CashIntensive)
+    {
+        return Err(invalid_economy(economy));
+    }
+    for transaction_id in economy.laundering_transactions_this_cycle() {
+        let transaction = state
+            .finance
+            .get_transaction(*transaction_id)
+            .ok_or_else(|| invalid_economy(economy))?;
+        let amounts =
+            laundering_transaction_amounts(state, economy, organization.id(), transaction)
                 .ok_or_else(|| invalid_economy(economy))?;
-            let cycle = registry.get_business(business.kind()).economics().cycle();
-            let schedule_base = [
-                Some(economy.established_at()),
-                economy.last_cycle_at(),
-                economy.loss_streak_anchor(),
-            ]
-            .into_iter()
-            .flatten()
-            .max()
-            .expect("established business economy always has a schedule base");
-            let expected_next = schedule_base.checked_add(cycle);
-            if economy.next_cycle_at() != expected_next {
-                return Err(StateValidationError::InvalidBusinessEconomySchedule {
-                    business: economy.business(),
-                });
-            }
-        }
-        if let Some(disrupted_through) = economy.disrupted_through() {
-            let duration = registry.business_disruption().duration();
-            // The mutation owner defines disruption endpoints. Reuse it here so restore
-            // validation cannot drift from the inclusive N-minute interval convention or its
-            // finite-clock clamping behavior.
-            let min_horizon =
-                crate::economy::business_economy_system::resolve_business_disruption_horizon(
-                    economy.established_at(),
-                    duration,
-                )
-                .as_minutes();
-            let max_horizon =
-                crate::economy::business_economy_system::resolve_business_disruption_horizon(
-                    state.now(),
-                    duration,
-                )
-                .as_minutes();
-            let horizon = disrupted_through.as_minutes();
-            if horizon < min_horizon || horizon > max_horizon {
-                return Err(StateValidationError::InvalidBusinessEconomySchedule {
-                    business: economy.business(),
-                });
-            }
-        }
-        let laundered = economy.laundered_this_cycle();
-        if laundered == crate::finance::Money::ZERO {
-            continue;
-        }
-        let business = state
-            .world
-            .get_business(economy.business())
+        let expected_fee = crate::finance::helpers::apply_basis_point_multiplier(
+            amounts.amount,
+            registry.laundering().fee_basis_points(),
+        )
+        .ok_or_else(|| invalid_economy(economy))?;
+        let expected_accounted = amounts
+            .amount
+            .checked_sub(expected_fee)
             .ok_or_else(|| invalid_economy(economy))?;
-        let BusinessOwner::Organization(organization) = business.owner() else {
-            return Err(invalid_economy(economy));
-        };
-        let organization = state
-            .world
-            .get_organization(organization)
-            .ok_or_else(|| invalid_economy(economy))?;
-        if organization.kind() != OrganizationKind::Criminal
-            || !business
-                .functions()
-                .contains(&BusinessFunction::CashIntensive)
+        if expected_fee <= Money::ZERO
+            || expected_accounted <= Money::ZERO
+            || amounts.fee != expected_fee
+            || amounts.accounted != expected_accounted
         {
             return Err(invalid_economy(economy));
         }
-        for transaction_id in economy.laundering_transactions_this_cycle() {
-            let transaction = state
-                .finance
-                .get_transaction(*transaction_id)
-                .ok_or_else(|| invalid_economy(economy))?;
-            let amounts =
-                laundering_transaction_amounts(state, economy, organization.id(), transaction)
-                    .ok_or_else(|| invalid_economy(economy))?;
-            let expected_fee = crate::finance::helpers::apply_basis_point_multiplier(
-                amounts.amount,
-                registry.laundering().fee_basis_points(),
-            )
-            .ok_or_else(|| invalid_economy(economy))?;
-            let expected_accounted = amounts
-                .amount
-                .checked_sub(expected_fee)
-                .ok_or_else(|| invalid_economy(economy))?;
-            if expected_fee <= crate::finance::Money::ZERO
-                || expected_accounted <= crate::finance::Money::ZERO
-                || amounts.fee != expected_fee
-                || amounts.accounted != expected_accounted
-            {
-                return Err(invalid_economy(economy));
-            }
-        }
-        // Restore can prove the immutable normal-gross ceiling for this operating window, but
-        // not whether each historical laundering transfer happened before or after a later
-        // sabotage hit because disruption start history is not duplicated on the economy
-        // record. Live laundering always enforces the stricter current (possibly disrupted)
-        // capacity at the transfer instant. Rechecking today's degraded capacity here would
-        // retroactively invalidate money that was legitimately laundered before later damage.
-        let gross = crate::economy::business_economy_system::resolve_business_gross_potential(
-            registry,
-            state,
-            economy.business(),
-        )
-        .map_err(|_| StateValidationError::InvalidBusinessEconomy {
-            business: economy.business(),
-        })?;
-        let capacity = crate::finance::helpers::apply_basis_point_multiplier(
-            gross,
-            registry.laundering().plausibility_gross_basis_points(),
-        )
-        .ok_or(StateValidationError::InvalidBusinessEconomy {
-            business: economy.business(),
-        })?;
-        if laundered > capacity {
-            return Err(StateValidationError::InvalidBusinessEconomy {
-                business: economy.business(),
-            });
-        }
+    }
+    // Restore can prove the immutable normal-gross ceiling for this operating window, but
+    // not whether each historical laundering transfer happened before or after a later
+    // sabotage hit because disruption start history is not duplicated on the economy
+    // record. Live laundering always enforces the stricter current (possibly disrupted)
+    // capacity at the transfer instant. Rechecking today's degraded capacity here would
+    // retroactively invalidate money that was legitimately laundered before later damage.
+    let gross = crate::economy::business_economy_system::resolve_business_gross_potential(
+        registry,
+        state,
+        economy.business(),
+    )
+    .map_err(|_| invalid_economy(economy))?;
+    let capacity = crate::finance::helpers::apply_basis_point_multiplier(
+        gross,
+        registry.laundering().plausibility_gross_basis_points(),
+    )
+    .ok_or_else(|| invalid_economy(economy))?;
+    if laundered > capacity {
+        return Err(invalid_economy(economy));
     }
     Ok(())
 }

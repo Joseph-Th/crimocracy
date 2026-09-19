@@ -290,15 +290,23 @@ pub(crate) fn surveillance_after_action_clause(
 ) -> Option<String> {
     let plan = plan?;
     let findings = plan.observation_findings().collect::<Vec<_>>().join("; ");
-    let clause = match outcome {
+    Some(render_surveillance_after_action_clause(
+        plan.observation_count(),
+        &findings,
+        outcome,
+    ))
+}
+
+fn render_surveillance_after_action_clause(
+    observation_count: usize,
+    findings: &str,
+    outcome: OperationObjectiveOutcome,
+) -> String {
+    match outcome {
         OperationObjectiveOutcome::Achieved => format!(
             "Surveillance produced {} usable target observation{}{}.",
-            plan.observation_count(),
-            if plan.observation_count() == 1 {
-                ""
-            } else {
-                "s"
-            },
+            observation_count,
+            if observation_count == 1 { "" } else { "s" },
             if findings.is_empty() {
                 String::new()
             } else {
@@ -307,12 +315,8 @@ pub(crate) fn surveillance_after_action_clause(
         ),
         OperationObjectiveOutcome::Partial => format!(
             "Surveillance produced {} limited target observation{}; important details remain unresolved.{}",
-            plan.observation_count(),
-            if plan.observation_count() == 1 {
-                ""
-            } else {
-                "s"
-            },
+            observation_count,
+            if observation_count == 1 { "" } else { "s" },
             if findings.is_empty() {
                 String::new()
             } else {
@@ -322,8 +326,100 @@ pub(crate) fn surveillance_after_action_clause(
         OperationObjectiveOutcome::Failed => {
             "Surveillance produced no target observation reliable enough for planning.".to_owned()
         }
-    };
-    Some(clause)
+    }
+}
+
+/// Rebuilds the after-action surveillance clause from the durable observation records rather than
+/// from current target state. The compact finding labels depend only on immutable entity identity,
+/// names, enterprise kind/location, and the ordered persisted observations; hidden case/evidence
+/// truth is never consulted. `Err(())` means a persisted observation cannot map to a canonical
+/// surveillance finding and therefore cannot support a valid historical after-action narrative.
+pub(crate) fn persisted_surveillance_after_action_clause(
+    state: &AppState,
+    operation: &OperationRecord,
+) -> Result<Option<String>, ()> {
+    if operation.kind() != OperationKind::Surveillance {
+        return Ok(None);
+    }
+    let resolution = operation.resolution().ok_or(())?;
+    if resolution.objective_outcome() == OperationObjectiveOutcome::Failed {
+        return Ok(Some(render_surveillance_after_action_clause(
+            0,
+            "",
+            resolution.objective_outcome(),
+        )));
+    }
+    let findings = resolution
+        .discovered_information()
+        .iter()
+        .map(|information| {
+            state
+                .intelligence
+                .get_information(*information)
+                .and_then(|record| persisted_surveillance_finding(state, record))
+                .ok_or(())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(render_surveillance_after_action_clause(
+        findings.len(),
+        &findings.join("; "),
+        resolution.objective_outcome(),
+    )))
+}
+
+fn persisted_surveillance_finding(
+    state: &AppState,
+    information: &InformationRecord,
+) -> Option<String> {
+    match (information.topic(), information.subject()) {
+        (InformationTopic::PoliceActivity, EntityRef::Neighborhood(id)) => state
+            .world
+            .get_neighborhood(id)
+            .map(|record| format!("police activity around {}", record.name())),
+        (InformationTopic::MarketAccess, EntityRef::Business(id)) => state
+            .world
+            .get_business(id)
+            .map(|record| format!("access intelligence at {}", record.name())),
+        (InformationTopic::Personnel, EntityRef::Character(id)) => state
+            .world
+            .get_character(id)
+            .map(|record| format!("the movements of {}", record.name())),
+        (InformationTopic::LegalActivity, EntityRef::Organization(id)) => state
+            .world
+            .get_organization(id)
+            .map(|record| format!("case activity at {}", record.name())),
+        (InformationTopic::Personnel, EntityRef::Organization(id)) => state
+            .world
+            .get_organization(id)
+            .map(|record| format!("personnel around {}", record.name())),
+        (InformationTopic::LegalActivity, EntityRef::Investigation(id)) => state
+            .legal
+            .get_investigation(id)
+            .map(|record| format!("the status of {}", record.title())),
+        (InformationTopic::Personnel, EntityRef::Enterprise(id)) => {
+            let enterprise = state.enterprises.get_enterprise(id)?;
+            let location = match enterprise.location() {
+                EnterpriseLocation::Neighborhood(neighborhood) => {
+                    state.world.get_neighborhood(neighborhood)?.name()
+                }
+                EnterpriseLocation::Business(business) => {
+                    state.world.get_business(business)?.name()
+                }
+            };
+            Some(format!(
+                "{} activity at {location}",
+                enterprise_kind_label(enterprise.kind())
+            ))
+        }
+        (InformationTopic::OperationalOutcome, EntityRef::Operation(id)) => {
+            let observed = state.operations.get_operation(id)?;
+            let organization = state
+                .world
+                .get_organization(observed.responsible_organization())?;
+            Some(format!("activity linked to {}", organization.name()))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn is_valid_persisted_surveillance_information(
@@ -454,8 +550,7 @@ fn resolve_target_snapshot(
             let active_enterprises = if organization.kind() == OrganizationKind::Criminal {
                 state
                     .enterprises
-                    .enterprises_for_organization(id)
-                    .filter(|enterprise| enterprise.status() == EnterpriseStatus::Active)
+                    .active_for_organization(id)
                     .take(3)
                     .map(|enterprise| resolve_enterprise_snapshot(state, enterprise))
                     .collect()

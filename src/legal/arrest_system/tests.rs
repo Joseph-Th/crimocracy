@@ -1900,10 +1900,7 @@ fn custody_aborts_authorized_operation_before_start() {
         crate::operations::OperationAbortCause::ParticipantDetained(fixture.suspect)
     );
     assert_eq!(
-        abort
-            .artifacts()
-            .expect("custody cancellation should explain itself through durable artifacts")
-            .report(),
+        abort.artifacts().report(),
         fixture
             .state
             .reports()

@@ -5,6 +5,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, NeighborhoodId, OperationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::enterprises::EnterpriseLocation;
 use crate::intelligence::InformationTopic;
 use crate::legal::patrol_system::{
     PatrolPresenceSnapshot, resolve_patrol_presence_interval_snapshot,
@@ -206,73 +207,123 @@ pub(super) fn resolve_target_neighborhoods(
     // police response for such operations could never attribute to a neighborhood.
     let mut queue: Vec<EntityRef> = entities;
     while let Some(entity) = queue.pop() {
-        match entity {
-            EntityRef::Neighborhood(id) => {
-                neighborhoods.insert(id);
-            }
-            EntityRef::Business(id) => {
-                if let Some(business) = state.world.get_business(id) {
-                    neighborhoods.insert(business.neighborhood());
-                }
-            }
-            EntityRef::Organization(id) => {
-                for business in state.world.businesses_owned_by_organization(id) {
-                    neighborhoods.insert(business.neighborhood());
-                }
-                if let Some(jurisdiction) = state.legal.get_jurisdiction(id) {
-                    for neighborhood in jurisdiction.neighborhoods() {
-                        neighborhoods.insert(*neighborhood);
-                    }
-                }
-            }
-            EntityRef::Character(id) => {
-                if let Some(character) = state.world.get_character(id)
-                    && let Some(org) = character.organization()
-                {
-                    // Reuse organization resolution rather than duplicating only its business
-                    // half here. Institutional characters also operate inside their authority's
-                    // jurisdiction, so surveilling an officer cannot become geographically
-                    // invisible merely because the department owns no business.
-                    queue.push(EntityRef::Organization(org));
-                }
-                for business in state.world.businesses_owned_by_character(id) {
-                    neighborhoods.insert(business.neighborhood());
-                }
-            }
-            EntityRef::Enterprise(id) => {
-                if let Some(enterprise) = state.enterprises.get_enterprise(id) {
-                    match enterprise.location() {
-                        crate::enterprises::EnterpriseLocation::Neighborhood(n) => {
-                            neighborhoods.insert(n);
-                        }
-                        crate::enterprises::EnterpriseLocation::Business(b) => {
-                            if let Some(business) = state.world.get_business(b) {
-                                neighborhoods.insert(business.neighborhood());
-                            }
-                        }
-                    }
-                }
-            }
-            EntityRef::Operation(id) => {
-                if let Some(operation) = state.operations.get_operation(id) {
-                    queue.push(EntityRef::Organization(
-                        operation.responsible_organization(),
-                    ));
-                }
-            }
-            EntityRef::Investigation(id) => {
-                if let Some(investigation) = state.legal.get_investigation(id) {
-                    queue.push(EntityRef::Organization(investigation.owner()));
-                }
-            }
-            // Unsupported surveillance targets can never reach this derivation validated.
-            EntityRef::Evidence(_)
-            | EntityRef::FinancialAccount(_)
-            | EntityRef::DecisionRequest(_)
-            | EntityRef::Mandate(_) => {}
-        }
+        collect_target_entity_neighborhoods(state, entity, &mut queue, &mut neighborhoods);
     }
     neighborhoods
+}
+
+fn collect_target_entity_neighborhoods(
+    state: &AppState,
+    entity: EntityRef,
+    queue: &mut Vec<EntityRef>,
+    neighborhoods: &mut BTreeSet<NeighborhoodId>,
+) {
+    match entity {
+        EntityRef::Neighborhood(id) => {
+            neighborhoods.insert(id);
+        }
+        EntityRef::Business(id) => collect_business_target_neighborhood(state, id, neighborhoods),
+        EntityRef::Organization(id) => {
+            collect_organization_target_neighborhoods(state, id, queue, neighborhoods);
+        }
+        EntityRef::Character(id) => {
+            collect_character_target_neighborhoods(state, id, queue, neighborhoods);
+        }
+        EntityRef::Enterprise(id) => {
+            collect_enterprise_target_neighborhood(state, id, neighborhoods)
+        }
+        EntityRef::Operation(id) => {
+            if let Some(operation) = state.operations.get_operation(id) {
+                queue.push(EntityRef::Organization(
+                    operation.responsible_organization(),
+                ));
+            }
+        }
+        EntityRef::Investigation(id) => {
+            if let Some(investigation) = state.legal.get_investigation(id) {
+                queue.push(EntityRef::Organization(investigation.owner()));
+            }
+        }
+        // Unsupported surveillance targets can never reach this derivation validated.
+        EntityRef::Evidence(_)
+        | EntityRef::FinancialAccount(_)
+        | EntityRef::DecisionRequest(_)
+        | EntityRef::Mandate(_) => {}
+    }
+}
+
+fn collect_business_target_neighborhood(
+    state: &AppState,
+    business: crate::core::id::BusinessId,
+    neighborhoods: &mut BTreeSet<NeighborhoodId>,
+) {
+    if let Some(business) = state.world.get_business(business) {
+        neighborhoods.insert(business.neighborhood());
+    }
+}
+
+fn collect_organization_target_neighborhoods(
+    state: &AppState,
+    organization: crate::core::id::OrganizationId,
+    queue: &mut Vec<EntityRef>,
+    neighborhoods: &mut BTreeSet<NeighborhoodId>,
+) {
+    for business in state.world.businesses_owned_by_organization(organization) {
+        neighborhoods.insert(business.neighborhood());
+    }
+    // Criminal organizations also operate through neighborhood-scoped rackets that need not sit
+    // inside organization-owned real estate. Only active enterprises belong to the current
+    // operational footprint; suspended and retired rackets remain durable history.
+    queue.extend(
+        state
+            .enterprises
+            .active_for_organization(organization)
+            .map(|enterprise| EntityRef::Enterprise(enterprise.id())),
+    );
+    if let Some(jurisdiction) = state.legal.get_jurisdiction(organization) {
+        neighborhoods.extend(jurisdiction.neighborhoods().iter().copied());
+    }
+}
+
+fn collect_character_target_neighborhoods(
+    state: &AppState,
+    character: CharacterId,
+    queue: &mut Vec<EntityRef>,
+    neighborhoods: &mut BTreeSet<NeighborhoodId>,
+) {
+    if let Some(organization) = state
+        .world
+        .get_character(character)
+        .and_then(|record| record.organization())
+    {
+        // Reuse organization resolution rather than duplicating only its business half here.
+        // Institutional characters also operate inside their authority's jurisdiction.
+        queue.push(EntityRef::Organization(organization));
+    }
+    neighborhoods.extend(
+        state
+            .world
+            .businesses_owned_by_character(character)
+            .map(|business| business.neighborhood()),
+    );
+}
+
+fn collect_enterprise_target_neighborhood(
+    state: &AppState,
+    enterprise: crate::core::id::EnterpriseId,
+    neighborhoods: &mut BTreeSet<NeighborhoodId>,
+) {
+    let Some(enterprise) = state.enterprises.get_enterprise(enterprise) else {
+        return;
+    };
+    match enterprise.location() {
+        EnterpriseLocation::Neighborhood(neighborhood) => {
+            neighborhoods.insert(neighborhood);
+        }
+        EnterpriseLocation::Business(business) => {
+            collect_business_target_neighborhood(state, business, neighborhoods);
+        }
+    }
 }
 
 /// Neighborhoods an investigation targets, derived from its subjects and, for

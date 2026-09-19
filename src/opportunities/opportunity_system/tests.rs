@@ -1266,9 +1266,7 @@ fn tick_aborts_delayed_converted_operation_when_opportunity_window_expires() {
         OperationAbortCause::OpportunityExpired(opportunity)
     );
     assert_eq!(abort.aborted_at(), valid_until);
-    let artifacts = abort
-        .artifacts()
-        .expect("opportunity-expiry abort should be visible to leadership");
+    let artifacts = abort.artifacts();
     assert!(
         fixture
             .state
