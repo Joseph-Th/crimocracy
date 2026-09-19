@@ -73,16 +73,36 @@ pub const DAY_MINUTES_U16: u16 = 1_440;
 pub const DAY_MINUTES: u64 = DAY_MINUTES_U16 as u64;
 pub const DAY_DURATION: SimDuration = SimDuration::from_minutes(DAY_MINUTES_U16 as u32);
 
+/// True exactly on a positive multiple of the supplied cadence. Minute zero is never a
+/// recurring boundary: state created at campaign start must not immediately run periodic work.
+/// A zero cadence is treated as disabled rather than reaching `is_multiple_of(0)`.
+pub fn is_recurring_boundary(now: SimTime, cadence: SimDuration) -> bool {
+    let cadence_minutes = u64::from(cadence.as_minutes());
+    now != SimTime::ZERO && cadence_minutes != 0 && now.as_minutes().is_multiple_of(cadence_minutes)
+}
+
 /// True exactly once per campaign day. Minute zero is never a boundary: state created at
 /// the campaign start must not immediately run its daily passes.
 pub fn is_day_boundary(now: SimTime) -> bool {
-    let minutes = now.as_minutes();
-    minutes != 0 && minutes.is_multiple_of(DAY_MINUTES)
+    is_recurring_boundary(now, DAY_DURATION)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recurring_boundary_excludes_campaign_start_and_zero_cadence() {
+        assert!(!is_recurring_boundary(SimTime::ZERO, DAY_DURATION));
+        assert!(!is_recurring_boundary(
+            SimTime::from_minutes(DAY_MINUTES),
+            SimDuration::from_minutes(0),
+        ));
+        assert!(is_recurring_boundary(
+            SimTime::from_minutes(DAY_MINUTES),
+            DAY_DURATION,
+        ));
+    }
 
     #[test]
     fn checked_add_reports_simulation_clock_capacity() {

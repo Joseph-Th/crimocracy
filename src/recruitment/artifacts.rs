@@ -108,7 +108,6 @@ pub(super) fn validate_recruitment_history_event(
         .expect("validated recruitment candidate must exist");
     let event = if plan.context.previous_organization.is_some() {
         HistoryEventDraft {
-            occurred_at: plan.context.occurred_at,
             kind: HistoryEventKind::Recruitment,
             summary: recruitment_defection_history_summary(candidate.name()),
             entities: BTreeSet::from([EntityRef::Character(plan.draft.candidate)]),
@@ -123,7 +122,6 @@ pub(super) fn validate_recruitment_history_event(
             .get_organization(plan.draft.target_organization)
             .expect("validated target organization must exist");
         HistoryEventDraft {
-            occurred_at: plan.context.occurred_at,
             kind: HistoryEventKind::Recruitment,
             summary: recruitment_join_history_summary(
                 candidate.name(),

@@ -614,7 +614,6 @@ fn make_test_scenario() -> TestScenario {
     validate_record_event(
         &state,
         HistoryEventDraft {
-            occurred_at: state.now(),
             kind: HistoryEventKind::Operation,
             summary: "Central Precinct opened an investigation touching Frank Dello.".to_owned(),
             entities: BTreeSet::from([

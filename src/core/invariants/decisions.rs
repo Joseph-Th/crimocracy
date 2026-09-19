@@ -20,8 +20,13 @@ use crate::recruitment::RecruitmentPolicySource;
 use crate::world::{ApprovalPolicy, OrganizationKind, PolicyKind, PolicySetting};
 
 pub(super) fn validate_decisions(state: &AppState) -> Result<(), StateValidationError> {
+    let mut previous_requested_at = None;
     for decision in state.decisions.decisions() {
         validate_decision(state, decision)?;
+        if previous_requested_at.is_some_and(|at| decision.requested_at() < at) {
+            return Err(invalid_decision_chronology(decision));
+        }
+        previous_requested_at = Some(decision.requested_at());
     }
 
     for operation in state

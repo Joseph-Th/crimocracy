@@ -16,12 +16,29 @@ use crate::opportunities::{OpportunityRecord, OpportunityResolution};
 use crate::registry::Registry;
 use crate::reports::{ReportKind, ReportRecord};
 use crate::world::OrganizationKind;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValidationError> {
     let mut covered_targets = BTreeSet::<EntityRef>::new();
+    let mut open_targets = BTreeMap::<
+        (
+            crate::core::id::OrganizationId,
+            crate::operations::OperationKind,
+        ),
+        BTreeSet<EntityRef>,
+    >::new();
     for opportunity in state.opportunities.opportunities() {
         validate_opportunity(state, opportunity, &mut covered_targets)?;
+        if opportunity.resolution().is_none() {
+            let context = opportunity.context();
+            let targets = open_targets
+                .entry((opportunity.organization(), context.operation_kind()))
+                .or_default();
+            if !targets.is_disjoint(context.targets()) {
+                return Err(invalid_opportunity(opportunity));
+            }
+            targets.extend(context.targets().iter().copied());
+        }
     }
     Ok(())
 }

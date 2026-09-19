@@ -1109,8 +1109,8 @@ pub(crate) fn apply_evidence_review_scheduling(
 
 /// Returns the oldest case-owned reviewable evidence that has not received a real autonomous
 /// review attempt. Scheduled and completed work consume the source; cancelled work does not.
-/// Evidence IDs are creation ordered inside the case's `BTreeSet`, so the oldest untouched
-/// source wins deterministically without introducing a second priority vocabulary.
+/// Discovery time is the substantive age of evidence; ID breaks only exact-time ties so a later
+/// import of an older fact does not wait behind newer evidence merely because it was recorded later.
 fn next_unattempted_review_source(
     state: &AppState,
     investigation: &crate::legal::InvestigationRecord,
@@ -1127,6 +1127,7 @@ fn next_unattempted_review_source(
         })
         .filter_map(|work| work.focus().evidence_id())
         .collect();
+    let mut oldest = None;
     for evidence_id in investigation.evidence() {
         // The investigation owns this evidence reference. A missing backing record is a broken
         // case graph, not "no reviewable evidence yet"; surface it at the autonomous consumer.
@@ -1134,14 +1135,17 @@ fn next_unattempted_review_source(
             .legal
             .get_evidence(*evidence_id)
             .ok_or(InvestigationWorkError::InvalidSourceEvidence(*evidence_id))?;
-        if !is_reviewable_evidence_kind(evidence.kind()) {
+        if !is_reviewable_evidence_kind(evidence.kind())
+            || attempted_reviews.contains(&evidence.id())
+        {
             continue;
         }
-        if !attempted_reviews.contains(&evidence.id()) {
-            return Ok(Some(evidence.id()));
+        let candidate = (evidence.discovered_at(), evidence.id());
+        if oldest.is_none_or(|current| candidate < current) {
+            oldest = Some(candidate);
         }
     }
-    Ok(None)
+    Ok(oldest.map(|(_, evidence)| evidence))
 }
 
 pub(crate) fn is_reviewable_evidence_kind(kind: EvidenceKind) -> bool {

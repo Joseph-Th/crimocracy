@@ -788,7 +788,6 @@ pub(crate) fn validate_operation_resolution_plan(
     let history = validate_record_event(
         state,
         HistoryEventDraft {
-            occurred_at: plan.snapshot.resolved_at,
             kind: HistoryEventKind::Operation,
             summary: format!(
                 "{} ended with objective {}.",

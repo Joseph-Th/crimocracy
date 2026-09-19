@@ -6,11 +6,6 @@ use crate::core::state::AppState;
 use crate::registry::Registry;
 
 pub(super) fn validate_reputations(state: &AppState) -> Result<(), StateValidationError> {
-    if !state.reputation.has_consistent_indexes() {
-        return Err(StateValidationError::IndexInconsistency {
-            subsystem: "reputation",
-        });
-    }
     for record in state.reputation.records() {
         let entity = EntityRef::Organization(record.organization());
         if !is_entity_present(state, entity) {

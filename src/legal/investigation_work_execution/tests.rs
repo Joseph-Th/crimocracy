@@ -389,6 +389,84 @@ fn autonomous_evidence_review_advances_to_each_reviewable_source_once() {
 }
 
 #[test]
+fn autonomous_evidence_review_uses_discovery_time_before_evidence_id() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+
+    let initial = apply_evidence_review_scheduling(&registry, &mut fixture.state)
+        .expect("initial autonomous review should schedule");
+    assert_eq!(initial.len(), 1);
+    run_until_work_resolved(&registry, &mut fixture.state, initial[0]);
+
+    let current = fixture.state.now();
+    let newer = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.target),
+            origin: Some(EntityRef::Character(fixture.middle)),
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+            discovered_at: current,
+        },
+    )
+    .expect("newer evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("newer evidence should commit");
+    let older_discovery = SimTime::from_minutes(
+        current
+            .as_minutes()
+            .checked_sub(1)
+            .expect("resolved work fixture must advance beyond campaign start"),
+    );
+    let older_but_later_recorded = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.target),
+            origin: Some(EntityRef::Character(fixture.middle)),
+            kind: EvidenceKind::FinancialRecord,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+            discovered_at: older_discovery,
+        },
+    )
+    .expect("retrospective evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("retrospective evidence should commit");
+    assert!(
+        newer < older_but_later_recorded,
+        "fixture must make evidence ID order disagree with discovery order"
+    );
+
+    let scheduled = apply_evidence_review_scheduling(&registry, &mut fixture.state)
+        .expect("retrospective evidence review should schedule");
+    assert_eq!(scheduled.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(scheduled[0])
+            .expect("retrospective evidence review should persist")
+            .focus(),
+        InvestigationWorkFocus::evidence(older_but_later_recorded),
+        "institutional review should prioritize when evidence was discovered, not when its ID was allocated"
+    );
+    validate_state(&fixture.state).expect("discovery-priority state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn detention_cancellation_token_stales_when_case_changes_before_commit() {
     let registry = build_registry();
     let mut fixture = make_fixture(

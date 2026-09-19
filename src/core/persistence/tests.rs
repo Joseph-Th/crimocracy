@@ -4,7 +4,16 @@ use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, HistoryEventId};
+use crate::core::id::{CharacterId, DecisionRequestId, HistoryEventId, InformationId};
+use crate::decisions::decision_system::validate_request_recruitment_approval;
+use crate::decisions::{
+    DecisionCancellation, DecisionContext, DecisionRequestRecord, DecisionResolution,
+    DecisionResponse, DecisionState, DecisionStatus, RecruitmentApprovalRequestDraft,
+};
+use crate::delegation::delegation_system::validate_assign_mandate;
+use crate::delegation::{
+    MandateAuthority, MandateDraft, ResponsibilityFunction, ResponsibilityScope,
+};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
@@ -17,12 +26,17 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
+use crate::intelligence::{InformationSignal, IntelligenceState};
+use crate::recruitment::RecruitmentApproach;
 use crate::reports::report_system::validate_record_report;
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::social::relationship_system::validate_set_relationship;
-use crate::social::{RelationshipDimensions, SocialState};
+use crate::social::{RelationshipDimensions, RelationshipLevel, SocialState};
 use crate::world::world_system::{insert_character, insert_organization};
-use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+use crate::world::{
+    ApprovalPolicy, AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind, PolicyKind,
+    PolicySetting,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,6 +46,69 @@ struct PersistenceFixture {
     organization: crate::core::id::OrganizationId,
     first: CharacterId,
     second: CharacterId,
+}
+
+#[derive(Clone, Debug, Serialize)]
+enum DecisionLifecycleWire {
+    Pending,
+    Resolved(DecisionResolution),
+    Cancelled(DecisionCancellation),
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DecisionRequestRecordWire {
+    id: DecisionRequestId,
+    recipient: crate::core::id::OrganizationId,
+    requester: CharacterId,
+    context: DecisionContext,
+    attention: AttentionClass,
+    summary: String,
+    requested_at: crate::core::time::SimTime,
+    options: BTreeSet<DecisionResponse>,
+    lifecycle: DecisionLifecycleWire,
+    version: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DecisionStateWire {
+    records: BTreeMap<DecisionRequestId, DecisionRequestRecordWire>,
+}
+
+fn decision_record_wire(record: &DecisionRequestRecord) -> DecisionRequestRecordWire {
+    let lifecycle = match record.status() {
+        DecisionStatus::Pending => DecisionLifecycleWire::Pending,
+        DecisionStatus::Resolved => DecisionLifecycleWire::Resolved(
+            record
+                .resolution()
+                .expect("resolved decision must carry a resolution"),
+        ),
+        DecisionStatus::Cancelled => DecisionLifecycleWire::Cancelled(
+            record
+                .cancellation()
+                .expect("cancelled decision must carry a cancellation"),
+        ),
+    };
+    DecisionRequestRecordWire {
+        id: record.id(),
+        recipient: record.recipient(),
+        requester: record.requester(),
+        context: record.context(),
+        attention: record.attention(),
+        summary: record.summary().to_owned(),
+        requested_at: record.requested_at(),
+        options: record.options().clone(),
+        lifecycle,
+        version: record.version(),
+    }
+}
+
+fn decision_state_wire(state: &DecisionState) -> DecisionStateWire {
+    DecisionStateWire {
+        records: state
+            .decisions()
+            .map(|record| (record.id(), decision_record_wire(record)))
+            .collect(),
+    }
 }
 
 fn fixture() -> PersistenceFixture {
@@ -207,6 +284,84 @@ fn history_state_wire(state: &HistoryState) -> HistoryStateWire {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct InformationSourceWire {
+    holder: KnowledgeHolder,
+    source_kind: InformationSourceKind,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct InformationSubjectWire {
+    topic: InformationTopic,
+    source_entity: Option<EntityRef>,
+    subject: EntityRef,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct InformationChronologyWire {
+    observed_at: crate::core::time::SimTime,
+    recorded_at: crate::core::time::SimTime,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct InformationAssessmentWire {
+    reliability: Reliability,
+    specificity: Specificity,
+    signal: Option<InformationSignal>,
+    derived_from: BTreeSet<InformationId>,
+    summary: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct InformationRecordWire {
+    id: InformationId,
+    source: InformationSourceWire,
+    subject: InformationSubjectWire,
+    chronology: InformationChronologyWire,
+    assessment: InformationAssessmentWire,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct IntelligenceStateWire {
+    records: BTreeMap<InformationId, InformationRecordWire>,
+}
+
+fn intelligence_state_wire(state: &IntelligenceState) -> IntelligenceStateWire {
+    IntelligenceStateWire {
+        records: state
+            .information()
+            .map(|record| {
+                (
+                    record.id(),
+                    InformationRecordWire {
+                        id: record.id(),
+                        source: InformationSourceWire {
+                            holder: record.holder(),
+                            source_kind: record.source_kind(),
+                        },
+                        subject: InformationSubjectWire {
+                            topic: record.topic(),
+                            source_entity: record.source_entity(),
+                            subject: record.subject(),
+                        },
+                        chronology: InformationChronologyWire {
+                            observed_at: record.observed_at(),
+                            recorded_at: record.recorded_at(),
+                        },
+                        assessment: InformationAssessmentWire {
+                            reliability: record.reliability(),
+                            specificity: record.specificity(),
+                            signal: record.signal().cloned(),
+                            derived_from: record.derived_from().clone(),
+                            summary: record.summary().to_owned(),
+                        },
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
 #[test]
 fn save_bytes_omit_derived_indexes_and_restore_rebuilds_them() {
     let PersistenceFixture {
@@ -265,7 +420,6 @@ fn restore_rejects_authoritative_map_key_and_embedded_id_divergence() {
         validate_record_event(
             &fixture.state,
             HistoryEventDraft {
-                occurred_at: fixture.state.now(),
                 kind: HistoryEventKind::Recruitment,
                 summary: summary.to_owned(),
                 entities: BTreeSet::from([EntityRef::Organization(fixture.organization)]),
@@ -303,6 +457,201 @@ fn restore_rejects_authoritative_map_key_and_embedded_id_divergence() {
         error,
         LoadError::InvalidState(StateValidationError::IndexInconsistency {
             subsystem: "history",
+        })
+    );
+}
+
+#[test]
+fn restore_rejects_history_chronology_that_rewinds_in_id_order() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(5));
+    let first = validate_record_event(
+        &fixture.state,
+        HistoryEventDraft {
+            kind: HistoryEventKind::Recruitment,
+            summary: "First chronological history event".to_owned(),
+            entities: BTreeSet::from([EntityRef::Organization(fixture.organization)]),
+        },
+    )
+    .expect("first chronological event should validate")
+    .commit(&mut fixture.state)
+    .expect("first chronological event should commit");
+
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(5));
+    let second = validate_record_event(
+        &fixture.state,
+        HistoryEventDraft {
+            kind: HistoryEventKind::Recruitment,
+            summary: "Second chronological history event".to_owned(),
+            entities: BTreeSet::from([EntityRef::Organization(fixture.organization)]),
+        },
+    )
+    .expect("second chronological event should validate")
+    .commit(&mut fixture.state)
+    .expect("second chronological event should commit");
+
+    let mut replacement = history_state_wire(fixture.state.history());
+    assert!(
+        replacement.records[&first].occurred_at < replacement.records[&second].occurred_at,
+        "fixture history must begin in chronological ID order"
+    );
+    replacement
+        .records
+        .get_mut(&second)
+        .expect("second history record should exist")
+        .occurred_at = crate::core::time::SimTime::from_minutes(4);
+
+    let error = restore_save(
+        &fixture.registry,
+        replace_serialized_substate(
+            build_save(&fixture.registry, &fixture.state)
+                .expect("valid chronological state should save before corruption"),
+            fixture.state.history(),
+            &replacement,
+        ),
+    )
+    .expect_err("history time may not rewind as monotone IDs advance");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::IndexInconsistency {
+            subsystem: "history",
+        })
+    );
+}
+
+#[test]
+fn restore_rejects_decision_request_time_that_rewinds_in_id_order() {
+    let mut fixture = fixture();
+    let make_candidate = |state: &mut AppState, name: &str| {
+        insert_character(
+            state,
+            CharacterDraft {
+                name: name.to_owned(),
+                organization: None,
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("decision chronology candidate should validate")
+    };
+    let first_candidate = make_candidate(&mut fixture.state, "First Decision Candidate");
+    let second_candidate = make_candidate(&mut fixture.state, "Second Decision Candidate");
+    let relationship_level =
+        RelationshipLevel::try_new(50).expect("fixture relationship level should validate");
+    let neutral_level =
+        RelationshipLevel::try_new(0).expect("fixture neutral relationship level should validate");
+    for candidate in [first_candidate, second_candidate] {
+        validate_set_relationship(
+            &fixture.state,
+            candidate,
+            fixture.first,
+            RelationshipDimensions {
+                trust: relationship_level,
+                respect: relationship_level,
+                fear: neutral_level,
+                affection: relationship_level,
+                dependence: neutral_level,
+                resentment: neutral_level,
+                debt: neutral_level,
+            },
+        )
+        .expect("decision chronology relationship should validate")
+        .commit(&mut fixture.state)
+        .expect("decision chronology relationship should commit");
+    }
+    let scope = ResponsibilityScope::Function(ResponsibilityFunction::Personnel);
+    let mandate = validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: fixture.organization,
+            manager: fixture.first,
+            scopes: BTreeSet::from([scope]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::IndependentRecruitment,
+                PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
+            )]),
+            budget: None,
+        },
+    )
+    .expect("decision chronology mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("decision chronology mandate should commit");
+    let request = |fixture: &mut PersistenceFixture,
+                   candidate: CharacterId,
+                   summary: &str|
+     -> DecisionRequestId {
+        validate_request_recruitment_approval(
+            &fixture.registry,
+            &fixture.state,
+            RecruitmentApprovalRequestDraft {
+                authority: MandateAuthority {
+                    mandate,
+                    manager: fixture.first,
+                    scope,
+                },
+                target_organization: fixture.organization,
+                recruiter: fixture.first,
+                candidate,
+                approach: RecruitmentApproach::PersonalAppeal,
+                attention: AttentionClass::Exception,
+                summary: summary.to_owned(),
+            },
+        )
+        .expect("decision chronology request should validate")
+        .commit(&mut fixture.state)
+        .expect("decision chronology request should commit")
+        .decision
+    };
+
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(5));
+    let first = request(
+        &mut fixture,
+        first_candidate,
+        "Approve first recruitment outreach.",
+    );
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(5));
+    let second = request(
+        &mut fixture,
+        second_candidate,
+        "Approve second recruitment outreach.",
+    );
+
+    let mut replacement = decision_state_wire(fixture.state.decisions());
+    assert!(
+        replacement.records[&first].requested_at < replacement.records[&second].requested_at,
+        "fixture decisions must begin in chronological ID order"
+    );
+    replacement
+        .records
+        .get_mut(&second)
+        .expect("second decision should exist")
+        .requested_at = crate::core::time::SimTime::from_minutes(4);
+
+    let error = restore_save(
+        &fixture.registry,
+        replace_serialized_substate(
+            build_save(&fixture.registry, &fixture.state)
+                .expect("valid decision chronology should save before corruption"),
+            fixture.state.decisions(),
+            &replacement,
+        ),
+    )
+    .expect_err("decision request time may not rewind as monotone IDs advance");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::InvalidDecisionChronology {
+            decision: second,
         })
     );
 }
@@ -472,6 +821,71 @@ fn restore_rejects_relationship_shapes_the_canonical_mutator_cannot_create() {
 }
 
 #[test]
+fn restore_rejects_information_recording_time_that_rewinds_in_id_order() {
+    let mut fixture = fixture();
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(5));
+    let record = |state: &AppState, summary: &str| {
+        validate_record_information(
+            state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(fixture.organization),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::General,
+                source_entity: None,
+                subject: EntityRef::Organization(fixture.organization),
+                observed_at: crate::core::time::SimTime::ZERO,
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: summary.to_owned(),
+            },
+        )
+        .expect("chronology fixture information should validate")
+    };
+    let first = record(&fixture.state, "First acquired fact")
+        .commit(&mut fixture.state)
+        .expect("first information should commit");
+
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(5));
+    let second = record(&fixture.state, "Second acquired fact")
+        .commit(&mut fixture.state)
+        .expect("second information should commit");
+
+    let mut replacement = intelligence_state_wire(fixture.state.intelligence());
+    assert!(
+        replacement.records[&first].chronology.recorded_at
+            < replacement.records[&second].chronology.recorded_at,
+        "fixture information must begin in chronological ID order"
+    );
+    replacement
+        .records
+        .get_mut(&second)
+        .expect("second information record should exist")
+        .chronology
+        .recorded_at = crate::core::time::SimTime::from_minutes(4);
+
+    let error = restore_save(
+        &fixture.registry,
+        replace_serialized_substate(
+            build_save(&fixture.registry, &fixture.state)
+                .expect("valid information chronology should save before corruption"),
+            fixture.state.intelligence(),
+            &replacement,
+        ),
+    )
+    .expect_err("information acquisition time may not rewind as monotone IDs advance");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::InvalidInformationChronology {
+            information: second,
+        })
+    );
+}
+
+#[test]
 fn restore_rejects_empty_information_summary() {
     let mut fixture = fixture();
     let summary = "Persistence-only intelligence";
@@ -558,7 +972,6 @@ fn restore_rejects_empty_history_summary_and_entity_set() {
     let event = validate_record_event(
         &fixture.state,
         HistoryEventDraft {
-            occurred_at: fixture.state.now(),
             kind: HistoryEventKind::Recruitment,
             summary: summary.to_owned(),
             entities: BTreeSet::from([EntityRef::Organization(fixture.organization)]),

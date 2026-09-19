@@ -371,36 +371,45 @@ pub enum StateValidationError {
 }
 
 mod business;
+mod contacts;
 mod decisions;
 mod enterprise;
 mod finance;
+mod history;
 mod id_allocators;
+mod intelligence;
 mod legal;
 mod operations;
 mod opportunities;
 mod recruitment;
 mod reports;
 mod reputation;
+mod social;
 mod world;
 
 use self::business::{validate_business_economies, validate_businesses_against_registry};
+use self::contacts::validate_contacts;
 use self::decisions::{validate_decisions, validate_delegation};
 use self::enterprise::{validate_enterprises, validate_enterprises_against_registry};
+use self::history::validate_history;
 use self::id_allocators::validate_id_allocators;
+use self::intelligence::validate_intelligence;
 use self::legal::{validate_legal_subsystems, validate_legal_subsystems_against_registry};
 use self::operations::validate_operations;
 use self::opportunities::{validate_opportunities, validate_opportunities_against_registry};
 use self::recruitment::{validate_recruitment, validate_recruitment_against_registry};
-use self::reports::validate_executive_briefs_against_registry;
+use self::reports::{validate_executive_briefs_against_registry, validate_reports};
 use self::reputation::{validate_reputations, validate_reputations_against_registry};
-use self::world::{validate_contacts, validate_social_and_intelligence, validate_world_state};
+use self::social::validate_social;
+use self::world::validate_world_state;
 
 pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_id_allocators(state)?;
     validate_indexes(state)?;
     validate_campaign(state)?;
     validate_world_state(state)?;
-    validate_social_and_intelligence(state)?;
+    validate_social(state)?;
+    validate_intelligence(state)?;
     validate_contacts(state)?;
     validate_recruitment(state)?;
     validate_operations(state)?;
@@ -411,6 +420,8 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     validate_enterprises(state)?;
     validate_reputations(state)?;
     validate_legal_subsystems(state)?;
+    validate_reports(state)?;
+    validate_history(state)?;
     Ok(())
 }
 
@@ -458,6 +469,7 @@ fn validate_indexes(state: &AppState) -> Result<(), StateValidationError> {
         ("delegation", state.delegation.has_consistent_indexes()),
         ("economy", state.economy.has_consistent_indexes()),
         ("enterprises", state.enterprises.has_consistent_indexes()),
+        ("reputation", state.reputation.has_consistent_indexes()),
         ("legal", state.legal.has_consistent_indexes()),
         ("reports", state.reports.has_consistent_indexes()),
         ("history", state.history.has_consistent_indexes()),
@@ -484,9 +496,8 @@ pub fn validate_invariants(state: &AppState) {
 
     // The release-safe structural validators are the single source of truth for record,
     // lifecycle, provenance, index, and balance coherence — including every subsystem's
-    // derived-index consistency (`validate_indexes`), finance balance agreement, and the
-    // reputation index check inside `validate_reputations`. Keep them authoritative here
-    // instead of re-running reduced-fidelity copies alongside them: copies diverge (the
+    // index consistency (`validate_indexes`) and finance balance agreement. Keep them
+    // authoritative here instead of re-running reduced-fidelity copies alongside them: copies diverge (the
     // supervision-cycle walk must detect multi-character cycles rather than only self-reference).
     if let Err(error) = validate_state(state) {
         panic!("State Runtime Validity: release-safe structural validation failed: {error:?}");

@@ -1,11 +1,10 @@
-//! Release-safe structural validation for the legal subsystems plus persisted reports and history,
-//! split per aggregate so each contract stays readable on its own.
+//! Release-safe structural validation for the legal subsystems, split per aggregate so each
+//! contract stays readable on its own.
 
 mod casework;
 mod custody;
 mod enforcement;
 mod prosecution;
-mod references;
 mod representation;
 mod work;
 
@@ -16,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Full legal-subsystem record validation, ordered like the custody cluster it guards:
 /// institutions, patrols, arrests, representation, prosecution, investigation casework,
-/// witnesses, informants, evidence provenance, then player-facing report/history integrity.
+/// witnesses, informants, and evidence provenance.
 pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateValidationError> {
     enforcement::validate_jurisdictions(state)?;
     enforcement::validate_police_responses(state)?;
@@ -46,8 +45,6 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         &named_witness_evidence,
         &informant_evidence,
     )?;
-    references::validate_report_holders(state)?;
-    references::validate_history_event_references(state)?;
     Ok(())
 }
 

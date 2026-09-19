@@ -997,6 +997,78 @@ fn overlapping_target_set_is_rejected_as_duplicate_open_work() {
 }
 
 #[test]
+fn restore_rejects_overlapping_open_opportunities_that_canonical_discovery_cannot_create() {
+    let mut fixture = make_fixture();
+    let first = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(120)),
+    )
+    .expect("single-target opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("single-target opportunity should commit");
+    let owner_intel = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::TargetSecurity,
+            source_entity: None,
+            subject: EntityRef::Character(fixture.leader),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::General,
+            summary: "The property's watchman is a known fixture personality.".to_owned(),
+        },
+    )
+    .expect("second target information should validate")
+    .commit(&mut fixture.state)
+    .expect("second target information should commit");
+    let second = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            operation_kind: OperationKind::Robbery,
+            targets: BTreeSet::from([
+                EntityRef::Business(fixture.business),
+                EntityRef::Character(fixture.leader),
+            ]),
+            source_information: BTreeSet::from([fixture.source, owner_intel]),
+            ..opportunity_draft(&fixture, SimTime::from_minutes(120))
+        },
+    )
+    .expect("a different operation kind may overlap the same target")
+    .commit(&mut fixture.state)
+    .expect("second operation-kind opportunity should commit");
+    assert_ne!(first, second);
+
+    let second_record = fixture
+        .state
+        .opportunities()
+        .get_opportunity(second)
+        .expect("second open opportunity should persist");
+    let mut corrupted = opportunity_record_wire(second_record);
+    corrupted.context.operation_kind = OperationKind::Burglary;
+    let envelope = replace_serialized_opportunity(
+        build_save(&fixture.registry, &fixture.state)
+            .expect("valid distinct-kind opportunities should save before corruption"),
+        second_record,
+        &corrupted,
+    );
+
+    let error = restore_save(&fixture.registry, envelope)
+        .expect_err("restore must reject overlapping open opportunity target sets");
+    assert_eq!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidOpportunity {
+                opportunity: second,
+            }
+        )
+    );
+}
+
+#[test]
 fn multi_target_discovery_converts_against_one_of_its_targets() {
     let mut fixture = make_fixture();
     // A second covered target: the fixture leader's presence in the situation.

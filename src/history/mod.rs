@@ -71,14 +71,21 @@ impl HistoryState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        // History has no secondary indexes, but the authoritative map key is still part of
-        // record identity and must agree with the embedded ID after deserialization.
-        self.records.iter().all(|(id, event)| *id == event.id())
+        // History has no secondary indexes, but the authoritative map key and monotone event
+        // chronology are still part of durable identity. Canonical event IDs are allocated at
+        // commit time, so iteration by ID must never rewind campaign time.
+        let mut previous_at = None;
+        for (id, event) in &self.records {
+            if *id != event.id() || previous_at.is_some_and(|at| event.occurred_at() < at) {
+                return false;
+            }
+            previous_at = Some(event.occurred_at());
+        }
+        true
     }
 }
 
 pub struct HistoryEventDraft {
-    pub occurred_at: SimTime,
     pub kind: HistoryEventKind,
     pub summary: String,
     pub entities: BTreeSet<EntityRef>,

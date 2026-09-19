@@ -1773,8 +1773,7 @@ fn detention_preserves_formal_supervision_but_blocks_new_supervisory_work() {
     validate_invariants(&fixture.state);
 }
 
-#[test]
-fn custody_aborts_authorized_operation_before_start() {
+fn authorize_suspect_operation(fixture: &mut Fixture, title: &str) -> OperationId {
     use crate::operations::operation_system::validate_authorize_operation;
     use crate::operations::{OperationApproach, OperationDraft, OperationKind, OperationObjective};
     use crate::world::world_system::{insert_business, insert_neighborhood};
@@ -1783,7 +1782,6 @@ fn custody_aborts_authorized_operation_before_start() {
         NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile, Rating,
     };
 
-    let mut fixture = fixture();
     let neighborhood = insert_neighborhood(
         &mut fixture.state,
         NeighborhoodDraft {
@@ -1817,11 +1815,11 @@ fn custody_aborts_authorized_operation_before_start() {
         },
     )
     .expect("business should validate");
-    let operation = validate_authorize_operation(
+    validate_authorize_operation(
         &fixture.registry,
         &fixture.state,
         OperationDraft {
-            title: "Guarded score".to_owned(),
+            title: title.to_owned(),
             kind: OperationKind::Intimidation,
             responsible_organization: fixture
                 .state
@@ -1838,12 +1836,22 @@ fn custody_aborts_authorized_operation_before_start() {
             intelligence: BTreeSet::new(),
             constraints: Vec::new(),
             contingencies: Vec::new(),
-            scheduled_for: crate::core::time::SimTime::ZERO,
+            scheduled_for: fixture
+                .state
+                .now()
+                .checked_add(SimDuration::ONE_MINUTE)
+                .expect("fixture operation start should fit simulation time"),
         },
     )
     .expect("authorized operation should validate")
     .commit(&mut fixture.state)
-    .expect("authorized operation should commit");
+    .expect("authorized operation should commit")
+}
+
+#[test]
+fn custody_aborts_authorized_operation_before_start() {
+    let mut fixture = fixture();
+    let operation = authorize_suspect_operation(&mut fixture, "Guarded score");
 
     let corroborating = add_character_evidence(
         &mut fixture.state,
@@ -1930,6 +1938,81 @@ fn custody_aborts_authorized_operation_before_start() {
         "release must not resurrect a plan invalidated by a prior arrest"
     );
     validate_state(&fixture.state).expect("custody-cancelled operation state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn stale_operation_preemption_rejects_arrest_before_custody_mutates() {
+    use crate::core::id::IdKind;
+    use crate::operations::operation_system::validate_begin_operation;
+
+    let mut fixture = fixture();
+    let operation = authorize_suspect_operation(&mut fixture, "Stale custody preemption");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let arrest = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence, corroborating]),
+        },
+    )
+    .expect("arrest should initially validate against the authorized operation");
+    let next_arrest = fixture.state.ids.next_raw(IdKind::Arrest);
+
+    validate_begin_operation(&fixture.registry, &fixture.state, operation)
+        .expect("operation should still be able to begin")
+        .commit(&mut fixture.state)
+        .expect("operation begin should commit and stale the held abort token");
+    assert_eq!(
+        fixture
+            .state
+            .operations()
+            .get_operation(operation)
+            .expect("started operation should persist")
+            .status(),
+        crate::operations::OperationStatus::InProgress
+    );
+
+    let error = arrest
+        .commit(&mut fixture.state)
+        .expect_err("stale operation preemption must reject before custody is inserted");
+    assert!(matches!(
+        error,
+        ArrestError::Operation(OperationError::StaleAbortOperation { operation: stale, .. })
+            if stale == operation
+    ));
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none(),
+        "rejected arrest must not leave partial custody"
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::Arrest),
+        next_arrest,
+        "rejected arrest must not consume its durable ID"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .operations()
+            .get_operation(operation)
+            .expect("stale-preemption operation should persist")
+            .status(),
+        crate::operations::OperationStatus::InProgress,
+        "rejected arrest must not alter the conflicting operation"
+    );
+    validate_state(&fixture.state).expect("stale arrest rejection should preserve valid state");
     validate_invariants(&fixture.state);
 }
 

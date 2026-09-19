@@ -3,7 +3,7 @@
 use crate::core::attention::AttentionClass;
 use crate::core::id::{CharacterId, MandateId, OrganizationId, RecruitmentAttemptId};
 use crate::core::state::AppState;
-use crate::core::time::SimTime;
+use crate::core::time::is_recurring_boundary;
 use crate::decisions::decision_system::{
     DecisionError, DecisionRequestOutcome, validate_request_recruitment_approval,
 };
@@ -62,13 +62,10 @@ pub(crate) fn apply_due_autonomous_recruitment(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<AutonomousRecruitmentOutcome, AutonomousRecruitmentError> {
-    let cadence = u64::from(
-        registry
-            .recruitment()
-            .autonomous_attempt_cadence()
-            .as_minutes(),
-    );
-    if state.now() == SimTime::ZERO || !state.now().as_minutes().is_multiple_of(cadence) {
+    if !is_recurring_boundary(
+        state.now(),
+        registry.recruitment().autonomous_attempt_cadence(),
+    ) {
         return Ok(AutonomousRecruitmentOutcome::default());
     }
 

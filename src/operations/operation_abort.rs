@@ -189,6 +189,42 @@ impl ValidatedOperationAbort {
     }
 
     pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), OperationError> {
+        self.ensure_current_without_detention_custody(state)?;
+        if let OperationAbortCause::ParticipantDetained(character) = self.cause
+            && state.legal.active_arrest_for_character(character).is_none()
+        {
+            let record = state
+                .operations
+                .get_operation(self.operation)
+                .expect("preflighted abort operation must still exist");
+            return Err(OperationError::InvalidAbortCause {
+                operation: self.operation,
+                status: record.status(),
+                cause: self.cause,
+            });
+        }
+        Ok(())
+    }
+
+    /// Revalidates every dependency of a detention abort except the custody record whose
+    /// insertion this abort is composed with. The arrest owner calls this before mutating
+    /// custody so a stale operation/decision cannot make the larger arrest transaction fail
+    /// after the arrest itself has already become authoritative.
+    pub(crate) fn ensure_current_before_detention(
+        &self,
+        state: &AppState,
+    ) -> Result<(), OperationError> {
+        debug_assert!(matches!(
+            self.cause,
+            OperationAbortCause::ParticipantDetained(_)
+        ));
+        self.ensure_current_without_detention_custody(state)
+    }
+
+    fn ensure_current_without_detention_custody(
+        &self,
+        state: &AppState,
+    ) -> Result<(), OperationError> {
         // Staleness re-checks precede ID reservation: a rejected commit must leave the
         // serialized high-water marks exactly as it found them.
         let record = state
@@ -235,21 +271,14 @@ impl ValidatedOperationAbort {
                 cause: self.cause,
             });
         }
-        if let OperationAbortCause::ParticipantDetained(character) = self.cause {
-            // Abort causality must name a real detention, not merely a participant:
-            // persistence validation independently requires an arrest of this character at
-            // the abort minute, so a cause without live custody would commit now and fail
-            // restore later. The canonical arrest path commits the arrest immediately
-            // before this token, so custody is live here even though it postdates the
-            // earlier validation-time phase mapping.
-            let detained = state.legal.active_arrest_for_character(character).is_some();
-            if !record.participants().contains(&character) || !detained {
-                return Err(OperationError::InvalidAbortCause {
-                    operation: self.operation,
-                    status: record.status(),
-                    cause: self.cause,
-                });
-            }
+        if let OperationAbortCause::ParticipantDetained(character) = self.cause
+            && !record.participants().contains(&character)
+        {
+            return Err(OperationError::InvalidAbortCause {
+                operation: self.operation,
+                status: record.status(),
+                cause: self.cause,
+            });
         }
         if let OperationAbortCause::OpportunityExpired(opportunity) = self.cause
             && !opportunity_expiry_can_abort(state, record, opportunity)
@@ -484,7 +513,6 @@ fn validate_operation_abort(
             let history = validate_record_event(
                 state,
                 HistoryEventDraft {
-                    occurred_at: state.now(),
                     kind: HistoryEventKind::Operation,
                     summary,
                     entities,

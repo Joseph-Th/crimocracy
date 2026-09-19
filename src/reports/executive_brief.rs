@@ -4,7 +4,7 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{DecisionRequestId, InformationId, OrganizationId, ReportId};
 use crate::core::state::AppState;
-use crate::core::time::{SimDuration, SimTime};
+use crate::core::time::{SimDuration, SimTime, is_recurring_boundary};
 use crate::decisions::{DecisionContext, DecisionRequestRecord};
 use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_report_draft};
@@ -64,8 +64,7 @@ pub struct ExecutiveBriefPlan {
 }
 
 pub fn is_executive_brief_due(registry: &Registry, at: SimTime) -> bool {
-    let cadence = u64::from(registry.executive_brief().cadence().as_minutes());
-    at != SimTime::ZERO && at.as_minutes().is_multiple_of(cadence)
+    is_recurring_boundary(at, registry.executive_brief().cadence())
 }
 
 pub fn decide_executive_brief(

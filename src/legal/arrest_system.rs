@@ -276,6 +276,12 @@ impl ValidatedArrest {
         )?;
         self.prosecution_release.ensure_current(state)?;
         self.counsel_representation_ends.ensure_current(state)?;
+        for preemption in &self.operation_preemptions {
+            if let Some(decision) = &preemption.decision_cancellation {
+                decision.ensure_current(state)?;
+            }
+            preemption.abort.ensure_current_before_detention(state)?;
+        }
 
         let mut id_budget = vec![(IdKind::Arrest, 1)];
         for preemption in &self.operation_preemptions {
@@ -288,13 +294,10 @@ impl ValidatedArrest {
             .ids
             .next_arrest()
             .expect("arrest ID was preflighted before custody mutation");
-        // Custody becomes live before its preemptions commit: operation detention aborts
-        // re-check custody at commit time, and persistence validation independently requires
-        // an arrest of the detainee at the abort minute. Landing the arrest first keeps the
-        // composed transaction internally consistent — a preemption token can never commit
-        // against custody that does not exist yet. Only this commit's own insert intervenes
-        // between the stability checks above and the freshness checks below, so a failure
-        // here means the canonical state contract is broken rather than merely stale.
+        // Custody becomes live before its preemptions commit because persistence requires the
+        // detention cause to have a matching arrest at this minute. Every fallible freshness
+        // check for those preemptions already ran above, so nothing after this insertion may
+        // reject the composed transaction.
         state.legal.insert_arrest(ArrestRecord {
             id,
             character: self.draft.character,
@@ -306,12 +309,6 @@ impl ValidatedArrest {
             status: ArrestStatus::Detained,
             version: 1,
         });
-        for preemption in &self.operation_preemptions {
-            if let Some(decision) = &preemption.decision_cancellation {
-                decision.ensure_current(state)?;
-            }
-            preemption.abort.ensure_current(state)?;
-        }
         for preemption in self.operation_preemptions {
             if let Some(decision) = preemption.decision_cancellation {
                 decision.commit_preflighted(state);
