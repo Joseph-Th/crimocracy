@@ -91,13 +91,14 @@ After that, every minute advances through one contractual pipeline:
  2  AppState::new(seed)              serializable state, 4 ChaCha8Rng streams, SimTime::ZERO
  3  validate_* / decide_*            domain system validates or derives read-only plan
  4  Validated*::commit / apply_*      owning system commits atomically, preserves indexes
- 5  core::simulation::run_tick        one simulated minute in stable contractual order
- 6  TickOutcome + reports/projections player-visible consequences, no hidden-state leak
+ 5  core::simulation::run_tick        preflight finite clock, then one minute in stable contractual order
+ 6  Result<TickOutcome, TickError>    typed terminal-clock rejection or player-visible consequences
  7  build_save / restore_save         envelope {format_version, content_revision, state}
 ```
 
 Tick cadence is an adapter concern. Calling `run_tick` faster or slower changes
-wall time, not the semantics of one canonical minute.
+wall time, not the semantics of one canonical minute. Clock exhaustion is checked before
+the first mutation, so the terminal representable minute is a valid state with no successor tick.
 
 ### run_tick — contractual order (`src/core/simulation.rs`)
 
@@ -106,25 +107,26 @@ explain each “runs after X so Y is visible” dependency. Reordering breaks
 determinism and harness contracts.
 
 ```text
- 1  apply_due_custody_releases              hard arrest-custody boundary before same-minute consumers
- 2  apply_opportunity_expiry                durable lifecycle report before remaining same-minute consumers
- 3  run_operations_phase                    police arrivals → starts → deadline cleanup → resolution
+ 0  checked next minute                    reject ClockExhausted before mutation
+ 1  apply_due_custody_releases             hard arrest-custody boundary before same-minute consumers
+ 2  apply_opportunity_expiry               durable lifecycle report before remaining same-minute consumers
+ 3  run_operations_phase                   police arrivals → starts → deadline cleanup → resolution
  4    ├─ apply_due_police_response_arrivals (exposure → decisions; must precede new starts)
  5    ├─ find_due_authorized → Begin or deadline-missed
  6    ├─ find_due_with_missed_deadlines → abort via decision when present
  7    └─ find_due_in_progress → decide+validate+commit per operation (RNG: operation stream)
- 8  apply_autonomous_investigator_staffing  single-seat staffing, lead-investigator knowledge
- 9  apply_evidence_review_scheduling        next unattempted reviewable evidence on active staffed cases
-10  apply_witness_interview_scheduling      after reviews so same-minute witness is interviewable
-11  run_investigation_work_phase            resolve due work (RNG: investigation stream)
-12  apply_autonomous_evidence_arrests       active LawEnforcement cases: authored independent-evidence threshold → custody + responsibility preemption
-13  apply_autonomous_prosecution_staffing   refill prosecution seats released by custody
-14  apply_automatic_legal_support           conclude boundary releases; retain before a due detainee decision
-15  apply_detainee_informant_recruitment    one decision after a delay; active counsel lowers authored flip chance
-16  apply_informant_disclosures             holder-knowledge → handler cases
-17  apply_cold_case_decay                   originated cases only, authored inactivity window, no RNG
-18  run_business_cycle_phase                per due business (RNG: business stream)
-19  run_enterprise_cycle_phase              per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
+ 8  apply_autonomous_investigator_staffing single-seat staffing, lead-investigator knowledge
+ 9  apply_evidence_review_scheduling       next unattempted reviewable evidence on active staffed cases
+10  apply_witness_interview_scheduling     after reviews so same-minute witness is interviewable
+11  run_investigation_work_phase           resolve due work (RNG: investigation stream)
+12  apply_autonomous_evidence_arrests      active LawEnforcement cases: authored independent-evidence threshold → custody + responsibility preemption
+13  apply_autonomous_prosecution_staffing  refill prosecution seats released by custody
+14  apply_automatic_legal_support          conclude boundary releases; retain before a due detainee decision
+15  apply_detainee_informant_recruitment   one decision after a delay; active counsel lowers authored flip chance
+16  apply_informant_disclosures            holder-knowledge → handler cases
+17  apply_cold_case_decay                  originated cases only, authored inactivity window, no RNG
+18  run_business_cycle_phase               per due business (RNG: business stream)
+19  run_enterprise_cycle_phase             per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
 20  apply_daily_payroll  →  apply_reputation_phase
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence
     ──► apply_due_autonomous_enterprises  reads current police-fear posture

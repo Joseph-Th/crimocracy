@@ -15,7 +15,7 @@ agent routing is in [`AGENTS.md`](AGENTS.md).
 - `AppState` owns serializable campaign state, simulation time, typed ID counters, attention settings, and independent deterministic RNG streams for operation, investigation, business, and enterprise work. Autonomous recruitment is deterministic managerial judgment and consumes no RNG.
 - `Registry` owns immutable Rust-authored definitions. Runtime records and generated values belong to `AppState` and its domain owners.
 - Save/load validates envelope, schema, authored content revision, registry references, cross-references, indexes, and ID high-water marks before accepting state. Compatibility is current-version only; no implicit migration or defaulting.
-- [`core::simulation::run_tick`](src/core/simulation.rs) is the canonical one-minute pipeline: it processes due work in stable order and returns `TickOutcome`.
+- [`core::simulation::run_tick`](src/core/simulation.rs) is the canonical one-minute pipeline: it processes due work in stable order and returns `Result<TickOutcome, TickError>`, rejecting an exhausted simulation clock before any phase mutates state.
 - `validate_state` provides release-safe structural checks; debug boundaries additionally run the full invariant validator.
 
 ## Implemented domains

@@ -1136,7 +1136,7 @@ pub fn run_until_operation_terminal(
             }
             .into());
         }
-        let outcome = run_tick(scenario.registry, &mut scenario.state);
+        let outcome = run_tick(scenario.registry, &mut scenario.state)?;
         observe_tick(scenario, &outcome, narrative, metrics)?;
         maybe_capture_matched_financials(scenario, metrics)?;
     }
@@ -1149,7 +1149,7 @@ pub fn run_until(
     metrics: &mut RunMetrics,
 ) -> Result<(), Box<dyn Error>> {
     while scenario.state.now() < until {
-        let outcome = run_tick(scenario.registry, &mut scenario.state);
+        let outcome = run_tick(scenario.registry, &mut scenario.state)?;
         observe_tick(scenario, &outcome, narrative, metrics)?;
         maybe_capture_matched_financials(scenario, metrics)?;
     }

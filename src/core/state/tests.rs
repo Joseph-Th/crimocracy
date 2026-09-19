@@ -7,7 +7,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::IdKind;
 use crate::core::invariants::{StateValidationError, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::decisions::decision_system::{
     DecisionError, validate_request_recruitment_approval, validate_resolve_decision,
 };

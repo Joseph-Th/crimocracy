@@ -7,7 +7,7 @@ use crate::core::invariants::{
     StateValidationError, validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::delegation::delegation_system::{
     DelegationError, MandateRevisionDraft, validate_assign_mandate, validate_revise_mandate,
     validate_revoke_mandate,

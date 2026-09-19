@@ -7,7 +7,7 @@ use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::core::time::SimDuration;
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
@@ -1921,7 +1921,7 @@ fn custody_aborts_authorized_operation_before_start() {
     fixture.state.advance_clock(SimDuration::from_minutes(
         maximum_detention.as_minutes() - 1,
     ));
-    let released_tick = crate::core::simulation::run_tick(&fixture.registry, &mut fixture.state);
+    let released_tick = run_tick(&fixture.registry, &mut fixture.state);
     assert_eq!(released_tick.custody_releases, vec![arrest]);
     assert!(released_tick.started_operations.is_empty());
     assert_eq!(

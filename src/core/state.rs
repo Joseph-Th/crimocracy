@@ -236,8 +236,16 @@ impl AppState {
         self.campaign.player_organization = Some(organization);
     }
 
+    pub(super) fn try_advance_clock(&mut self, duration: SimDuration) -> Option<SimTime> {
+        let next = self.simulation.now.checked_add(duration)?;
+        self.simulation.now = next;
+        Some(next)
+    }
+
+    #[cfg(test)]
     pub(crate) fn advance_clock(&mut self, duration: SimDuration) {
-        self.simulation.now = self.simulation.now + duration;
+        self.try_advance_clock(duration)
+            .expect("test fixture must remain within the finite simulation clock");
     }
 
     #[cfg(test)]

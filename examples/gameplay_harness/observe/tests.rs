@@ -111,7 +111,7 @@ fn foreign_pending_and_resolved_requests_do_not_become_player_decisions() {
             ScenarioProfile::NightTrap,
         )
         .unwrap();
-        let mut tick = run_tick(&registry, &mut scenario.state);
+        let mut tick = run_tick(&registry, &mut scenario.state).unwrap();
         let request = approval_request(&mut scenario, false);
         if resolved {
             validate_resolve_decision(
@@ -143,7 +143,7 @@ fn player_request_is_rejected_once_and_terminal_reobservation_is_inert() {
         ScenarioProfile::NightTrap,
     )
     .unwrap();
-    let mut tick = run_tick(&registry, &mut scenario.state);
+    let mut tick = run_tick(&registry, &mut scenario.state).unwrap();
     let request = approval_request(&mut scenario, true);
     let id = request.decision;
     tick.decision_requests.push(request);

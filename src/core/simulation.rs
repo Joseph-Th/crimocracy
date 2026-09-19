@@ -81,10 +81,22 @@ pub struct TickOutcome {
     pub executive_brief: Option<ReportId>,
 }
 
-pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum TickError {
+    #[error("simulation clock is exhausted at minute {now:?}; no later canonical tick exists")]
+    ClockExhausted { now: SimTime },
+}
+
+pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome, TickError> {
     // Simulation speed is an adapter concern. The canonical pipeline always advances one minute,
     // so normal/fast/very-fast modes call the exact same deterministic path more often.
-    state.advance_clock(SimDuration::ONE_MINUTE);
+    // The state owner performs the checked mutation itself. A terminal campaign state is valid,
+    // but it has no successor minute; rejecting here keeps the whole tick atomic and leaves no
+    // unchecked production clock mutator for another caller to reuse accidentally.
+    let previous_now = state.now();
+    state
+        .try_advance_clock(SimDuration::ONE_MINUTE)
+        .ok_or(TickError::ClockExhausted { now: previous_now })?;
     // The custody cap is a hard lifecycle boundary. Release due detainees before any same-minute
     // work so an expired detention cannot block a participant, remain an extraction target, or
     // otherwise influence systems after its authored end instant. The informant decision delay is
@@ -182,7 +194,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
     // same simulation minute.
     let executive_brief = synthesize_executive_brief(registry, state);
     validate_invariants(state);
-    TickOutcome {
+    Ok(TickOutcome {
         now: state.now(),
         started_operations,
         arrived_police_responses,
@@ -207,7 +219,12 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
         cold_case_suspensions: cold_case_decay.suspended,
         cold_case_closures: cold_case_decay.closed,
         executive_brief,
-    }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn run_test_tick(registry: &Registry, state: &mut AppState) -> TickOutcome {
+    run_tick(registry, state).expect("test fixture must leave room for another simulation minute")
 }
 
 /// Processes due police-response arrivals, starts due authorized operations, aborts missed

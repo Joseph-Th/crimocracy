@@ -4,7 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::invariants::{StateValidationError, validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::decisions::decision_system::{
     validate_request_recruitment_approval, validate_resolve_decision,
 };

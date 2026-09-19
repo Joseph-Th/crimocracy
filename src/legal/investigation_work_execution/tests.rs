@@ -6,7 +6,7 @@ use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::legal::arrest_system::validate_arrest;
 use crate::legal::investigation_system::{
     validate_add_evidence, validate_assign_investigator, validate_open_investigation,

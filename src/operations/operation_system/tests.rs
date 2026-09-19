@@ -8,6 +8,7 @@ use crate::core::invariants::{
     StateValidationError, validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::core::time::{SimDuration, SimTime};
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{
@@ -249,7 +250,7 @@ fn due_operation_aborts_before_start_when_objective_became_unavailable() {
     .commit(&mut state)
     .expect("business acquisition should commit before the operation begins");
 
-    let outcome = crate::core::simulation::run_tick(&registry, &mut state);
+    let outcome = run_tick(&registry, &mut state);
     assert!(outcome.started_operations.is_empty());
     assert!(outcome.resolved_operations.is_empty());
     let record = state
@@ -483,7 +484,7 @@ fn gambling_event_fails_if_the_sponsor_loses_the_venue_before_payout() {
     .commit(&mut state)
     .expect("controlled gambling venue should commit");
 
-    let tick = crate::core::simulation::run_tick(&registry, &mut state);
+    let tick = run_tick(&registry, &mut state);
     assert_eq!(tick.started_operations, vec![operation]);
     validate_transfer_business_ownership(&state, venue, BusinessOwner::Independent)
         .expect("an operation target does not freeze world ownership")
@@ -1685,7 +1686,7 @@ fn missed_completion_deadline_aborts_before_start_with_visible_provenance() {
         .expect("deadline-constrained operation should commit");
 
     state.advance_clock(crate::core::time::SimDuration::from_minutes(41));
-    let outcome = crate::core::simulation::run_tick(&registry, &mut state);
+    let outcome = run_tick(&registry, &mut state);
 
     assert!(outcome.started_operations.is_empty());
     let record = state
@@ -1745,7 +1746,7 @@ fn in_progress_operation_aborts_when_its_deadline_passes_without_resolution() {
         .expect("operation should begin before its deadline");
 
     state.advance_clock(crate::core::time::SimDuration::from_minutes(9));
-    let outcome = crate::core::simulation::run_tick(&registry, &mut state);
+    let outcome = run_tick(&registry, &mut state);
 
     assert!(outcome.resolved_operations.is_empty());
     let record = state
@@ -1852,7 +1853,7 @@ fn deadline_constrained_operation_resolves_on_its_clamped_deadline_minute() {
     // One canonical minute per tick: the clamped window must resolve exactly on the deadline.
     let mut resolved = None;
     for _ in 0..24 {
-        let tick = crate::core::simulation::run_tick(&registry, &mut state);
+        let tick = run_tick(&registry, &mut state);
         if tick.resolved_operations.contains(&operation) {
             resolved = Some(tick);
             break;
@@ -1908,7 +1909,7 @@ fn decision_paused_operation_auto_aborts_when_deadline_expires() {
     // The dispatched response arrives and pauses the operation pending leadership.
     let mut decision = None;
     for _ in 0..9 {
-        let outcome = crate::core::simulation::run_tick(&registry, &mut state);
+        let outcome = run_tick(&registry, &mut state);
         if let Some(request) = outcome.decision_requests.first() {
             decision = Some(request.decision);
             break;
@@ -1925,7 +1926,7 @@ fn decision_paused_operation_auto_aborts_when_deadline_expires() {
     );
 
     while state.now() < SimTime::from_minutes(12) {
-        crate::core::simulation::run_tick(&registry, &mut state);
+        run_tick(&registry, &mut state);
     }
 
     let record = state
@@ -2000,7 +2001,7 @@ fn authorization_expires_if_scheduled_time_passes_before_commit() {
         .expect("future operation should validate");
 
     for _ in 0..3 {
-        crate::core::simulation::run_tick(&registry, &mut state);
+        run_tick(&registry, &mut state);
     }
 
     let error = validated

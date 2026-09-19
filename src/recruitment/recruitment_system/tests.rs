@@ -8,7 +8,7 @@ use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::core::time::SimDuration;
 use crate::decisions::decision_system::{
     validate_request_recruitment_approval, validate_resolve_decision,
@@ -514,7 +514,7 @@ fn day_boundary_recruitment_uses_current_decayed_reputation() {
         .state
         .advance_clock(SimDuration::from_minutes(1_439));
 
-    let outcome = crate::core::simulation::run_tick(&fixture.registry, &mut fixture.state);
+    let outcome = run_tick(&fixture.registry, &mut fixture.state);
     assert_eq!(outcome.recruitment_attempts.len(), 1);
     let attempt = fixture
         .state

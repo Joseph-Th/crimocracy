@@ -7,7 +7,7 @@ use crate::contacts::contact_system::{
 };
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::delegation_system::validate_set_policy;
 use crate::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};

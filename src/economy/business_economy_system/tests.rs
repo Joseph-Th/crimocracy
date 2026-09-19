@@ -4,7 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state_against_registry};
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::economy::BusinessEconomyDraft;
 use crate::economy::business_reporting::resolve_organization_business_financial_summary;
 use crate::finance::finance_system::{

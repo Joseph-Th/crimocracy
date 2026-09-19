@@ -5,7 +5,7 @@ use crate::build_registry;
 use crate::core::id::EvidenceId;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::core::time::SimDuration;
 use crate::intelligence::intelligence_system::validate_record_information;
 use crate::intelligence::{

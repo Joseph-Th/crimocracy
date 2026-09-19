@@ -9,7 +9,7 @@ use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::core::simulation::run_tick;
+use crate::core::simulation::run_test_tick as run_tick;
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::decision_system::{
     DecisionError, validate_request_police_arrival_decision_on_arrival, validate_resolve_decision,

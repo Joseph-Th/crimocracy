@@ -25,6 +25,26 @@ fn test_rating(value: u8) -> Rating {
 }
 
 #[test]
+fn terminal_clock_rejects_tick_without_mutating_state() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xC10C_EA11);
+    state.set_now_for_test(SimTime::from_minutes(u64::MAX));
+    let before = bincode::serialize(&state).expect("terminal state should serialize");
+
+    assert_eq!(
+        run_tick(&registry, &mut state),
+        Err(TickError::ClockExhausted {
+            now: SimTime::from_minutes(u64::MAX),
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected terminal state should still serialize"),
+        before,
+        "clock exhaustion must reject before any tick phase mutates state"
+    );
+}
+
+#[test]
 fn domain_random_streams_do_not_cross_contaminate_unrelated_simulation_work() {
     let mut baseline = AppState::new(0x1933_0814);
     let mut operation_heavy = baseline.clone();
@@ -179,7 +199,7 @@ fn same_minute_police_arrival_blocks_back_to_back_participant_start() {
     .commit(&mut state)
     .expect("exact back-to-back follow-up should commit");
 
-    let first_tick = run_tick(&registry, &mut state);
+    let first_tick = run_test_tick(&registry, &mut state);
     assert_eq!(first_tick.now, SimTime::from_minutes(1));
     assert_eq!(first_tick.started_operations, vec![first]);
     let first_record = state
@@ -203,13 +223,13 @@ fn same_minute_police_arrival_blocks_back_to_back_participant_start() {
     );
 
     for expected_minute in 2..=3 {
-        let tick = run_tick(&registry, &mut state);
+        let tick = run_test_tick(&registry, &mut state);
         assert_eq!(tick.now, SimTime::from_minutes(expected_minute));
         assert!(tick.started_operations.is_empty());
         assert!(tick.arrived_police_responses.is_empty());
     }
 
-    let boundary = run_tick(&registry, &mut state);
+    let boundary = run_test_tick(&registry, &mut state);
     assert_eq!(boundary.now, SimTime::from_minutes(4));
     assert_eq!(boundary.arrived_police_responses, vec![response]);
     assert_eq!(boundary.decision_requests.len(), 1);

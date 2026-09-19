@@ -802,7 +802,7 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
             pressure_resolved = true;
             break;
         }
-        run_tick(registry, &mut state);
+        run_tick(registry, &mut state)?;
     }
     let pressure_record = state
         .operations()
