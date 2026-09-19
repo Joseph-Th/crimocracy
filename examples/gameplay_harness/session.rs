@@ -178,7 +178,7 @@ pub fn launder_through_front(
                 Err(LaunderingError::AmountTooSmallForSplit) => {
                     if narrative {
                         println!(
-                            "[LAUNDER] {front_name}'s remaining plausible capacity is too small to produce both a real front fee and accounted funds; {} stays street cash.",
+                            "[LAUNDER] {front_name}'s remaining plausible capacity is too small to produce both a real laundering fee and accounted funds; {} stays street cash.",
                             format_cents(requested_cents),
                         );
                     }
@@ -196,7 +196,7 @@ pub fn launder_through_front(
     let (gross, fee) = commit_laundering(scenario, metrics, validated, source_account)?;
     if narrative {
         println!(
-            "[LAUNDER] {front_name} absorbed {}; the house kept {} as booked revenue, and {} now sits as accounted money.",
+            "[LAUNDER] {front_name} absorbed {}; {} was paid as the laundering cost, and {} now sits as accounted money.",
             format_cents(gross),
             format_cents(fee),
             format_cents(gross - fee),

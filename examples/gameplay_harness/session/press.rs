@@ -587,9 +587,9 @@ fn launder_enterprise_till(
     launder_through_front(scenario, narrative, metrics, cash_account, launderable)
 }
 
-/// Withdraw only settled legitimate earnings and front fees, never the opening
-/// capital. The production sweep checks real liquidity and ownership; this policy
-/// caps the draw to earned surplus so profitable books remain operating assets.
+/// Withdraw only settled legitimate earnings, never laundering fees or opening capital. The
+/// production sweep checks real liquidity and ownership; this policy caps the draw to earned
+/// surplus so profitable books remain operating assets.
 fn sweep_front_profits(
     scenario: &mut Scenario,
     narrative: bool,
@@ -617,7 +617,7 @@ fn sweep_front_profits(
         .balance()
         .cents()
         .max(0);
-    let amount = (earned + metrics.launder_fee_cents - metrics.business_profits_swept_cents)
+    let amount = (earned - metrics.business_profits_swept_cents)
         .max(0)
         .min(available);
     if amount == 0 {

@@ -13,7 +13,10 @@ use crate::delegation::{
     BudgetAuthority, BudgetPeriod, MandateAuthority, MandateDraft, ResponsibilityFunction,
     ResponsibilityScope,
 };
-use crate::economy::business_economy_system::resolve_business_gross_potential;
+use crate::economy::business_economy_system::{
+    BusinessProfitSweepDraft, BusinessProfitSweepError, resolve_business_gross_potential,
+    validate_sweep_business_profits,
+};
 use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
 };
@@ -2130,7 +2133,7 @@ fn laundering_rejects_non_criminal_organization() {
 }
 
 #[test]
-fn laundering_rejects_amount_that_would_bypass_the_front_fee() {
+fn laundering_rejects_amount_that_would_bypass_the_laundering_fee() {
     let registry = build_registry();
     let mut fixture = make_laundering_fixture();
     let reserve = insert_account(
@@ -2175,7 +2178,7 @@ fn laundering_rejects_amount_that_would_bypass_the_front_fee() {
         },
     )
     .err()
-    .expect("a laundering transfer must produce a nonzero front fee");
+    .expect("a laundering transfer must produce a nonzero laundering fee");
     assert_eq!(error, LaunderingError::AmountTooSmallForSplit);
     assert_eq!(
         fixture
@@ -2285,6 +2288,45 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
         .sum();
     assert_eq!(street_delta, -capacity.cents());
     assert_eq!(accounted_delta, capacity.cents() - fee.cents());
+    let economy = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("laundering front economy should persist");
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(economy.operating_account())
+            .expect("front operating account should persist")
+            .balance(),
+        Money::ZERO,
+        "laundering fees are costs, not recoverable front operating profit"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(economy.settlement_account())
+            .expect("front settlement account should persist")
+            .balance(),
+        fee,
+        "the authored fee must settle into the non-liquid clearing account"
+    );
+    let sweep_error = validate_sweep_business_profits(
+        &fixture.state,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination: fixture.accounted,
+            amount: fee,
+        },
+    )
+    .expect_err("laundering fees must not be recoverable through the owner-profit sweep");
+    assert!(matches!(
+        sweep_error,
+        BusinessProfitSweepError::InsufficientTillCash { .. }
+    ));
     validate_invariants(&fixture.state);
 }
 

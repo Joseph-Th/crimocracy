@@ -460,17 +460,15 @@ pub(crate) fn apply_detainee_informant_recruitment(
         if state.legal.informant_for(character, handler).is_some() {
             continue;
         }
-        candidates.push((arrest, character, handler));
+        let safety = record
+            .drive(crate::world::DriveKind::Safety)
+            .map(|rating| u32::from(rating.value()))
+            .unwrap_or(0);
+        candidates.push((arrest, character, handler, safety));
     }
 
     let mut recruited = Vec::new();
-    for (arrest, character, handler) in candidates {
-        let safety = state
-            .world
-            .get_character(character)
-            .and_then(|record| record.drive(crate::world::DriveKind::Safety))
-            .map(|rating| u32::from(rating.value()))
-            .unwrap_or(0);
+    for (arrest, character, handler, safety) in candidates {
         let chance = resolve_informant_flip_chance(
             registry.legal(),
             safety,

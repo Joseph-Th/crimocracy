@@ -797,7 +797,7 @@ pub struct RunMetrics {
     pub player_member_arrests: u32,
     // Money-state evidence: street cash routed through an owned cash-intensive front's books.
     pub laundered_gross_cents: i64,
-    /// The front's authored cut of everything it absorbed.
+    /// The authored laundering cost paid out of every absorbed transfer.
     pub launder_fee_cents: i64,
     pub business_profits_swept_cents: i64,
     /// Times the books refused a request because it exceeded the cycle's plausible volume:

@@ -1235,7 +1235,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
     let laundering_net = view.laundered_gross_cents - view.launder_fee_cents;
     if view.laundered_gross_cents > 0 || view.laundering_capacity_rejections > 0 {
         println!(
-            "  Laundered to date: {} gross through the front's books, {} booked as front fees, {} cumulative net credited to accounted funds (not the current balance); the books refused {} over-capacity request(s).",
+            "  Laundered to date: {} gross through the front's books, {} paid as laundering costs, {} cumulative net credited to accounted funds (not the current balance); the books refused {} over-capacity request(s).",
             format_cents(view.laundered_gross_cents),
             format_cents(view.launder_fee_cents),
             format_cents(laundering_net),
@@ -1243,7 +1243,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         );
     }
     println!(
-        "  Owner withdrawals to date: {} actually transferred from earned front surplus (legitimate trade and booked fees) into accounted funds; opening business capital is not swept.",
+        "  Owner withdrawals to date: {} actually transferred from earned legitimate front surplus into accounted funds; laundering fees and opening business capital are not swept.",
         format_cents(view.business_profits_swept_cents),
     );
     println!(
@@ -1462,7 +1462,7 @@ pub fn print_metrics(metrics: &RunMetrics) {
         );
     }
     println!(
-        "        money: laundered {} gross through the front's books (house fee {}, cumulative net credited {}), owner withdrawals {}, acquisition spend {}, accounted-payroll spend {}, current accounted balance {}, books refused {} over-capacity request(s), vice inquiries drawn {}",
+        "        money: laundered {} gross through the front's books (laundering cost {}, cumulative net credited {}), owner withdrawals {}, acquisition spend {}, accounted-payroll spend {}, current accounted balance {}, books refused {} over-capacity request(s), vice inquiries drawn {}",
         optional_dollars(Some(metrics.laundered_gross_cents)),
         optional_dollars(Some(metrics.launder_fee_cents)),
         format_cents(metrics.laundered_gross_cents - metrics.launder_fee_cents),

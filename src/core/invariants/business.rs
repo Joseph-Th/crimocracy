@@ -321,9 +321,9 @@ fn laundering_transaction_amounts(
         {
             accounted = Some(posting.amount);
         } else if posting.amount > Money::ZERO
-            && posting.account == economy.operating_account()
+            && posting.account == economy.settlement_account()
             && account.owner() == FinancialOwner::Business(economy.business())
-            && account.kind() == AccountKind::LegitimateOperating
+            && account.kind() == AccountKind::Settlement
             && fee.is_none()
         {
             fee = Some(posting.amount);

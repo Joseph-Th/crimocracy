@@ -679,9 +679,12 @@ fn resolve_transaction_budget(
 /// A dirty-to-accounted funds conversion routed through an owned cash-intensive front.
 ///
 /// The canonical laundering path: street cash leaves a StreetCash account, arrives in the
-/// organization's AccountedFunds minus the authored front fee, and the fee lands in the
-/// front's legitimate operating account as revenue. Plausibility is enforced against the
-/// front's legitimate gross potential, so volume requires larger or additional fronts.
+/// organization's AccountedFunds minus the authored laundering fee, and the fee lands in the
+/// front's non-liquid settlement account as an external cost. The fee must leave organization-
+/// controlled liquidity permanently; routing it into the front's operating till would let the
+/// owner sweep it back later and turn an authored cost into a temporary bookkeeping delay.
+/// Plausibility is enforced against the front's legitimate gross potential, so volume requires
+/// larger or additional fronts.
 #[derive(Clone, Debug)]
 pub struct LaunderingDraft {
     pub organization: crate::core::id::OrganizationId,
@@ -695,7 +698,7 @@ pub struct LaunderingDraft {
 pub enum LaunderingError {
     #[error("laundering amount must be positive")]
     NonPositiveAmount,
-    #[error("laundering amount is too small to produce both a front fee and accounted funds")]
+    #[error("laundering amount is too small to produce both a laundering fee and accounted funds")]
     AmountTooSmallForSplit,
     #[error("laundering organization {0} does not exist")]
     MissingOrganization(crate::core::id::OrganizationId),
@@ -1015,7 +1018,7 @@ fn validate_laundering_transaction(
             amount: credited,
         },
         LedgerPosting {
-            account: economy.operating_account(),
+            account: economy.settlement_account(),
             amount: fee,
         },
     ];

@@ -319,6 +319,18 @@ fn validate_finance_aggregates(
     Ok(())
 }
 
+fn invalid_transaction(transaction: &LedgerTransactionRecord) -> StateValidationError {
+    StateValidationError::InvalidLedgerTransaction {
+        transaction: transaction.id(),
+    }
+}
+
+fn finance_index_error() -> StateValidationError {
+    StateValidationError::IndexInconsistency {
+        subsystem: "finance",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,17 +385,5 @@ mod tests {
             restored.finance().get_account(account).is_some(),
             "restore must preserve the sparse high-id account"
         );
-    }
-}
-
-fn invalid_transaction(transaction: &LedgerTransactionRecord) -> StateValidationError {
-    StateValidationError::InvalidLedgerTransaction {
-        transaction: transaction.id(),
-    }
-}
-
-fn finance_index_error() -> StateValidationError {
-    StateValidationError::IndexInconsistency {
-        subsystem: "finance",
     }
 }
