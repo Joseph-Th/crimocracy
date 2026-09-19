@@ -429,7 +429,10 @@ fn run_enterprise_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<
             economics.gross_variance_basis_points(),
         );
         let vice_attention_roll = u16::try_from(
-            draw_index(state.enterprise_rng_mut(), 10_000)
+            draw_index(
+                state.enterprise_rng_mut(),
+                crate::enterprises::enterprise_execution::EnterpriseCycleRandomness::VICE_ATTENTION_ROLL_COUNT,
+            )
                 .expect("vice-attention roll range is never empty"),
         )
         .expect("vice-attention roll fits u16");

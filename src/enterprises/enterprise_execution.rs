@@ -14,12 +14,12 @@ use support::{
 };
 pub(crate) use support::{can_authority_cover_location, resolve_location_neighborhood};
 
+pub(crate) use economics::{
+    decode_enterprise_investigation_case_count, resolve_enterprise_financial_projection,
+    resolve_enterprise_operating_cost_projection, resolve_historical_enterprise_cycle_financials,
+};
 use economics::{
     resolve_basis_point_variance, resolve_gross_before_variance, resolve_operating_cost,
-};
-pub(crate) use economics::{
-    resolve_enterprise_financial_projection, resolve_enterprise_operating_cost_projection,
-    resolve_historical_enterprise_cycle_financials,
 };
 pub use establishment::{ValidatedEnterpriseEstablishment, validate_establish_enterprise};
 pub(crate) use establishment::{
@@ -325,7 +325,14 @@ pub struct EnterpriseCycleRandomness {
 }
 
 impl EnterpriseCycleRandomness {
+    pub(crate) const VICE_ATTENTION_ROLL_COUNT: usize = 10_000;
+    pub(crate) const MAX_VICE_ATTENTION_ROLL: u16 = 9_999;
+
     pub(crate) fn new(variance_basis_points: i16, vice_attention_roll: u16) -> Self {
+        debug_assert!(
+            vice_attention_roll <= Self::MAX_VICE_ATTENTION_ROLL,
+            "enterprise vice-attention roll must be in the production 0..10000 basis-point domain"
+        );
         Self {
             variance_basis_points,
             vice_attention_roll,

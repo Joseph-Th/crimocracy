@@ -62,6 +62,28 @@ pub(super) struct OperatingCostBreakdown {
     pub(super) investigation_heat: Money,
 }
 
+/// Decodes the persisted street-heat charge back to the number of active district cases that
+/// could have produced it. Persistent IDs reserve zero and require allocator headroom above the
+/// highest stored ID, so at most u32::MAX - 1 investigation records can exist.
+pub(crate) fn decode_enterprise_investigation_case_count(
+    economics: &EnterpriseEconomicsDefinition,
+    investigation_heat: Money,
+) -> Option<u32> {
+    let per_case = economics.heat_surcharge_per_active_case().cents();
+    let heat = investigation_heat.cents();
+    if per_case < 0 || heat < 0 {
+        return None;
+    }
+    if per_case == 0 {
+        return (heat == 0).then_some(0);
+    }
+    if heat % per_case != 0 {
+        return None;
+    }
+    let count = u32::try_from(heat / per_case).ok()?;
+    (count < u32::MAX).then_some(count)
+}
+
 pub(super) fn resolve_operating_cost(
     economics: &EnterpriseEconomicsDefinition,
     profile: NeighborhoodProfile,
@@ -213,11 +235,7 @@ pub(crate) fn resolve_historical_enterprise_cycle_financials(
     )?;
     let gross_revenue = resolve_basis_point_variance(record.id(), gross_before_variance, variance)?;
     let heat = cycle.investigation_heat();
-    let per_case_heat = economics.heat_surcharge_per_active_case().cents();
-    if heat.cents() < 0
-        || (per_case_heat == 0 && heat != Money::ZERO)
-        || (per_case_heat > 0 && heat.cents() % per_case_heat != 0)
-    {
+    if decode_enterprise_investigation_case_count(economics, heat).is_none() {
         return Err(EnterpriseError::ArithmeticOverflow(record.id()));
     }
     let operating_cost = resolve_operating_cost_with_heat(

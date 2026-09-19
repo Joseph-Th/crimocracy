@@ -9,10 +9,10 @@ use crate::core::state::AppState;
 use crate::delegation::delegation_system::DelegationError;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::enterprises::enterprise_execution::{
-    EnterpriseError, can_authority_cover_location, enterprise_location_is_occupied,
-    resolve_enterprise_financial_projection, resolve_enterprise_operating_cost_projection,
-    resolve_location_neighborhood, validate_establish_enterprise,
-    validate_establish_enterprise_with_openings,
+    EnterpriseError, can_authority_cover_location, decode_enterprise_investigation_case_count,
+    enterprise_location_is_occupied, resolve_enterprise_financial_projection,
+    resolve_enterprise_operating_cost_projection, resolve_location_neighborhood,
+    validate_establish_enterprise, validate_establish_enterprise_with_openings,
 };
 use crate::enterprises::{
     ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation,
@@ -850,17 +850,13 @@ fn resolve_observed_district_pressure(
             .enterprises()
             .get_enterprise(cycle.enterprise())
             .expect("enterprise cycle must reference its persisted enterprise");
-        let per_case = registry
-            .get_enterprise(enterprise.kind())
-            .economics()
-            .heat_surcharge_per_active_case()
-            .cents();
-        if per_case <= 0 {
+        let economics = registry.get_enterprise(enterprise.kind()).economics();
+        if economics.heat_surcharge_per_active_case() <= Money::ZERO {
             continue;
         }
-        let heat = cycle.investigation_heat().cents();
-        debug_assert!(heat >= 0 && heat % per_case == 0);
-        let inferred = u32::try_from(heat / per_case).unwrap_or(u32::MAX);
+        let inferred =
+            decode_enterprise_investigation_case_count(economics, cycle.investigation_heat())
+                .expect("validated enterprise heat must encode a representable active-case count");
         let key = (cycle.occurred_at(), cycle.id());
         let neighborhood = resolve_location_neighborhood(state, enterprise.location())?;
         let observation = latest_observations

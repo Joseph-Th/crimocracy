@@ -55,6 +55,9 @@ impl LegalState {
                     .expect("informant-handler index must reference an informant")
             })
     }
+    pub(crate) fn informant_handlers(&self) -> impl Iterator<Item = OrganizationId> + '_ {
+        self.indexes.informants.by_handler.keys().copied()
+    }
     pub(crate) fn patrol_deployments_for_neighborhood(
         &self,
         neighborhood: NeighborhoodId,
@@ -193,15 +196,22 @@ impl LegalState {
         self.indexes
             .prosecutions
             .open_by_arrest_office
-            .iter()
-            .any(|((indexed_arrest, _), case)| *indexed_arrest == arrest && *case != except)
+            .range(
+                (arrest, OrganizationId::from_raw(0))
+                    ..=(arrest, OrganizationId::from_raw(u32::MAX)),
+            )
+            .any(|(_, case)| *case != except)
     }
     pub(crate) fn has_open_prosecution_case_for_arrest(&self, arrest: ArrestId) -> bool {
         self.indexes
             .prosecutions
             .open_by_arrest_office
-            .keys()
-            .any(|(indexed_arrest, _)| *indexed_arrest == arrest)
+            .range(
+                (arrest, OrganizationId::from_raw(0))
+                    ..=(arrest, OrganizationId::from_raw(u32::MAX)),
+            )
+            .next()
+            .is_some()
     }
     pub fn reviewing_prosecution_cases_for_prosecutor(
         &self,

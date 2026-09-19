@@ -526,11 +526,7 @@ pub(crate) fn apply_informant_disclosures(
         return Ok(Vec::new());
     }
     let mut candidates: Vec<(InformantId, InformationId, InvestigationId)> = Vec::new();
-    let handlers: BTreeSet<OrganizationId> = state
-        .legal
-        .informants()
-        .map(|informant| informant.handler())
-        .collect();
+    let handlers: Vec<OrganizationId> = state.legal.informant_handlers().collect();
     for handler in handlers {
         // Build only this handler's live case view. A held fact is institutionally available to
         // every matching active file in the same pass. Serializing that propagation one case per

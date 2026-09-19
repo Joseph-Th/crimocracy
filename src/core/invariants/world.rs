@@ -1,7 +1,6 @@
 //! Release-safe structural validation for the world subsystem.
 
 use crate::core::entity::{EntityRef, is_entity_present};
-use crate::core::id::CharacterId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::registry::Registry;
@@ -24,12 +23,10 @@ pub(super) fn validate_world_state(state: &AppState) -> Result<(), StateValidati
         }
     }
 
-    // One reused visitation set serves every character's ancestor walk; clearing between
-    // characters keeps the cycle detection identical without allocating per record.
-    let mut visited = BTreeSet::new();
     for character in state.world.characters() {
-        validate_character(state, character, &mut visited)?;
+        validate_character(state, character)?;
     }
+    validate_supervision_graph(state)?;
     for business in state.world.businesses() {
         validate_business(state, business)?;
     }
@@ -154,7 +151,6 @@ pub(in crate::core::invariants) fn validate_organization_policies_against_regist
 fn validate_character(
     state: &AppState,
     character: &CharacterRecord,
-    visited: &mut BTreeSet<CharacterId>,
 ) -> Result<(), StateValidationError> {
     if character.name().trim().is_empty() {
         return Err(StateValidationError::EmptyEntityName {
@@ -190,30 +186,46 @@ fn validate_character(
             });
         }
     }
-    validate_supervision_chain(state, character, visited)
+    Ok(())
 }
 
-fn validate_supervision_chain(
-    state: &AppState,
-    character: &CharacterRecord,
-    visited: &mut BTreeSet<CharacterId>,
-) -> Result<(), StateValidationError> {
-    visited.clear();
-    let mut cursor = character.supervisor();
-    while let Some(current) = cursor {
-        if current == character.id() || !visited.insert(current) {
-            return Err(StateValidationError::SupervisionCycle {
-                character: character.id(),
-            });
+fn validate_supervision_graph(state: &AppState) -> Result<(), StateValidationError> {
+    // Supervision is a functional graph: every character has at most one outgoing supervisor
+    // edge. Once one chain reaches the top, every node on that path is proven acyclic and later
+    // starts can stop there. This avoids re-walking the same long ancestor chain for every
+    // subordinate while keeping the traversal iterative and deterministic.
+    let mut validated = BTreeSet::new();
+    let mut current_path = BTreeSet::new();
+    let mut path_nodes = Vec::new();
+    for character in state.world.characters() {
+        if validated.contains(&character.id()) {
+            continue;
         }
-        cursor = state
-            .world
-            .get_character(current)
-            .ok_or(StateValidationError::MissingEntity {
-                context: "supervision hierarchy",
-                entity: EntityRef::Character(current),
-            })?
-            .supervisor();
+        current_path.clear();
+        path_nodes.clear();
+        let mut cursor = Some(character.id());
+        while let Some(current) = cursor {
+            if validated.contains(&current) {
+                break;
+            }
+            if !current_path.insert(current) {
+                return Err(StateValidationError::SupervisionCycle {
+                    character: character.id(),
+                });
+            }
+            path_nodes.push(current);
+            cursor = state
+                .world
+                .get_character(current)
+                .ok_or(StateValidationError::MissingEntity {
+                    context: "supervision hierarchy",
+                    entity: EntityRef::Character(current),
+                })?
+                .supervisor();
+        }
+        for id in path_nodes.drain(..) {
+            validated.insert(id);
+        }
     }
     Ok(())
 }

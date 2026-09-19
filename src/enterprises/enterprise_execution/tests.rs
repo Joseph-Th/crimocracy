@@ -71,7 +71,10 @@ fn notable_cycle_rejects_changed_information_allocator_before_mutation() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(variance, u16::MAX),
+        EnterpriseCycleRandomness::new(
+            variance,
+            EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+        ),
     )
     .expect("notable enterprise cycle should resolve");
     let validated = validate_enterprise_cycle_plan(&fixture.state, plan)
@@ -142,7 +145,10 @@ fn notable_settlement_reaches_executive_brief_without_pending_decisions() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(variance, u16::MAX),
+        EnterpriseCycleRandomness::new(
+            variance,
+            EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+        ),
     )
     .unwrap();
     let cycle = validate_enterprise_cycle_plan(&fixture.state, plan)
@@ -253,7 +259,10 @@ fn report_id_exhaustion_rejects_notable_settlement_before_any_mutation() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(variance, u16::MAX),
+        EnterpriseCycleRandomness::new(
+            variance,
+            EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+        ),
     )
     .unwrap();
     let validated = validate_enterprise_cycle_plan(&fixture.state, plan).unwrap();
@@ -494,7 +503,7 @@ fn restore_rejects_active_enterprise_schedule_drift_from_authored_cadence() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, u16::MAX),
+            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
         )
         .expect("routine enterprise cycle should decide"),
     )
@@ -562,7 +571,10 @@ fn due_enterprise_cycle_near_clock_horizon_settles_then_exhausts_future_recurren
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, u16::MAX),
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+            ),
         )
         .expect("already-due enterprise work should settle even when only its next recurrence overflows"),
     )
@@ -595,7 +607,7 @@ fn due_enterprise_cycle_near_clock_horizon_settles_then_exhausts_future_recurren
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, u16::MAX),
+            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,),
         )
         .expect_err("no second enterprise settlement is representable after recurrence exhaustion"),
         EnterpriseError::SimulationTimeOverflow
@@ -896,7 +908,10 @@ fn restore_rejects_nonincreasing_enterprise_cycle_time_in_sequential_id_order() 
                 &registry,
                 &fixture.state,
                 enterprise,
-                EnterpriseCycleRandomness::new(0, u16::MAX),
+                EnterpriseCycleRandomness::new(
+                    0,
+                    EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+                ),
             )
             .expect("routine enterprise cycle should decide"),
         )
@@ -1394,7 +1409,7 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, u16::MAX),
+            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
         )
         .expect("first due cycle should resolve"),
     )
@@ -1595,7 +1610,7 @@ fn routine_cycle_records_causal_economics_and_balanced_cash_settlement() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("due enterprise cycle should resolve");
     assert_eq!(
@@ -1690,7 +1705,7 @@ fn registry_validation_rejects_internally_balanced_unauthored_enterprise_financi
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("due enterprise cycle should resolve");
     let cycle = validate_enterprise_cycle_plan(&fixture.state, plan)
@@ -1734,6 +1749,33 @@ fn registry_validation_rejects_internally_balanced_unauthored_enterprise_financi
             ) if invalid == cycle
         ),
         "expected invalid enterprise cycle, got {error:?}"
+    );
+}
+
+#[test]
+fn enterprise_heat_decoder_rejects_case_counts_beyond_persistent_id_space() {
+    let registry = build_registry();
+    let economics = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics();
+    let per_case = economics.heat_surcharge_per_active_case();
+    assert!(per_case > Money::ZERO);
+
+    let maximum_case_count = u32::MAX - 1;
+    let maximum_heat = per_case
+        .checked_mul(i64::from(maximum_case_count))
+        .expect("registry arithmetic contract must support the maximum case count");
+    assert_eq!(
+        decode_enterprise_investigation_case_count(economics, maximum_heat),
+        Some(maximum_case_count)
+    );
+    let impossible_heat = maximum_heat
+        .checked_add(per_case)
+        .expect("one-beyond-bound heat remains representable in this authored fixture");
+    assert_eq!(
+        decode_enterprise_investigation_case_count(economics, impossible_heat),
+        None,
+        "persisted heat cannot imply more active cases than the u32-backed case identity space"
     );
 }
 
@@ -1806,7 +1848,7 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, u16::MAX),
+            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
         )
         .expect("due enterprise cycle should resolve");
         let (cost, heat, attention) = (
@@ -1966,7 +2008,7 @@ fn cycle_plan_rejects_when_district_case_pressure_changes_before_settlement() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("quiet due cycle should resolve");
 
@@ -2042,7 +2084,7 @@ fn settle_cycle_inner(
         registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("due enterprise cycle should resolve");
     let attention = plan.economics.attention;
@@ -2121,7 +2163,7 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("due cycle should plan while the manager is free");
     let arrest = validate_arrest(
@@ -2155,7 +2197,7 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, u16::MAX),
+            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,),
         )
         .expect_err("a detained manager cannot settle through the direct enterprise API"),
         EnterpriseError::Delegation(
@@ -2393,7 +2435,7 @@ fn alcohol_distribution_uses_owned_business_network_and_survives_save_before_cyc
         &registry,
         &restored,
         enterprise,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("valid alcohol distribution network should resolve a due cycle");
     assert_eq!(
@@ -2957,7 +2999,7 @@ fn stale_cycle_plan_cannot_commit_after_enterprise_lifecycle_change() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("cycle should resolve");
     validate_suspend_enterprise(&fixture.state, enterprise)
@@ -3004,7 +3046,7 @@ fn active_enterprise_blocks_authority_removal_until_suspended() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, u16::MAX),
+            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
         )
         .expect("pre-suspension cycle should decide"),
     )
@@ -3179,7 +3221,10 @@ fn organization_financial_reporting_rederives_cycle_totals_without_cached_state(
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(variance, u16::MAX),
+            EnterpriseCycleRandomness::new(
+                variance,
+                EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+            ),
         )
         .expect("due cycle should resolve for reporting fixture");
         validate_enterprise_cycle_plan(&fixture.state, plan)
@@ -3333,7 +3378,7 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
             &registry,
             &state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, u16::MAX),
+            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
         )
         .expect("losing enterprise cycle should decide");
         assert!(
@@ -3398,7 +3443,7 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
             &registry,
             &state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, u16::MAX),
+            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
         )
         .expect("post-resume losing cycle should decide");
         assert!(plan.economics.net_cash.cents() < 0);
@@ -3876,7 +3921,7 @@ fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
         &registry,
         &fixture.state,
         gambling,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("second same-minute peer cycle should resolve");
     assert_eq!(
@@ -3918,7 +3963,7 @@ fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
         &registry,
         &fixture.state,
         protection,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("next-day source cycle should resolve");
     assert_eq!(
@@ -3943,7 +3988,7 @@ fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
         &registry,
         &fixture.state,
         gambling,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("next-day peer cycle should resolve");
     assert_eq!(
@@ -4411,7 +4456,7 @@ fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, u16::MAX),
+        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
     )
     .expect("initial hot cycle should resolve");
     assert!(first.economics.investigation_heat > Money::ZERO);

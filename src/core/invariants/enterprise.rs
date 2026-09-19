@@ -603,13 +603,6 @@ fn validate_cycle_against_registry(
         return Err(invalid());
     }
     let variance = i32::from(cycle.variance_basis_points()).unsigned_abs();
-    let per_case = economics.heat_surcharge_per_active_case().cents();
-    if cycle.investigation_heat().cents() < 0
-        || (per_case == 0 && cycle.investigation_heat().cents() != 0)
-        || (per_case > 0 && cycle.investigation_heat().cents() % per_case != 0)
-    {
-        return Err(invalid());
-    }
     let previous_heat = state
         .enterprises
         .prior_cycle(cycle.enterprise(), cycle.id())
@@ -628,9 +621,7 @@ fn validate_cycle_against_registry(
     } else {
         AttentionClass::Routine
     };
-    if variance > u32::from(economics.gross_variance_basis_points())
-        || cycle.attention() != expected_attention
-    {
+    if cycle.attention() != expected_attention {
         return Err(invalid());
     }
     Ok(())

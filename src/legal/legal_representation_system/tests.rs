@@ -278,6 +278,96 @@ fn automatic_legal_support_aggregates_split_organization_liquidity() {
 }
 
 #[test]
+fn direct_retainer_spends_dirty_liquidity_before_clean_reserve() {
+    let mut fx = fixture();
+    let street = insert_account(
+        &mut fx.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fx.sponsor),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("later street-cash account should validate");
+    validate_record_transaction(
+        &fx.state,
+        LedgerTransactionDraft {
+            occurred_at: fx.state.now(),
+            memo: "Move part of legal reserve into street cash".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fx.payer,
+                    amount: Money::from_cents(-10_000),
+                },
+                LedgerPosting {
+                    account: street,
+                    amount: Money::from_cents(10_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("street-cash split should validate")
+    .commit(&mut fx.state)
+    .expect("street-cash split should commit");
+    assert!(
+        fx.payer < street,
+        "fixture must prove semantic priority against account creation order"
+    );
+
+    let clean_before = fx
+        .state
+        .finance()
+        .get_account(fx.payer)
+        .expect("clean payer should persist")
+        .balance();
+    let mut draft = representation_draft(&fx, 5_000, None);
+    draft.payer_accounts.insert(street);
+    let representation = validate_retain_legal_representation(&fx.state, draft)
+        .expect("mixed-money retainer should validate")
+        .commit(&mut fx.state)
+        .expect("mixed-money retainer should commit");
+    let record = fx
+        .state
+        .legal()
+        .get_legal_representation(representation)
+        .expect("representation should persist");
+    let payment = fx
+        .state
+        .finance()
+        .get_transaction(record.payment())
+        .expect("retainer payment should persist");
+
+    assert!(payment.postings().iter().any(|posting| {
+        posting.account == street && posting.amount == Money::from_cents(-5_000)
+    }));
+    assert!(
+        payment
+            .postings()
+            .iter()
+            .all(|posting| posting.account != fx.payer),
+        "clean account must not fund a fee that later-created street cash can cover"
+    );
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(fx.payer)
+            .expect("clean payer should persist")
+            .balance(),
+        clean_before
+    );
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(street)
+            .expect("street payer should persist")
+            .balance(),
+        Money::from_cents(5_000)
+    );
+    validate_state(&fx.state).expect("semantic retainer funding should validate");
+    validate_invariants(&fx.state);
+}
+
+#[test]
 fn mandate_automatic_legal_support_respects_exhausted_budget_window() {
     let mut fx = fixture_with_options(OrganizationKind::LegalServices, true);
     let supervisor = fx

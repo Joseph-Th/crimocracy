@@ -14,8 +14,8 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime};
 use crate::finance::finance_system::{
-    FinanceError, ValidatedFinancialAccountOpenings, validate_open_accounts,
-    validate_record_transaction, validate_record_transaction_with_openings,
+    FinanceError, ValidatedFinancialAccountOpenings, ValidatedLedgerTransaction,
+    validate_open_accounts, validate_record_transaction, validate_record_transaction_with_openings,
 };
 use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
@@ -152,85 +152,14 @@ fn apply_organization_payroll(
     // make real organization cash disappear from payroll. We only need availability up to the
     // amount owed, so the i128 accumulator cannot overflow even if a campaign has many very
     // large positive accounts.
-    let owed_cents = i128::from(owed.cents());
-    let available_cents = funding
-        .iter()
-        .map(|account| {
-            state
-                .finance()
-                .get_account(*account)
-                .expect("payroll funding came from the finance owner index")
-        })
-        .map(|record| record.spendable_balance().cents())
-        .fold(0_i128, |total, cents| {
-            (total + i128::from(cents)).min(owed_cents)
-        });
-    let paid = Money::from_cents(
-        i64::try_from(available_cents).expect("available payroll is bounded by money owed"),
-    );
+    let paid = resolve_payroll_liquidity(state, funding, owed);
     let allocations = allocate_member_payments(
         &members,
         per_member,
         paid,
         payroll_remainder_offset(state.now(), members.len()),
     );
-    let transaction = if paid > Money::ZERO {
-        let mut postings: Vec<LedgerPosting> = Vec::new();
-        let mut remaining = paid;
-        for account in funding {
-            if remaining.cents() == 0 {
-                break;
-            }
-            let spendable = state
-                .finance()
-                .get_account(*account)
-                .expect("payroll funding came from the finance owner index")
-                .spendable_balance();
-            if spendable == Money::ZERO {
-                continue;
-            }
-            let debit = spendable.min(remaining);
-            postings.push(LedgerPosting {
-                account: *account,
-                amount: debit.checked_neg().expect("positive balance negates"),
-            });
-            remaining = remaining
-                .checked_sub(debit)
-                .expect("debit cannot exceed payable payroll");
-        }
-        let (wage_accounts, openings) = plan_wage_accounts(state, &allocations)?;
-        for ((_, _, amount), account) in allocations.iter().zip(wage_accounts) {
-            if *amount == Money::ZERO {
-                continue;
-            }
-            let account = account.expect("a positive wage allocation must resolve an account");
-            postings.push(LedgerPosting {
-                account,
-                amount: *amount,
-            });
-        }
-        debug_assert_eq!(
-            postings
-                .iter()
-                .map(|posting| posting.amount.cents())
-                .sum::<i64>(),
-            0,
-            "payroll postings must balance"
-        );
-        let draft = LedgerTransactionDraft {
-            occurred_at: state.now(),
-            memo: format!("Daily payroll for {} member(s)", members.len()),
-            postings,
-            authorization: None,
-        };
-        let transaction = match openings {
-            Some(openings) => validate_record_transaction_with_openings(state, openings, draft),
-            None => validate_record_transaction(state, draft),
-        }?;
-        Some(transaction)
-    } else {
-        None
-    };
+    let transaction = validate_payroll_payment(state, funding, &allocations, paid)?;
 
     let short = owed.checked_sub(paid).expect("paid cannot exceed owed");
     let mut outcome = PayrollOutcome {
@@ -277,6 +206,97 @@ fn apply_organization_payroll(
         consequences.commit_preflighted(state);
     }
     Ok(Some(outcome))
+}
+
+fn resolve_payroll_liquidity(
+    state: &AppState,
+    funding: &[FinancialAccountId],
+    owed: Money,
+) -> Money {
+    let owed_cents = i128::from(owed.cents());
+    let available_cents = funding
+        .iter()
+        .map(|account| {
+            state
+                .finance()
+                .get_account(*account)
+                .expect("payroll funding came from the finance owner index")
+                .spendable_balance()
+                .cents()
+        })
+        .fold(0_i128, |total, cents| {
+            (total + i128::from(cents)).min(owed_cents)
+        });
+    Money::from_cents(
+        i64::try_from(available_cents).expect("available payroll is bounded by money owed"),
+    )
+}
+
+fn validate_payroll_payment(
+    state: &AppState,
+    funding: &[FinancialAccountId],
+    allocations: &[(CharacterId, Option<CharacterId>, Money)],
+    paid: Money,
+) -> Result<Option<ValidatedLedgerTransaction>, PayrollError> {
+    if paid == Money::ZERO {
+        return Ok(None);
+    }
+
+    let mut postings = Vec::new();
+    let mut remaining = paid;
+    for account in funding {
+        if remaining == Money::ZERO {
+            break;
+        }
+        let spendable = state
+            .finance()
+            .get_account(*account)
+            .expect("payroll funding came from the finance owner index")
+            .spendable_balance();
+        if spendable == Money::ZERO {
+            continue;
+        }
+        let debit = spendable.min(remaining);
+        postings.push(LedgerPosting {
+            account: *account,
+            amount: debit.checked_neg().expect("positive balance negates"),
+        });
+        remaining = remaining
+            .checked_sub(debit)
+            .expect("debit cannot exceed payable payroll");
+    }
+    debug_assert_eq!(remaining, Money::ZERO);
+
+    let (wage_accounts, openings) = plan_wage_accounts(state, allocations)?;
+    for ((_, _, amount), account) in allocations.iter().zip(wage_accounts) {
+        if *amount == Money::ZERO {
+            continue;
+        }
+        let account = account.expect("a positive wage allocation must resolve an account");
+        postings.push(LedgerPosting {
+            account,
+            amount: *amount,
+        });
+    }
+    debug_assert_eq!(
+        postings
+            .iter()
+            .map(|posting| posting.amount.cents())
+            .sum::<i64>(),
+        0,
+        "payroll postings must balance"
+    );
+    let draft = LedgerTransactionDraft {
+        occurred_at: state.now(),
+        memo: format!("Daily payroll for {} member(s)", allocations.len()),
+        postings,
+        authorization: None,
+    };
+    let transaction = match openings {
+        Some(openings) => validate_record_transaction_with_openings(state, openings, draft),
+        None => validate_record_transaction(state, draft),
+    }?;
+    Ok(Some(transaction))
 }
 
 fn allocate_member_payments(
@@ -385,11 +405,24 @@ fn find_funding_accounts(
         .accounts_for(owner)
         .filter_map(|account| {
             let spendable = account.spendable_balance();
-            (spendable > Money::ZERO).then_some((spendable, account.id()))
+            (spendable > Money::ZERO).then_some((
+                account.kind().unrestricted_spending_priority(),
+                spendable,
+                account.id(),
+            ))
         })
         .collect();
-    accounts.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-    accounts.into_iter().map(|(_, id)| id).collect()
+    // Wages are an informal carrying cost. Spend exposed street cash first, then hidden dirty
+    // reserves, before consuming clean liquidity that can finance legitimate purchases and
+    // delegated budgets. Within an equal semantic class, use the largest balance first to keep
+    // ordinary payroll transactions compact; account ID is only the deterministic final tie.
+    accounts.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(right.1.cmp(&left.1))
+            .then(left.2.cmp(&right.2))
+    });
+    accounts.into_iter().map(|(_, _, id)| id).collect()
 }
 
 struct ValidatedPayrollShortfallConsequences {

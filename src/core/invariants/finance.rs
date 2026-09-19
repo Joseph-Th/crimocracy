@@ -15,7 +15,7 @@ type BudgetPeriodKey = (
 );
 
 struct FinanceValidationScratch {
-    account_present: Vec<bool>,
+    account_ids: Vec<crate::core::id::FinancialAccountId>,
     derived_balance_cents: Vec<i64>,
     derived_account_versions: Vec<u32>,
     expected_mandate_entries: usize,
@@ -24,13 +24,19 @@ struct FinanceValidationScratch {
     last_transaction_time: Option<SimTime>,
 }
 
+impl FinanceValidationScratch {
+    fn account_slot(&self, account: crate::core::id::FinancialAccountId) -> Option<usize> {
+        self.account_ids.binary_search(&account).ok()
+    }
+}
+
 /// Finance ownership, ledger, and balance coherence in ONE pass over the append-only
 /// transaction history: every per-transaction index-membership, posting, arithmetic, and
 /// budget-authority check runs while the referenced-account set and derived balances are
-/// accumulated, so per-tick validation walks campaign-length history once instead of once
-/// per concern. Posting-level membership and balance accumulation use dense vectors keyed
-/// by raw account id (ids are allocated monotonically), keeping the hottest loop free of
-/// ordered-map traversals without weakening any check.
+/// accumulated, so per-tick validation walks campaign-length history once instead of once per
+/// concern. Scratch balances remain dense by account count, while a sorted account-id vector maps
+/// persistent ids to slots with binary search. This keeps memory proportional to real state size
+/// even if a malformed current-version save carries a sparse high account id.
 pub(super) fn validate_finance_indexes_and_ledger(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
@@ -83,14 +89,11 @@ fn validate_account(
 }
 
 fn initialize_ledger_scratch(state: &AppState) -> FinanceValidationScratch {
-    let highest_account = state
-        .finance
-        .account_id_bounds()
-        .map_or(0, |(_, highest)| highest) as usize;
+    let account_count = state.finance.accounts().count();
     let mut scratch = FinanceValidationScratch {
-        account_present: vec![false; highest_account + 1],
-        derived_balance_cents: vec![0_i64; highest_account + 1],
-        derived_account_versions: vec![0_u32; highest_account + 1],
+        account_ids: Vec::with_capacity(account_count),
+        derived_balance_cents: Vec::with_capacity(account_count),
+        derived_account_versions: Vec::with_capacity(account_count),
         expected_mandate_entries: 0,
         derived_budget_totals: BTreeMap::new(),
         // Reused for every transaction to avoid allocating a new ordered set in the
@@ -99,12 +102,13 @@ fn initialize_ledger_scratch(state: &AppState) -> FinanceValidationScratch {
         last_transaction_time: None,
     };
     for account in state.finance.accounts() {
-        let raw = account.id().raw() as usize;
-        scratch.account_present[raw] = true;
+        scratch.account_ids.push(account.id());
+        scratch.derived_balance_cents.push(0);
         // Every account opens at version 1. The ledger pass below advances this once for each
         // transaction that touched the account, exactly mirroring `apply_transaction`.
-        scratch.derived_account_versions[raw] = 1;
+        scratch.derived_account_versions.push(1);
     }
+    debug_assert!(scratch.account_ids.is_sorted());
     scratch
 }
 
@@ -154,22 +158,21 @@ fn validate_postings(
         if posting.amount == Money::ZERO || !scratch.seen_posting_accounts.insert(posting.account) {
             return Err(invalid_transaction(transaction));
         }
-        let raw = posting.account.raw() as usize;
-        if raw >= scratch.account_present.len() || !scratch.account_present[raw] {
+        let Some(slot) = scratch.account_slot(posting.account) else {
             return Err(StateValidationError::MissingEntity {
                 context: "ledger posting account",
                 entity: EntityRef::FinancialAccount(posting.account),
             });
-        }
+        };
         net_cents = net_cents.checked_add(posting.amount.cents()).ok_or(
             StateValidationError::LedgerArithmeticOverflow {
                 transaction: transaction.id(),
             },
         )?;
-        scratch.derived_balance_cents[raw] = scratch.derived_balance_cents[raw]
+        scratch.derived_balance_cents[slot] = scratch.derived_balance_cents[slot]
             .checked_add(posting.amount.cents())
             .ok_or(StateValidationError::FinancialBalanceMismatch)?;
-        scratch.derived_account_versions[raw] = scratch.derived_account_versions[raw]
+        scratch.derived_account_versions[slot] = scratch.derived_account_versions[slot]
             .checked_add(1)
             .ok_or(StateValidationError::InvalidFinancialAccount {
                 account: posting.account,
@@ -220,12 +223,12 @@ fn validate_budget_usage(
         .iter()
         .filter(|posting| posting.amount < Money::ZERO)
         .all(|posting| posting.account == usage.funding_account());
-    let funding_raw = usage.funding_account().raw() as usize;
+    let funding_slot = scratch.account_slot(usage.funding_account());
     // `validate_postings` has already applied this transaction to the running historical balance,
     // so this is the exact post-spend balance at the transaction instant, unaffected by later
     // ledger activity. Canonical delegated spending cannot overdraw its designated funding pool.
-    let funding_remains_solvent = funding_raw < scratch.derived_balance_cents.len()
-        && scratch.derived_balance_cents[funding_raw] >= 0;
+    let funding_remains_solvent =
+        funding_slot.is_some_and(|slot| scratch.derived_balance_cents[slot] >= 0);
     let current_budget_matches = if usage.mandate_version() == mandate.version() {
         mandate.budget().is_some_and(|budget| {
             let window = budget.period.window(transaction.occurred_at());
@@ -300,20 +303,77 @@ fn validate_finance_aggregates(
     if !aggregate_matches {
         return Err(finance_index_error());
     }
-    if !state
-        .finance
-        .balances_agree_with_derived_cents(&scratch.derived_balance_cents)
-    {
-        return Err(StateValidationError::FinancialBalanceMismatch);
-    }
     for account in state.finance.accounts() {
-        if scratch.derived_account_versions[account.id().raw() as usize] != account.version() {
+        let slot = scratch
+            .account_slot(account.id())
+            .expect("ledger scratch is initialized from every persisted account");
+        if scratch.derived_balance_cents[slot] != account.balance().cents() {
+            return Err(StateValidationError::FinancialBalanceMismatch);
+        }
+        if scratch.derived_account_versions[slot] != account.version() {
             return Err(StateValidationError::InvalidFinancialAccount {
                 account: account.id(),
             });
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_registry;
+    use crate::core::id::IdKind;
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::finance::finance_system::insert_account;
+    use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+    use crate::world::world_system::insert_organization;
+    use crate::world::{OrganizationDraft, OrganizationKind};
+
+    #[test]
+    fn ledger_scratch_memory_tracks_account_count_not_sparse_id_high_water() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xF1A4_CE55);
+        let organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Sparse Finance Fixture".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("finance fixture organization should validate");
+        state
+            .ids
+            .set_next_raw_for_test(IdKind::FinancialAccount, 1_000_000_000);
+        let account = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::StreetCash,
+            },
+        )
+        .expect("sparse high-id account should validate through the canonical owner");
+
+        let scratch = initialize_ledger_scratch(&state);
+        assert_eq!(scratch.account_ids, vec![account]);
+        assert_eq!(scratch.derived_balance_cents.len(), 1);
+        assert_eq!(scratch.derived_account_versions.len(), 1);
+        assert_eq!(scratch.account_slot(account), Some(0));
+        validate_finance_indexes_and_ledger(&state).expect(
+            "sparse persistent IDs must not make finance validation allocate by high water",
+        );
+        let restored = restore_save(
+            &registry,
+            build_save(&registry, &state)
+                .expect("sparse high-id finance state should remain saveable"),
+        )
+        .expect("restore must validate sparse high-id finance state without high-water allocation");
+        assert!(
+            restored.finance().get_account(account).is_some(),
+            "restore must preserve the sparse high-id account"
+        );
+    }
 }
 
 fn invalid_transaction(transaction: &LedgerTransactionRecord) -> StateValidationError {

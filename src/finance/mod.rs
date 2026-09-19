@@ -69,6 +69,22 @@ impl AccountKind {
                 | Self::LegitimateOperating
         )
     }
+
+    /// Semantic source priority for expenses that explicitly accept any liquid money state.
+    ///
+    /// Informal street cash is spent first, then concealed dirty reserves, before scarce clean
+    /// liquidity that can finance legitimate purchases and delegated budgets. Restricted flows
+    /// such as acquisition or enterprise capitalization still enforce their narrower account
+    /// kinds instead of consulting this ordering. Settlement is non-liquid and receives the
+    /// final exhaustive rank only so callers can sort a closed vocabulary without a wildcard.
+    pub(crate) const fn unrestricted_spending_priority(self) -> u8 {
+        match self {
+            Self::StreetCash => 0,
+            Self::ConcealedCash => 1,
+            Self::AccountedFunds | Self::LegitimateOperating => 2,
+            Self::Settlement => 3,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -412,19 +428,6 @@ impl FinanceState {
             .values()
             .map(BTreeSet::len)
             .sum()
-    }
-
-    /// Balance-agreement half of the fused finance audit: stored balances must equal the
-    /// caller's single-pass derivation from the full ledger, indexed densely by raw account
-    /// id (missing slots derive zero).
-    pub(crate) fn balances_agree_with_derived_cents(&self, derived_cents: &[i64]) -> bool {
-        self.accounts.values().all(|account| {
-            derived_cents
-                .get(account.id().raw() as usize)
-                .copied()
-                .unwrap_or(0)
-                == account.balance().cents()
-        })
     }
 }
 

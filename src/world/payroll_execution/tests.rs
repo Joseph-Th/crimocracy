@@ -375,6 +375,84 @@ fn accounted_funds_are_available_for_payroll_but_settlement_balances_are_not() {
 }
 
 #[test]
+fn payroll_spends_dirty_cash_before_clean_reserves() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let concealed = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("concealed payroll reserve should validate");
+    let accounted = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("accounted payroll reserve should validate");
+    let owed = registry
+        .upkeep()
+        .per_member_daily()
+        .checked_mul(2)
+        .expect("two-member payroll should fit money");
+    assert!(
+        owed.cents() > 300,
+        "fixture payroll must exercise every funding tier"
+    );
+
+    // Make the clean account by far the largest balance. Balance-first funding would consume it
+    // immediately; semantic funding should exhaust easy street cash, then concealed reserves,
+    // and use accounted money only for the remainder.
+    credit_account(&mut fixture.state, fixture.boss, fixture.treasury, 100);
+    credit_account(&mut fixture.state, fixture.boss, concealed, 200);
+    credit_account(&mut fixture.state, fixture.boss, accounted, owed.cents());
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    let outcome = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("mixed-source payroll should settle")
+        .into_iter()
+        .find(|outcome| outcome.organization() == fixture.organization)
+        .expect("staffed organization should run payroll");
+
+    assert_eq!(outcome.paid(), owed);
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.treasury)
+            .expect("street treasury should persist")
+            .balance(),
+        Money::ZERO
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(concealed)
+            .expect("concealed reserve should persist")
+            .balance(),
+        Money::ZERO
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(accounted)
+            .expect("accounted reserve should persist")
+            .balance(),
+        Money::from_cents(300),
+        "clean capital should cover only the amount dirty cash could not fund"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn shortfall_distributes_available_cash_and_breeds_supervisor_resentment() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();
