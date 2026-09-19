@@ -177,12 +177,9 @@ impl ValidatedOpportunityDiscovery<'_> {
         state
             .ids
             .reserve_many(&[(IdKind::Report, 1), (IdKind::Opportunity, 1)])?;
-        if state.now() != self.discovered_at {
-            return Err(OpportunityError::StaleDiscoveryTime {
-                expected: self.discovered_at,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.discovered_at).map_err(
+            |(expected, found)| OpportunityError::StaleDiscoveryTime { expected, found },
+        )?;
         validate_discovery_state(self.registry, state, &self.draft, self.discovered_at)?;
         let report = self
             .report
@@ -732,12 +729,8 @@ struct ValidatedOpportunityExpiry {
 
 impl ValidatedOpportunityExpiry {
     fn commit(self, state: &mut AppState) -> Result<ReportId, OpportunityError> {
-        if state.now() != self.expected_now {
-            return Err(OpportunityError::StaleExpiryTime {
-                expected: self.expected_now,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.expected_now)
+            .map_err(|(expected, found)| OpportunityError::StaleExpiryTime { expected, found })?;
         let opportunity = validate_open_opportunity(state, self.opportunity)?;
         if opportunity.version() != self.expected_version {
             return Err(OpportunityError::StaleOpportunity {

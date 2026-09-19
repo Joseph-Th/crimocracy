@@ -568,7 +568,12 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
         .expect("autonomous attempt should persist");
     assert_eq!(attempt.recruiter(), fixture.recruiter);
     assert_eq!(attempt.candidate(), fixture.candidate);
-    assert_eq!(attempt.approach(), RecruitmentApproach::PersonalAppeal);
+    assert_eq!(
+        attempt.approach(),
+        RecruitmentApproach::Protection,
+        "a delegated recruiter should tailor the pitch to the relationship-gated prospect's strongest modeled motive"
+    );
+    assert_eq!(attempt.factors().drive_alignment(), 90);
     assert!(matches!(
         attempt.authority(),
         RecruitmentAuthority::Delegated {
@@ -674,7 +679,7 @@ fn delegated_manager_prefers_the_stronger_relationship_not_a_random_prospect() {
             autonomy: AutonomyLevel::Guided,
             capabilities: BTreeMap::new(),
             traits: BTreeSet::new(),
-            drives: BTreeMap::new(),
+            drives: BTreeMap::from([(DriveKind::Money, rating(90))]),
         },
     )
     .expect("second delegated candidate should validate");
@@ -700,6 +705,115 @@ fn delegated_manager_prefers_the_stronger_relationship_not_a_random_prospect() {
         .get_attempt(outcome.attempts[0])
         .expect("delegated attempt should persist");
     assert_eq!(attempt.candidate(), stronger_candidate);
+    assert_eq!(
+        attempt.approach(),
+        RecruitmentApproach::FinancialOpportunity,
+        "candidate selection and pitch selection should remain coherent for the selected prospect"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn delegated_manager_uses_candidate_trait_affinity_when_drives_do_not_choose_a_pitch() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+
+    let greedy_candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Greedy Delegated Prospect".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::from([TraitKind::Greedy]),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("trait-driven delegated candidate should validate");
+    validate_set_relationship(
+        &fixture.state,
+        greedy_candidate,
+        fixture.recruiter,
+        relationship(95, 95, 0, 80, 15, 0, 50),
+    )
+    .expect("trait-driven candidate relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("trait-driven candidate relationship should commit");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("trait-aware delegated recruitment should validate");
+    assert_eq!(outcome.attempts.len(), 1);
+    let attempt = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[0])
+        .expect("trait-aware delegated attempt should persist");
+    assert_eq!(attempt.candidate(), greedy_candidate);
+    assert_eq!(
+        attempt.approach(),
+        RecruitmentApproach::FinancialOpportunity
+    );
+    assert_eq!(attempt.factors().drive_alignment(), 0);
+    assert!(attempt.factors().trait_adjustment() > 0);
+    validate_state(&fixture.state).expect("trait-aware autonomous recruitment should stay valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn delegated_manager_personality_breaks_equal_candidate_pitch_fit() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+
+    let neutral_candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Neutral Delegated Prospect".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("neutral delegated candidate should validate");
+    validate_set_relationship(
+        &fixture.state,
+        neutral_candidate,
+        fixture.recruiter,
+        relationship(95, 95, 0, 80, 15, 0, 50),
+    )
+    .expect("neutral candidate relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("neutral candidate relationship should commit");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("personality-tied delegated recruitment should validate");
+    assert_eq!(outcome.attempts.len(), 1);
+    let attempt = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[0])
+        .expect("personality-tied delegated attempt should persist");
+    assert_eq!(attempt.candidate(), neutral_candidate);
+    assert_eq!(
+        attempt.approach(),
+        RecruitmentApproach::PersonalAppeal,
+        "a charismatic manager should prefer personal appeal only when candidate fit is tied"
+    );
+    assert_eq!(attempt.factors().drive_alignment(), 0);
+    assert_eq!(attempt.factors().trait_adjustment(), 0);
+    validate_state(&fixture.state)
+        .expect("personality-tied autonomous recruitment should stay valid");
     validate_invariants(&fixture.state);
 }
 
@@ -2769,9 +2883,22 @@ fn npc_approval_does_not_oracle_candidate_refusal() {
     let registry = build_registry();
     let mut fixture = fixture();
     let mandate = assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+    let reluctant_candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Attached Associate".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("reluctant candidate should validate");
     validate_set_relationship(
         &fixture.state,
-        fixture.candidate,
+        reluctant_candidate,
         fixture.incumbent,
         relationship(95, 95, 10, 85, 90, 0, 0),
     )
@@ -2780,18 +2907,18 @@ fn npc_approval_does_not_oracle_candidate_refusal() {
     .expect("relationship should commit");
     validate_set_relationship(
         &fixture.state,
-        fixture.candidate,
+        reluctant_candidate,
         fixture.recruiter,
-        relationship(10, 20, 30, 5, 0, 0, 0),
+        relationship(60, 60, 0, 60, 0, 0, 60),
     )
-    .expect("weak recruiter relationship should validate")
+    .expect("moderate recruiter relationship should validate")
     .commit(&mut fixture.state)
     .expect("relationship should commit");
 
     let autonomous_draft = RecruitmentDraft {
         target_organization: fixture.target,
         recruiter: fixture.recruiter,
-        candidate: fixture.candidate,
+        candidate: reluctant_candidate,
         approach: RecruitmentApproach::PersonalAppeal,
     };
     let plan = decide_recruitment_attempt(&registry, &fixture.state, autonomous_draft)
@@ -2824,6 +2951,8 @@ fn npc_approval_does_not_oracle_candidate_refusal() {
         .recruitment()
         .get_attempt(outcome.attempts[0])
         .expect("the approved pitch should persist even when refused");
+    assert_eq!(attempt.candidate(), reluctant_candidate);
+    assert_eq!(attempt.approach(), RecruitmentApproach::PersonalAppeal);
     assert_eq!(attempt.outcome(), RecruitmentOutcome::Refused);
     assert!(matches!(
         attempt.authority(),
@@ -2835,7 +2964,7 @@ fn npc_approval_does_not_oracle_candidate_refusal() {
     let candidate = fixture
         .state
         .world()
-        .get_character(fixture.candidate)
+        .get_character(reluctant_candidate)
         .expect("refusing candidate should persist");
     assert_eq!(candidate.organization(), Some(fixture.source));
     assert_eq!(candidate.supervisor(), Some(fixture.incumbent));

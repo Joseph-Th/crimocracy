@@ -185,12 +185,8 @@ impl ValidatedPropertyDisposition {
             self.draft.cash_account,
             self.draft.settlement_account,
         )?;
-        if state.now() != self.disposed_at {
-            return Err(PropertyDispositionError::StaleTime {
-                expected: self.disposed_at,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.disposed_at)
+            .map_err(|(expected, found)| PropertyDispositionError::StaleTime { expected, found })?;
 
         let transaction = self.ledger.commit(state)?;
         let information = self
@@ -658,12 +654,8 @@ impl ValidatedCashDisposition {
             self.draft.cash_account,
             self.draft.settlement_account,
         )?;
-        if state.now() != self.deposited_at {
-            return Err(PropertyDispositionError::StaleTime {
-                expected: self.deposited_at,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.deposited_at)
+            .map_err(|(expected, found)| PropertyDispositionError::StaleTime { expected, found })?;
 
         let transaction = self.ledger.commit(state)?;
         let information = self

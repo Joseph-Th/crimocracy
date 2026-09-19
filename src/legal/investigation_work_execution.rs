@@ -253,9 +253,11 @@ impl ValidatedInvestigationWorkCancellation {
             });
         }
         ensure_version_can_advance(investigation.version(), "investigation")?;
-        if work.investigator() != self.investigator || state.now() != self.cancelled_at {
+        if work.investigator() != self.investigator {
             return Err(InvestigationWorkError::StaleResolutionContext { work: self.work });
         }
+        crate::core::time::ensure_time_current(state.now(), self.cancelled_at)
+            .map_err(|_| InvestigationWorkError::StaleResolutionContext { work: self.work })?;
         Ok(())
     }
 
@@ -1324,12 +1326,9 @@ fn validate_resolution_snapshot(
         }
         None => {}
     }
-    if state.now() != plan.resolved_at {
-        return Err(InvestigationWorkError::StaleResolutionTime {
-            expected: plan.resolved_at,
-            found: state.now(),
-        });
-    }
+    crate::core::time::ensure_time_current(state.now(), plan.resolved_at).map_err(
+        |(expected, found)| InvestigationWorkError::StaleResolutionTime { expected, found },
+    )?;
     Ok(())
 }
 

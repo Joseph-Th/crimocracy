@@ -204,12 +204,8 @@ fn validate_dispatch_snapshot(
     state: &AppState,
     token: &ValidatedPoliceResponseDispatch,
 ) -> Result<(), PoliceResponseError> {
-    if state.now() != token.validated_at {
-        return Err(PoliceResponseError::StaleTime {
-            expected: token.validated_at,
-            found: state.now(),
-        });
-    }
+    crate::core::time::ensure_time_current(state.now(), token.validated_at)
+        .map_err(|(expected, found)| PoliceResponseError::StaleTime { expected, found })?;
     validate_dispatch_dependencies(state, token.draft)?;
     let operation = state
         .operations
@@ -264,12 +260,8 @@ impl ValidatedPoliceResponseArrival {
             });
         }
         ensure_version_can_advance(record.version(), "police response")?;
-        if state.now() != self.arrived_at {
-            return Err(PoliceResponseError::StaleTime {
-                expected: self.arrived_at,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.arrived_at)
+            .map_err(|(expected, found)| PoliceResponseError::StaleTime { expected, found })?;
         validate_arrival_dependencies(state, record)?;
         state
             .legal

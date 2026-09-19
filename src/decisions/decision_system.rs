@@ -196,12 +196,8 @@ impl ValidatedOperationDecisionCancellation {
         if decision.status() != DecisionStatus::Pending {
             return Err(DecisionError::DecisionNotPending(self.decision));
         }
-        if state.now() != self.cancelled_at {
-            return Err(DecisionError::StaleResolutionTime {
-                expected: self.cancelled_at,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.cancelled_at)
+            .map_err(|(expected, found)| DecisionError::StaleResolutionTime { expected, found })?;
         let operation = state
             .operations
             .get_operation(self.operation)
@@ -864,12 +860,8 @@ impl ValidatedDecisionResolution {
         }
         // The abort-vs-deadline classification is fixed at validation; reject clock drift so a
         // resolution cannot commit under conditions that changed after validation.
-        if state.now() != self.validated_at {
-            return Err(DecisionError::StaleResolutionTime {
-                expected: self.validated_at,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.validated_at)
+            .map_err(|(expected, found)| DecisionError::StaleResolutionTime { expected, found })?;
 
         let recruitment_attempt = match self.action {
             DecisionResolutionAction::Operation {

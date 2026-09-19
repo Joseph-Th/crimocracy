@@ -1071,12 +1071,8 @@ impl ValidatedOperationStart {
                 transition: OperationTransition::Begin,
             });
         }
-        if state.now() != self.started_at {
-            return Err(OperationError::StaleBeginTime {
-                expected: self.started_at,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.started_at)
+            .map_err(|(expected, found)| OperationError::StaleBeginTime { expected, found })?;
         let entry_at = self.police_response.entry_at();
         let response = self.police_response.commit_dispatch(state)?;
         state.operations.begin(

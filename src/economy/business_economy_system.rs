@@ -565,12 +565,11 @@ impl ValidatedBusinessCycle {
                 self.plan.snapshot.business,
             ));
         }
-        if state.now() != self.plan.snapshot.occurred_at {
-            return Err(BusinessEconomyError::StaleCycleTime {
-                expected: self.plan.snapshot.occurred_at,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.plan.snapshot.occurred_at)
+            .map_err(|(expected, found)| BusinessEconomyError::StaleCycleTime {
+                expected,
+                found,
+            })?;
         validate_accounts(
             state,
             self.plan.snapshot.business,
@@ -666,12 +665,8 @@ pub fn validate_business_cycle_plan(
             plan.snapshot.business,
         ));
     }
-    if state.now() != plan.snapshot.occurred_at {
-        return Err(BusinessEconomyError::StaleCycleTime {
-            expected: plan.snapshot.occurred_at,
-            found: state.now(),
-        });
-    }
+    crate::core::time::ensure_time_current(state.now(), plan.snapshot.occurred_at)
+        .map_err(|(expected, found)| BusinessEconomyError::StaleCycleTime { expected, found })?;
     validate_accounts(
         state,
         plan.snapshot.business,
@@ -1011,13 +1006,13 @@ pub struct ValidatedBusinessDisruption {
 
 impl ValidatedBusinessDisruption {
     pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), BusinessEconomyError> {
-        if state.now() != self.expected_now {
-            return Err(BusinessEconomyError::StaleDisruptionTime {
+        crate::core::time::ensure_time_current(state.now(), self.expected_now).map_err(
+            |(expected, found)| BusinessEconomyError::StaleDisruptionTime {
                 business: self.business,
-                expected: self.expected_now,
-                found: state.now(),
-            });
-        }
+                expected,
+                found,
+            },
+        )?;
         let economy = state
             .economy
             .get_business_economy(self.business)

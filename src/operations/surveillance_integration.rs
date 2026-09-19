@@ -243,9 +243,8 @@ pub(crate) fn validate_surveillance_plan_snapshot(
     state: &AppState,
     plan: &SurveillanceIntelligencePlan,
 ) -> Result<(), SurveillanceError> {
-    if state.now() != plan.observed_at {
-        return Err(SurveillanceError::StaleTarget(plan.target));
-    }
+    crate::core::time::ensure_time_current(state.now(), plan.observed_at)
+        .map_err(|_| SurveillanceError::StaleTarget(plan.target))?;
     let current = resolve_target_snapshot(state, plan.target, plan.observed_at, plan.surveiller)?;
     if current != plan.snapshot {
         return Err(SurveillanceError::StaleTarget(plan.target));

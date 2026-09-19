@@ -986,12 +986,8 @@ fn validate_plan_state_snapshot(
     state: &AppState,
     plan: &RecruitmentPlan,
 ) -> Result<(), RecruitmentError> {
-    if state.now() != plan.context.occurred_at {
-        return Err(RecruitmentError::StaleTime {
-            expected: plan.context.occurred_at,
-            found: state.now(),
-        });
-    }
+    crate::core::time::ensure_time_current(state.now(), plan.context.occurred_at)
+        .map_err(|(expected, found)| RecruitmentError::StaleTime { expected, found })?;
     let candidate = state
         .world
         .get_character(plan.draft.candidate)

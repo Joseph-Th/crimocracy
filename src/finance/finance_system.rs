@@ -287,12 +287,9 @@ pub struct ValidatedLedgerTransaction {
 
 impl ValidatedLedgerTransaction {
     pub fn commit(self, state: &mut AppState) -> Result<LedgerTransactionId, FinanceError> {
-        if self.draft.occurred_at != state.now() {
-            return Err(FinanceError::NonCurrentTransactionTime {
-                occurred_at: self.draft.occurred_at,
-                now: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.draft.occurred_at).map_err(
+            |(occurred_at, now)| FinanceError::NonCurrentTransactionTime { occurred_at, now },
+        )?;
         if let Some(openings) = &self.openings {
             openings.ensure_current(state)?;
         }
@@ -431,12 +428,9 @@ fn validate_record_transaction_with_optional_openings(
     if draft.postings.len() < 2 {
         return Err(FinanceError::TooFewPostings);
     }
-    if draft.occurred_at != state.now() {
-        return Err(FinanceError::NonCurrentTransactionTime {
-            occurred_at: draft.occurred_at,
-            now: state.now(),
-        });
-    }
+    crate::core::time::ensure_time_current(state.now(), draft.occurred_at).map_err(
+        |(occurred_at, now)| FinanceError::NonCurrentTransactionTime { occurred_at, now },
+    )?;
 
     let mut seen = BTreeSet::new();
     let mut net_cents: i128 = 0;

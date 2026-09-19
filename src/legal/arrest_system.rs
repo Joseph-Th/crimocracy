@@ -205,12 +205,8 @@ pub struct ValidatedArrest {
 
 impl ValidatedArrest {
     pub fn commit(self, state: &mut AppState) -> Result<ArrestId, ArrestError> {
-        if state.now() != self.validated_at {
-            return Err(ArrestError::StaleArrestTime {
-                expected: self.validated_at,
-                found: state.now(),
-            });
-        }
+        crate::core::time::ensure_time_current(state.now(), self.validated_at)
+            .map_err(|(expected, found)| ArrestError::StaleArrestTime { expected, found })?;
         let investigation = state
             .legal
             .get_investigation(self.draft.investigation)

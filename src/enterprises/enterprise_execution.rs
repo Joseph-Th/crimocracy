@@ -814,12 +814,8 @@ fn validate_enterprise_cycle_snapshot_current<'a>(
             plan.snapshot.enterprise,
         ));
     }
-    if state.now() != plan.snapshot.occurred_at {
-        return Err(EnterpriseError::StaleCycleTime {
-            expected: plan.snapshot.occurred_at,
-            found: state.now(),
-        });
-    }
+    crate::core::time::ensure_time_current(state.now(), plan.snapshot.occurred_at)
+        .map_err(|(expected, found)| EnterpriseError::StaleCycleTime { expected, found })?;
     ensure_mandate_authority_current(state, plan.snapshot.authority)?;
     validate_legal_pressure_context(state, record, &plan.snapshot)?;
     validate_supporting_business_versions(state, &plan.snapshot.supporting_business_versions)?;

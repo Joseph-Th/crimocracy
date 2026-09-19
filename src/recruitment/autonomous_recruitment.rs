@@ -13,8 +13,10 @@ use crate::delegation::{MandateAuthority, ResponsibilityFunction, Responsibility
 use crate::recruitment::recruitment_system::{
     RecruitmentError, find_recruitment_candidates, validate_delegated_recruitment_attempt,
 };
-use crate::recruitment::scoring::recruitment_relationship_support;
-use crate::recruitment::{RecruitmentApproach, RecruitmentDraft};
+use crate::recruitment::scoring::{
+    recruitment_personal_approach_fit, recruitment_relationship_support,
+};
+use crate::recruitment::{ALL_RECRUITMENT_APPROACHES, RecruitmentApproach, RecruitmentDraft};
 use crate::registry::{RecruitmentDefinition, Registry};
 use crate::world::{ApprovalPolicy, AutonomyLevel, PolicyKind, PolicySetting, TraitKind};
 use std::cmp::Reverse;
@@ -50,7 +52,6 @@ struct PreparedRecruitmentAuthority {
     organization: OrganizationId,
     manager: CharacterId,
     policy: ApprovalPolicy,
-    approach: RecruitmentApproach,
     candidates: Vec<RankedRecruitmentCandidate>,
 }
 
@@ -86,9 +87,21 @@ pub(crate) fn apply_due_autonomous_recruitment(
             organization,
             manager,
             policy,
-            approach,
             candidates: _,
         } = prepared;
+        let manager_record = state
+            .world()
+            .get_character(manager)
+            .ok_or(RecruitmentError::MissingRecruiter(manager))?;
+        let candidate_record = state
+            .world()
+            .get_character(candidate)
+            .ok_or(RecruitmentError::MissingCandidate(candidate))?;
+        let approach = resolve_autonomous_recruitment_approach(
+            registry.recruitment(),
+            manager_record,
+            candidate_record,
+        );
         let authority = MandateAuthority {
             mandate,
             manager,
@@ -200,7 +213,6 @@ fn prepare_recruitment_authorities(
             organization,
             manager,
             policy,
-            approach: resolve_autonomous_recruitment_approach(manager_record),
             candidates,
         });
     }
@@ -303,8 +315,36 @@ fn approval_request_summary(
 }
 
 fn resolve_autonomous_recruitment_approach(
+    definition: &RecruitmentDefinition,
     manager: &crate::world::CharacterRecord,
+    candidate: &crate::world::CharacterRecord,
 ) -> RecruitmentApproach {
+    // Relationship-gated candidates are personal contacts. When that contact has a modeled
+    // motive, the manager should pitch what the candidate actually wants rather than blindly
+    // projecting the manager's own personality onto every prospect. This deliberately does not
+    // calculate or maximize the hidden acceptance margin: it uses only the candidate's modeled
+    // drives and unconditional trait-to-pitch affinities. Manager personality is a secondary
+    // preference only when candidate fit ties; the stable authored approach order is the final
+    // tie-breaker when neither the prospect nor the manager distinguishes two pitches.
+    let manager_preference = manager_recruitment_preference(manager);
+    let mut selected = ALL_RECRUITMENT_APPROACHES[0];
+    let mut best_priority = (
+        recruitment_personal_approach_fit(definition, candidate, selected),
+        selected == manager_preference,
+        Reverse(0_usize),
+    );
+    for (index, approach) in ALL_RECRUITMENT_APPROACHES.into_iter().enumerate().skip(1) {
+        let fit = recruitment_personal_approach_fit(definition, candidate, approach);
+        let priority = (fit, approach == manager_preference, Reverse(index));
+        if priority > best_priority {
+            selected = approach;
+            best_priority = priority;
+        }
+    }
+    selected
+}
+
+fn manager_recruitment_preference(manager: &crate::world::CharacterRecord) -> RecruitmentApproach {
     if manager.has_trait(TraitKind::Charismatic) {
         RecruitmentApproach::PersonalAppeal
     } else if manager.has_trait(TraitKind::Ambitious) || manager.has_trait(TraitKind::Proud) {

@@ -1005,12 +1005,9 @@ fn validate_plan_snapshot(
             due_at,
         });
     }
-    if state.now() != plan.snapshot.resolved_at {
-        return Err(OperationResolutionError::StaleResolutionTime {
-            expected: plan.snapshot.resolved_at,
-            found: state.now(),
-        });
-    }
+    crate::core::time::ensure_time_current(state.now(), plan.snapshot.resolved_at).map_err(
+        |(expected, found)| OperationResolutionError::StaleResolutionTime { expected, found },
+    )?;
     // Surveillance owns a richer target snapshot than the generic venue/police derivation.
     // Check it first so a changed observed organization, enterprise selection, or other
     // surveillance-specific dependency reports the precise target-staleness error rather than a

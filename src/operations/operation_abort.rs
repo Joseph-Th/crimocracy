@@ -236,13 +236,13 @@ impl ValidatedOperationAbort {
                 cause: self.cause,
             });
         }
-        if state.now() != self.aborted_at {
-            return Err(OperationError::StaleAbortTime {
+        crate::core::time::ensure_time_current(state.now(), self.aborted_at).map_err(
+            |(expected, found)| OperationError::StaleAbortTime {
                 operation: self.operation,
-                expected: self.aborted_at,
-                found: state.now(),
-            });
-        }
+                expected,
+                found,
+            },
+        )?;
         if let OperationAbortCause::Decision(decision) = self.cause
             && state.decisions.pending_for_operation(self.operation) != Some(decision)
         {

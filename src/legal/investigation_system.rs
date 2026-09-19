@@ -204,10 +204,11 @@ impl ValidatedInvestigatorDetentionRelease {
         }
         if investigation.status() != InvestigationStatus::Active
             || investigation.lead_investigator() != Some(self.investigator)
-            || state.now() != self.released_at
         {
             return Err(InvestigationError::InactiveInvestigation);
         }
+        crate::core::time::ensure_time_current(state.now(), self.released_at)
+            .map_err(|_| InvestigationError::InactiveInvestigation)?;
         ensure_version_can_advance(investigation.version(), "investigation")?;
         Ok(())
     }

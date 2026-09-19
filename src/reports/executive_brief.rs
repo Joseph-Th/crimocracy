@@ -320,12 +320,8 @@ fn validate_plan_dependencies(
     state: &AppState,
     plan: &ExecutiveBriefPlan,
 ) -> Result<(), ExecutiveBriefError> {
-    if state.now() != plan.generated_at {
-        return Err(ExecutiveBriefError::StaleTime {
-            expected: plan.generated_at,
-            found: state.now(),
-        });
-    }
+    crate::core::time::ensure_time_current(state.now(), plan.generated_at)
+        .map_err(|(expected, found)| ExecutiveBriefError::StaleTime { expected, found })?;
     let previous_brief = state
         .reports()
         .latest_for_kind(plan.recipient, ReportKind::ExecutiveBrief)
