@@ -771,9 +771,9 @@ pub struct RunMetrics {
     /// Canonical police-contact channel usage: how many times the organization asked its
     /// standing contact what the institution knows and received a fresh disclosure.
     pub contact_reads: u32,
-    /// Player-owned cycles that drew a vice inquiry: sustained district casework converting
+    /// Player-owned cycles that drew a racket inquiry: sustained district casework converting
     /// into a dedicated investigation on the racket itself.
-    pub vice_inquiries_drawn: u32,
+    pub racket_inquiries_drawn: u32,
     // Witness-chain evidence: a witnessed exposure on a character-owned business names the
     // owner as the case's witness, interviews are scheduled institutionally, and the player
     // can answer with canonical witness pressure.
@@ -851,7 +851,7 @@ pub struct Aggregate {
     pub player_personnel_departures: u64,
     pub player_poach_warnings: u64,
     pub contact_reads: u64,
-    pub vice_inquiries: u64,
+    pub racket_inquiries: u64,
     pub witness_cases: u64,
     pub witness_pressure_attempts: u64,
     pub witness_testimony_sessions: u64,
@@ -928,7 +928,7 @@ impl Aggregate {
         self.player_personnel_departures += u64::from(metrics.player_personnel_departures);
         self.player_poach_warnings += u64::from(metrics.player_poach_warnings);
         self.contact_reads += u64::from(metrics.contact_reads);
-        self.vice_inquiries += u64::from(metrics.vice_inquiries_drawn);
+        self.racket_inquiries += u64::from(metrics.racket_inquiries_drawn);
         self.witness_cases += u64::from(metrics.case_witness_registered);
         self.witness_pressure_attempts += u64::from(metrics.witness_pressure_attempted);
         self.witness_testimony_sessions += u64::from(metrics.witness_testimony_produced);
@@ -1027,7 +1027,7 @@ impl Aggregate {
             self.player_poach_warnings,
             self.player_personnel_departures,
             self.contact_reads,
-            self.vice_inquiries,
+            self.racket_inquiries,
             format_avg_dollars(self.payroll_paid_total_cents as f64 / self.samples as f64),
             format_avg_dollars(self.payroll_short_total_cents as f64 / self.samples as f64),
             self.witness_cases,

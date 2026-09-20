@@ -946,6 +946,94 @@ impl ValidatedDecisionResolution {
     }
 }
 
+fn validate_operation_resolution_action(
+    registry: &Registry,
+    state: &AppState,
+    decision: DecisionRequestId,
+    response: DecisionResponse,
+    operation: OperationId,
+) -> Result<DecisionResolutionAction, DecisionError> {
+    let operation_record = state
+        .operations
+        .get_operation(operation)
+        .ok_or(DecisionError::MissingOperation(operation))?;
+    if operation_record.status() != OperationStatus::AwaitingDecision {
+        return Err(DecisionError::OperationNotAwaitingDecision { operation });
+    }
+    ensure_version_can_advance(operation_record.version(), "operation")?;
+
+    // Arrival processing already applied any standing pre-entry abort before raising
+    // the decision, so a Continue here always resumes and an Abort stands down.
+    let next_status = match response {
+        DecisionResponse::Continue => OperationStatus::InProgress,
+        DecisionResponse::Abort => OperationStatus::Aborted,
+        DecisionResponse::Approve | DecisionResponse::Reject => {
+            return Err(DecisionError::InvalidResponse { decision, response });
+        }
+    };
+    if next_status == OperationStatus::InProgress {
+        // Resuming shifts the operation's window; a participant may have been booked
+        // into the gap while the operation was paused.
+        crate::operations::operation_system::validate_operation_resume_participants(
+            state,
+            operation,
+            state.now(),
+        )?;
+    }
+    let abort = match response {
+        // A leadership abort on the deadline minute itself is a choice, not a missed
+        // deadline: only an abort strictly after the deadline records `DeadlineMissed`.
+        DecisionResponse::Abort => Some(Box::new(
+            if has_operation_deadline_fully_passed(state, operation) {
+                validate_deadline_missed_operation(registry, state, operation)?
+            } else {
+                validate_decision_abort_operation(state, operation, decision)?
+            },
+        )),
+        DecisionResponse::Continue => None,
+        DecisionResponse::Approve | DecisionResponse::Reject => {
+            unreachable!("operation responses were validated above")
+        }
+    };
+    Ok(DecisionResolutionAction::Operation {
+        operation,
+        expected_operation_version: operation_record.version(),
+        next_status,
+        abort,
+    })
+}
+
+fn validate_recruitment_resolution_action(
+    registry: &Registry,
+    state: &AppState,
+    decision: DecisionRequestId,
+    response: DecisionResponse,
+    context: RecruitmentApprovalContext,
+) -> Result<DecisionResolutionAction, DecisionError> {
+    let attempt = match response {
+        DecisionResponse::Approve => {
+            validate_recruitment_approval_authority_snapshot(state, context)?;
+            Some(Box::new(validate_approved_recruitment_attempt(
+                registry,
+                state,
+                decision,
+                context.authority().authority(),
+                RecruitmentDraft {
+                    target_organization: context.target_organization(),
+                    recruiter: context.recruiter(),
+                    candidate: context.candidate(),
+                    approach: context.approach(),
+                },
+            )?))
+        }
+        DecisionResponse::Reject => None,
+        DecisionResponse::Continue | DecisionResponse::Abort => {
+            return Err(DecisionError::InvalidResponse { decision, response });
+        }
+    };
+    Ok(DecisionResolutionAction::RecruitmentApproval { context, attempt })
+}
+
 pub fn validate_resolve_decision(
     registry: &Registry,
     state: &AppState,
@@ -977,77 +1065,10 @@ pub fn validate_resolve_decision(
 
     let action = match record.context() {
         DecisionContext::OperationPoliceArrival { operation, .. } => {
-            let operation_record = state
-                .operations
-                .get_operation(operation)
-                .ok_or(DecisionError::MissingOperation(operation))?;
-            if operation_record.status() != OperationStatus::AwaitingDecision {
-                return Err(DecisionError::OperationNotAwaitingDecision { operation });
-            }
-            ensure_version_can_advance(operation_record.version(), "operation")?;
-            // Arrival processing already applied any standing pre-entry abort before raising
-            // the decision, so a Continue here always resumes and an Abort stands down.
-            let next_status = match response {
-                DecisionResponse::Continue => OperationStatus::InProgress,
-                DecisionResponse::Abort => OperationStatus::Aborted,
-                DecisionResponse::Approve | DecisionResponse::Reject => {
-                    return Err(DecisionError::InvalidResponse { decision, response });
-                }
-            };
-            if next_status == OperationStatus::InProgress {
-                // Resuming shifts the operation's window; a participant may have been booked
-                // into the gap while the operation was paused.
-                crate::operations::operation_system::validate_operation_resume_participants(
-                    state,
-                    operation,
-                    state.now(),
-                )?;
-            }
-            let abort = match response {
-                // A leadership abort on the deadline minute itself is a choice, not a missed
-                // deadline: only an abort strictly after the deadline records `DeadlineMissed`.
-                DecisionResponse::Abort => Some(Box::new(
-                    if has_operation_deadline_fully_passed(state, operation) {
-                        validate_deadline_missed_operation(registry, state, operation)?
-                    } else {
-                        validate_decision_abort_operation(state, operation, decision)?
-                    },
-                )),
-                DecisionResponse::Continue => None,
-                DecisionResponse::Approve | DecisionResponse::Reject => {
-                    unreachable!("operation responses were validated above")
-                }
-            };
-            DecisionResolutionAction::Operation {
-                operation,
-                expected_operation_version: operation_record.version(),
-                next_status,
-                abort,
-            }
+            validate_operation_resolution_action(registry, state, decision, response, operation)?
         }
         DecisionContext::RecruitmentApproval(context) => {
-            let attempt = match response {
-                DecisionResponse::Approve => {
-                    validate_recruitment_approval_authority_snapshot(state, context)?;
-                    Some(Box::new(validate_approved_recruitment_attempt(
-                        registry,
-                        state,
-                        decision,
-                        context.authority().authority(),
-                        RecruitmentDraft {
-                            target_organization: context.target_organization(),
-                            recruiter: context.recruiter(),
-                            candidate: context.candidate(),
-                            approach: context.approach(),
-                        },
-                    )?))
-                }
-                DecisionResponse::Reject => None,
-                DecisionResponse::Continue | DecisionResponse::Abort => {
-                    return Err(DecisionError::InvalidResponse { decision, response });
-                }
-            };
-            DecisionResolutionAction::RecruitmentApproval { context, attempt }
+            validate_recruitment_resolution_action(registry, state, decision, response, context)?
         }
     };
     Ok(ValidatedDecisionResolution {

@@ -301,7 +301,7 @@ pub(super) fn build_cycle_report_summary(
     state: &crate::core::state::AppState,
     record: &crate::enterprises::EnterpriseRecord,
     economics: &EnterpriseCycleEconomics,
-    drew_vice_attention: bool,
+    drew_enforcement_attention: bool,
     plan_suspends: bool,
 ) -> String {
     let kind = match record.kind() {
@@ -313,6 +313,14 @@ pub(super) fn build_cycle_report_summary(
         EnterpriseKind::Fencing => "Fencing",
         EnterpriseKind::Speakeasy => "Speakeasy",
         EnterpriseKind::LaborRacketeering => "Labor racketeering",
+        EnterpriseKind::NumbersRacket => "Numbers racket",
+        EnterpriseKind::SlotMachineRoute => "Slot-machine route",
+        EnterpriseKind::Brothel => "Brothel",
+        EnterpriseKind::PrizeFighting => "Prizefighting",
+        EnterpriseKind::Counterfeiting => "Counterfeiting",
+        EnterpriseKind::Fraud => "Commercial fraud",
+        EnterpriseKind::AutoTheftRing => "Stolen-auto ring",
+        EnterpriseKind::Smuggling => "Smuggling network",
     };
     let mandate = state
         .delegation
@@ -346,9 +354,9 @@ pub(super) fn build_cycle_report_summary(
     } else {
         String::new()
     };
-    let vice = if drew_vice_attention {
+    let vice = if drew_enforcement_attention {
         format!(
-            " Vice officers were noticed watching {}; district enforcement attention is focusing on this racket.",
+            " Investigators were noticed watching {}; district enforcement attention is focusing on this racket.",
             resolve_enterprise_location_name(state, record),
         )
     } else {
@@ -386,7 +394,7 @@ fn resolve_enterprise_district_name(
         .to_owned()
 }
 
-/// Active law-enforcement originated cases (operation exposure or enterprise vice attention)
+/// Active law-enforcement originated cases (operation exposure or enterprise enforcement attention)
 /// targeting this neighborhood: the shared pressure signal behind street-heat surcharges and vice
 /// attention. Case pressure follows the live case, not today's intake-priority winner; otherwise a
 /// jurisdiction handoff would make an old bureau's still-active investigation disappear from the
@@ -412,7 +420,7 @@ pub(super) fn count_district_originated_cases(
                 // committed the first record earlier. Legal activity that existed before this
                 // enterprise phase, including operation-created casework earlier in the tick,
                 // still counts immediately.
-                && !enterprise_vice_inquiry_became_active_this_minute(state, investigation)
+                && !enterprise_inquiry_became_active_this_minute(state, investigation)
                 && crate::operations::operation_execution::resolve_investigation_target_neighborhoods(
                 state, investigation,
             )
@@ -425,7 +433,7 @@ pub(super) fn count_district_originated_cases(
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
-fn enterprise_vice_inquiry_became_active_this_minute(
+fn enterprise_inquiry_became_active_this_minute(
     state: &crate::core::state::AppState,
     investigation: &crate::legal::InvestigationRecord,
 ) -> bool {
@@ -438,12 +446,12 @@ fn enterprise_vice_inquiry_became_active_this_minute(
             return false;
         };
         evidence.discovered_at() == state.now()
-            && is_enterprise_vice_evidence(state, investigation, evidence, enterprise)
+            && is_enterprise_inquiry_evidence(state, investigation, evidence, enterprise)
             && state
                 .enterprises
                 .latest_cycle(enterprise)
                 .is_some_and(|cycle| {
-                    cycle.occurred_at() == state.now() && cycle.drew_vice_attention()
+                    cycle.occurred_at() == state.now() && cycle.drew_enforcement_attention()
                 })
     })
 }
@@ -466,16 +474,16 @@ pub(super) fn has_active_enterprise_inquiry(
                     .legal
                     .get_evidence(*evidence_id)
                     .expect("investigation evidence index must reference persisted evidence");
-                is_enterprise_vice_evidence(state, investigation, evidence, enterprise)
+                is_enterprise_inquiry_evidence(state, investigation, evidence, enterprise)
             })
         })
 }
 
-/// Canonical persisted signature of enterprise vice intake. Incident continuation may resume a
+/// Canonical persisted signature of enterprise enforcement intake. Incident continuation may resume a
 /// shelf whose original case origin names some other overlapping incident, so the investigation's
-/// `origin` alone is not reliable provenance for later vice-cycle behavior. The intake evidence is:
-/// every vice event adds one enterprise-specific surveillance item even when it reuses a shelf.
-fn is_enterprise_vice_evidence(
+/// `origin` alone is not reliable provenance for later racket-cycle behavior. The intake evidence is:
+/// every enforcement event adds one enterprise-specific surveillance item even when it reuses a shelf.
+fn is_enterprise_inquiry_evidence(
     state: &crate::core::state::AppState,
     investigation: &crate::legal::InvestigationRecord,
     evidence: &crate::legal::EvidenceRecord,
@@ -502,10 +510,10 @@ fn is_enterprise_vice_evidence(
         && evidence.admissibility() == crate::legal::Admissibility::Unknown
 }
 
-/// Builds the intake draft for a vice inquiry opened onto this racket: one questionable
+/// Builds the intake draft for a racket inquiry opened onto this racket: one questionable
 /// surveillance item against the enterprise itself, originated by the enterprise so the
 /// district heat loop and cold-case decay treat it exactly like any other street case.
-pub(super) fn build_vice_incident_draft(
+pub(super) fn build_enforcement_incident_draft(
     state: &crate::core::state::AppState,
     enterprise: EnterpriseId,
     record: &crate::enterprises::EnterpriseRecord,
@@ -516,7 +524,7 @@ pub(super) fn build_vice_incident_draft(
     let location_name = resolve_enterprise_location_name(state, record);
     crate::legal::IncidentIntakeDraft {
         owner,
-        title: format!("Vice inquiry into {location_name}"),
+        title: format!("Racket inquiry into {location_name}"),
         subjects: BTreeSet::from([EntityRef::Enterprise(record.id())]),
         evidence: vec![crate::legal::IncidentEvidenceDraft {
             subject: EntityRef::Enterprise(record.id()),
@@ -532,7 +540,7 @@ pub(super) fn build_vice_incident_draft(
     }
 }
 
-/// Human-facing venue description used in cycle reports and vice-inquiry titles.
+/// Human-facing venue description used in cycle reports and racket-inquiry titles.
 fn resolve_enterprise_location_name(
     state: &crate::core::state::AppState,
     record: &crate::enterprises::EnterpriseRecord,

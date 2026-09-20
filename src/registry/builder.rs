@@ -307,8 +307,8 @@ pub(crate) enum RegistryBuildError {
     EnterpriseNotableVarianceOutOfRange(EnterpriseKind),
     #[error("enterprise {0:?} losing-cycle suspension threshold must be at least one cycle")]
     EnterpriseSuspensionThresholdOutOfRange(EnterpriseKind),
-    #[error("enterprise {0:?} vice-attention basis points must be in 0..=10000")]
-    EnterpriseViceAttentionOutOfRange(EnterpriseKind),
+    #[error("enterprise {0:?} enforcement-attention basis points must be in 0..=10000")]
+    EnterpriseEnforcementAttentionOutOfRange(EnterpriseKind),
 }
 
 /// Registry-time proof that a nonnegative gross composition remains representable after its
@@ -593,7 +593,7 @@ impl RegistryBuilder {
         for delta in [
             spec.witnessed_exposure_police_fear,
             spec.identifying_exposure_police_fear,
-            spec.vice_inquiry_police_fear,
+            spec.racket_inquiry_police_fear,
             spec.achieved_underworld_competence,
             spec.partial_underworld_competence,
             spec.violent_businesses_fear,
@@ -606,7 +606,7 @@ impl RegistryBuilder {
         }
         if spec.witnessed_exposure_police_fear <= 0
             || spec.identifying_exposure_police_fear < spec.witnessed_exposure_police_fear
-            || spec.vice_inquiry_police_fear < spec.witnessed_exposure_police_fear
+            || spec.racket_inquiry_police_fear < spec.witnessed_exposure_police_fear
             || spec.achieved_underworld_competence <= 0
             || spec.partial_underworld_competence <= 0
             || spec.partial_underworld_competence > spec.achieved_underworld_competence
@@ -628,7 +628,7 @@ impl RegistryBuilder {
             expansion_police_fear_ceiling: spec.expansion_police_fear_ceiling,
             witnessed_exposure_police_fear: spec.witnessed_exposure_police_fear,
             identifying_exposure_police_fear: spec.identifying_exposure_police_fear,
-            vice_inquiry_police_fear: spec.vice_inquiry_police_fear,
+            racket_inquiry_police_fear: spec.racket_inquiry_police_fear,
             achieved_underworld_competence: spec.achieved_underworld_competence,
             partial_underworld_competence: spec.partial_underworld_competence,
             violent_businesses_fear: spec.violent_businesses_fear,
@@ -910,8 +910,8 @@ impl RegistryBuilder {
         }
         // The per-cycle visibility roll is a draw from 0..=9999 compared against these
         // basis points, so anything above 10_000 would mean "an inquiry every cycle".
-        if economics.vice_attention_basis_points_per_active_case > 10_000 {
-            return Err(RegistryBuildError::EnterpriseViceAttentionOutOfRange(kind));
+        if economics.enforcement_attention_basis_points_per_active_case > 10_000 {
+            return Err(RegistryBuildError::EnterpriseEnforcementAttentionOutOfRange(kind));
         }
         if self
             .enterprises

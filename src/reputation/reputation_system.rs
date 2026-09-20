@@ -210,12 +210,12 @@ pub(crate) fn apply_operation_reputation_consequences(
     )
 }
 
-/// Deterministic consequence pass over a racket that drew a dedicated vice inquiry this
+/// Deterministic consequence pass over a racket that drew a dedicated racket inquiry this
 /// tick. A case built on the racket itself is at least as alarming to its owner as being
 /// witnessed on a job: police fear rises through the single canonical delta path, which
 /// throttles delegated expansion while it decays. Player feedback is committed atomically
 /// with the shift through the same composition helper as operation consequences.
-pub(crate) fn apply_vice_inquiry_reputation_consequences(
+pub(crate) fn apply_racket_inquiry_reputation_consequences(
     registry: &Registry,
     state: &mut AppState,
     organization: OrganizationId,
@@ -227,7 +227,7 @@ pub(crate) fn apply_vice_inquiry_reputation_consequences(
     if responsible.kind() != OrganizationKind::Criminal {
         return Ok(Vec::new());
     }
-    let fear = registry.reputation().vice_inquiry_police_fear();
+    let fear = registry.reputation().racket_inquiry_police_fear();
     let shifts = resolve_shift(
         registry,
         state,

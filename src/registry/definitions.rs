@@ -607,9 +607,9 @@ pub struct EnterpriseEconomicsDefinition {
     /// Per-cycle cost per active investigation targeting the enterprise's neighborhood.
     pub(crate) heat_surcharge_per_active_case: Money,
     /// Per-cycle chance, in basis points, that each active originated case targeting the
-    /// enterprise's neighborhood draws a vice inquiry onto this racket (5_000 = even odds
+    /// enterprise's neighborhood draws a racket inquiry onto this enterprise (5_000 = even odds
     /// per cycle). Sustained institutional attention eventually finds visible street work.
-    pub(crate) vice_attention_basis_points_per_active_case: u16,
+    pub(crate) enforcement_attention_basis_points_per_active_case: u16,
     pub(crate) gross_variance_basis_points: u16,
     pub(crate) notable_variance_basis_points: u16,
     /// Consecutive net-losing cycles after which the enterprise's own governance suspends it.
@@ -646,8 +646,8 @@ impl EnterpriseEconomicsDefinition {
     pub fn heat_surcharge_per_active_case(&self) -> Money {
         self.heat_surcharge_per_active_case
     }
-    pub fn vice_attention_basis_points_per_active_case(&self) -> u16 {
-        self.vice_attention_basis_points_per_active_case
+    pub fn enforcement_attention_basis_points_per_active_case(&self) -> u16 {
+        self.enforcement_attention_basis_points_per_active_case
     }
     pub fn gross_variance_basis_points(&self) -> u16 {
         self.gross_variance_basis_points
@@ -946,9 +946,9 @@ pub struct ReputationConfigSpec {
     pub witnessed_exposure_police_fear: i8,
     /// Police-fear movement after identifying exposure; never weaker than witnessed exposure.
     pub identifying_exposure_police_fear: i8,
-    /// Police fear applied when one of the organization's own rackets draws a dedicated vice
+    /// Police fear applied when one of the organization's own rackets draws a dedicated enforcement
     /// inquiry: a case built on the racket itself is at least as alarming as witnessed exposure.
-    pub vice_inquiry_police_fear: i8,
+    pub racket_inquiry_police_fear: i8,
     /// Positive competence movement for an achieved objective.
     pub achieved_underworld_competence: i8,
     /// Positive competence movement for a partial objective, no stronger than full success.
@@ -963,7 +963,7 @@ pub struct ReputationConfigDefinition {
     pub(super) expansion_police_fear_ceiling: u8,
     pub(super) witnessed_exposure_police_fear: i8,
     pub(super) identifying_exposure_police_fear: i8,
-    pub(super) vice_inquiry_police_fear: i8,
+    pub(super) racket_inquiry_police_fear: i8,
     pub(super) achieved_underworld_competence: i8,
     pub(super) partial_underworld_competence: i8,
     pub(super) violent_businesses_fear: i8,
@@ -984,8 +984,8 @@ impl ReputationConfigDefinition {
     pub fn identifying_exposure_police_fear(self) -> i8 {
         self.identifying_exposure_police_fear
     }
-    pub fn vice_inquiry_police_fear(self) -> i8 {
-        self.vice_inquiry_police_fear
+    pub fn racket_inquiry_police_fear(self) -> i8 {
+        self.racket_inquiry_police_fear
     }
     pub fn achieved_underworld_competence(self) -> i8 {
         self.achieved_underworld_competence

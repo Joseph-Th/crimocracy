@@ -317,8 +317,8 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     let recon = recon.clone();
 
     println!("\n--- VICE HEAT PROBE ---");
-    // Reaching the readout proves the vice-attention chain: the probe fails the run otherwise.
-    run_vice_attention_probe(&registry, primary_seeds)?;
+    // Reaching the readout proves the enforcement-attention chain: the probe fails the run otherwise.
+    run_enforcement_attention_probe(&registry, primary_seeds)?;
     print_experience_readout(&rush, &press, &recon, true);
 
     println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
@@ -452,8 +452,8 @@ mod tests {
         NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline, SessionRunMode,
         Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, format_avg_dollars,
         format_day_minute, format_patrol_windows, parse_options, patrol_intervals_from_signal,
-        play_session, run_opportunity_portfolio_probe, run_smoke, run_vice_attention_probe, stamp,
-        validate_batch_strategy_coverage, validate_branch_financial_isolation,
+        play_session, run_enforcement_attention_probe, run_opportunity_portfolio_probe, run_smoke,
+        stamp, validate_batch_strategy_coverage, validate_branch_financial_isolation,
         validate_press_witness_counterplay, validate_run_metrics, validate_second_act_evidence,
         validate_strategy_evidence,
     };
@@ -912,9 +912,11 @@ mod tests {
     }
 
     #[test]
-    fn vice_heat_probe_proves_clean_districts_stay_clean_and_casework_converts() {
-        run_vice_attention_probe(&crimocracy::build_registry(), EvaluationSeeds::defaults())
-            .expect("vice-attention probe should prove the sustained-casework conversion chain");
+    fn racket_heat_probe_proves_clean_districts_stay_clean_and_casework_converts() {
+        run_enforcement_attention_probe(&crimocracy::build_registry(), EvaluationSeeds::defaults())
+            .expect(
+                "enforcement-attention probe should prove the sustained-casework conversion chain",
+            );
     }
 
     #[test]

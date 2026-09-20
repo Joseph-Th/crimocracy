@@ -1071,6 +1071,13 @@ fn business_function_label(function: BusinessFunction) -> &'static str {
         BusinessFunction::ProfessionalRecords => "professional record handling",
         BusinessFunction::AlcoholProduction => "alcohol production",
         BusinessFunction::Nightlife => "nightlife venue",
+        BusinessFunction::Lodging => "lodging rooms",
+        BusinessFunction::SportingVenue => "sporting venue",
+        BusinessFunction::PrintingPress => "printing press",
+        BusinessFunction::FinancialServices => "financial services",
+        BusinessFunction::VehicleWorkshop => "vehicle workshop",
+        BusinessFunction::DockAccess => "dock access",
+        BusinessFunction::RacingWire => "racing wire service",
     }
 }
 
@@ -1268,6 +1275,14 @@ fn enterprise_kind_label(kind: crate::enterprises::EnterpriseKind) -> &'static s
         crate::enterprises::EnterpriseKind::Fencing => "fencing",
         crate::enterprises::EnterpriseKind::Speakeasy => "speakeasy",
         crate::enterprises::EnterpriseKind::LaborRacketeering => "labor",
+        crate::enterprises::EnterpriseKind::NumbersRacket => "numbers",
+        crate::enterprises::EnterpriseKind::SlotMachineRoute => "slot-machine route",
+        crate::enterprises::EnterpriseKind::Brothel => "brothel",
+        crate::enterprises::EnterpriseKind::PrizeFighting => "prizefighting",
+        crate::enterprises::EnterpriseKind::Counterfeiting => "counterfeiting",
+        crate::enterprises::EnterpriseKind::Fraud => "commercial fraud",
+        crate::enterprises::EnterpriseKind::AutoTheftRing => "stolen-auto ring",
+        crate::enterprises::EnterpriseKind::Smuggling => "smuggling network",
     }
 }
 

@@ -2,6 +2,8 @@
 
 **BCA policy:** advisory
 
+**Rust agent diagnostics:** advisory. Use bounded cargo-modules structure views when the architecture map still leaves an owner ambiguous, targeted cargo-mutants selection/execution when focused tests may not constrain a consequential state/tick policy, and cargo-expand only when macro/derive output is material. These diagnostics are review evidence, not completion gates or quality scores. [TESTING.md](TESTING.md) remains the verification authority.
+
 This is the execution card for agents changing this system. It keeps high-risk
 guardrails local and routes detailed contracts to their single owners. Ownership is in
 [`ARCHITECTURE.md`](ARCHITECTURE.md); scope is in [`STATUS.md`](STATUS.md);
@@ -186,7 +188,7 @@ text; acting policy must use only actionable player-visible information.
 | 3 | `rand::thread_rng()` or `SystemTime::now()` | Ambient entropy leaks into authoritative state | `state.<domain>_rng_mut()` + `draw_index` (rejection sampling) |
 | 4 | Adding a record but forgetting its schedule/index | Invisible to `run_tick`; leaks onto revoked/suspended work | Follow the 3-part pattern: `BTreeMap::insert` + derived `BTreeSet` + `has_consistent_indexes` (see `src/finance/mod.rs`) |
 | 5 | Forgetting `IdCounters::reserve` before multi-record commits | Allocator high-water mark drifts, `validate_id_allocators` fails on next save | Call `state.ids.reserve(…)` before any `validate_*` that may allocate |
-| 6 | Consuming RNG conditionally (e.g. vice roll only when vice inquiry) | Branches needing matched determinism diverge | Draw unconditionally per cycle (see `src/core/simulation.rs`) |
+| 6 | Consuming RNG conditionally (e.g. enforcement roll only when racket inquiry) | Branches needing matched determinism diverge | Draw unconditionally per cycle (see `src/core/simulation.rs`) |
 | 7 | Writing ledger `balance` directly | Balance is a materialized view; ledger `postings` are the truth | `finance_system::validate_record_transaction` derives balances; audit re-derives via dense `Vec<i64>` at `src/core/invariants/finance.rs` |
 | 8 | Using display text as identity | Fragile foreign keys, collisions | Typed IDs (`CharacterId`, `BusinessId`) + `EntityRef` where project controls vocabulary |
 | 9 | Silently defaulting a missing future-affecting value on load | Old save loads but loses continuation fidelity | Incompatible schema/content is rejected; [`STATUS.md`](STATUS.md) owns the current compatibility policy |

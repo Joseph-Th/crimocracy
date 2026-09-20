@@ -6,7 +6,7 @@ mod lifecycle;
 mod support;
 
 use support::{
-    build_cycle_report_summary, build_vice_incident_draft, count_district_originated_cases,
+    build_cycle_report_summary, build_enforcement_incident_draft, count_district_originated_cases,
     has_active_enterprise_inquiry, resolve_location_profile, snapshot_supporting_business_versions,
     validate_enterprise_accounts, validate_enterprise_business_dependencies,
     validate_enterprise_environment, validate_supporting_business_versions,
@@ -218,18 +218,18 @@ pub enum EnterpriseError {
         found_active_inquiry: bool,
     },
     #[error(
-        "enterprise {enterprise} vice intake routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
+        "enterprise {enterprise} racket intake routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
     )]
-    StaleViceIntakeRouting {
+    StaleEnforcementIntakeRouting {
         enterprise: EnterpriseId,
         neighborhood: NeighborhoodId,
         expected: Option<OrganizationId>,
         found: Option<OrganizationId>,
     },
     #[error(
-        "enterprise {enterprise} vice intake jurisdiction changed for neighborhood {neighborhood}; organization {organization} expected version {expected_version}, found {found_version:?}"
+        "enterprise {enterprise} racket intake jurisdiction changed for neighborhood {neighborhood}; organization {organization} expected version {expected_version}, found {found_version:?}"
     )]
-    StaleViceIntakeJurisdictionVersion {
+    StaleEnforcementIntakeJurisdictionVersion {
         enterprise: EnterpriseId,
         neighborhood: NeighborhoodId,
         organization: OrganizationId,
@@ -272,11 +272,11 @@ struct EnterpriseCycleSnapshot {
     suspends_after_settlement: bool,
     supporting_business_versions: BTreeMap<BusinessId, u32>,
     host_business_version: Option<(BusinessId, u32)>,
-    /// Active district casework feeds both street-heat cost and vice probability. Pin the
+    /// Active district casework feeds both street-heat cost and enforcement probability. Pin the
     /// count so a held plan cannot settle economics from a legal-pressure picture that no
     /// longer exists.
     active_district_cases: u32,
-    /// An existing dedicated inquiry suppresses another vice inquiry. This is a separate
+    /// An existing dedicated inquiry suppresses another racket inquiry. This is a separate
     /// dependency from district case count because a case can open or close without changing
     /// the total district pressure count.
     had_active_enterprise_inquiry: bool,
@@ -308,12 +308,12 @@ pub struct EnterpriseCyclePlan {
     economics: EnterpriseCycleEconomics,
     accounts: EnterpriseCycleAccounts,
     /// Validated at commit through the canonical intake path when this cycle's visibility
-    /// roll converted sustained district casework into a vice inquiry on this racket.
-    vice_incident: Option<crate::legal::IncidentIntakeDraft>,
+    /// roll converted sustained district casework into a racket inquiry on this racket.
+    enforcement_incident: Option<crate::legal::IncidentIntakeDraft>,
     /// Routing/version snapshot captured whenever the visibility roll hits, including an
     /// unroutable `None` authority. A held cycle token must re-decide if case-intake eligibility
     /// changes after planning, even when no incident draft existed initially.
-    vice_authority: Option<CaseIntakeAuthoritySnapshot>,
+    enforcement_authority: Option<CaseIntakeAuthoritySnapshot>,
 }
 
 /// Explicit per-cycle randomness injected by the tick pipeline so decide stays read-only and
@@ -321,21 +321,21 @@ pub struct EnterpriseCyclePlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnterpriseCycleRandomness {
     variance_basis_points: i16,
-    vice_attention_roll: u16,
+    enforcement_attention_roll: u16,
 }
 
 impl EnterpriseCycleRandomness {
-    pub(crate) const VICE_ATTENTION_ROLL_COUNT: usize = 10_000;
-    pub(crate) const MAX_VICE_ATTENTION_ROLL: u16 = 9_999;
+    pub(crate) const ENFORCEMENT_ATTENTION_ROLL_COUNT: usize = 10_000;
+    pub(crate) const MAX_ENFORCEMENT_ATTENTION_ROLL: u16 = 9_999;
 
-    pub(crate) fn new(variance_basis_points: i16, vice_attention_roll: u16) -> Self {
+    pub(crate) fn new(variance_basis_points: i16, enforcement_attention_roll: u16) -> Self {
         debug_assert!(
-            vice_attention_roll <= Self::MAX_VICE_ATTENTION_ROLL,
-            "enterprise vice-attention roll must be in the production 0..10000 basis-point domain"
+            enforcement_attention_roll <= Self::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            "enterprise enforcement-attention roll must be in the production 0..10000 basis-point domain"
         );
         Self {
             variance_basis_points,
-            vice_attention_roll,
+            enforcement_attention_roll,
         }
     }
 
@@ -343,8 +343,8 @@ impl EnterpriseCycleRandomness {
         self.variance_basis_points
     }
 
-    pub(crate) fn vice_attention_roll(self) -> u16 {
-        self.vice_attention_roll
+    pub(crate) fn enforcement_attention_roll(self) -> u16 {
+        self.enforcement_attention_roll
     }
 }
 
@@ -401,7 +401,7 @@ pub fn decide_enterprise_cycle(
     let neighborhood = resolve_location_profile(state, record.location())?;
     let district = resolve_location_neighborhood(state, record.location())?;
     // Sustained originated casework in the racket's district is resolved once per cycle:
-    // the shared pressure signal behind both the street-heat surcharge and vice attention.
+    // the shared pressure signal behind both the street-heat surcharge and enforcement attention.
     let active_district_cases = count_district_originated_cases(state, district);
     let manager = state
         .world
@@ -421,35 +421,35 @@ pub fn decide_enterprise_cycle(
         enterprise,
     )?;
     let operating_cost = cost.total;
-    // Active casework converts into vice attention: every cycle run under an active case
+    // Active casework converts into enforcement attention: every cycle run under an active case
     // risks a dedicated inquiry on this racket. An already-active inquiry keeps contributing
     // district heat but cannot recursively open another concurrent inquiry into the same
     // racket; clean districts never draw one, so lying low or moving the book remain real
     // counter-play.
-    let vice_chance_basis_points = u32::try_from(
+    let enforcement_chance_basis_points = u32::try_from(
         (u64::from(
             definition
                 .economics()
-                .vice_attention_basis_points_per_active_case(),
+                .enforcement_attention_basis_points_per_active_case(),
         ) * u64::from(active_district_cases))
         .min(10_000),
     )
     .expect("vice chance is explicitly capped to basis-point range");
     let had_active_enterprise_inquiry = has_active_enterprise_inquiry(state, enterprise);
-    let vice_roll_hits = active_district_cases > 0
+    let enforcement_roll_hits = active_district_cases > 0
         && !had_active_enterprise_inquiry
-        && u32::from(randomness.vice_attention_roll()) < vice_chance_basis_points;
-    let vice_authority =
-        vice_roll_hits.then(|| resolve_case_intake_authority_snapshot(state, district));
-    let vice_incident = vice_authority.and_then(|authority| {
-        authority
-            .organization
-            .map(|owner| build_vice_incident_draft(state, enterprise, record, owner, state.now()))
+        && u32::from(randomness.enforcement_attention_roll()) < enforcement_chance_basis_points;
+    let enforcement_authority =
+        enforcement_roll_hits.then(|| resolve_case_intake_authority_snapshot(state, district));
+    let enforcement_incident = enforcement_authority.and_then(|authority| {
+        authority.organization.map(|owner| {
+            build_enforcement_incident_draft(state, enterprise, record, owner, state.now())
+        })
     });
-    // A visibility roll is only an actual vice event when an institution currently exists to
+    // A visibility roll is only an actual enforcement event when an institution currently exists to
     // own the case. Hot districts can retain pressure from old cases after jurisdiction moves
     // away; in that state the roll is unspent rather than becoming a phantom notable event.
-    let draws_vice_attention = vice_incident.is_some();
+    let draws_enforcement_attention = enforcement_incident.is_some();
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
@@ -465,12 +465,15 @@ pub fn decide_enterprise_cycle(
     let previous_heat = latest_cycle_investigation_heat(state, enterprise);
     let heat_reportable =
         enterprise_heat_change_is_reportable(previous_heat, cost.investigation_heat);
-    let attention =
-        if variance_notable || net_cash < Money::ZERO || draws_vice_attention || heat_reportable {
-            AttentionClass::Notable
-        } else {
-            AttentionClass::Routine
-        };
+    let attention = if variance_notable
+        || net_cash < Money::ZERO
+        || draws_enforcement_attention
+        || heat_reportable
+    {
+        AttentionClass::Notable
+    } else {
+        AttentionClass::Routine
+    };
     let trailing_losing_cycles = count_trailing_losing_cycles(
         state,
         enterprise,
@@ -526,8 +529,8 @@ pub fn decide_enterprise_cycle(
             cash_account: record.cash_account(),
             settlement_account: record.settlement_account(),
         },
-        vice_incident,
-        vice_authority,
+        enforcement_incident,
+        enforcement_authority,
     })
 }
 
@@ -540,7 +543,7 @@ fn latest_cycle_investigation_heat(state: &AppState, enterprise: EnterpriseId) -
         .map(|cycle| cycle.investigation_heat())
 }
 
-fn validate_vice_intake_authority_snapshot(
+fn validate_enforcement_intake_authority_snapshot(
     state: &AppState,
     enterprise: EnterpriseId,
     snapshot: CaseIntakeAuthoritySnapshot,
@@ -550,7 +553,7 @@ fn validate_vice_intake_authority_snapshot(
             neighborhood,
             expected,
             found,
-        } => EnterpriseError::StaleViceIntakeRouting {
+        } => EnterpriseError::StaleEnforcementIntakeRouting {
             enterprise,
             neighborhood,
             expected,
@@ -561,7 +564,7 @@ fn validate_vice_intake_authority_snapshot(
             organization,
             expected_version,
             found_version,
-        } => EnterpriseError::StaleViceIntakeJurisdictionVersion {
+        } => EnterpriseError::StaleEnforcementIntakeJurisdictionVersion {
             enterprise,
             neighborhood,
             organization,
@@ -746,10 +749,12 @@ impl ValidatedEnterpriseCycle {
                 .commit(state)
                 .expect("enterprise report ID was preflighted before mutation");
         }
-        let vice_investigation = self.incident.map(|incident| {
+        let enforcement_investigation = self.incident.map(|incident| {
             incident
                 .commit(state)
-                .expect("preflighted enterprise vice intake must remain current during settlement")
+                .expect(
+                    "preflighted enterprise racket intake must remain current during settlement",
+                )
                 .investigation
         });
         let cycle_id = state
@@ -772,7 +777,7 @@ impl ValidatedEnterpriseCycle {
                 },
                 artifacts: super::EnterpriseCycleArtifacts {
                     attention: self.plan.economics.attention,
-                    drew_vice_attention: vice_investigation.is_some(),
+                    drew_enforcement_attention: enforcement_investigation.is_some(),
                 },
                 provenance: super::EnterpriseCycleProvenance {
                     transaction,
@@ -840,8 +845,8 @@ fn validate_enterprise_cycle_snapshot_current<'a>(
         plan.accounts.settlement_account,
         Some(record.id()),
     )?;
-    if let Some(snapshot) = plan.vice_authority {
-        validate_vice_intake_authority_snapshot(state, plan.snapshot.enterprise, snapshot)?;
+    if let Some(snapshot) = plan.enforcement_authority {
+        validate_enforcement_intake_authority_snapshot(state, plan.snapshot.enterprise, snapshot)?;
     }
     Ok(record)
 }
@@ -874,16 +879,16 @@ pub fn validate_enterprise_cycle_plan(
 ) -> Result<ValidatedEnterpriseCycle, EnterpriseError> {
     let record = validate_enterprise_cycle_snapshot_current(state, &plan)?;
     debug_assert!(
-        match (&plan.vice_incident, plan.vice_authority) {
+        match (&plan.enforcement_incident, plan.enforcement_authority) {
             (Some(incident), Some(snapshot)) => snapshot.organization == Some(incident.owner),
             (None, Some(snapshot)) => snapshot.organization.is_none(),
             (None, None) => true,
             (Some(_), None) => false,
         },
-        "vice planning must pair incidents with their routed authority and unroutable hits with an explicit absent-authority snapshot"
+        "enforcement planning must pair incidents with their routed authority and unroutable hits with an explicit absent-authority snapshot"
     );
-    let drew_vice_attention = plan.vice_incident.is_some();
-    let incident = match &plan.vice_incident {
+    let drew_enforcement_attention = plan.enforcement_incident.is_some();
+    let incident = match &plan.enforcement_incident {
         Some(draft) => Some(validate_incident_intake(state, draft.clone())?),
         None => None,
     };
@@ -920,7 +925,7 @@ pub fn validate_enterprise_cycle_plan(
                 state,
                 record,
                 &plan.economics,
-                drew_vice_attention,
+                drew_enforcement_attention,
                 plan.snapshot.suspends_after_settlement,
             );
             let information = validate_record_information(

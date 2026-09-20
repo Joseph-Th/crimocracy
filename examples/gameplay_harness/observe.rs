@@ -100,24 +100,24 @@ fn observe_enterprise_evidence(
     outcome: &TickOutcome,
     metrics: &mut RunMetrics,
 ) {
-    // Vice-attention evidence is counted for every session regardless of narration: sustained
+    // Enforcement-attention evidence is counted for every session regardless of narration: sustained
     // district casework converting into an inquiry on a player-owned racket is a core
     // consequence-loop signal, and batch aggregates track how often it lands.
     for cycle_id in &outcome.enterprise_cycles {
-        let drew_vice = scenario
+        let drew_enforcement = scenario
             .state
             .enterprises()
             .get_cycle(*cycle_id)
             .is_some_and(|cycle| {
-                cycle.drew_vice_attention()
+                cycle.drew_enforcement_attention()
                     && scenario
                         .state
                         .enterprises()
                         .get_enterprise(cycle.enterprise())
                         .is_some_and(|record| record.organization() == scenario.player)
             });
-        if drew_vice {
-            metrics.vice_inquiries_drawn += 1;
+        if drew_enforcement {
+            metrics.racket_inquiries_drawn += 1;
         }
     }
 }

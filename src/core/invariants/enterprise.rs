@@ -38,14 +38,14 @@ pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidati
             });
         }
     }
-    let vice_incident_times = derive_vice_incident_times(state)?;
+    let enterprise_incident_times = derive_enterprise_incident_times(state)?;
     let mut previous_cycle_at = BTreeMap::new();
     let mut used_transactions = BTreeSet::new();
     for cycle in state.enterprises.cycles() {
         validate_enterprise_cycle(
             state,
             cycle,
-            &vice_incident_times,
+            &enterprise_incident_times,
             &mut previous_cycle_at,
             &mut used_transactions,
         )?;
@@ -337,7 +337,7 @@ fn validate_active_enterprise(
     Ok(())
 }
 
-fn derive_vice_incident_times(
+fn derive_enterprise_incident_times(
     state: &AppState,
 ) -> Result<
     BTreeSet<(crate::core::id::EnterpriseId, crate::core::time::SimTime)>,
@@ -390,7 +390,10 @@ fn derive_vice_incident_times(
 fn validate_enterprise_cycle(
     state: &AppState,
     cycle: &EnterpriseCycleRecord,
-    vice_incident_times: &BTreeSet<(crate::core::id::EnterpriseId, crate::core::time::SimTime)>,
+    enterprise_incident_times: &BTreeSet<(
+        crate::core::id::EnterpriseId,
+        crate::core::time::SimTime,
+    )>,
     previous_cycle_at: &mut BTreeMap<crate::core::id::EnterpriseId, crate::core::time::SimTime>,
     used_transactions: &mut BTreeSet<crate::core::id::LedgerTransactionId>,
 ) -> Result<(), StateValidationError> {
@@ -410,7 +413,7 @@ fn validate_enterprise_cycle(
         return Err(invalid());
     }
     validate_cycle_attention(state, enterprise, cycle)?;
-    validate_cycle_vice(enterprise, cycle, vice_incident_times)?;
+    validate_cycle_enforcement(enterprise, cycle, enterprise_incident_times)?;
     validate_cycle_transaction(state, enterprise, cycle, used_transactions)
 }
 
@@ -450,14 +453,17 @@ fn validate_cycle_attention(
     Ok(())
 }
 
-fn validate_cycle_vice(
+fn validate_cycle_enforcement(
     enterprise: &EnterpriseRecord,
     cycle: &EnterpriseCycleRecord,
-    vice_incident_times: &BTreeSet<(crate::core::id::EnterpriseId, crate::core::time::SimTime)>,
+    enterprise_incident_times: &BTreeSet<(
+        crate::core::id::EnterpriseId,
+        crate::core::time::SimTime,
+    )>,
 ) -> Result<(), StateValidationError> {
     let invalid = || StateValidationError::InvalidEnterpriseCycle { cycle: cycle.id() };
-    if cycle.drew_vice_attention()
-        != vice_incident_times.contains(&(enterprise.id(), cycle.occurred_at()))
+    if cycle.drew_enforcement_attention()
+        != enterprise_incident_times.contains(&(enterprise.id(), cycle.occurred_at()))
     {
         return Err(invalid());
     }
@@ -615,7 +621,7 @@ fn validate_cycle_against_registry(
     let expected_attention = if variance >= u32::from(economics.notable_variance_basis_points())
         || heat_reportable
         || cycle.net_cash() < Money::ZERO
-        || cycle.drew_vice_attention()
+        || cycle.drew_enforcement_attention()
     {
         AttentionClass::Notable
     } else {

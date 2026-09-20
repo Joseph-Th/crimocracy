@@ -95,6 +95,10 @@ fn is_builtin_cargo_command(command: &str) -> bool {
     )
 }
 
+fn is_external_cargo_subcommand(command: &str) -> bool {
+    matches!(command, "expand" | "modules" | "mutants")
+}
+
 fn is_concrete_repository_route(value: &str) -> bool {
     const ROOTED_PREFIXES: &[&str] = &["src/", "scripts/", "examples/", ".cargo/"];
     ROOTED_PREFIXES
@@ -215,7 +219,10 @@ fn documented_cargo_commands_have_live_entrypoints() {
             let Some(entrypoint) = command.split_whitespace().nth(1) else {
                 continue;
             };
-            if entrypoint.starts_with('-') || is_builtin_cargo_command(entrypoint) {
+            if entrypoint.starts_with('-')
+                || is_builtin_cargo_command(entrypoint)
+                || is_external_cargo_subcommand(entrypoint)
+            {
                 continue;
             }
             assert!(

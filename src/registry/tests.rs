@@ -23,6 +23,30 @@ fn burglary_operation_parts() -> (
     )
 }
 
+#[test]
+fn authored_bookmaking_requires_cash_customers_and_a_racing_wire() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::Bookmaking);
+    assert_eq!(
+        definition.required_business_functions(),
+        &BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+        ])
+    );
+    assert_eq!(
+        definition.required_network_functions(),
+        &BTreeSet::from([BusinessFunction::RacingWire])
+    );
+    let economics = definition.economics();
+    assert_eq!(economics.demand_revenue_per_point(), Money::from_cents(190));
+    assert_eq!(
+        economics.support_surcharge_per_business(),
+        Money::from_cents(3_000)
+    );
+    assert_eq!(economics.gross_variance_basis_points(), 2_200);
+}
+
 fn investigation_work_spec(kind: InvestigationWorkKind) -> InvestigationWorkDefinitionSpec {
     let registry = build_registry();
     let definition = registry.get_investigation_work(kind);
@@ -124,6 +148,106 @@ fn operation_leaders_use_their_authored_domain_capability() {
     );
 }
 
+#[test]
+fn authored_fraud_requires_financial_records_and_customer_access() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::Fraud);
+    assert_eq!(
+        definition.required_business_functions(),
+        &BTreeSet::from([
+            BusinessFunction::ProfessionalRecords,
+            BusinessFunction::FinancialServices,
+        ])
+    );
+    assert_eq!(
+        definition.required_network_functions(),
+        &BTreeSet::from([BusinessFunction::CustomerAccess])
+    );
+    let economics = definition.economics();
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(110));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(95)
+    );
+    assert_eq!(
+        economics.management_revenue_per_point(),
+        Money::from_cents(90)
+    );
+    assert_eq!(economics.gross_variance_basis_points(), 1_500);
+    assert_eq!(
+        economics.enforcement_attention_basis_points_per_active_case(),
+        400
+    );
+}
+
+#[test]
+fn authored_auto_theft_ring_requires_workshop_resale_and_records_network() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::AutoTheftRing);
+    assert_eq!(
+        definition.required_business_functions(),
+        &BTreeSet::from([
+            BusinessFunction::ResaleMarket,
+            BusinessFunction::VehicleWorkshop,
+        ])
+    );
+    assert_eq!(
+        definition.required_network_functions(),
+        &BTreeSet::from([
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::ProfessionalRecords,
+        ])
+    );
+    let economics = definition.economics();
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(120)
+    );
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(100));
+    assert_eq!(
+        economics.management_revenue_per_point(),
+        Money::from_cents(75)
+    );
+    assert_eq!(
+        economics.enforcement_attention_basis_points_per_active_case(),
+        520
+    );
+    assert_eq!(economics.gross_variance_basis_points(), 1_300);
+}
+
+#[test]
+fn authored_smuggling_requires_dock_storage_and_documented_distribution() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::Smuggling);
+    assert_eq!(
+        definition.required_business_functions(),
+        &BTreeSet::from([BusinessFunction::Warehousing, BusinessFunction::DockAccess,])
+    );
+    assert_eq!(
+        definition.required_network_functions(),
+        &BTreeSet::from([
+            BusinessFunction::VehicleFleet,
+            BusinessFunction::DistributionInfrastructure,
+            BusinessFunction::ProfessionalRecords,
+        ])
+    );
+    let economics = definition.economics();
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(115)
+    );
+    assert_eq!(economics.demand_revenue_per_point(), Money::from_cents(90));
+    assert_eq!(
+        economics.management_revenue_per_point(),
+        Money::from_cents(80)
+    );
+    assert_eq!(economics.gross_variance_basis_points(), 1_600);
+    assert_eq!(
+        economics.enforcement_attention_basis_points_per_active_case(),
+        600
+    );
+}
+
 fn recruitment_spec() -> RecruitmentDefinitionSpec {
     RecruitmentDefinitionSpec {
         timing: RecruitmentTimingDefinition {
@@ -200,7 +324,7 @@ fn reputation_spec() -> ReputationConfigSpec {
         expansion_police_fear_ceiling: definition.expansion_police_fear_ceiling(),
         witnessed_exposure_police_fear: definition.witnessed_exposure_police_fear(),
         identifying_exposure_police_fear: definition.identifying_exposure_police_fear(),
-        vice_inquiry_police_fear: definition.vice_inquiry_police_fear(),
+        racket_inquiry_police_fear: definition.racket_inquiry_police_fear(),
         achieved_underworld_competence: definition.achieved_underworld_competence(),
         partial_underworld_competence: definition.partial_underworld_competence(),
         violent_businesses_fear: definition.violent_businesses_fear(),
@@ -251,7 +375,7 @@ fn reputation_authoring_rejects_neutral_throttle_and_inverted_consequences() {
     ));
 
     let mut spec = reputation_spec();
-    spec.vice_inquiry_police_fear = spec.witnessed_exposure_police_fear - 1;
+    spec.racket_inquiry_police_fear = spec.witnessed_exposure_police_fear - 1;
     assert!(matches!(
         RegistryBuilder::default().register_reputation(spec),
         Err(RegistryBuildError::InvalidReputationConsequence)
@@ -525,6 +649,340 @@ fn authored_alcohol_distribution_requires_concrete_commercial_network() {
     assert_eq!(economics.police_cost_per_point(), Money::from_cents(40));
     assert_eq!(economics.gross_variance_basis_points(), 1_800);
     assert_eq!(economics.notable_variance_basis_points(), 1_200);
+}
+
+#[test]
+fn authored_numbers_racket_is_a_district_network_not_another_fixed_gambling_venue() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::NumbersRacket);
+    assert!(
+        definition.required_business_functions().is_empty(),
+        "numbers writers operate across the district rather than requiring one dedicated venue"
+    );
+    assert_eq!(
+        definition.required_network_functions(),
+        &BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::ProfessionalRecords,
+        ])
+    );
+    let economics = definition.economics();
+    assert_eq!(economics.cycle(), SimDuration::from_minutes(1_440));
+    assert_eq!(economics.demand_revenue_per_point(), Money::from_cents(165));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(20)
+    );
+    assert_eq!(economics.gross_variance_basis_points(), 700);
+    assert_eq!(
+        economics.enforcement_attention_basis_points_per_active_case(),
+        360
+    );
+}
+
+#[test]
+fn authored_slot_machine_route_is_distributed_commercial_gambling() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::SlotMachineRoute);
+    assert!(
+        definition.required_business_functions().is_empty(),
+        "a slot route spans ordinary premises rather than requiring one gambling venue"
+    );
+    assert_eq!(
+        definition.required_network_functions(),
+        &BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::VehicleFleet,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::DistributionInfrastructure,
+        ])
+    );
+    let economics = definition.economics();
+    assert_eq!(economics.cycle(), SimDuration::from_minutes(1_440));
+    assert_eq!(economics.demand_revenue_per_point(), Money::from_cents(125));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(85)
+    );
+    assert_eq!(economics.gross_variance_basis_points(), 1_000);
+    assert_eq!(
+        economics.enforcement_attention_basis_points_per_active_case(),
+        500
+    );
+}
+
+#[test]
+fn authored_brothel_is_a_wealth_sensitive_lodging_vice_venue() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::Brothel);
+    assert_eq!(
+        definition.required_business_functions(),
+        &BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::Lodging,
+        ])
+    );
+    assert!(definition.required_network_functions().is_empty());
+    let economics = definition.economics();
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(155));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(35)
+    );
+    assert_eq!(
+        economics.enforcement_attention_basis_points_per_active_case(),
+        760
+    );
+}
+
+#[test]
+fn authored_prizefighting_requires_a_real_sporting_venue_and_cash_network() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::PrizeFighting);
+    assert_eq!(
+        definition.required_business_functions(),
+        &BTreeSet::from([
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::SportingVenue,
+        ])
+    );
+    assert_eq!(
+        definition.required_network_functions(),
+        &BTreeSet::from([BusinessFunction::CashIntensive])
+    );
+    let economics = definition.economics();
+    assert_eq!(economics.gross_variance_basis_points(), 2_000);
+    assert_eq!(
+        economics.management_revenue_per_point(),
+        Money::from_cents(70)
+    );
+    assert_eq!(
+        economics.enforcement_attention_basis_points_per_active_case(),
+        420
+    );
+}
+
+#[test]
+fn authored_counterfeiting_requires_a_press_and_commercial_passing_network() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::Counterfeiting);
+    assert_eq!(
+        definition.required_business_functions(),
+        &BTreeSet::from([
+            BusinessFunction::PrintingPress,
+            BusinessFunction::ProfessionalRecords,
+        ])
+    );
+    assert_eq!(
+        definition.required_network_functions(),
+        &BTreeSet::from([
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::DistributionInfrastructure,
+        ])
+    );
+    let economics = definition.economics();
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(125)
+    );
+    assert_eq!(
+        economics.management_revenue_per_point(),
+        Money::from_cents(85)
+    );
+    assert_eq!(economics.gross_variance_basis_points(), 1_400);
+    assert_eq!(
+        economics.enforcement_attention_basis_points_per_active_case(),
+        550
+    );
+}
+
+#[test]
+fn authored_construction_business_is_commerce_driven_and_capital_heavy() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::Construction)
+        .economics();
+    assert_eq!(economics.cycle(), SimDuration::from_minutes(1_440));
+    assert_eq!(economics.base_gross(), Money::from_cents(19_000));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(130)
+    );
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(25));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(105_000));
+}
+
+#[test]
+fn authored_wholesale_business_is_a_stable_commerce_driven_distribution_front() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::Wholesale)
+        .economics();
+    assert_eq!(economics.cycle(), SimDuration::from_minutes(1_440));
+    assert_eq!(economics.base_gross(), Money::from_cents(17_500));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(115)
+    );
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(15));
+    assert_eq!(economics.gross_variance_basis_points(), 650);
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(82_000));
+}
+
+#[test]
+fn authored_pawnshop_is_a_low_capital_neighborhood_commercial_front() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::Pawnshop)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(11_500));
+    assert_eq!(economics.base_operating_cost(), Money::from_cents(8_500));
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(45));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(65)
+    );
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(38_000));
+}
+
+#[test]
+fn authored_coin_machine_distributor_is_commerce_driven_route_infrastructure() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::CoinMachineDistribution)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(15_500));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(105)
+    );
+    assert_eq!(economics.gross_variance_basis_points(), 750);
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(68_000));
+}
+
+#[test]
+fn authored_lodging_business_is_wealth_driven_and_capital_intensive() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::Lodging)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(16_500));
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(95));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(55)
+    );
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(76_000));
+}
+
+#[test]
+fn authored_athletic_club_is_a_mid_market_recreation_business() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::AthleticClub)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(12_500));
+    assert_eq!(economics.base_operating_cost(), Money::from_cents(10_000));
+    assert_eq!(economics.gross_variance_basis_points(), 900);
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(45_000));
+}
+
+#[test]
+fn authored_laundry_is_a_stable_low_capital_front() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::Laundry)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(11_000));
+    assert_eq!(economics.base_operating_cost(), Money::from_cents(9_000));
+    assert_eq!(economics.gross_variance_basis_points(), 550);
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(34_000));
+}
+
+#[test]
+fn authored_printing_business_is_a_stable_commercial_records_front() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::Printing)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(13_500));
+    assert_eq!(economics.base_operating_cost(), Money::from_cents(10_500));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(85)
+    );
+    assert_eq!(economics.gross_variance_basis_points(), 650);
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(48_000));
+}
+
+#[test]
+fn authored_financial_services_business_is_wealth_driven_and_record_heavy() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::FinancialServices)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(15_000));
+    assert_eq!(economics.base_operating_cost(), Money::from_cents(10_500));
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(120));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(45)
+    );
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(72_000));
+}
+
+#[test]
+fn authored_garment_factory_is_capital_heavy_industrial_commerce() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::GarmentFactory)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(18_000));
+    assert_eq!(economics.base_operating_cost(), Money::from_cents(15_500));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(125)
+    );
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(20));
+    assert_eq!(economics.gross_variance_basis_points(), 700);
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(88_000));
+}
+
+#[test]
+fn authored_stevedoring_is_capital_heavy_waterfront_commerce() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::Stevedoring)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(19_500));
+    assert_eq!(economics.base_operating_cost(), Money::from_cents(17_000));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(140)
+    );
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(15));
+    assert_eq!(economics.gross_variance_basis_points(), 650);
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(96_000));
+}
+
+#[test]
+fn authored_news_service_is_commerce_driven_information_infrastructure() {
+    let registry = build_registry();
+    let economics = registry
+        .get_business(crate::world::BusinessKind::NewsService)
+        .economics();
+    assert_eq!(economics.base_gross(), Money::from_cents(13_000));
+    assert_eq!(economics.base_operating_cost(), Money::from_cents(10_500));
+    assert_eq!(
+        economics.commerce_revenue_per_point(),
+        Money::from_cents(95)
+    );
+    assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(30));
+    assert_eq!(economics.gross_variance_basis_points(), 550);
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(52_000));
 }
 
 #[test]

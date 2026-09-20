@@ -48,7 +48,7 @@ pub struct PostureMoney {
     enterprise_cycles: usize,
     enterprise_net_cents: i64,
     home_heat_paid_cents: i64,
-    home_vice_warnings: u32,
+    home_enforcement_warnings: u32,
     payroll_paid_cents: i64,
     payroll_short_cents: i64,
 }
@@ -61,7 +61,7 @@ impl PostureMoney {
             .state
             .enterprises()
             .cycles_for(scenario.enterprise)
-            .filter(|cycle| cycle.drew_vice_attention())
+            .filter(|cycle| cycle.drew_enforcement_attention())
         {
             // Only count warnings whose production observation actually reached leadership.
             manager_report(scenario, cycle)?;
@@ -77,7 +77,7 @@ impl PostureMoney {
                         cycles + 1,
                         net + cycle.net_cash().cents(),
                         heat + cycle.investigation_heat().cents(),
-                        warnings + u32::from(cycle.drew_vice_attention()),
+                        warnings + u32::from(cycle.drew_enforcement_attention()),
                     )
                 },
             );
@@ -87,7 +87,7 @@ impl PostureMoney {
             enterprise_cycles: cycles,
             enterprise_net_cents: net,
             home_heat_paid_cents: heat,
-            home_vice_warnings: warnings,
+            home_enforcement_warnings: warnings,
             payroll_paid_cents: metrics.payroll_paid_cents,
             payroll_short_cents: metrics.payroll_short_cents,
         })
@@ -100,7 +100,8 @@ impl PostureMoney {
             enterprise_cycles: self.enterprise_cycles - baseline.enterprise_cycles,
             enterprise_net_cents: self.enterprise_net_cents - baseline.enterprise_net_cents,
             home_heat_paid_cents: self.home_heat_paid_cents - baseline.home_heat_paid_cents,
-            home_vice_warnings: self.home_vice_warnings - baseline.home_vice_warnings,
+            home_enforcement_warnings: self.home_enforcement_warnings
+                - baseline.home_enforcement_warnings,
             payroll_paid_cents: self.payroll_paid_cents - baseline.payroll_paid_cents,
             payroll_short_cents: self.payroll_short_cents - baseline.payroll_short_cents,
         }
@@ -113,7 +114,7 @@ pub struct PostureTrigger {
     venue: String,
     surcharge_cents: i64,
     home_net_cents: i64,
-    vice_warning_observed: bool,
+    enforcement_warning_observed: bool,
     manager_report: String,
 }
 
@@ -186,7 +187,7 @@ pub fn run_enterprise_posture_probe(
                 venue: enterprise_label(&open, enterprise),
                 surcharge_cents: cycle.investigation_heat().cents(),
                 home_net_cents: cycle.net_cash().cents(),
-                vice_warning_observed: cycle.drew_vice_attention(),
+                enforcement_warning_observed: cycle.drew_enforcement_attention(),
                 manager_report: report.to_owned(),
             };
         }
@@ -240,7 +241,7 @@ pub fn run_enterprise_posture_probe(
         || suspended.enterprise_cycles != 0
         || suspended.enterprise_net_cents != 0
         || suspended.home_heat_paid_cents != 0
-        || suspended.home_vice_warnings != 0
+        || suspended.home_enforcement_warnings != 0
         || keep_open.front_cycles == 0
         || keep_open.front_cycles != suspended.front_cycles
         || keep_open.front_net_cents != suspended.front_net_cents
@@ -326,8 +327,8 @@ fn print_posture_readout(evidence: &PostureEvidence) {
         evidence.trigger.venue,
         format_cents(evidence.trigger.surcharge_cents),
         format_cents(evidence.trigger.home_net_cents),
-        if evidence.trigger.vice_warning_observed {
-            "; the manager also reported vice officers watching the venue"
+        if evidence.trigger.enforcement_warning_observed {
+            "; the manager also reported investigators watching the venue"
         } else {
             ""
         },
@@ -339,7 +340,7 @@ fn print_posture_readout(evidence: &PostureEvidence) {
         evidence.keep_open.enterprise_cycles,
         format_cents(evidence.keep_open.enterprise_net_cents),
         format_cents(evidence.keep_open.home_heat_paid_cents),
-        evidence.keep_open.home_vice_warnings,
+        evidence.keep_open.home_enforcement_warnings,
         evidence.keep_open_final_status,
     );
     println!(
@@ -377,7 +378,7 @@ mod tests {
         assert_eq!(evidence.suspended.enterprise_cycles, 0);
         assert_eq!(evidence.suspended.enterprise_net_cents, 0);
         assert_eq!(evidence.suspended.home_heat_paid_cents, 0);
-        assert_eq!(evidence.suspended.home_vice_warnings, 0);
+        assert_eq!(evidence.suspended.home_enforcement_warnings, 0);
         assert_eq!(
             evidence.keep_open.front_cycles, evidence.suspended.front_cycles,
             "front trade must continue identically under both policies"

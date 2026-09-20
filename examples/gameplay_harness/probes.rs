@@ -240,15 +240,15 @@ pub fn run_repeat_take_probe(
     Ok(())
 }
 
-/// Proves the vice-attention consequence loop end to end through production paths, the way a
+/// Proves the enforcement-attention consequence loop end to end through production paths, the way a
 /// boss experiences it: a racket run in a clean district never draws a dedicated inquiry; a
 /// district under sustained originated casework first taxes every cycle with a compounding
-/// street-heat surcharge, and then converts into a vice inquiry opened on the racket itself,
+/// street-heat surcharge, and then converts into a racket inquiry opened on the racket itself,
 /// delivered to the organization as provenance-bearing legal knowledge. The casework is
 /// originated through the canonical incident-intake path; the conversion itself is authored
 /// per-cycle visibility math, so the probe originates enough parallel cases to push the
 /// authored chance to certainty instead of asserting a lucky roll.
-pub fn run_vice_attention_probe(
+pub fn run_enforcement_attention_probe(
     registry: &Registry,
     seeds: EvaluationSeeds,
 ) -> Result<(), Box<dyn Error>> {
@@ -283,8 +283,10 @@ pub fn run_vice_attention_probe(
         .cycles_for(enterprise_id)
         .last()
         .expect("control cycle must settle");
-    if control_cycle.drew_vice_attention() || control_cycle.investigation_heat() != Money::ZERO {
-        return Err("clean-district control cycle drew attention; the vice contract requires clean districts to stay clean".into());
+    if control_cycle.drew_enforcement_attention()
+        || control_cycle.investigation_heat() != Money::ZERO
+    {
+        return Err("clean-district control cycle drew attention; the enforcement contract requires clean districts to stay clean".into());
     }
     println!(
         "[VICE CONTROL] {}: {} settled a clean-district cycle (net {}) with no street surcharge and no inquiry.",
@@ -306,7 +308,7 @@ pub fn run_vice_attention_probe(
                     .kind(),
             )
             .economics()
-            .vice_attention_basis_points_per_active_case(),
+            .enforcement_attention_basis_points_per_active_case(),
     );
     let needed_cases = 10_000_u32.div_ceil(per_case_bp);
     let authority = resolve_case_intake_authority(&scenario.state, neighborhood)
@@ -371,9 +373,9 @@ pub fn run_vice_attention_probe(
         .cycles_for(enterprise_id)
         .last()
         .expect("heated cycle must settle");
-    if !heated_cycle.drew_vice_attention() {
+    if !heated_cycle.drew_enforcement_attention() {
         return Err(format!(
-            "sustained casework at certainty did not draw a vice inquiry: {} active case(s), roll margin {}bp/case",
+            "sustained casework at certainty did not draw a racket inquiry: {} active case(s), roll margin {}bp/case",
             needed_cases, per_case_bp
         )
         .into());
@@ -396,7 +398,7 @@ pub fn run_vice_attention_probe(
         .map(|record| record.summary().to_owned());
     if formal_case_knowledge.is_some() {
         return Err(
-            "vice intake leaked formal enterprise-case knowledge to the organization without a disclosure channel"
+            "racket intake leaked formal enterprise-case knowledge to the organization without a disclosure channel"
                 .into(),
         );
     }
@@ -405,11 +407,11 @@ pub fn run_vice_attention_probe(
         .and_then(|information| scenario.state.intelligence().get_information(information))
         .map(|record| record.summary().to_owned())
         .unwrap_or_else(|| "cycle report missing".to_owned());
-    if !manager_report.contains("Vice officers were noticed watching")
+    if !manager_report.contains("Investigators were noticed watching")
         || manager_report.contains("case stays open")
     {
         return Err(
-            "the heated enterprise cycle must report observable vice attention without asserting hidden case state"
+            "the heated enterprise cycle must report observable enforcement attention without asserting hidden case state"
                 .into(),
         );
     }
@@ -438,12 +440,12 @@ pub fn run_vice_attention_probe(
         });
     if !inquiry_on_racket {
         return Err(
-            "a drawn vice inquiry must exist as an active originated case on the racket".into(),
+            "a drawn racket inquiry must exist as an active originated case on the racket".into(),
         );
     }
     validate_harness_state(registry, &scenario.state)?;
     println!(
-        "[VICE PASS] clean districts stay clean; sustained casework taxes cycles, opens a dedicated inquiry, and exposes only manager-observable vice attention."
+        "[ENFORCEMENT PASS] clean districts stay clean; sustained casework taxes cycles, opens a dedicated inquiry, and exposes only manager-observable enforcement attention."
     );
     Ok(())
 }
@@ -1119,7 +1121,7 @@ pub fn persist_run_artifact(
     let feedback = serde_json::json!({
         "player_report_count": metrics.player_report_count,
         "executive_brief_count": metrics.executive_brief_count,
-        "vice_inquiries_drawn": metrics.vice_inquiries_drawn,
+        "racket_inquiries_drawn": metrics.racket_inquiries_drawn,
     });
     let diagnostic = serde_json::json!({
         "case": {

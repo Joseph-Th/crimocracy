@@ -104,8 +104,8 @@ fn standing_shift_reports_the_clamped_delta_that_was_actually_applied() {
     )
     .expect("fixture standing should move near the upper rail");
 
-    let shifts = apply_vice_inquiry_reputation_consequences(&registry, &mut state, organization)
-        .expect("vice inquiry should apply its remaining bounded standing change");
+    let shifts = apply_racket_inquiry_reputation_consequences(&registry, &mut state, organization)
+        .expect("racket inquiry should apply its remaining bounded standing change");
     assert_eq!(shifts.len(), 1);
     assert_eq!(
         shifts[0].delta, 1,
@@ -840,14 +840,14 @@ fn player_feedback_id_exhaustion_leaves_reputation_unchanged() {
 }
 
 #[test]
-fn vice_inquiry_raises_owner_police_fear_through_the_canonical_path() {
+fn racket_inquiry_raises_owner_police_fear_through_the_canonical_path() {
     let (registry, mut state, organization) = make_state();
     let baseline = registry.reputation().baseline();
-    let authored = registry.reputation().vice_inquiry_police_fear();
+    let authored = registry.reputation().racket_inquiry_police_fear();
     assert!(authored > 0, "a dedicated inquiry must scare its owner");
 
     // A criminal racket owner's police fear rises by exactly the authored step.
-    let shifts = apply_vice_inquiry_reputation_consequences(&registry, &mut state, organization)
+    let shifts = apply_racket_inquiry_reputation_consequences(&registry, &mut state, organization)
         .expect("vice-inquiry consequences should apply");
     assert_eq!(shifts.len(), 1);
     assert_eq!(shifts[0].audience, AudienceKind::Police);
@@ -874,7 +874,7 @@ fn vice_inquiry_raises_owner_police_fear_through_the_canonical_path() {
         },
     )
     .expect("police fixture should validate");
-    let shifts = apply_vice_inquiry_reputation_consequences(&registry, &mut state, precinct)
+    let shifts = apply_racket_inquiry_reputation_consequences(&registry, &mut state, precinct)
         .expect("consequence pass should succeed");
     assert!(
         shifts.is_empty(),
@@ -891,10 +891,10 @@ fn vice_inquiry_raises_owner_police_fear_through_the_canonical_path() {
 }
 
 #[test]
-fn player_racket_vice_heat_surfaces_as_standing_report() {
+fn player_racket_racket_heat_surfaces_as_standing_report() {
     let (registry, mut state, organization) = make_state_with_player();
 
-    apply_vice_inquiry_reputation_consequences(&registry, &mut state, organization)
+    apply_racket_inquiry_reputation_consequences(&registry, &mut state, organization)
         .expect("vice-inquiry consequences and feedback should apply");
 
     assert_eq!(standing_reports(&state, organization), 1);

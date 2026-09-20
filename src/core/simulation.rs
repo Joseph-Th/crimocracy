@@ -81,7 +81,7 @@ pub struct TickOutcome {
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
     /// Number of individual reputation dimensions that actually moved this tick, including
-    /// day-boundary decay and current operation/vice consequences. This makes reputation-only
+    /// day-boundary decay and current operation/racket consequences. This makes reputation-only
     /// persistent ticks observable to validation/adapters instead of hiding them behind phases
     /// that happen to have no other surfaced outcome.
     pub reputation_changes: usize,
@@ -203,7 +203,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     let enterprise_cycles = run_enterprise_cycle_phase(registry, state);
     // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
     // the same day's wages. Reputation then settles the day boundary before recruitment: daily
-    // decay advances only impressions old enough to fade, while operation/vice consequences from
+    // decay advances only impressions old enough to fade, while operation/racket consequences from
     // this minute land before candidates judge an outfit's underworld competence. Together with
     // payroll, every authored recruitment input therefore reflects the current minute rather
     // than a mixture of pre- and post-boundary state.
@@ -228,7 +228,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     let retired_enterprises = enterprise_lifecycle.retired;
     // Delegated rival expansion runs after lifecycle maintenance and recruitment so a mandate
     // whose crew changed this minute governs with its current roster, and after reputation so a
-    // vice hit this minute can make the organization keep its head down immediately. Selection
+    // racket hit this minute can make the organization keep its head down immediately. Selection
     // consumes no randomness, so matched branches observe identical rival growth unless their own
     // actions touched rival state.
     let autonomous_enterprises =
@@ -489,19 +489,19 @@ fn run_enterprise_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<
             state.enterprise_rng_mut(),
             economics.gross_variance_basis_points(),
         );
-        let vice_attention_roll = u16::try_from(
+        let enforcement_attention_roll = u16::try_from(
             draw_index(
                 state.enterprise_rng_mut(),
-                crate::enterprises::enterprise_execution::EnterpriseCycleRandomness::VICE_ATTENTION_ROLL_COUNT,
+                crate::enterprises::enterprise_execution::EnterpriseCycleRandomness::ENFORCEMENT_ATTENTION_ROLL_COUNT,
             )
-                .expect("vice-attention roll range is never empty"),
+                .expect("racket-attention roll range is never empty"),
         )
-        .expect("vice-attention roll fits u16");
+        .expect("racket-attention roll fits u16");
         let plan = decide_enterprise_cycle(
             registry,
             state,
             enterprise,
-            EnterpriseCycleRandomness::new(variance, vice_attention_roll),
+            EnterpriseCycleRandomness::new(variance, enforcement_attention_roll),
         )
         .expect("due active enterprise must resolve a valid cycle plan");
         let cycle = validate_enterprise_cycle_plan(state, plan)
@@ -516,7 +516,7 @@ fn run_enterprise_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<
 /// Day-boundary decay runs first in the reputation cluster: eligible aged impressions fade one
 /// authored step before anything new lands, so consequences applied this minute are not
 /// immediately eroded by the same boundary's decay pass. Resolved operations feed competence/
-/// fear/exposure consequences; rackets that drew a vice inquiry this tick pay the same
+/// fear/exposure consequences; rackets that drew a racket inquiry this tick pay the same
 /// institutional memory as an exposed operation. The player organization reads its own standing
 /// shifts through the canonical Standing-report path — legitimate self-knowledge.
 fn apply_reputation_phase(
@@ -564,7 +564,7 @@ fn apply_reputation_phase(
                 .enterprises()
                 .get_cycle(*cycle_id)
                 .expect("settled enterprise cycle must exist for reputation consequences");
-            if !cycle.drew_vice_attention() {
+            if !cycle.drew_enforcement_attention() {
                 continue;
             }
             state
@@ -574,12 +574,12 @@ fn apply_reputation_phase(
                 .organization()
         };
         let shifts =
-            crate::reputation::reputation_system::apply_vice_inquiry_reputation_consequences(
+            crate::reputation::reputation_system::apply_racket_inquiry_reputation_consequences(
                 registry,
                 state,
                 organization,
             )
-            .expect("valid state should apply vice-inquiry reputation consequences");
+            .expect("valid state should apply racket-inquiry reputation consequences");
         changed = changed
             .checked_add(shifts.len())
             .expect("one tick cannot contain enough reputation shifts to overflow usize");

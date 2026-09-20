@@ -1414,6 +1414,14 @@ fn autonomous_expansion_rotates_kinds_and_hosts_the_rival_venue() {
         ]),
         BusinessOwner::Organization(organization),
     );
+    insert_support_business(
+        &registry,
+        &mut fixture,
+        "Rival Racing News",
+        BusinessKind::NewsService,
+        BTreeSet::from([BusinessFunction::RacingWire]),
+        BusinessOwner::Organization(organization),
+    );
 
     fixture
         .state
@@ -1479,6 +1487,19 @@ fn autonomous_expansion_rotates_kinds_and_hosts_the_rival_venue() {
         .name()
         .to_owned();
     assert_eq!(host_name, "Rival Card Room");
+    let support_names = third
+        .supporting_businesses()
+        .iter()
+        .map(|business| {
+            fixture
+                .state
+                .world()
+                .get_business(*business)
+                .expect("bookmaking support should exist")
+                .name()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(support_names, vec!["Rival Racing News"]);
 
     // Each establishment reserved its own exclusive settlement account.
     assert_ne!(first_kind.2, third.settlement_account());
@@ -1486,7 +1507,93 @@ fn autonomous_expansion_rotates_kinds_and_hosts_the_rival_venue() {
 }
 
 #[test]
-fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
+fn autonomous_expansion_can_assemble_a_waterfront_smuggling_network() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let waterfront = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Freight Basin".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(20),
+                    commercial_activity: rating(100),
+                    illicit_demand: rating(100),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(10),
+                },
+            },
+        },
+    )
+    .expect("waterfront neighborhood should validate");
+    validate_revise_mandate(
+        &fixture.state,
+        fixture.authority.mandate,
+        MandateRevisionDraft {
+            scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(waterfront)]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("waterfront enterprise authority should validate")
+    .commit(&mut fixture.state)
+    .expect("waterfront enterprise authority should commit");
+    let organization = fixture.organization;
+    let pier = insert_business(
+        &registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Basin Stevedoring".to_owned(),
+            kind: BusinessKind::Stevedoring,
+            functions: BTreeSet::from([
+                BusinessFunction::DockAccess,
+                BusinessFunction::Warehousing,
+                BusinessFunction::UnionAccess,
+                BusinessFunction::DistributionInfrastructure,
+            ]),
+            neighborhood: waterfront,
+            owner: BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("waterfront stevedoring business should validate");
+    let carrier = insert_business(
+        &registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Basin Cartage".to_owned(),
+            kind: BusinessKind::Transportation,
+            functions: BTreeSet::from([
+                BusinessFunction::ProfessionalRecords,
+                BusinessFunction::VehicleFleet,
+            ]),
+            neighborhood: waterfront,
+            owner: BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("waterfront carrier should validate");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("waterfront autonomous expansion should resolve");
+    assert_eq!(established.len(), 1);
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(established[0])
+        .expect("waterfront enterprise should persist");
+    assert_eq!(record.kind(), EnterpriseKind::Smuggling);
+    assert_eq!(record.location(), EnterpriseLocation::Business(pier));
+    assert_eq!(record.supporting_businesses(), &BTreeSet::from([carrier]));
+    validate_state(&fixture.state).expect("waterfront expansion state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn same_tick_racket_fear_blocks_due_autonomous_expansion() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     fund_enterprise_fixture_cash(&mut fixture, 1_000_000);
@@ -1547,14 +1654,14 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
         neighborhood,
     );
 
-    // Enough independent district-pressure cases make this enterprise's due vice roll certain.
+    // Enough independent district-pressure cases make this enterprise's due enforcement roll certain.
     // They deliberately target the neighborhood rather than the enterprise so they create heat
     // without already counting as the dedicated inquiry the cycle should draw.
     let per_case = u32::from(
         registry
             .get_enterprise(EnterpriseKind::Protection)
             .economics()
-            .vice_attention_basis_points_per_active_case(),
+            .enforcement_attention_basis_points_per_active_case(),
     );
     assert!(
         per_case > 0,
@@ -1587,13 +1694,13 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
     }
 
     // Start at the value that becomes exactly the expansion ceiling after one day-boundary
-    // decay step and the authored vice consequence.
+    // decay step and the authored racket consequence.
     let reputation = registry.reputation();
     let pre_tick_fear = reputation
         .expansion_police_fear_ceiling()
         .checked_sub(
-            u8::try_from(reputation.vice_inquiry_police_fear())
-                .expect("authored vice fear is registry-validated positive"),
+            u8::try_from(reputation.racket_inquiry_police_fear())
+                .expect("authored racket fear is registry-validated positive"),
         )
         .and_then(|value| value.checked_add(reputation.daily_decay_step()))
         .expect("authored fixture values leave a representable pre-tick fear");
@@ -1615,7 +1722,7 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
     // Prove the organization really would expand at this boundary if it read the stale
     // pre-consequence posture. The control intentionally does not assert a destination: delegated
     // planning may use only pressure the organization has actually observed, while these synthetic
-    // district cases exist only to force the same-tick vice consequence below.
+    // district cases exist only to force the same-tick racket consequence below.
     let mut stale_posture_control = fixture.state.clone();
     stale_posture_control.advance_clock(SimDuration::ONE_MINUTE);
     let stale_expansion = apply_due_autonomous_enterprises(&registry, &mut stale_posture_control)
@@ -1641,8 +1748,8 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
             .enterprises()
             .get_cycle(outcome.enterprise_cycles[0])
             .expect("due enterprise cycle should persist")
-            .drew_vice_attention(),
-        "certainty-level district pressure must draw the same-tick vice inquiry"
+            .drew_enforcement_attention(),
+        "certainty-level district pressure must draw the same-tick racket inquiry"
     );
     assert_eq!(
         crate::reputation::reputation_system::resolve_score(
@@ -1653,11 +1760,11 @@ fn same_tick_vice_fear_blocks_due_autonomous_expansion() {
             crate::reputation::ReputationDimension::Fear,
         ),
         registry.reputation().expansion_police_fear_ceiling(),
-        "day-boundary decay plus the fresh vice consequence should land exactly on the ceiling"
+        "day-boundary decay plus the fresh racket consequence should land exactly on the ceiling"
     );
     assert!(
         outcome.autonomous_enterprises.is_empty(),
-        "same-minute vice fear must reach the expansion gate before delegated growth runs"
+        "same-minute racket fear must reach the expansion gate before delegated growth runs"
     );
     validate_invariants(&fixture.state);
 }

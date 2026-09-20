@@ -86,7 +86,7 @@ pub(super) fn run_press_response(
         if narrative {
             match metrics.followup_case_active {
                 Some(true) => println!(
-                    "[VERIFY]  Detectives around {police_name} are still actively developing the case. Stop new street jobs; the home racket remains open, earning income and risking further vice attention."
+                    "[VERIFY]  Detectives around {police_name} are still actively developing the case. Stop new street jobs; the home racket remains open, earning income and risking further enforcement attention."
                 ),
                 Some(false) => println!(
                     "[VERIFY]  No active case machinery around {police_name}; the matter appears shelved."
@@ -823,7 +823,7 @@ fn poll_case_activity(
         metrics.cold_case_confirmed = Some(true);
         if narrative {
             println!(
-                "[CASE UPDATE] The channel confirms the burglary file is shelved. This clears that file only, not the district: any racket surcharge or manager warning about vice attention remains a separate reason for caution."
+                "[CASE UPDATE] The channel confirms the burglary file is shelved. This clears that file only, not the district: any racket surcharge or manager warning about enforcement attention remains a separate reason for caution."
             );
         }
     }

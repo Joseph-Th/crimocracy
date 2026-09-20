@@ -14,14 +14,14 @@ pub(super) fn register_reputation(builder: &mut RegistryBuilder) {
             // One point per day: a witnessed job stays in an audience's memory for weeks,
             // not forever, and never manufactures impressions that were never touched.
             daily_decay_step: 1,
-            // A witnessed exposure plus a vice inquiry can visibly throttle delegated
+            // A witnessed exposure plus a racket inquiry can visibly throttle delegated
             // expansion, making police posture a strategic constraint rather than decoration.
             expansion_police_fear_ceiling: 50,
             witnessed_exposure_police_fear: 8,
             identifying_exposure_police_fear: 10,
             // A dedicated case on one of our own rackets is at least as alarming as a
             // witnessed job, matching the consequence contract in reputation_system.
-            vice_inquiry_police_fear: 8,
+            racket_inquiry_police_fear: 8,
             achieved_underworld_competence: 3,
             partial_underworld_competence: 1,
             violent_businesses_fear: 3,

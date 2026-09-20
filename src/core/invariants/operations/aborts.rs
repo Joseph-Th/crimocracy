@@ -1,9 +1,6 @@
 //! Persisted operation-abort lifecycle and artifact validation.
 
-use super::{
-    detention_abort_matches_arrest, is_after_action_title, resolve_abort_started_due,
-    resolve_completion_deadline,
-};
+use super::{detention_abort_matches_arrest, is_after_action_title, resolve_completion_deadline};
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{InformationId, ReportId};
@@ -37,6 +34,18 @@ struct AbortArtifactSets<'a> {
 struct ExpectedAbortArtifacts {
     summary: String,
     entities: BTreeSet<EntityRef>,
+}
+
+/// The started/due instant pair every in-progress abort arm re-derives: an operation that
+/// never truly began cannot carry an in-progress abort record.
+fn resolve_abort_started_due(
+    operation: &OperationRecord,
+) -> Result<(SimTime, SimTime), StateValidationError> {
+    let (Some(started_at), Some(due_at)) = (operation.started_at(), operation.resolution_due_at())
+    else {
+        return Err(invalid_abort(operation));
+    };
+    Ok((started_at, due_at))
 }
 
 pub(super) fn validate_operation_abort_links(

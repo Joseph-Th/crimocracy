@@ -1400,7 +1400,7 @@ pub fn print_metrics(metrics: &RunMetrics) {
         optional_dollars(Some(metrics.payroll_accounted_spent_cents)),
         optional_dollars(metrics.accounted_balance_cents),
         metrics.laundering_capacity_rejections,
-        metrics.vice_inquiries_drawn,
+        metrics.racket_inquiries_drawn,
     );
     if metrics.case_witness_registered
         || metrics.witness_pressure_attempted
@@ -1466,7 +1466,7 @@ pub fn print_experience_readout(
     rush: &RunMetrics,
     press: &RunMetrics,
     recon: &RunMetrics,
-    vice_demonstrated: bool,
+    racket_demonstrated: bool,
 ) {
     println!("\n--- PLAYER LOOP READOUT ---");
     println!(
@@ -1703,14 +1703,14 @@ pub fn print_experience_readout(
         wealth_loop_shown,
         "accounted wealth from laundering and legitimate owner withdrawals converts into an owned asset through the canonical acquisition path: the short book first surfaces as a visible rejection, the purchase lands at the authored price, and owning the venue unlocks the second-district racket - the money loop closes",
     );
-    let any_vice = vice_demonstrated
+    let any_enforcement = racket_demonstrated
         || [rush, press, recon]
             .iter()
-            .any(|run| run.vice_inquiries_drawn > 0);
+            .any(|run| run.racket_inquiries_drawn > 0);
     checkpoint(
         "vice heat",
-        any_vice,
-        "sustained district casework can convert into a dedicated vice inquiry on a racket itself: the manager reports that new pressure, while lying low or diversifying districts remain available counters",
+        any_enforcement,
+        "sustained district casework can convert into a dedicated racket inquiry on a racket itself: the manager reports that new pressure, while lying low or diversifying districts remain available counters",
     );
     if missing > 0 {
         println!(
@@ -1818,7 +1818,7 @@ pub fn print_experience_readout(
     );
     println!(
         "  - Visibility leverage: the branches drew {} vice inquiries this comparison, and the vice-heat probe demonstrates the full chain deterministically every run - clean districts never roll attention; sustained casework compounds a per-case street surcharge onto every cycle and can convert into a dedicated inquiry on the racket itself, taxing every book in that district (including rivals') until it shelves. Suspending a racket stops its future cycles; moving districts avoids unrelated-case surcharges. PRESS instead keeps its home racket open while stopping new street jobs, so its remaining vice risk is deliberate.",
-        rush.vice_inquiries_drawn + press.vice_inquiries_drawn + recon.vice_inquiries_drawn,
+        rush.racket_inquiries_drawn + press.racket_inquiries_drawn + recon.racket_inquiries_drawn,
     );
     println!(
         "Player attention load: RUSH {} surfaced decision(s), PRESS {}, RECON {}; player reports {}/{}/{}, executive briefs {}/{}/{}.",

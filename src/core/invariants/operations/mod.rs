@@ -2,8 +2,8 @@
 
 mod aborts;
 mod dispositions;
+mod exposure;
 
-use super::opportunities::validate_operation_exposure_links;
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::InformationId;
@@ -21,8 +21,7 @@ use crate::operations::operation_economics::{
 use crate::operations::operation_execution::{
     completion_history_summary, has_police_response_arrived_by, participant_after_action_summary,
     render_persisted_after_action_summary, resolve_completion_history_entities,
-    resolve_execution_margin, resolve_exposure_level, resolve_exposure_score,
-    resolve_intelligence_factors, resolve_objective_outcome,
+    resolve_execution_margin, resolve_intelligence_factors, resolve_objective_outcome,
 };
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::{
@@ -49,20 +48,6 @@ use crate::operations::{
 use crate::registry::{OperationDefinition, OperationExecutionDefinition, Registry};
 use crate::reports::ReportKind;
 use std::collections::{BTreeMap, BTreeSet};
-
-/// The started/due instant pair every in-progress abort arm re-derives: an operation that
-/// never truly began cannot carry an in-progress abort record.
-fn resolve_abort_started_due(
-    operation: &OperationRecord,
-) -> Result<(SimTime, SimTime), StateValidationError> {
-    let (Some(started_at), Some(due_at)) = (operation.started_at(), operation.resolution_due_at())
-    else {
-        return Err(StateValidationError::InvalidOperationAbort {
-            operation: operation.id(),
-        });
-    };
-    Ok((started_at, due_at))
-}
 
 pub(super) fn validate_operations_against_registry(
     registry: &Registry,
@@ -203,7 +188,7 @@ fn validate_operation_against_registry(
         validate_authored_operation_resolution(registry, state, operation, execution, resolution)?;
     validate_authored_after_action_summary(registry, state, operation, resolution)?;
     validate_authored_property_disposition(registry, state, operation, resolution)?;
-    validate_authored_operation_exposure(
+    exposure::validate_authored_operation_exposure(
         state,
         operation,
         execution,
@@ -713,55 +698,8 @@ fn validate_authored_property_disposition(
     Ok(())
 }
 
-fn validate_authored_operation_exposure(
-    state: &AppState,
-    operation: &OperationRecord,
-    execution: &OperationExecutionDefinition,
-    resolution: &crate::operations::OperationResolutionRecord,
-    expected_police_response_arrived: bool,
-) -> Result<(), StateValidationError> {
-    let exposure = resolution.exposure();
-    let exposure_factors = exposure.factors();
-    let expected_intelligence_mitigation =
-        u16::from(resolution.factors().intelligence_quality().value())
-            * u16::from(execution.intelligence_mitigation_weight())
-            / 100;
-    let expected_exposure_score = resolve_exposure_score(execution, exposure_factors);
-    let expected_exposure_level = resolve_exposure_level(execution, expected_exposure_score);
-    if exposure_factors.variance().unsigned_abs() > execution.exposure_variance_limit()
-        || exposure_factors.approach_adjustment()
-            != execution
-                .exposure_approach_adjustment(operation.approach())
-                .expect("validated operation approach must have an exposure adjustment")
-        || exposure_factors.intelligence_mitigation()
-            != u8::try_from(expected_intelligence_mitigation)
-                .expect("bounded exposure intelligence mitigation must fit u8")
-        || exposure_factors.police_response_arrived() != expected_police_response_arrived
-        || exposure.score() != expected_exposure_score
-        || exposure.level() != expected_exposure_level
-    {
-        return Err(invalid_operation_exposure(operation));
-    }
-    if let Some(evidence_id) = exposure.evidence().iter().next() {
-        let evidence = state
-            .legal
-            .get_evidence(*evidence_id)
-            .ok_or_else(|| invalid_operation_exposure(operation))?;
-        if evidence.kind() != execution.exposure_evidence_kind() {
-            return Err(invalid_operation_exposure(operation));
-        }
-    }
-    Ok(())
-}
-
 fn invalid_operation_definition(operation: &OperationRecord) -> StateValidationError {
     StateValidationError::InvalidOperationDefinition {
-        operation: operation.id(),
-    }
-}
-
-fn invalid_operation_exposure(operation: &OperationRecord) -> StateValidationError {
-    StateValidationError::InvalidOperationExposure {
         operation: operation.id(),
     }
 }
@@ -1172,7 +1110,7 @@ fn validate_completed_operation(
         &mut context.discovered_information,
         &mut context.surveillance_signatures,
     )?;
-    validate_operation_exposure_links(state, operation, resolution)
+    exposure::validate_operation_exposure_links(state, operation, resolution)
 }
 
 fn validate_participant_after_action_information(

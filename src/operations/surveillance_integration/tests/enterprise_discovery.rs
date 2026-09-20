@@ -114,6 +114,24 @@ fn make_test_enterprise_kind_at(
     location: EnterpriseLocation,
     kind: EnterpriseKind,
 ) -> EnterpriseId {
+    make_test_enterprise_kind_with_support_at(
+        fixture,
+        rival,
+        authority,
+        location,
+        kind,
+        BTreeSet::new(),
+    )
+}
+
+fn make_test_enterprise_kind_with_support_at(
+    fixture: &mut Fixture,
+    rival: OrganizationId,
+    authority: MandateAuthority,
+    location: EnterpriseLocation,
+    kind: EnterpriseKind,
+    supporting_businesses: BTreeSet<crate::core::id::BusinessId>,
+) -> EnterpriseId {
     let cash = insert_account(
         &mut fixture.state,
         FinancialAccountDraft {
@@ -138,7 +156,7 @@ fn make_test_enterprise_kind_at(
             organization: rival,
             authority,
             location,
-            supporting_businesses: BTreeSet::new(),
+            supporting_businesses,
             cash_account: cash,
             settlement_account: settlement,
         },
@@ -568,20 +586,42 @@ fn colocated_rackets_remain_distinguishable_in_surveillance_and_after_action() {
         },
     )
     .unwrap();
-    let kinds = [
-        EnterpriseKind::Protection,
-        EnterpriseKind::Bookmaking,
-        EnterpriseKind::LoanSharking,
-    ];
-    let enterprises = kinds.map(|kind| {
+    let wire = insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Rival Racing News".to_owned(),
+            kind: BusinessKind::NewsService,
+            functions: BTreeSet::from([BusinessFunction::RacingWire]),
+            neighborhood,
+            owner: BusinessOwner::Organization(rival),
+        },
+    )
+    .unwrap();
+    let enterprises = [
         make_test_enterprise_kind_at(
             &mut fixture,
             rival,
             authority,
             EnterpriseLocation::Business(business),
-            kind,
-        )
-    });
+            EnterpriseKind::Protection,
+        ),
+        make_test_enterprise_kind_with_support_at(
+            &mut fixture,
+            rival,
+            authority,
+            EnterpriseLocation::Business(business),
+            EnterpriseKind::Bookmaking,
+            BTreeSet::from([wire]),
+        ),
+        make_test_enterprise_kind_at(
+            &mut fixture,
+            rival,
+            authority,
+            EnterpriseLocation::Business(business),
+            EnterpriseKind::LoanSharking,
+        ),
+    ];
     let operation = authorize_surveillance(&mut fixture, EntityRef::Organization(rival));
     resolve_with_zero_variance(&mut fixture, operation);
     let result = fixture

@@ -863,14 +863,19 @@ Once established, many activities become ongoing enterprises:
 
 - Protection.
 - Gambling.
+- Numbers / policy lottery.
 - Bookmaking.
+- Distributed slot-machine routes through stores, clubs, and back rooms.
+- Prizefighting with an attached betting operation.
 - Loan sharking.
 - Alcohol distribution.
-- Smuggling.
+- Smuggling through dockside cargo networks.
 - Fencing.
-- Prostitution where historically/contextually appropriate.
+- Brothels / prostitution where historically and contextually appropriate.
 - Labor racketeering.
+- Counterfeiting through a printing and passing network.
 - Fraud.
+- Stolen-automobile rings using workshops, altered identity records, and resale channels.
 
 Each racket has:
 
@@ -902,6 +907,14 @@ Examples:
 
 - Bootlegging requires supply, transport, storage, distribution, and retail outlets.
 - Gambling depends on customers, venues, money handling, and protection.
+- Off-track bookmaking depends on a customer-facing cash book and timely racing information;
+  owning a social club alone does not manufacture live track results.
+- Commercial fraud depends on financial-paper access, credible records, and channels through which
+  credit, claims, or merchandise can be converted into cash.
+- Stolen-auto rings depend on workshops capable of reworking vehicle identity, credible records,
+  and access to buyers rather than functioning as generic stolen-goods fencing.
+- Standing smuggling depends on real dock access, storage, commercial records, vehicles, and
+  distribution capacity instead of abstracting every warehouse or truck fleet into a port.
 - Hijacking depends on valuable shipments that are actually moving through the city.
 - Extortion depends on businesses worth extorting.
 
@@ -955,6 +968,22 @@ A business can provide:
 - Information.
 - Cover identities.
 - Distribution infrastructure.
+
+Period-specific businesses should create different network choices rather than functioning as interchangeable income nodes. Construction contractors can combine real commercial income with union access, storage, and vehicles; wholesale distributors can combine warehousing, distribution infrastructure, and customer access. Pawnshops can combine ordinary neighborhood trade with resale, cash handling, and customer access. Coin-machine distributors can combine legitimate equipment sales and service with vehicle fleets, customer relationships, and distribution infrastructure. Hotels and boarding houses can provide lodging, private meeting space, customer access, and cash-heavy books. Athletic clubs can provide a genuine sporting venue rather than treating any social room as a fight arena. Laundries can provide modest legitimate income plus cash handling, customer access, or delivery vehicles. Commercial printers can provide presses and professional record handling, but a counterfeit operation still needs a separate commercial network capable of passing the notes. Finance companies and insurance offices can provide financial-paper access and professional records without making every lawyer or accountant a credit institution. Garment and fur factories can combine industrial commerce with union access, warehousing, and distribution infrastructure, making labor influence valuable inside a real productive sector. Automotive businesses can provide a real workshop in addition to vehicles or resale access, allowing a motor works or dealer to matter differently from a trucking fleet. Stevedoring firms can combine actual dock access with storage, union ties, and distribution infrastructure, making the waterfront a distinct strategic business environment rather than another generic warehouse. News and wire services can provide timely racing information, which is strategically different from a printing press or generic professional records. Their exact functions remain properties of the individual business, so the player values the actual network rather than a building-name bonus.
+
+Distributed rackets should be represented at the level the organization actually governs. A slot-machine operator may maintain dozens of cabinets across shops and social clubs, but the strategic object is the district route, its collection network, and its institutional exposure. The player should choose the manager and supporting network, not manually schedule each machine collection.
+
+Hosted rackets should require a front that makes physical sense. A brothel needs actual lodging plus customer and cash access; a prizefighting operation needs a real sporting venue and money-handling capacity. This preserves the classic front-business idea without reducing fronts to arbitrary building-name recipes.
+
+Production rackets should likewise distinguish making contraband from distributing it. Counterfeiting requires a real press and record-handling front plus customer/distribution access for passing the notes. The player governs that network rather than manually assigning individual counterfeit bills to shops.
+
+White-collar rackets should be similarly concrete. A commercial-fraud operation needs a financial-services front with credible records plus customer-facing access through which false credit, insurance claims, invoices, or bankruptcy schemes can produce cash. That access may be integrated into the host or supplied elsewhere in the owned network; the meaningful requirement is a plausible commercial channel, not an arbitrary second building. It should not be available merely because the organization owns an accountant or generic office.
+
+Specialized resale rackets should also preserve their physical differences. A stolen-auto ring requires a vehicle workshop and resale capacity plus records and customer access so stolen cars can be altered and disposed of plausibly. The game models the continuing ring rather than tracking each stolen automobile as inventory.
+
+Import rackets should stay at the same strategic scale. A standing smuggling enterprise requires a waterfront host with dock access and storage plus records, vehicle, and distribution capability across the owned network. The player governs the organization that moves contraband through the port; individual crates, ship manifests, and delivery runs remain abstract unless the simulation later gains a broader supply-chain model.
+
+Information infrastructure can also be a business dependency. Off-track bookmaking requires rapid racing information through a racing-wire service in addition to the cash-handling, customer-facing betting front. The organization controls access to the information network; the player does not schedule individual calls, sheets, or race-result deliveries.
 
 The same business can also become a liability through:
 
@@ -1555,9 +1584,14 @@ An organization built almost entirely around alcohol should face disruption.
 Possible responses include:
 
 - Move into gambling.
-- Expand labor racketeering.
-- Enter legitimate alcohol distribution.
-- Use existing transport networks for other contraband.
+- Expand neighborhood numbers operations that rely on customer, cash-handling, and record-keeping networks rather than Prohibition supply.
+- Expand labor racketeering through garment, fur, construction, and other union-sensitive industries.
+- Diversify into commercial fraud through financial-services and customer-facing business networks.
+- Diversify into counterfeiting through printing and commercial passing networks.
+- Use automotive workshops and dealer networks for stolen-vehicle rings.
+- Enter legitimate alcohol distribution through wholesale and transport infrastructure.
+- Combine stevedoring, records, transport, and distribution businesses into a smuggling network
+  for other contraband.
 - Invest in legal businesses.
 - Exploit political contacts to shape licensing.
 

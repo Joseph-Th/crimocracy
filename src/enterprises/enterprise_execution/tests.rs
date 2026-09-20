@@ -82,7 +82,7 @@ fn notable_cycle_rejects_changed_information_allocator_before_mutation() {
         enterprise,
         EnterpriseCycleRandomness::new(
             variance,
-            EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
         ),
     )
     .expect("notable enterprise cycle should resolve");
@@ -136,6 +136,737 @@ fn notable_cycle_rejects_changed_information_allocator_before_mutation() {
 }
 
 #[test]
+fn bookmaking_requires_a_racing_wire_beyond_the_betting_front() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let betting_front = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Horse Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let error = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Bookmaking,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(betting_front),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("cash and customers alone must not provide live race information"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::MissingNetworkFunction {
+            function: BusinessFunction::RacingWire,
+        }
+    );
+
+    let wire_service = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Racing News",
+        BusinessKind::NewsService,
+        BTreeSet::from([
+            BusinessFunction::ProfessionalRecords,
+            BusinessFunction::RacingWire,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Bookmaking,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(betting_front),
+            supporting_businesses: BTreeSet::from([wire_service]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("betting front plus racing wire should support bookmaking")
+    .commit(&mut fixture.state)
+    .expect("validated bookmaking enterprise should commit");
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("bookmaking enterprise should persist");
+    assert_eq!(record.kind(), EnterpriseKind::Bookmaking);
+    assert_eq!(
+        record.supporting_businesses(),
+        &BTreeSet::from([wire_service])
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("bookmaking wire network should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn fraud_requires_a_financial_records_front_and_customer_channel() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let generic_office = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ordinary Accountancy",
+        BusinessKind::ProfessionalServices,
+        BTreeSet::from([
+            BusinessFunction::ProfessionalRecords,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let error = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Fraud,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(generic_office),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("ordinary records must not stand in for financial-paper access"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::MissingBusinessFunction {
+            business: generic_office,
+            function: BusinessFunction::FinancialServices,
+        }
+    );
+
+    let finance_office = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Finance & Indemnity",
+        BusinessKind::FinancialServices,
+        BTreeSet::from([
+            BusinessFunction::FinancialServices,
+            BusinessFunction::ProfessionalRecords,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let customer_front = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Department Counter",
+        BusinessKind::Retail,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Fraud,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(finance_office),
+            supporting_businesses: BTreeSet::from([customer_front]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("financial records front plus customer channel should support commercial fraud")
+    .commit(&mut fixture.state)
+    .expect("validated fraud enterprise should commit");
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("fraud enterprise should persist");
+    assert_eq!(record.kind(), EnterpriseKind::Fraud);
+    assert_eq!(
+        record.location(),
+        EnterpriseLocation::Business(finance_office)
+    );
+    assert_eq!(
+        record.supporting_businesses(),
+        &BTreeSet::from([customer_front])
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("fraud network should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn auto_theft_ring_requires_a_workshop_and_vehicle_disposal_network() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let generic_dealer = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ordinary Used Car Lot",
+        BusinessKind::Automotive,
+        BTreeSet::from([
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::ProfessionalRecords,
+            BusinessFunction::ResaleMarket,
+            BusinessFunction::VehicleFleet,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let error = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::AutoTheftRing,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(generic_dealer),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => {
+            panic!("a dealership without workshop capability must not re-identify stolen cars")
+        }
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::MissingBusinessFunction {
+            business: generic_dealer,
+            function: BusinessFunction::VehicleWorkshop,
+        }
+    );
+
+    let workshop = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Motor Works",
+        BusinessKind::Automotive,
+        BTreeSet::from([
+            BusinessFunction::ProfessionalRecords,
+            BusinessFunction::ResaleMarket,
+            BusinessFunction::VehicleFleet,
+            BusinessFunction::VehicleWorkshop,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let sales_front = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Auto Sales",
+        BusinessKind::Automotive,
+        BTreeSet::from([
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::ResaleMarket,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::AutoTheftRing,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(workshop),
+            supporting_businesses: BTreeSet::from([sales_front]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("workshop, records, and customer access should support a stolen-auto ring")
+    .commit(&mut fixture.state)
+    .expect("validated stolen-auto ring should commit");
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("stolen-auto ring should persist");
+    assert_eq!(record.kind(), EnterpriseKind::AutoTheftRing);
+    assert_eq!(record.location(), EnterpriseLocation::Business(workshop));
+    assert_eq!(
+        record.supporting_businesses(),
+        &BTreeSet::from([sales_front])
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("stolen-auto network should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn smuggling_requires_real_dock_access_and_a_documented_distribution_network() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let generic_warehouse = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Inland Freight Warehouse",
+        BusinessKind::Warehouse,
+        BTreeSet::from([
+            BusinessFunction::Warehousing,
+            BusinessFunction::DistributionInfrastructure,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let error = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Smuggling,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(generic_warehouse),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("an inland warehouse must not stand in for waterfront access"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::MissingBusinessFunction {
+            business: generic_warehouse,
+            function: BusinessFunction::DockAccess,
+        }
+    );
+
+    let stevedore = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Pier & Stevedoring",
+        BusinessKind::Stevedoring,
+        BTreeSet::from([
+            BusinessFunction::DockAccess,
+            BusinessFunction::Warehousing,
+            BusinessFunction::UnionAccess,
+            BusinessFunction::DistributionInfrastructure,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let carrier = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Cartage Company",
+        BusinessKind::Transportation,
+        BTreeSet::from([
+            BusinessFunction::VehicleFleet,
+            BusinessFunction::ProfessionalRecords,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Smuggling,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(stevedore),
+            supporting_businesses: BTreeSet::from([carrier]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("dock storage plus documented carrier access should support smuggling")
+    .commit(&mut fixture.state)
+    .expect("validated smuggling enterprise should commit");
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("smuggling enterprise should persist");
+    assert_eq!(record.kind(), EnterpriseKind::Smuggling);
+    assert_eq!(record.location(), EnterpriseLocation::Business(stevedore));
+    assert_eq!(record.supporting_businesses(), &BTreeSet::from([carrier]));
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("smuggling network should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn counterfeiting_requires_a_real_press_and_a_separate_passing_network() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let generic_office = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Generic Records Office",
+        BusinessKind::ProfessionalServices,
+        BTreeSet::from([
+            BusinessFunction::ProfessionalRecords,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let error = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Counterfeiting,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(generic_office),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("records alone must not stand in for a printing press"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::MissingBusinessFunction {
+            business: generic_office,
+            function: BusinessFunction::PrintingPress,
+        }
+    );
+
+    let printer = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Commercial Printing",
+        BusinessKind::Printing,
+        BTreeSet::from([
+            BusinessFunction::PrintingPress,
+            BusinessFunction::ProfessionalRecords,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let distributor = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward General Wholesale",
+        BusinessKind::Wholesale,
+        BTreeSet::from([
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::DistributionInfrastructure,
+            BusinessFunction::Warehousing,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Counterfeiting,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(printer),
+            supporting_businesses: BTreeSet::from([distributor]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("printing front plus commercial distribution should support counterfeiting")
+    .commit(&mut fixture.state)
+    .expect("validated counterfeiting enterprise should commit");
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("counterfeiting enterprise should persist");
+    assert_eq!(record.kind(), EnterpriseKind::Counterfeiting);
+    assert_eq!(record.location(), EnterpriseLocation::Business(printer));
+    assert_eq!(
+        record.supporting_businesses(),
+        &BTreeSet::from([distributor])
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("counterfeiting network should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn brothel_requires_a_lodging_front_instead_of_any_cash_venue() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),
+    };
+    let generic_venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Generic Cash Club",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let error = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Brothel,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(generic_venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("a generic cash venue without lodging must not host a brothel"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::MissingBusinessFunction {
+            business: generic_venue,
+            function: BusinessFunction::Lodging,
+        }
+    );
+
+    let lodging = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Boarding Hotel",
+        BusinessKind::Lodging,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::Lodging,
+            BusinessFunction::MeetingSpace,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_business(lodging)
+            .expect("lodging front should persist")
+            .neighborhood(),
+        neighborhood
+    );
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Brothel,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(lodging),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("a cash-handling lodging front should host a brothel")
+    .commit(&mut fixture.state)
+    .expect("validated brothel should commit");
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("brothel should persist")
+            .kind(),
+        EnterpriseKind::Brothel
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("brothel front should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn prizefighting_uses_an_athletic_host_and_separate_cash_front_when_needed() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let athletic_club = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Athletic Club",
+        BusinessKind::AthleticClub,
+        BTreeSet::from([
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::SportingVenue,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let incomplete = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::PrizeFighting,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(athletic_club),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("a fight venue without cash handling must have a support front"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        incomplete,
+        EnterpriseError::MissingNetworkFunction {
+            function: BusinessFunction::CashIntensive,
+        }
+    );
+
+    let laundry = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Laundry Service",
+        BusinessKind::Laundry,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::VehicleFleet,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::PrizeFighting,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(athletic_club),
+            supporting_businesses: BTreeSet::from([laundry]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("athletic venue plus cash front should support prizefighting")
+    .commit(&mut fixture.state)
+    .expect("validated prizefighting enterprise should commit");
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("prizefighting enterprise should persist");
+    assert_eq!(record.kind(), EnterpriseKind::PrizeFighting);
+    assert_eq!(
+        record.location(),
+        EnterpriseLocation::Business(athletic_club)
+    );
+    assert_eq!(record.supporting_businesses(), &BTreeSet::from([laundry]));
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("prizefighting network should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn slot_machine_route_uses_distribution_network_without_route_micromanagement() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let distributor = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Coin Machine Company",
+        BusinessKind::CoinMachineDistribution,
+        BTreeSet::from([
+            BusinessFunction::VehicleFleet,
+            BusinessFunction::DistributionInfrastructure,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let customer_front = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Corner Pawn & Loan",
+        BusinessKind::Pawnshop,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::ResaleMarket,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+
+    let incomplete = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::SlotMachineRoute,
+            organization,
+            authority: fixture.authority,
+            location: fixture.location,
+            supporting_businesses: BTreeSet::from([distributor]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("a distributor without cash handling must not support a slot route"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        incomplete,
+        EnterpriseError::MissingNetworkFunction {
+            function: BusinessFunction::CashIntensive,
+        }
+    );
+
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::SlotMachineRoute,
+            organization,
+            authority: fixture.authority,
+            location: fixture.location,
+            supporting_businesses: BTreeSet::from([distributor, customer_front]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("distribution and customer access should support a district slot-machine route")
+    .commit(&mut fixture.state)
+    .expect("validated slot-machine route should commit");
+
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("slot-machine route should persist");
+    assert_eq!(record.kind(), EnterpriseKind::SlotMachineRoute);
+    assert_eq!(record.location(), fixture.location);
+    assert_eq!(
+        record.supporting_businesses(),
+        &BTreeSet::from([distributor, customer_front])
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("slot-machine route network should satisfy authored content");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn notable_settlement_reaches_executive_brief_without_pending_decisions() {
     use crate::reports::ReportKind;
     use crate::reports::executive_brief::{decide_executive_brief, validate_executive_brief_plan};
@@ -156,7 +887,7 @@ fn notable_settlement_reaches_executive_brief_without_pending_decisions() {
         enterprise,
         EnterpriseCycleRandomness::new(
             variance,
-            EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
         ),
     )
     .unwrap();
@@ -270,7 +1001,7 @@ fn report_id_exhaustion_rejects_notable_settlement_before_any_mutation() {
         enterprise,
         EnterpriseCycleRandomness::new(
             variance,
-            EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
         ),
     )
     .unwrap();
@@ -512,7 +1243,10 @@ fn restore_rejects_active_enterprise_schedule_drift_from_authored_cadence() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
         )
         .expect("routine enterprise cycle should decide"),
     )
@@ -582,7 +1316,7 @@ fn due_enterprise_cycle_near_clock_horizon_settles_then_exhausts_future_recurren
             enterprise,
             EnterpriseCycleRandomness::new(
                 0,
-                EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
             ),
         )
         .expect("already-due enterprise work should settle even when only its next recurrence overflows"),
@@ -616,7 +1350,10 @@ fn due_enterprise_cycle_near_clock_horizon_settles_then_exhausts_future_recurren
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,),
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
         )
         .expect_err("no second enterprise settlement is representable after recurrence exhaustion"),
         EnterpriseError::SimulationTimeOverflow
@@ -928,7 +1665,7 @@ fn restore_rejects_nonincreasing_enterprise_cycle_time_in_sequential_id_order() 
                 enterprise,
                 EnterpriseCycleRandomness::new(
                     0,
-                    EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+                    EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
                 ),
             )
             .expect("routine enterprise cycle should decide"),
@@ -1002,7 +1739,7 @@ struct EnterpriseCycleFinancialsWire {
 #[derive(Clone, Serialize)]
 struct EnterpriseCycleArtifactsWire {
     attention: AttentionClass,
-    drew_vice_attention: bool,
+    drew_enforcement_attention: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -1038,7 +1775,7 @@ fn enterprise_cycle_wire(
         },
         artifacts: EnterpriseCycleArtifactsWire {
             attention: record.attention(),
-            drew_vice_attention: record.drew_vice_attention(),
+            drew_enforcement_attention: record.drew_enforcement_attention(),
         },
         provenance: EnterpriseCycleProvenanceWire {
             transaction: record.transaction(),
@@ -1366,9 +2103,94 @@ fn establish_alcohol_distribution(
 }
 
 #[test]
-fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
+fn numbers_racket_uses_a_front_network_without_a_dedicated_gambling_venue() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let collection_front = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Wholesale Counter",
+        BusinessKind::Wholesale,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::DistributionInfrastructure,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let policy_office = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Policy Office",
+        BusinessKind::ProfessionalServices,
+        BTreeSet::from([
+            BusinessFunction::ProfessionalRecords,
+            BusinessFunction::MeetingSpace,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+
+    let incomplete = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::NumbersRacket,
+            organization,
+            authority: fixture.authority,
+            location: fixture.location,
+            supporting_businesses: BTreeSet::from([collection_front]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("a collection front without the policy bank's records must be incomplete"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        incomplete,
+        EnterpriseError::MissingNetworkFunction {
+            function: BusinessFunction::ProfessionalRecords,
+        }
+    );
+
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::NumbersRacket,
+            organization,
+            authority: fixture.authority,
+            location: fixture.location,
+            supporting_businesses: BTreeSet::from([collection_front, policy_office]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("cash-handling customer network should support a neighborhood numbers racket")
+    .commit(&mut fixture.state)
+    .expect("validated numbers racket should commit");
+
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("numbers racket should persist");
+    assert_eq!(record.kind(), EnterpriseKind::NumbersRacket);
+    assert_eq!(record.location(), fixture.location);
+    assert_eq!(
+        record.supporting_businesses(),
+        &BTreeSet::from([collection_front, policy_office])
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("numbers-racket network should satisfy authored content");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn a_drawn_racket_inquiry_settles_notable_and_stays_registry_valid_across_save() {
     // Notability parity: the persisted notability rule and the registry-relative invariant
-    // re-derivation both include drawn vice attention, so a settlement whose only notability
+    // re-derivation both include drawn enforcement attention, so a settlement whose only notability
     // trigger is a visibility draw stays registry-valid across save/load.
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
@@ -1419,9 +2241,9 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
             witness: None,
         },
     )
-    .expect("standing vice inquiry should validate")
+    .expect("standing racket inquiry should validate")
     .commit(&mut fixture.state)
-    .expect("standing vice inquiry should commit");
+    .expect("standing racket inquiry should commit");
 
     // First settlement under sustained casework, roll misses: notable through first-time
     // street heat only.
@@ -1434,7 +2256,10 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
         )
         .expect("first due cycle should resolve"),
     )
@@ -1446,9 +2271,9 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
         .enterprises()
         .get_cycle(first)
         .expect("first cycle should exist");
-    assert!(!first_record.drew_vice_attention());
+    assert!(!first_record.drew_enforcement_attention());
 
-    // Second settlement, same case pressure, roll hits: the drawn vice inquiry is the ONLY
+    // Second settlement, same case pressure, roll hits: the drawn racket inquiry is the ONLY
     // fresh notability trigger — variance is zero, heat is unchanged, and the book earns.
     fixture
         .state
@@ -1483,7 +2308,7 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
         .get_cycle(first)
         .expect("first cycle should exist")
         .investigation_heat();
-    assert!(second_record.drew_vice_attention());
+    assert!(second_record.drew_enforcement_attention());
     assert_eq!(second_heat, first_heat);
     assert!(second_record.net_cash() >= Money::ZERO);
     assert_eq!(
@@ -1558,7 +2383,7 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
         "the original bureau's still-active enterprise inquiry must keep contributing heat after intake priority moves elsewhere"
     );
     assert!(
-        !third_record.drew_vice_attention(),
+        !third_record.drew_enforcement_attention(),
         "an active dedicated inquiry must suppress duplicate concurrent inquiries"
     );
     let active_racket_inquiries = fixture
@@ -1587,18 +2412,18 @@ fn a_drawn_vice_inquiry_settles_notable_and_stays_registry_valid_across_save() {
         .enterprises()
         .get_cycle(second)
         .expect("vice cycle should remain available for corruption checks");
-    let mut false_vice_flag = enterprise_cycle_wire(second_record);
-    false_vice_flag.artifacts.drew_vice_attention = false;
+    let mut false_racket_flag = enterprise_cycle_wire(second_record);
+    false_racket_flag.artifacts.drew_enforcement_attention = false;
     let error = restore_save(
         &registry,
         replace_serialized_cycle(
             build_save(&registry, &fixture.state)
                 .expect("valid state should save before false-vice corruption"),
             second_record,
-            &false_vice_flag,
+            &false_racket_flag,
         ),
     )
-    .expect_err("a cycle cannot deny a vice event that has canonical incident evidence");
+    .expect_err("a cycle cannot deny a enforcement event that has canonical incident evidence");
     assert!(
         matches!(
             error,
@@ -1635,7 +2460,10 @@ fn routine_cycle_records_causal_economics_and_balanced_cash_settlement() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("due enterprise cycle should resolve");
     assert_eq!(
@@ -1730,7 +2558,10 @@ fn registry_validation_rejects_internally_balanced_unauthored_enterprise_financi
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("due enterprise cycle should resolve");
     let cycle = validate_enterprise_cycle_plan(&fixture.state, plan)
@@ -1873,7 +2704,10 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
         )
         .expect("due enterprise cycle should resolve");
         let (cost, heat, attention) = (
@@ -2033,7 +2867,10 @@ fn cycle_plan_rejects_when_district_case_pressure_changes_before_settlement() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("quiet due cycle should resolve");
 
@@ -2109,7 +2946,10 @@ fn settle_cycle_inner(
         registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("due enterprise cycle should resolve");
     let attention = plan.economics.attention;
@@ -2188,7 +3028,10 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("due cycle should plan while the manager is free");
     let arrest = validate_arrest(
@@ -2222,7 +3065,10 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,),
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
         )
         .expect_err("a detained manager cannot settle through the direct enterprise API"),
         EnterpriseError::Delegation(
@@ -2460,7 +3306,10 @@ fn alcohol_distribution_uses_owned_business_network_and_survives_save_before_cyc
         &registry,
         &restored,
         enterprise,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("valid alcohol distribution network should resolve a due cycle");
     assert_eq!(
@@ -3024,7 +3873,10 @@ fn stale_cycle_plan_cannot_commit_after_enterprise_lifecycle_change() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("cycle should resolve");
     validate_suspend_enterprise(&fixture.state, enterprise)
@@ -3071,7 +3923,10 @@ fn active_enterprise_blocks_authority_removal_until_suspended() {
             &registry,
             &fixture.state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
         )
         .expect("pre-suspension cycle should decide"),
     )
@@ -3248,7 +4103,7 @@ fn organization_financial_reporting_rederives_cycle_totals_without_cached_state(
             enterprise,
             EnterpriseCycleRandomness::new(
                 variance,
-                EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
             ),
         )
         .expect("due cycle should resolve for reporting fixture");
@@ -3403,7 +4258,10 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
             &registry,
             &state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
         )
         .expect("losing enterprise cycle should decide");
         assert!(
@@ -3481,7 +4339,10 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
             &registry,
             &state,
             enterprise,
-            EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
         )
         .expect("post-resume losing cycle should decide");
         assert!(plan.economics.net_cash.cents() < 0);
@@ -3853,7 +4714,7 @@ fn open_district_pressure_case(
     );
 }
 
-fn find_vice_investigation(
+fn find_racket_investigation(
     fixture: &EnterpriseFixture,
     police: OrganizationId,
     enterprise: EnterpriseId,
@@ -3867,7 +4728,7 @@ fn find_vice_investigation(
 }
 
 #[test]
-fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
+fn same_minute_peer_racket_inquiry_does_not_retroactively_raise_cycle_heat() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let protection = establish_protection(&registry, &mut fixture);
@@ -3951,15 +4812,18 @@ fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
             .enterprises()
             .get_cycle(first_cycle)
             .expect("first peer cycle should persist")
-            .drew_vice_attention(),
-        "the first peer should create the same-minute vice inquiry asserted by this check"
+            .drew_enforcement_attention(),
+        "the first peer should create the same-minute racket inquiry asserted by this check"
     );
 
     let second_plan = decide_enterprise_cycle(
         &registry,
         &fixture.state,
         gambling,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("second same-minute peer cycle should resolve");
     assert_eq!(
@@ -4001,13 +4865,16 @@ fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
         &registry,
         &fixture.state,
         protection,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("next-day source cycle should resolve");
     assert_eq!(
         source_next_day.economics.investigation_heat,
         Money::from_cents(10_000),
-        "the preexisting pressure case and yesterday's vice inquiry should both apply to the source racket"
+        "the preexisting pressure case and yesterday's racket inquiry should both apply to the source racket"
     );
     let source_cycle = validate_enterprise_cycle_plan(&fixture.state, source_next_day)
         .expect("next-day source cycle should validate")
@@ -4019,20 +4886,23 @@ fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
             .enterprises()
             .get_cycle(source_cycle)
             .expect("next-day source cycle should persist")
-            .drew_vice_attention(),
+            .drew_enforcement_attention(),
         "an already-active inquiry must suppress a duplicate vice draw"
     );
     let next_day = decide_enterprise_cycle(
         &registry,
         &fixture.state,
         gambling,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("next-day peer cycle should resolve");
     assert_eq!(
         next_day.economics.investigation_heat,
         Money::from_cents(10_000),
-        "on the next cycle the preexisting case and yesterday's vice inquiry must both apply"
+        "on the next cycle the preexisting case and yesterday's racket inquiry must both apply"
     );
     validate_state(&fixture.state).expect("peer settlement pressure state should validate");
     validate_state_against_registry(&registry, &fixture.state)
@@ -4041,7 +4911,7 @@ fn same_minute_peer_vice_inquiry_does_not_retroactively_raise_cycle_heat() {
 }
 
 #[test]
-fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
+fn sustained_district_heat_draws_a_racket_inquiry_onto_the_racket_itself() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
@@ -4068,12 +4938,12 @@ fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
         .commit(&mut fixture.state)
         .expect("clean cycle settlement should commit");
     assert!(
-        find_vice_investigation(&fixture, police, enterprise).is_none(),
-        "a clean district must not fabricate a vice inquiry"
+        find_racket_investigation(&fixture, police, enterprise).is_none(),
+        "a clean district must not fabricate a racket inquiry"
     );
 
     // Once originated casework targets the racket's district, a low visibility roll opens a
-    // vice inquiry onto the enterprise itself.
+    // racket inquiry onto the enterprise itself.
     open_district_pressure_case(
         &registry,
         &mut fixture,
@@ -4097,19 +4967,19 @@ fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
         .commit(&mut fixture.state)
         .expect("hot cycle settlement should commit");
 
-    let vice_case = find_vice_investigation(&fixture, police, enterprise)
-        .expect("the visibility roll must open a vice inquiry on the racket");
+    let racket_case = find_racket_investigation(&fixture, police, enterprise)
+        .expect("the visibility roll must open a racket inquiry on the racket");
     assert_eq!(
-        vice_case.status(),
+        racket_case.status(),
         crate::legal::InvestigationStatus::Active
     );
     assert!(
-        vice_case
+        racket_case
             .subjects()
             .contains(&EntityRef::Enterprise(enterprise)),
         "the inquiry targets the racket itself"
     );
-    // Intake itself stays institutional. The manager can report the observable vice attention,
+    // Intake itself stays institutional. The manager can report the observable enforcement attention,
     // but formal case activity must be learned through surveillance/contact/legal channels.
     assert_eq!(
         fixture
@@ -4123,7 +4993,7 @@ fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
             .count(),
         0
     );
-    let vice_cycle = fixture
+    let racket_cycle = fixture
         .state
         .enterprises()
         .cycles_for(enterprise)
@@ -4133,7 +5003,7 @@ fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
         .state
         .intelligence()
         .get_information(
-            vice_cycle
+            racket_cycle
                 .information()
                 .expect("notable vice cycle must have a report"),
         )
@@ -4141,7 +5011,7 @@ fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
     assert!(
         manager_information
             .summary()
-            .contains("Vice officers were noticed watching")
+            .contains("Investigators were noticed watching")
     );
     assert!(!manager_information.summary().contains("case stays open"));
 
@@ -4166,7 +5036,7 @@ fn sustained_district_heat_draws_a_vice_inquiry_onto_the_racket_itself() {
 }
 
 #[test]
-fn non_police_enterprise_case_does_not_suppress_first_police_vice_inquiry() {
+fn non_police_enterprise_case_does_not_suppress_first_police_racket_inquiry() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
@@ -4185,7 +5055,7 @@ fn non_police_enterprise_case_does_not_suppress_first_police_vice_inquiry() {
     );
 
     // A public legal authority may own its own investigation into the same enterprise, but it is
-    // not a police vice inquiry and must not consume the police visibility event.
+    // not a police racket inquiry and must not consume the police visibility event.
     let legal_authority = insert_organization(
         &registry,
         &mut fixture.state,
@@ -4238,10 +5108,10 @@ fn non_police_enterprise_case_does_not_suppress_first_police_vice_inquiry() {
             .enterprises()
             .get_cycle(cycle)
             .expect("cycle should persist")
-            .drew_vice_attention(),
-        "a non-police enterprise investigation must not suppress the first real police vice inquiry"
+            .drew_enforcement_attention(),
+        "a non-police enterprise investigation must not suppress the first real police racket inquiry"
     );
-    assert!(find_vice_investigation(&fixture, police, enterprise).is_some());
+    assert!(find_racket_investigation(&fixture, police, enterprise).is_some());
     validate_state(&fixture.state).expect("mixed-authority enterprise casework should validate");
     validate_state_against_registry(&registry, &fixture.state)
         .expect("mixed-authority enterprise casework should remain registry-valid");
@@ -4249,7 +5119,7 @@ fn non_police_enterprise_case_does_not_suppress_first_police_vice_inquiry() {
 }
 
 #[test]
-fn validated_vice_cycle_stales_atomically_when_intake_priority_changes() {
+fn validated_racket_cycle_stales_atomically_when_intake_priority_changes() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
@@ -4338,7 +5208,7 @@ fn validated_vice_cycle_stales_atomically_when_intake_priority_changes() {
         .expect_err("changed intake priority must stale the validated vice cycle");
     assert_eq!(
         error,
-        EnterpriseError::StaleViceIntakeRouting {
+        EnterpriseError::StaleEnforcementIntakeRouting {
             enterprise,
             neighborhood,
             expected: Some(original_police),
@@ -4380,14 +5250,14 @@ fn validated_vice_cycle_stales_atomically_when_intake_priority_changes() {
             .balance(),
         settlement_before
     );
-    assert!(find_vice_investigation(&fixture, original_police, enterprise).is_none());
-    assert!(find_vice_investigation(&fixture, replacement_police, enterprise).is_none());
+    assert!(find_racket_investigation(&fixture, original_police, enterprise).is_none());
+    assert!(find_racket_investigation(&fixture, replacement_police, enterprise).is_none());
     validate_state(&fixture.state).expect("stale vice routing rejection must preserve valid state");
     validate_invariants(&fixture.state);
 }
 
 #[test]
-fn planned_vice_cycle_stales_when_same_intake_authority_changes_version() {
+fn planned_racket_cycle_stales_when_same_intake_authority_changes_version() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
@@ -4446,7 +5316,7 @@ fn planned_vice_cycle_stales_when_same_intake_authority_changes_version() {
     };
     assert_eq!(
         error,
-        EnterpriseError::StaleViceIntakeJurisdictionVersion {
+        EnterpriseError::StaleEnforcementIntakeJurisdictionVersion {
             enterprise,
             neighborhood,
             organization: police,
@@ -4458,13 +5328,13 @@ fn planned_vice_cycle_stales_when_same_intake_authority_changes_version() {
         fixture.state.enterprises().cycles_for(enterprise).count(),
         0
     );
-    assert!(find_vice_investigation(&fixture, police, enterprise).is_none());
+    assert!(find_racket_investigation(&fixture, police, enterprise).is_none());
     validate_state(&fixture.state).expect("stale planned vice cycle must leave valid state");
     validate_invariants(&fixture.state);
 }
 
 #[test]
-fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
+fn hot_district_without_current_intake_does_not_emit_phantom_racket_attention() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
@@ -4494,7 +5364,10 @@ fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, EnterpriseCycleRandomness::MAX_VICE_ATTENTION_ROLL),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("initial hot cycle should resolve");
     assert!(first.economics.investigation_heat > Money::ZERO);
@@ -4504,7 +5377,7 @@ fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
         .expect("initial hot cycle should commit");
 
     // The bureau gives up this district but its already-open pressure case remains active. Heat
-    // therefore persists, while no institution currently exists to own a new vice inquiry.
+    // therefore persists, while no institution currently exists to own a new racket inquiry.
     let elsewhere = insert_neighborhood(
         &mut fixture.state,
         NeighborhoodDraft {
@@ -4555,7 +5428,7 @@ fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
     assert_eq!(
         unroutable.economics.attention,
         AttentionClass::Routine,
-        "an unchanged heat surcharge plus an unroutable vice roll is not fresh manager news"
+        "an unchanged heat surcharge plus an unroutable enforcement roll is not fresh manager news"
     );
     let cycle = validate_enterprise_cycle_plan(&fixture.state, unroutable)
         .expect("unroutable hot cycle should validate")
@@ -4566,15 +5439,15 @@ fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
         .enterprises()
         .get_cycle(cycle)
         .expect("unroutable cycle should persist");
-    assert!(!cycle.drew_vice_attention());
+    assert!(!cycle.drew_enforcement_attention());
     assert_eq!(cycle.attention(), AttentionClass::Routine);
-    assert!(find_vice_investigation(&fixture, police, enterprise).is_none());
+    assert!(find_racket_investigation(&fixture, police, enterprise).is_none());
     validate_state(&fixture.state).expect("unroutable vice state should validate");
     validate_state_against_registry(&registry, &fixture.state)
         .expect("unroutable vice cycle must remain registry-valid");
     validate_invariants(&fixture.state);
 
-    // Absence is routing state too. Hold a fully validated plan whose vice roll hit while no
+    // Absence is routing state too. Hold a fully validated plan whose enforcement roll hit while no
     // authority covered the district, then restore police intake before commit. The token must
     // stale rather than silently settle the now-routable roll as though nothing changed.
     fixture
@@ -4606,7 +5479,7 @@ fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
         .expect_err("new intake authority must stale a validated unroutable vice cycle");
     assert_eq!(
         error,
-        EnterpriseError::StaleViceIntakeRouting {
+        EnterpriseError::StaleEnforcementIntakeRouting {
             enterprise,
             neighborhood,
             expected: None,
@@ -4618,14 +5491,14 @@ fn hot_district_without_current_intake_does_not_emit_phantom_vice_attention() {
         cycles_before,
         "routing staleness must reject before a cycle is persisted"
     );
-    assert!(find_vice_investigation(&fixture, police, enterprise).is_none());
+    assert!(find_racket_investigation(&fixture, police, enterprise).is_none());
     validate_state(&fixture.state)
         .expect("absent-to-present routing rejection must preserve state");
     validate_invariants(&fixture.state);
 }
 
 #[test]
-fn shelved_vice_inquiry_releases_the_racket_from_compounded_heat() {
+fn shelved_racket_inquiry_releases_the_racket_from_compounded_heat() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
@@ -4642,7 +5515,7 @@ fn shelved_vice_inquiry_releases_the_racket_from_compounded_heat() {
         neighborhood,
     );
 
-    // Draw the vice inquiry with the strongest roll alignment.
+    // Draw the racket inquiry with the strongest roll alignment.
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
@@ -4657,7 +5530,7 @@ fn shelved_vice_inquiry_releases_the_racket_from_compounded_heat() {
         .expect("hot cycle plan should validate")
         .commit(&mut fixture.state)
         .expect("hot cycle settlement should commit");
-    assert!(find_vice_investigation(&fixture, police, enterprise).is_some());
+    assert!(find_racket_investigation(&fixture, police, enterprise).is_some());
 
     // With no institutional activity, cold-case decay shelves every originated case in the
     // district. The clock jumps past the authored inactivity window without settling further
@@ -4670,13 +5543,13 @@ fn shelved_vice_inquiry_releases_the_racket_from_compounded_heat() {
         registry.legal().cold_case_window(),
     )
     .expect("cold-case decay should resolve");
-    let shelved = find_vice_investigation(&fixture, police, enterprise)
+    let shelved = find_racket_investigation(&fixture, police, enterprise)
         .expect("the vice case record must persist after shelving");
     let shelved_id = shelved.id();
     assert_eq!(
         shelved.status(),
         crate::legal::InvestigationStatus::Suspended,
-        "an inactive vice inquiry must shelf like any other originated case"
+        "an inactive racket inquiry must shelf like any other originated case"
     );
 
     fixture
@@ -4721,7 +5594,7 @@ fn shelved_vice_inquiry_releases_the_racket_from_compounded_heat() {
     validate_state_against_registry(&registry, &fixture.state)
         .expect("heat recovery report must remain registry-valid");
 
-    // Fresh district pressure after the shelf may draw vice attention again. Canonical intake
+    // Fresh district pressure after the shelf may draw enforcement attention again. Canonical intake
     // must reopen the existing enterprise shelf, not manufacture a second case, while retaining
     // the original incident evidence that proves the first vice-drawing cycle.
     open_district_pressure_case(
@@ -4753,10 +5626,10 @@ fn shelved_vice_inquiry_releases_the_racket_from_compounded_heat() {
             .enterprises()
             .get_cycle(resumed_cycle)
             .expect("resumed-pressure cycle should persist")
-            .drew_vice_attention()
+            .drew_enforcement_attention()
     );
-    let resumed = find_vice_investigation(&fixture, police, enterprise)
-        .expect("renewed vice attention should reactivate the shelved inquiry");
+    let resumed = find_racket_investigation(&fixture, police, enterprise)
+        .expect("renewed enforcement attention should reactivate the shelved inquiry");
     assert_eq!(
         resumed.id(),
         shelved_id,

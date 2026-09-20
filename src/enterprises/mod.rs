@@ -29,9 +29,17 @@ pub enum EnterpriseKind {
     Fencing,
     Speakeasy,
     LaborRacketeering,
+    NumbersRacket,
+    SlotMachineRoute,
+    Brothel,
+    PrizeFighting,
+    Counterfeiting,
+    Fraud,
+    AutoTheftRing,
+    Smuggling,
 }
 
-pub const ALL_ENTERPRISE_KINDS: [EnterpriseKind; 8] = [
+pub const ALL_ENTERPRISE_KINDS: [EnterpriseKind; 16] = [
     EnterpriseKind::Protection,
     EnterpriseKind::Gambling,
     EnterpriseKind::AlcoholDistribution,
@@ -40,6 +48,14 @@ pub const ALL_ENTERPRISE_KINDS: [EnterpriseKind; 8] = [
     EnterpriseKind::Fencing,
     EnterpriseKind::Speakeasy,
     EnterpriseKind::LaborRacketeering,
+    EnterpriseKind::NumbersRacket,
+    EnterpriseKind::SlotMachineRoute,
+    EnterpriseKind::Brothel,
+    EnterpriseKind::PrizeFighting,
+    EnterpriseKind::Counterfeiting,
+    EnterpriseKind::Fraud,
+    EnterpriseKind::AutoTheftRing,
+    EnterpriseKind::Smuggling,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -182,10 +198,10 @@ pub(super) struct EnterpriseCycleFinancials {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct EnterpriseCycleArtifacts {
     attention: AttentionClass,
-    /// Set when this settlement drew a vice inquiry onto the racket: sustained district
+    /// Set when this settlement drew a racket inquiry onto the racket: sustained district
     /// casework opened a police investigation or reactivated a matching suspended shelf under
     /// the current intake authority.
-    drew_vice_attention: bool,
+    drew_enforcement_attention: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -240,8 +256,8 @@ impl EnterpriseCycleRecord {
         self.artifacts.attention
     }
 
-    pub fn drew_vice_attention(&self) -> bool {
-        self.artifacts.drew_vice_attention
+    pub fn drew_enforcement_attention(&self) -> bool {
+        self.artifacts.drew_enforcement_attention
     }
 
     pub fn transaction(&self) -> Option<LedgerTransactionId> {

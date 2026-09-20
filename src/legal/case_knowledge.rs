@@ -82,7 +82,7 @@ pub(crate) fn prepare_case_activity_knowledge(
     let case_title = record.title().to_owned();
     // The activity fact is about the incident/case being worked, not about the authority's
     // entire caseload. Originated files keep their typed origin as the subject so a legitimate
-    // contact query can distinguish the burglary case from a later vice inquiry without parsing
+    // contact query can distinguish the burglary case from a later racket inquiry without parsing
     // summary text or exposing an otherwise-hidden InvestigationId. Non-originated files fall
     // back to their own investigation identity.
     let subject = record
