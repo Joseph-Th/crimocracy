@@ -813,8 +813,7 @@ fn scheduled_work_for_investigator(
 ) -> Option<crate::core::id::InvestigationWorkId> {
     state
         .legal
-        .work_for_investigator(character)
-        .find(|work| work.status() == crate::legal::InvestigationWorkStatus::Scheduled)
+        .scheduled_work_for_investigator(character)
         .map(|work| work.id())
 }
 

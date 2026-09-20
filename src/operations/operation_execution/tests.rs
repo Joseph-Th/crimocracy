@@ -1099,6 +1099,7 @@ fn sabotage_of_a_suspended_target_aborts_before_start() {
     let outcome = run_tick(&registry, &mut state);
     assert!(outcome.started_operations.is_empty());
     assert!(outcome.resolved_operations.is_empty());
+    assert_eq!(outcome.aborted_operations, vec![operation]);
     let record = state
         .operations()
         .get_operation(operation)

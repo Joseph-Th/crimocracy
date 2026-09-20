@@ -1,6 +1,8 @@
-//! Persistent delegated criminal enterprises and cycle history; `enterprise_execution` owns lifecycle and routine settlement, `autonomous_expansion` owns the daily delegated expansion pass, `enterprise_reporting` is read-only aggregation.
+//! Persistent delegated criminal enterprises and cycle history; `enterprise_execution` owns lifecycle and routine settlement, `autonomous_planning` owns shared read-only NPC planning projections, `autonomous_lifecycle` owns suspended-racket maintenance, `autonomous_expansion` owns new delegated growth, and `enterprise_reporting` is read-only aggregation.
 
 pub mod autonomous_expansion;
+pub(crate) mod autonomous_lifecycle;
+pub(crate) mod autonomous_planning;
 pub mod enterprise_execution;
 pub mod enterprise_reporting;
 
@@ -267,6 +269,10 @@ pub struct EnterpriseState {
     active_by_mandate: BTreeMap<MandateId, BTreeSet<EnterpriseId>>,
     #[serde(skip)]
     active_by_next_cycle: BTreeMap<SimTime, BTreeSet<EnterpriseId>>,
+    /// Current suspended rackets only. Retired history grows for the life of the campaign, so
+    /// daily lifecycle maintenance must not recover suspended work by rescanning every record.
+    #[serde(skip)]
+    suspended: BTreeSet<EnterpriseId>,
     #[serde(skip)]
     by_settlement_account: BTreeMap<FinancialAccountId, EnterpriseId>,
     #[serde(skip)]
@@ -290,6 +296,7 @@ impl EnterpriseState {
         self.active_by_organization.clear();
         self.active_by_mandate.clear();
         self.active_by_next_cycle.clear();
+        self.suspended.clear();
         self.by_settlement_account.clear();
         self.cycles_by_enterprise.clear();
         self.cycles_by_time.clear();
@@ -326,6 +333,8 @@ impl EnterpriseState {
                         .or_default()
                         .insert(id);
                 }
+            } else if record.status() == EnterpriseStatus::Suspended {
+                self.suspended.insert(id);
             }
         }
         for cycle in self.cycles.values() {
@@ -503,6 +512,17 @@ impl EnterpriseState {
         })
     }
 
+    /// Current suspended rackets in stable enterprise-ID order. This derived projection is
+    /// rebuilt after restore, keeping daily lifecycle maintenance proportional to suspended work
+    /// instead of lifetime retired enterprise history.
+    pub(crate) fn suspended_enterprises(&self) -> impl Iterator<Item = &EnterpriseRecord> {
+        self.suspended.iter().map(|id| {
+            self.records
+                .get(id)
+                .expect("suspended-enterprise index must reference an enterprise")
+        })
+    }
+
     pub fn get_by_settlement_account(
         &self,
         account: FinancialAccountId,
@@ -631,18 +651,19 @@ impl EnterpriseState {
         loss_streak_anchor: Option<SimTime>,
         changed_at: SimTime,
     ) {
-        let (was_active, organization, mandate, old_next_cycle_at) = {
+        let (old_status, organization, mandate, old_next_cycle_at) = {
             let record = self
                 .records
                 .get(&id)
                 .expect("validated enterprise disappeared before status commit");
             (
-                record.runtime.status == EnterpriseStatus::Active,
+                record.runtime.status,
                 record.organization(),
                 record.assignment.authority.mandate,
                 record.runtime.next_cycle_at,
             )
         };
+        let was_active = old_status == EnterpriseStatus::Active;
         let will_be_active = status == EnterpriseStatus::Active;
         if was_active && let Some(old_next_cycle_at) = old_next_cycle_at {
             Self::remove_from_set_index(&mut self.active_by_next_cycle, old_next_cycle_at, id);
@@ -659,6 +680,12 @@ impl EnterpriseState {
                 .entry(mandate)
                 .or_default()
                 .insert(id);
+        }
+        if old_status == EnterpriseStatus::Suspended {
+            self.suspended.remove(&id);
+        }
+        if status == EnterpriseStatus::Suspended {
+            self.suspended.insert(id);
         }
         if will_be_active && let Some(scheduled) = next_cycle_at {
             self.active_by_next_cycle
@@ -702,6 +729,7 @@ impl EnterpriseState {
             && self.active_organization_index_is_consistent()
             && self.active_mandate_index_is_consistent()
             && self.active_schedule_index_is_consistent()
+            && self.suspended_index_is_consistent()
     }
 
     /// Every authoritative enterprise must appear in each index implied by its current record.
@@ -750,6 +778,11 @@ impl EnterpriseState {
             });
             if is_schedule_indexed
                 != (record.status() == EnterpriseStatus::Active && record.next_cycle_at().is_some())
+            {
+                return false;
+            }
+            if self.suspended.contains(&record.id())
+                != (record.status() == EnterpriseStatus::Suspended)
             {
                 return false;
             }
@@ -934,6 +967,15 @@ impl EnterpriseState {
             }
         }
         true
+    }
+
+    /// Only currently suspended enterprises may occupy the lifecycle-maintenance index.
+    fn suspended_index_is_consistent(&self) -> bool {
+        self.suspended.iter().all(|id| {
+            self.records
+                .get(id)
+                .is_some_and(|record| record.status() == EnterpriseStatus::Suspended)
+        })
     }
 }
 

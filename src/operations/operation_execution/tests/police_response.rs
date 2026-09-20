@@ -92,6 +92,86 @@ fn rival_post_entry_police_exception_aborts_instead_of_waiting_for_player_direct
 }
 
 #[test]
+fn police_arrival_on_entry_minute_does_not_trigger_before_entry_abort() {
+    let (registry, mut state, police, neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::AbortOnPoliceArrivalBeforeEntry],
+        );
+    // Burglary enters 10 minutes after dispatch. With the stock 12-minute response and a
+    // 9-minute patrol reduction range, presence 23 reduces the response by exactly 2 minutes.
+    // This creates an exact arrival == entry boundary through authored production timing.
+    validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("fixture minute should validate"),
+                    1_440,
+                    Rating::try_new(23).expect("boundary patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
+        },
+    )
+    .expect("boundary patrol should validate")
+    .commit(&mut state)
+    .expect("boundary patrol should commit");
+
+    let start = run_tick(&registry, &mut state);
+    assert_eq!(start.started_operations, vec![operation]);
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("started operation should persist");
+    let response_id = operation_record
+        .police_response()
+        .expect("observable burglary should dispatch police response");
+    let entry_at = operation_record
+        .entry_at()
+        .expect("burglary should have an authored entry milestone");
+    assert_eq!(
+        state
+            .legal()
+            .get_police_response(response_id)
+            .expect("boundary response should persist")
+            .arrival_due_at(),
+        entry_at,
+        "fixture must exercise the exact police-arrival/entry boundary"
+    );
+
+    while state.now() < entry_at {
+        let outcome = run_tick(&registry, &mut state);
+        if outcome.now == entry_at {
+            assert_eq!(outcome.arrived_police_responses, vec![response_id]);
+            assert!(
+                !outcome.aborted_operations.contains(&operation),
+                "AbortOnPoliceArrivalBeforeEntry is a strict-before contingency; equality means the crew has reached entry"
+            );
+        }
+    }
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("boundary operation should persist");
+    assert_eq!(operation_record.status(), OperationStatus::InProgress);
+    assert!(operation_record.abort_record().is_none());
+    assert_eq!(
+        state
+            .legal()
+            .get_police_response(response_id)
+            .and_then(|response| response.arrived_at()),
+        Some(entry_at)
+    );
+    validate_state(&state).expect("entry-boundary police arrival state should remain valid");
+    validate_state_against_registry(&registry, &state)
+        .expect("entry-boundary police arrival should match authored content");
+    validate_invariants(&state);
+}
+
+#[test]
 fn pre_designation_police_exception_aborts_instead_of_creating_unowned_decision() {
     let (registry, mut state, police, neighborhood, operation) =
         make_exposed_business_operation_fixture_with_contingencies(

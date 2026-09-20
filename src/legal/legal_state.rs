@@ -113,6 +113,15 @@ impl LegalState {
                 if investigation.lead_investigator().is_none() {
                     self.indexes.investigations.active_without_lead.insert(id);
                 }
+            } else if investigation.status() == InvestigationStatus::Suspended
+                && investigation.origin().is_some()
+            {
+                self.indexes
+                    .investigations
+                    .suspended_originated_by_owner
+                    .entry(investigation.owner())
+                    .or_default()
+                    .insert(id);
             }
         }
     }
@@ -196,7 +205,23 @@ impl LegalState {
                 .entry(work.investigator())
                 .or_default()
                 .insert(id);
+            if work.kind() == InvestigationWorkKind::EvidenceReview
+                && work.status() != InvestigationWorkStatus::Cancelled
+            {
+                let evidence = work
+                    .focus()
+                    .evidence_id()
+                    .expect("persisted evidence review must have evidence focus");
+                self.indexes
+                    .work
+                    .evidence_review_attempt_by_source
+                    .insert(evidence, id);
+            }
             if work.status() == InvestigationWorkStatus::Scheduled {
+                self.indexes
+                    .work
+                    .scheduled_work_by_investigator
+                    .insert(work.investigator(), id);
                 self.indexes
                     .work
                     .scheduled_work_by_due_at

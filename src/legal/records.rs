@@ -1447,6 +1447,9 @@ pub(super) struct InvestigationIndexes {
     /// Active cases grouped by owner so handler-specific recurring legal work does not scan
     /// unrelated active institutions or historical case records.
     pub(super) active_by_owner: BTreeMap<OrganizationId, BTreeSet<InvestigationId>>,
+    /// Suspended originated shelves grouped by owner. Incident continuation consults only these
+    /// resumable files rather than rescanning an institution's lifetime active/closed case history.
+    pub(super) suspended_originated_by_owner: BTreeMap<OrganizationId, BTreeSet<InvestigationId>>,
     pub(super) investigations_by_subject: BTreeMap<EntityRef, BTreeSet<InvestigationId>>,
     pub(super) investigations_by_investigator: BTreeMap<CharacterId, BTreeSet<InvestigationId>>,
     pub(super) active_without_lead: BTreeSet<InvestigationId>,
@@ -1490,6 +1493,14 @@ pub(super) struct InformantIndexes {
 pub(super) struct InvestigationWorkIndexes {
     pub(super) work_by_investigation: BTreeMap<InvestigationId, BTreeSet<InvestigationWorkId>>,
     pub(super) work_by_investigator: BTreeMap<CharacterId, BTreeSet<InvestigationWorkId>>,
+    /// The single currently scheduled work item per investigator. Historical completed and
+    /// cancelled work remains in `work_by_investigator`, while hot capacity/preemption checks use
+    /// this live projection instead of rescanning an investigator's lifetime work history.
+    pub(super) scheduled_work_by_investigator: BTreeMap<CharacterId, InvestigationWorkId>,
+    /// One real evidence-review attempt per source. Scheduled and completed reviews occupy this
+    /// projection; cancelled work releases it because no review occurred. This both enforces the
+    /// one-attempt rule for direct commands and avoids rescanning casework history every minute.
+    pub(super) evidence_review_attempt_by_source: BTreeMap<EvidenceId, InvestigationWorkId>,
     pub(super) scheduled_work_by_due_at: BTreeMap<SimTime, BTreeSet<InvestigationWorkId>>,
     pub(super) scheduled_work_by_focus: BTreeMap<
         (

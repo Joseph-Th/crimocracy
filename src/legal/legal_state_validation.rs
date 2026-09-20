@@ -5,8 +5,9 @@
 
 use crate::legal::legal_state::LegalState;
 use crate::legal::records::{
-    ArrestStatus, InvestigationStatus, InvestigationWorkStatus, LegalRepresentationOrigin,
-    LegalRepresentationStatus, PatrolDeploymentStatus, PoliceResponseStatus, ProsecutionCaseStatus,
+    ArrestStatus, InvestigationStatus, InvestigationWorkKind, InvestigationWorkStatus,
+    LegalRepresentationOrigin, LegalRepresentationStatus, PatrolDeploymentStatus,
+    PoliceResponseStatus, ProsecutionCaseStatus,
 };
 
 impl LegalState {
@@ -478,6 +479,7 @@ impl LegalState {
     fn has_consistent_investigation_indexes(&self) -> bool {
         self.investigation_forward_indexes_are_consistent()
             && self.active_investigation_indexes_are_consistent()
+            && self.suspended_originated_index_is_consistent()
             && self.investigation_activity_index_is_consistent()
             && self.investigation_owner_index_is_consistent()
             && self.investigation_subject_index_is_consistent()
@@ -546,6 +548,17 @@ impl LegalState {
             {
                 return false;
             }
+            if self
+                .indexes
+                .investigations
+                .suspended_originated_by_owner
+                .get(&investigation.owner())
+                .is_some_and(|ids| ids.contains(&investigation.id()))
+                != (investigation.status() == InvestigationStatus::Suspended
+                    && investigation.origin().is_some())
+            {
+                return false;
+            }
             if let Some(investigator) = investigation.lead_investigator()
                 && !self
                     .indexes
@@ -566,6 +579,26 @@ impl LegalState {
                         record.status() == InvestigationStatus::Active && record.owner() == *owner
                     })
                 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Incident continuation may consult only suspended files with real operation/enterprise
+    /// provenance, grouped under the institution that owns the shelf.
+    fn suspended_originated_index_is_consistent(&self) -> bool {
+        for (owner, ids) in &self.indexes.investigations.suspended_originated_by_owner {
+            if ids.is_empty() {
+                return false;
+            }
+            for id in ids {
+                if !self.investigations.get(id).is_some_and(|record| {
+                    record.owner() == *owner
+                        && record.status() == InvestigationStatus::Suspended
+                        && record.origin().is_some()
+                }) {
                     return false;
                 }
             }
@@ -715,6 +748,8 @@ impl LegalState {
         self.investigation_work_forward_indexes_are_consistent()
             && self.work_by_investigation_index_is_consistent()
             && self.work_by_investigator_index_is_consistent()
+            && self.scheduled_work_investigator_index_is_consistent()
+            && self.evidence_review_attempt_index_is_consistent()
             && self.scheduled_work_due_index_is_consistent()
             && self.scheduled_work_focus_index_is_consistent()
     }
@@ -749,12 +784,32 @@ impl LegalState {
                 work.kind(),
                 work.focus(),
             )) == Some(&work.id());
+            let investigator_scheduled = self
+                .indexes
+                .work
+                .scheduled_work_by_investigator
+                .get(&work.investigator())
+                == Some(&work.id());
+            let review_attempt_indexed = work.focus().evidence_id().is_some_and(|evidence| {
+                self.indexes
+                    .work
+                    .evidence_review_attempt_by_source
+                    .get(&evidence)
+                    == Some(&work.id())
+            });
+            if review_attempt_indexed
+                != (work.kind() == InvestigationWorkKind::EvidenceReview
+                    && work.status() != InvestigationWorkStatus::Cancelled)
+            {
+                return false;
+            }
             match work.status() {
                 InvestigationWorkStatus::Scheduled => {
                     if work.resolution().is_some()
                         || work.cancellation().is_some()
                         || !due_indexed
                         || !focus_indexed
+                        || !investigator_scheduled
                     {
                         return false;
                     }
@@ -764,6 +819,7 @@ impl LegalState {
                         || work.cancellation().is_some()
                         || due_indexed
                         || focus_indexed
+                        || investigator_scheduled
                     {
                         return false;
                     }
@@ -773,6 +829,7 @@ impl LegalState {
                         || work.cancellation().is_none()
                         || due_indexed
                         || focus_indexed
+                        || investigator_scheduled
                     {
                         return false;
                     }
@@ -809,6 +866,33 @@ impl LegalState {
                 {
                     return false;
                 }
+            }
+        }
+        true
+    }
+
+    /// Scheduled investigator capacity is exclusive and points only to live scheduled work.
+    fn scheduled_work_investigator_index_is_consistent(&self) -> bool {
+        for (investigator, id) in &self.indexes.work.scheduled_work_by_investigator {
+            if !self.investigation_work.get(id).is_some_and(|work| {
+                work.status() == InvestigationWorkStatus::Scheduled
+                    && work.investigator() == *investigator
+            }) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Every indexed review attempt is a scheduled/completed evidence review of that exact source.
+    fn evidence_review_attempt_index_is_consistent(&self) -> bool {
+        for (evidence, id) in &self.indexes.work.evidence_review_attempt_by_source {
+            if !self.investigation_work.get(id).is_some_and(|work| {
+                work.kind() == InvestigationWorkKind::EvidenceReview
+                    && work.status() != InvestigationWorkStatus::Cancelled
+                    && work.focus().evidence_id() == Some(*evidence)
+            }) {
+                return false;
             }
         }
         true

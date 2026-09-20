@@ -14,7 +14,9 @@ use crate::delegation::delegation_system::{
 };
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::enterprises::EnterpriseKind;
-use crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises;
+use crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises_excluding;
+use crate::enterprises::autonomous_lifecycle::apply_due_autonomous_enterprise_lifecycle;
+use crate::enterprises::autonomous_planning::AutonomousEnterpriseError;
 use crate::enterprises::enterprise_reporting::resolve_organization_enterprise_financial_summary;
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::finance::{
@@ -54,6 +56,13 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod autonomous_expansion;
+
+fn apply_due_autonomous_enterprises(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<Vec<EnterpriseId>, AutonomousEnterpriseError> {
+    apply_due_autonomous_enterprises_excluding(registry, state, &BTreeSet::new())
+}
 
 #[test]
 fn notable_cycle_rejects_changed_information_allocator_before_mutation() {
@@ -637,18 +646,27 @@ fn due_enterprise_cycle_near_clock_horizon_settles_then_exhausts_future_recurren
 
     let restored = restore_save(
         &registry,
-        build_save(&registry, &fixture.state)
-            .expect("recurrence-exhausted enterprise should remain saveable"),
+        build_save(&registry, &suspended)
+            .expect("suspended recurrence-exhausted enterprise should remain saveable"),
     )
-    .expect("enterprise recurrence exhaustion must survive restore");
+    .expect("suspended enterprise recurrence exhaustion must survive restore");
+    let restored_record = restored
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("restored enterprise should persist");
+    assert_eq!(restored_record.status(), EnterpriseStatus::Suspended);
+    assert_eq!(restored_record.next_cycle_at(), None);
     assert_eq!(
         restored
             .enterprises()
-            .get_enterprise(enterprise)
-            .expect("restored enterprise should persist")
-            .next_cycle_at(),
-        None
+            .suspended_enterprises()
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        vec![enterprise],
+        "restore must rebuild the suspended-enterprise maintenance index from authoritative records"
     );
+    validate_state(&restored).expect("restored suspended enterprise should remain valid");
+    validate_invariants(&restored);
 }
 
 fn replace_serialized_business(
@@ -1070,6 +1088,13 @@ fn make_test_enterprise_fixture() -> EnterpriseFixture {
 }
 
 fn make_test_enterprise_fixture_for_kind(kind: OrganizationKind) -> EnterpriseFixture {
+    make_test_enterprise_fixture_for_kind_and_autonomy(kind, AutonomyLevel::Delegated)
+}
+
+fn make_test_enterprise_fixture_for_kind_and_autonomy(
+    kind: OrganizationKind,
+    autonomy: AutonomyLevel,
+) -> EnterpriseFixture {
     let registry = build_registry();
     let mut state = AppState::new(0xE17E_1931);
     let organization = insert_organization(
@@ -1104,7 +1129,7 @@ fn make_test_enterprise_fixture_for_kind(kind: OrganizationKind) -> EnterpriseFi
             name: "Enterprise Manager".to_owned(),
             organization: Some(organization),
             supervisor: None,
-            autonomy: AutonomyLevel::Delegated,
+            autonomy,
             capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
             traits: BTreeSet::new(),
             drives: BTreeMap::new(),
@@ -3420,6 +3445,19 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
         .get_information(last_information.expect("notable losing cycle should report"))
         .expect("manager report should persist");
     assert!(information.summary().contains("suspended"));
+
+    let same_boundary = apply_due_autonomous_enterprise_lifecycle(&registry, &mut state)
+        .expect("same-boundary autonomous maintenance should resolve");
+    assert!(same_boundary.resumed.is_empty());
+    assert!(same_boundary.retired.is_empty());
+    assert_eq!(
+        state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .map(|record| record.status()),
+        Some(crate::enterprises::EnterpriseStatus::Suspended),
+        "a chronic-loss suspension must survive the boundary that caused it instead of resetting immediately"
+    );
 
     crate::enterprises::enterprise_execution::validate_resume_enterprise(
         &registry, &state, enterprise,

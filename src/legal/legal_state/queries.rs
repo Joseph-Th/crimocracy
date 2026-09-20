@@ -406,6 +406,34 @@ impl LegalState {
                     .expect("work-by-investigator index must reference investigation work")
             })
     }
+    pub(crate) fn scheduled_work_for_investigator(
+        &self,
+        investigator: CharacterId,
+    ) -> Option<&InvestigationWorkRecord> {
+        self.indexes
+            .work
+            .scheduled_work_by_investigator
+            .get(&investigator)
+            .map(|id| {
+                self.investigation_work
+                    .get(id)
+                    .expect("scheduled investigator-work index must reference investigation work")
+            })
+    }
+    pub(crate) fn evidence_review_attempt(
+        &self,
+        evidence: EvidenceId,
+    ) -> Option<&InvestigationWorkRecord> {
+        self.indexes
+            .work
+            .evidence_review_attempt_by_source
+            .get(&evidence)
+            .map(|id| {
+                self.investigation_work
+                    .get(id)
+                    .expect("evidence-review attempt index must reference investigation work")
+            })
+    }
     pub(crate) fn scheduled_work_for_focus(
         &self,
         investigation: InvestigationId,
@@ -479,6 +507,22 @@ impl LegalState {
                 self.investigations
                     .get(id)
                     .expect("active investigation-owner index must reference an investigation")
+            })
+    }
+    pub(crate) fn suspended_originated_investigations_for_owner(
+        &self,
+        owner: OrganizationId,
+    ) -> impl Iterator<Item = &InvestigationRecord> {
+        self.indexes
+            .investigations
+            .suspended_originated_by_owner
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.investigations
+                    .get(id)
+                    .expect("suspended originated owner index must reference an investigation")
             })
     }
     pub(crate) fn active_investigation_for_investigator(

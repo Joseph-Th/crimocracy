@@ -3,39 +3,30 @@
 //! command uses.
 
 use crate::core::id::{
-    BusinessId, EnterpriseId, FinancialAccountId, NeighborhoodId, OrganizationId,
+    BusinessId, EnterpriseId, FinancialAccountId, MandateId, NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::delegation::delegation_system::DelegationError;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
+use crate::enterprises::autonomous_planning::{
+    AutonomousEnterpriseError, ObservedDistrictPressure, available_working_capital,
+    reserve_working_capital, resolve_committed_working_capital,
+    resolve_observed_district_case_count, resolve_observed_district_pressure,
+};
 use crate::enterprises::enterprise_execution::{
-    EnterpriseError, can_authority_cover_location, decode_enterprise_investigation_case_count,
-    enterprise_location_is_occupied, resolve_enterprise_financial_projection,
-    resolve_enterprise_operating_cost_projection, resolve_location_neighborhood,
+    can_authority_cover_location, enterprise_location_is_occupied,
+    resolve_enterprise_financial_projection, resolve_location_neighborhood,
     validate_establish_enterprise, validate_establish_enterprise_with_openings,
 };
 use crate::enterprises::{
     ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation,
 };
-use crate::finance::finance_system::{FinanceError, validate_open_accounts};
+use crate::finance::finance_system::validate_open_accounts;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
 use crate::registry::{EnterpriseDefinition, Registry};
 use crate::world::territory_influence::resolve_neighborhood_influence;
 use crate::world::{AutonomyLevel, CapabilityKind, Rating};
 use std::collections::{BTreeMap, BTreeSet};
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub(crate) enum AutonomousExpansionError {
-    #[error(transparent)]
-    Delegation(#[from] DelegationError),
-    #[error(transparent)]
-    Finance(#[from] FinanceError),
-    #[error(transparent)]
-    Enterprise(#[from] EnterpriseError),
-    #[error("working-capital reservations overflowed for account {account}")]
-    WorkingCapitalOverflow { account: FinancialAccountId },
-}
 
 const LED_NEIGHBORHOOD_AUTHORITY_RANK: usize = 0;
 const OTHER_NEIGHBORHOOD_AUTHORITY_RANK: usize = 1;
@@ -63,8 +54,6 @@ struct ExpansionEconomicsContext<'a> {
     available_working_capital: Money,
 }
 
-type ObservedDistrictPressure = BTreeMap<(OrganizationId, NeighborhoodId), u32>;
-
 #[derive(Clone, Copy)]
 struct NeighborhoodExpansionAuthority {
     rank: usize,
@@ -86,10 +75,13 @@ struct NeighborhoodExpansionAuthority {
 /// Tight/Guided manager, or no usable uncommitted cash and settlement accounts) simply do not
 /// expand. Neighborhood and business scopes are preferred over the broad Enterprise function;
 /// the function scope remains a real organization-wide fallback rather than inert authority.
-pub(crate) fn apply_due_autonomous_enterprises(
+/// Same deterministic expansion pass, excluding mandates that already spent their daily
+/// enterprise-governance action on lifecycle maintenance.
+pub(crate) fn apply_due_autonomous_enterprises_excluding(
     registry: &Registry,
     state: &mut AppState,
-) -> Result<Vec<EnterpriseId>, AutonomousExpansionError> {
+    excluded_mandates: &BTreeSet<MandateId>,
+) -> Result<Vec<EnterpriseId>, AutonomousEnterpriseError> {
     if !crate::core::time::is_day_boundary(state.now()) {
         return Ok(Vec::new());
     }
@@ -102,7 +94,12 @@ pub(crate) fn apply_due_autonomous_enterprises(
     let observed_district_pressure = resolve_observed_district_pressure(registry, state)?;
     let mut working_capital_reservations =
         resolve_committed_working_capital(registry, state, &observed_district_pressure)?;
-    let mut mandates = resolve_eligible_expansion_mandates(registry, state, player_organization)?;
+    let mut mandates = resolve_eligible_expansion_mandates(
+        registry,
+        state,
+        player_organization,
+        excluded_mandates,
+    )?;
     let mut established = Vec::new();
     // Organizations compete in one phase-wide queue. Resolving an entire organization before
     // considering the next one would let OrganizationId decide shared location claims and could
@@ -211,11 +208,17 @@ fn resolve_eligible_expansion_mandates(
     registry: &Registry,
     state: &AppState,
     player_organization: Option<OrganizationId>,
-) -> Result<BTreeMap<OrganizationId, Vec<crate::delegation::MandateRecord>>, AutonomousExpansionError>
-{
+    excluded_mandates: &BTreeSet<MandateId>,
+) -> Result<
+    BTreeMap<OrganizationId, Vec<crate::delegation::MandateRecord>>,
+    AutonomousEnterpriseError,
+> {
     let mut by_organization: BTreeMap<OrganizationId, Vec<crate::delegation::MandateRecord>> =
         BTreeMap::new();
     for mandate in state.delegation().active_mandates() {
+        if excluded_mandates.contains(&mandate.id()) {
+            continue;
+        }
         let organization = mandate.organization();
         if Some(organization) == player_organization {
             continue;
@@ -261,7 +264,7 @@ fn commit_autonomous_expansion_plan(
     mandate: &crate::delegation::MandateRecord,
     plan: AutonomousExpansionPlan,
     working_capital_reservations: &mut BTreeMap<FinancialAccountId, Money>,
-) -> Result<EnterpriseId, AutonomousExpansionError> {
+) -> Result<EnterpriseId, AutonomousEnterpriseError> {
     let manager = mandate.manager();
     // Delegated managers do not open a new racket from token cash. The decision already
     // priced one current cycle of runway using the canonical operating-cost composition,
@@ -334,7 +337,7 @@ fn decide_autonomous_expansion(
     mandate: &crate::delegation::MandateRecord,
     available_working_capital: Money,
     observed_district_pressure: &ObservedDistrictPressure,
-) -> Result<Option<AutonomousExpansionPlan>, AutonomousExpansionError> {
+) -> Result<Option<AutonomousExpansionPlan>, AutonomousEnterpriseError> {
     let district_scopes = resolve_ranked_district_scopes(state, organization, mandate);
     let business_scopes: Vec<ResponsibilityScope> = mandate
         .scopes()
@@ -446,7 +449,7 @@ fn collect_enterprise_function_candidates(
     scope: ResponsibilityScope,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) -> Result<(), AutonomousExpansionError> {
+) -> Result<(), AutonomousEnterpriseError> {
     for neighborhood in economics.state.world().neighborhoods() {
         let neighborhood_id = neighborhood.id();
         let leads = resolve_neighborhood_influence(economics.state, neighborhood_id)
@@ -481,7 +484,7 @@ fn collect_district_candidates(
     district_scopes: &[(usize, ResponsibilityScope)],
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) -> Result<(), AutonomousExpansionError> {
+) -> Result<(), AutonomousEnterpriseError> {
     for (authority_rank, scope) in district_scopes.iter().copied() {
         let ResponsibilityScope::Neighborhood(neighborhood) = scope else {
             continue;
@@ -509,7 +512,7 @@ fn collect_neighborhood_scope_candidates(
     authority: NeighborhoodExpansionAuthority,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) -> Result<(), AutonomousExpansionError> {
+) -> Result<(), AutonomousEnterpriseError> {
     if definition.required_business_functions().is_empty() {
         let Some(supporting_businesses) =
             resolve_support_network(definition, owned_venues, None, authority.scope)
@@ -546,7 +549,7 @@ fn collect_hosted_candidates_in_neighborhood(
     authority: NeighborhoodExpansionAuthority,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) -> Result<(), AutonomousExpansionError> {
+) -> Result<(), AutonomousEnterpriseError> {
     for (business_id, business) in owned_venues {
         if business.neighborhood() != authority.neighborhood
             || !host_satisfies_business_requirements(definition, business)
@@ -583,7 +586,7 @@ fn collect_business_scope_candidates(
     business_scopes: &[ResponsibilityScope],
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
-) -> Result<(), AutonomousExpansionError> {
+) -> Result<(), AutonomousEnterpriseError> {
     let requires_host = !definition.required_business_functions().is_empty();
     for scope in business_scopes {
         let ResponsibilityScope::Business(business_id) = scope else {
@@ -621,7 +624,7 @@ fn build_ranked_candidate(
     scope: ResponsibilityScope,
     location: EnterpriseLocation,
     supporting_businesses: BTreeSet<BusinessId>,
-) -> Result<Option<AutonomousExpansionPlan>, AutonomousExpansionError> {
+) -> Result<Option<AutonomousExpansionPlan>, AutonomousEnterpriseError> {
     if enterprise_location_is_occupied(economics.state, kind, location) {
         return Ok(None);
     }
@@ -794,125 +797,6 @@ fn resolve_max_autonomous_working_capital(
         })
         .map(|account| available_working_capital(account, reservations))
         .max()
-}
-
-fn resolve_committed_working_capital(
-    registry: &Registry,
-    state: &AppState,
-    observed_district_pressure: &ObservedDistrictPressure,
-) -> Result<BTreeMap<FinancialAccountId, Money>, AutonomousExpansionError> {
-    let mut reservations = BTreeMap::new();
-    for enterprise in state.enterprises().active_enterprises() {
-        let observed_active_cases = resolve_observed_district_case_count(
-            state,
-            observed_district_pressure,
-            enterprise.organization(),
-            enterprise.location(),
-        )?;
-        let required = resolve_enterprise_operating_cost_projection(
-            registry,
-            state,
-            enterprise.kind(),
-            enterprise.location(),
-            enterprise.supporting_businesses().len(),
-            observed_active_cases,
-        )?;
-        reserve_working_capital(&mut reservations, enterprise.cash_account(), required)?;
-    }
-    Ok(reservations)
-}
-
-/// Most recent district-pressure count the organization can infer from its own settled rackets.
-/// The autonomous planner must not inspect live investigations: an unseen case is uncertainty,
-/// not free foresight. Once one of the organization's enterprises settles in the district, its
-/// recorded street-heat surcharge becomes legitimate operating history for later planning. The
-/// complete map is derived once per daily pass so candidate evaluation remains linear in world
-/// history rather than rescanning an organization's rackets for every proposed location.
-fn resolve_observed_district_pressure(
-    registry: &Registry,
-    state: &AppState,
-) -> Result<ObservedDistrictPressure, AutonomousExpansionError> {
-    let mut latest_observations = BTreeMap::new();
-    let maximum_age = u64::from(registry.legal().cold_case_window().as_minutes());
-    let lower_bound = state
-        .now()
-        .as_minutes()
-        .checked_sub(maximum_age)
-        .map(crate::core::time::SimTime::from_minutes);
-    // Only observations younger than the legal cold-case horizon can influence today's plan.
-    // The cycle-time index therefore bounds this pass by recent settlement volume instead of
-    // rescanning every retired enterprise accumulated over the lifetime of a campaign.
-    for cycle in state
-        .enterprises()
-        .cycles_after_through(lower_bound, state.now())
-    {
-        let enterprise = state
-            .enterprises()
-            .get_enterprise(cycle.enterprise())
-            .expect("enterprise cycle must reference its persisted enterprise");
-        let economics = registry.get_enterprise(enterprise.kind()).economics();
-        if economics.heat_surcharge_per_active_case() <= Money::ZERO {
-            continue;
-        }
-        let inferred =
-            decode_enterprise_investigation_case_count(economics, cycle.investigation_heat())
-                .expect("validated enterprise heat must encode a representable active-case count");
-        let key = (cycle.occurred_at(), cycle.id());
-        let neighborhood = resolve_location_neighborhood(state, enterprise.location())?;
-        let observation = latest_observations
-            .entry((enterprise.organization(), neighborhood))
-            .or_insert((key, inferred));
-        if key > observation.0 {
-            *observation = (key, inferred);
-        }
-    }
-    Ok(latest_observations
-        .into_iter()
-        .map(|(district, (_, count))| (district, count))
-        .collect())
-}
-
-fn resolve_observed_district_case_count(
-    state: &AppState,
-    observed_district_pressure: &ObservedDistrictPressure,
-    organization: OrganizationId,
-    location: EnterpriseLocation,
-) -> Result<u32, AutonomousExpansionError> {
-    let neighborhood = resolve_location_neighborhood(state, location)?;
-    Ok(observed_district_pressure
-        .get(&(organization, neighborhood))
-        .copied()
-        .unwrap_or(0))
-}
-
-fn reserve_working_capital(
-    reservations: &mut BTreeMap<FinancialAccountId, Money>,
-    account: FinancialAccountId,
-    amount: Money,
-) -> Result<(), AutonomousExpansionError> {
-    let current = reservations.get(&account).copied().unwrap_or(Money::ZERO);
-    let reserved = current
-        .checked_add(amount)
-        .ok_or(AutonomousExpansionError::WorkingCapitalOverflow { account })?;
-    reservations.insert(account, reserved);
-    Ok(())
-}
-
-fn available_working_capital(
-    account: &crate::finance::FinancialAccountRecord,
-    reservations: &BTreeMap<FinancialAccountId, Money>,
-) -> Money {
-    let reserved = reservations
-        .get(&account.id())
-        .copied()
-        .unwrap_or(Money::ZERO);
-    let spendable = account.spendable_balance();
-    if spendable <= reserved {
-        return Money::ZERO;
-    }
-    spendable
-        .checked_sub(reserved)
-        .expect("positive balance above a nonnegative reservation must subtract safely")
 }
 
 /// Resolves the rival's operating accounts read-only: the smallest sufficiently funded

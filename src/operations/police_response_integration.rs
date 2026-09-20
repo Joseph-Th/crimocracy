@@ -50,6 +50,7 @@ pub(crate) enum PoliceResponseIntegrationError {
 pub(crate) struct PoliceResponseProcessingOutcome {
     pub(crate) arrived: Vec<PoliceResponseId>,
     pub(crate) decisions: Vec<DecisionRequestOutcome>,
+    pub(crate) aborted_operations: Vec<OperationId>,
 }
 
 #[derive(Debug)]
@@ -155,6 +156,7 @@ pub(crate) fn apply_due_police_response_arrivals(
     let due = find_due_police_responses(state);
     let mut arrived = Vec::with_capacity(due.len());
     let mut decisions = Vec::new();
+    let mut aborted_operations = Vec::new();
     for response_id in due {
         let (
             operation_id,
@@ -255,6 +257,7 @@ pub(crate) fn apply_due_police_response_arrivals(
             abort
                 .commit(state)
                 .expect("fresh police-arrival abort token must commit atomically");
+            aborted_operations.push(operation_id);
         } else if let Some(decision) = decision {
             decisions.push(
                 decision
@@ -269,7 +272,11 @@ pub(crate) fn apply_due_police_response_arrivals(
         }
         arrived.push(response_id);
     }
-    Ok(PoliceResponseProcessingOutcome { arrived, decisions })
+    Ok(PoliceResponseProcessingOutcome {
+        arrived,
+        decisions,
+        aborted_operations,
+    })
 }
 
 fn validate_participant_police_pressure_information(

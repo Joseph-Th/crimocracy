@@ -59,6 +59,9 @@ pub struct TickOutcome {
     /// Every decision request raised this tick, regardless of owning subsystem. The outcome
     /// preserves whether this player-owned attention event requests an adapter pause.
     pub decision_requests: Vec<DecisionRequestOutcome>,
+    /// Operations aborted during the operation phase itself. Custody-driven aborts remain
+    /// represented by the arrest that caused them later in the tick.
+    pub aborted_operations: Vec<OperationId>,
     pub resolved_operations: Vec<OperationId>,
     pub staffed_investigations: Vec<(InvestigationId, CharacterId)>,
     pub scheduled_investigation_work: Vec<InvestigationWorkId>,
@@ -70,10 +73,21 @@ pub struct TickOutcome {
     pub informant_disclosures: Vec<crate::core::id::InformantDisclosureId>,
     pub custody_releases: Vec<crate::core::id::ArrestId>,
     pub automatic_legal_support: Vec<crate::core::id::LegalRepresentationId>,
+    /// Automatic-policy retainers ended because their represented matter is no longer active.
+    /// The legal-support API returns newly retained counsel, so this separate count keeps a
+    /// conclusion-only tick visible to adapters and validation.
+    pub concluded_automatic_legal_support: usize,
     pub business_cycles: Vec<BusinessCycleId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
+    /// Number of individual reputation dimensions that actually moved this tick, including
+    /// day-boundary decay and current operation/vice consequences. This makes reputation-only
+    /// persistent ticks observable to validation/adapters instead of hiding them behind phases
+    /// that happen to have no other surfaced outcome.
+    pub reputation_changes: usize,
     pub recruitment_attempts: Vec<RecruitmentAttemptId>,
+    pub resumed_enterprises: Vec<crate::core::id::EnterpriseId>,
+    pub retired_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub autonomous_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
@@ -117,8 +131,13 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // above.
     let expired_opportunities = apply_opportunity_expiry(registry, state)
         .expect("valid state should expire every due opportunity atomically");
-    let (started_operations, arrived_police_responses, mut decision_requests, resolved_operations) =
-        run_operations_phase(registry, state);
+    let OperationsPhaseOutcome {
+        started: started_operations,
+        arrived_police_responses,
+        mut decision_requests,
+        aborted: aborted_operations,
+        resolved: resolved_operations,
+    } = run_operations_phase(registry, state);
     let staffed_investigations = apply_autonomous_investigator_staffing(state)
         .expect("valid state should staff available investigators onto active cases");
     // Evidence-review scheduling scans every active staffed case, not only cases staffed this
@@ -150,9 +169,23 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // promised counsel materially affect custodial cooperation risk instead of retaining counsel
     // only after the irreversible decision. It also sees every new arrest created above and
     // concludes automatic retainers for matters already ended.
+    let automatic_support_before = state
+        .legal()
+        .active_automatic_policy_representations()
+        .count();
     let automatic_legal_support =
         crate::legal::legal_representation_system::apply_automatic_legal_support(registry, state)
             .expect("valid state should resolve automatic legal-support retention");
+    let automatic_support_after = state
+        .legal()
+        .active_automatic_policy_representations()
+        .count();
+    let concluded_automatic_legal_support = automatic_support_before
+        .checked_add(automatic_legal_support.len())
+        .and_then(|expected_without_conclusions| {
+            expected_without_conclusions.checked_sub(automatic_support_after)
+        })
+        .expect("automatic legal-support lifecycle counts must remain internally consistent");
     // A member arrested exactly one cadence window ago now faces the decision with current
     // representation visible. New informants then disclose personally-held knowledge.
     let informant_recruitments =
@@ -176,19 +209,35 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // than a mixture of pre- and post-boundary state.
     let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state)
         .expect("valid state should settle every due criminal-organization payroll");
-    apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles);
+    let reputation_changes =
+        apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles);
     let recruitment = apply_due_autonomous_recruitment(registry, state)
         .expect("valid state should resolve every due autonomous recruitment action");
     let recruitment_attempts = recruitment.attempts;
     decision_requests.extend(recruitment.approval_requests);
-    // Delegated rival expansion runs after recruitment so a mandate whose crew changed this
-    // minute governs with its current roster, and after reputation so a vice hit this minute can
-    // make the organization keep its head down immediately. Selection consumes
-    // no randomness, so matched branches observe identical rival growth unless their own actions
-    // touched rival state.
+    // Suspended rival rackets are reconsidered before new growth. This gives chronic-loss
+    // suspension a recoverable lifecycle without allowing an organization to spend one cash pool
+    // on both a reopened racket and a fresh establishment. A racket suspended by a cycle earlier
+    // in this same minute remains suspended until a later daily boundary.
+    let enterprise_lifecycle =
+        crate::enterprises::autonomous_lifecycle::apply_due_autonomous_enterprise_lifecycle(
+            registry, state,
+        )
+        .expect("valid state should maintain suspended autonomous enterprises");
+    let resumed_enterprises = enterprise_lifecycle.resumed;
+    let retired_enterprises = enterprise_lifecycle.retired;
+    // Delegated rival expansion runs after lifecycle maintenance and recruitment so a mandate
+    // whose crew changed this minute governs with its current roster, and after reputation so a
+    // vice hit this minute can make the organization keep its head down immediately. Selection
+    // consumes no randomness, so matched branches observe identical rival growth unless their own
+    // actions touched rival state.
     let autonomous_enterprises =
-        crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises(registry, state)
-            .expect("valid state should resolve every due autonomous enterprise expansion");
+        crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises_excluding(
+            registry,
+            state,
+            &enterprise_lifecycle.resumed_mandates,
+        )
+        .expect("valid state should resolve every due autonomous enterprise expansion");
     // Executive synthesis runs last so a due brief sees every report and decision created by
     // operational, investigative, financial, and delegated personnel work that resolved in the
     // same simulation minute.
@@ -199,6 +248,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         started_operations,
         arrived_police_responses,
         decision_requests,
+        aborted_operations,
         resolved_operations,
         staffed_investigations,
         scheduled_investigation_work,
@@ -210,10 +260,14 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         informant_disclosures,
         custody_releases,
         automatic_legal_support,
+        concluded_automatic_legal_support,
         business_cycles,
         enterprise_cycles,
         payrolls,
+        reputation_changes,
         recruitment_attempts,
+        resumed_enterprises,
+        retired_enterprises,
         autonomous_enterprises,
         expired_opportunities,
         cold_case_suspensions: cold_case_decay.suspended,
@@ -230,15 +284,15 @@ pub(crate) fn run_test_tick(registry: &Registry, state: &mut AppState) -> TickOu
 /// Processes due police-response arrivals, starts due authorized operations, aborts missed
 /// deadlines (through the pending decision when one exists), and resolves due in-progress
 /// operations with pre-drawn deterministic variance.
-fn run_operations_phase(
-    registry: &Registry,
-    state: &mut AppState,
-) -> (
-    Vec<OperationId>,
-    Vec<PoliceResponseId>,
-    Vec<DecisionRequestOutcome>,
-    Vec<OperationId>,
-) {
+struct OperationsPhaseOutcome {
+    started: Vec<OperationId>,
+    arrived_police_responses: Vec<PoliceResponseId>,
+    decision_requests: Vec<DecisionRequestOutcome>,
+    aborted: Vec<OperationId>,
+    resolved: Vec<OperationId>,
+}
+
+fn run_operations_phase(registry: &Registry, state: &mut AppState) -> OperationsPhaseOutcome {
     // Process responses that were dispatched on earlier ticks before admitting new work.
     // Authorization deliberately allows exact back-to-back participant windows. A response
     // arriving on that boundary can turn the earlier operation into an unresolved commitment;
@@ -249,6 +303,7 @@ fn run_operations_phase(
         .expect("due police responses must commit through canonical arrival processing");
     let arrived_police_responses = police_response_outcome.arrived;
     let decision_requests = police_response_outcome.decisions;
+    let mut aborted_operations = police_response_outcome.aborted_operations;
 
     let due_authorized = find_due_authorized_operations(state);
     let mut started_operations = Vec::with_capacity(due_authorized.len());
@@ -258,6 +313,7 @@ fn run_operations_phase(
                 .expect("a missed operation deadline must validate")
                 .commit(state)
                 .expect("a missed operation deadline must commit atomically");
+            aborted_operations.push(operation);
         } else if let Some((opportunity, _)) = state
             .opportunities()
             .expired_window_for_operation(operation, state.now())
@@ -266,6 +322,7 @@ fn run_operations_phase(
                 .expect("an expired linked opportunity must validate a pre-start abort")
                 .commit(state)
                 .expect("an expired linked opportunity must abort atomically");
+            aborted_operations.push(operation);
         } else {
             match apply_transition(registry, state, operation, OperationTransition::Begin) {
                 Ok(()) => started_operations.push(operation),
@@ -280,6 +337,7 @@ fn run_operations_phase(
                         .expect("an unavailable due objective must validate a pre-start abort")
                         .commit(state)
                         .expect("an unavailable due objective must abort atomically");
+                    aborted_operations.push(operation);
                 }
                 Err(error) => {
                     panic!(
@@ -309,11 +367,13 @@ fn run_operations_phase(
             .expect("an overdue operation decision must support automatic abort")
             .commit(state)
             .expect("automatic deadline decision abort must commit atomically");
+            aborted_operations.push(operation);
         } else {
             validate_deadline_missed_operation(registry, state, operation)
                 .expect("an overdue in-progress operation must validate a deadline abort")
                 .commit(state)
                 .expect("an overdue in-progress operation must abort atomically");
+            aborted_operations.push(operation);
         }
     }
     let due_operations = find_due_in_progress_operations(state);
@@ -344,12 +404,13 @@ fn run_operations_phase(
             .expect("validated operation resolution must commit atomically");
         resolved_operations.push(resolved);
     }
-    (
-        started_operations,
+    OperationsPhaseOutcome {
+        started: started_operations,
         arrived_police_responses,
         decision_requests,
-        resolved_operations,
-    )
+        aborted: aborted_operations,
+        resolved: resolved_operations,
+    }
 }
 
 /// Resolves due scheduled detective work with pre-drawn variance. Runs after operation
@@ -463,8 +524,9 @@ fn apply_reputation_phase(
     state: &mut AppState,
     resolved_operations: &[OperationId],
     enterprise_cycles: &[EnterpriseCycleId],
-) {
-    crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
+) -> usize {
+    let mut changed =
+        crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
     for operation in resolved_operations {
         let (organization, kind, approach, objective_outcome, exposure_level) = {
             let record = state
@@ -482,7 +544,7 @@ fn apply_reputation_phase(
                 resolution.exposure().level(),
             )
         };
-        crate::reputation::reputation_system::apply_operation_reputation_consequences(
+        let shifts = crate::reputation::reputation_system::apply_operation_reputation_consequences(
             registry,
             state,
             organization,
@@ -492,6 +554,9 @@ fn apply_reputation_phase(
             exposure_level,
         )
         .expect("valid state should apply operation reputation consequences");
+        changed = changed
+            .checked_add(shifts.len())
+            .expect("one tick cannot contain enough reputation shifts to overflow usize");
     }
     for cycle_id in enterprise_cycles {
         let organization = {
@@ -508,13 +573,18 @@ fn apply_reputation_phase(
                 .expect("settled enterprise cycle must reference its enterprise")
                 .organization()
         };
-        crate::reputation::reputation_system::apply_vice_inquiry_reputation_consequences(
-            registry,
-            state,
-            organization,
-        )
-        .expect("valid state should apply vice-inquiry reputation consequences");
+        let shifts =
+            crate::reputation::reputation_system::apply_vice_inquiry_reputation_consequences(
+                registry,
+                state,
+                organization,
+            )
+            .expect("valid state should apply vice-inquiry reputation consequences");
+        changed = changed
+            .checked_add(shifts.len())
+            .expect("one tick cannot contain enough reputation shifts to overflow usize");
     }
+    changed
 }
 
 /// Synthesizes the player organization's due executive brief.

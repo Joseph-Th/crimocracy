@@ -13,10 +13,8 @@ use crate::delegation::{MandateAuthority, ResponsibilityFunction, Responsibility
 use crate::recruitment::recruitment_system::{
     RecruitmentError, find_recruitment_candidates, validate_delegated_recruitment_attempt,
 };
-use crate::recruitment::scoring::{
-    recruitment_personal_approach_fit, recruitment_relationship_support,
-};
-use crate::recruitment::{ALL_RECRUITMENT_APPROACHES, RecruitmentApproach, RecruitmentDraft};
+use crate::recruitment::scoring::recruitment_relationship_support;
+use crate::recruitment::{RecruitmentApproach, RecruitmentDraft};
 use crate::registry::{RecruitmentDefinition, Registry};
 use crate::world::{ApprovalPolicy, AutonomyLevel, PolicyKind, PolicySetting, TraitKind};
 use std::cmp::Reverse;
@@ -93,15 +91,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
             .world()
             .get_character(manager)
             .ok_or(RecruitmentError::MissingRecruiter(manager))?;
-        let candidate_record = state
-            .world()
-            .get_character(candidate)
-            .ok_or(RecruitmentError::MissingCandidate(candidate))?;
-        let approach = resolve_autonomous_recruitment_approach(
-            registry.recruitment(),
-            manager_record,
-            candidate_record,
-        );
+        let approach = resolve_autonomous_recruitment_approach(manager_record);
         let authority = MandateAuthority {
             mandate,
             manager,
@@ -136,7 +126,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
                         candidate,
                         approach,
                         attention: AttentionClass::Exception,
-                        summary: approval_request_summary(state, manager, candidate),
+                        summary: approval_request_summary(state, manager, candidate, approach),
                     },
                 )?;
                 if state.player_organization() == Some(organization) {
@@ -300,6 +290,7 @@ fn approval_request_summary(
     state: &AppState,
     recruiter: CharacterId,
     candidate: CharacterId,
+    approach: RecruitmentApproach,
 ) -> String {
     let recruiter_name = state
         .world()
@@ -311,37 +302,19 @@ fn approval_request_summary(
         .get_character(candidate)
         .expect("recruitment approval must reference a persisted candidate")
         .name();
-    format!("{recruiter_name} seeks approval to bring {candidate_name} into the organization.")
+    format!(
+        "{recruiter_name} seeks approval to approach {candidate_name} with a {approach:?} recruitment pitch."
+    )
 }
 
 fn resolve_autonomous_recruitment_approach(
-    definition: &RecruitmentDefinition,
     manager: &crate::world::CharacterRecord,
-    candidate: &crate::world::CharacterRecord,
 ) -> RecruitmentApproach {
-    // Relationship-gated candidates are personal contacts. When that contact has a modeled
-    // motive, the manager should pitch what the candidate actually wants rather than blindly
-    // projecting the manager's own personality onto every prospect. This deliberately does not
-    // calculate or maximize the hidden acceptance margin: it uses only the candidate's modeled
-    // drives and unconditional trait-to-pitch affinities. Manager personality is a secondary
-    // preference only when candidate fit ties; the stable authored approach order is the final
-    // tie-breaker when neither the prospect nor the manager distinguishes two pitches.
-    let manager_preference = manager_recruitment_preference(manager);
-    let mut selected = ALL_RECRUITMENT_APPROACHES[0];
-    let mut best_priority = (
-        recruitment_personal_approach_fit(definition, candidate, selected),
-        selected == manager_preference,
-        Reverse(0_usize),
-    );
-    for (index, approach) in ALL_RECRUITMENT_APPROACHES.into_iter().enumerate().skip(1) {
-        let fit = recruitment_personal_approach_fit(definition, candidate, approach);
-        let priority = (fit, approach == manager_preference, Reverse(index));
-        if priority > best_priority {
-            selected = approach;
-            best_priority = priority;
-        }
-    }
-    selected
+    // Autonomous choice may use only facts available to the acting manager. Candidate drives and
+    // traits are latent character state, not recruiter knowledge merely because a relationship
+    // edge exists. They still affect the candidate's canonical willingness calculation after the
+    // manager chooses a pitch, while the manager's own disposition determines what they try.
+    manager_recruitment_preference(manager)
 }
 
 fn manager_recruitment_preference(manager: &crate::world::CharacterRecord) -> RecruitmentApproach {

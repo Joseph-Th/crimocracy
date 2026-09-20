@@ -572,8 +572,54 @@ fn autonomous_evidence_review_does_not_repeat_an_inconclusive_attempt() {
             .is_empty(),
         "autonomous casework must not retry one inconclusive source forever and keep the case artificially active"
     );
+    assert_eq!(
+        validate_schedule_investigation_work(
+            &registry,
+            &fixture.state,
+            review_draft(&fixture, fixture.first_evidence),
+        )
+        .expect_err("direct scheduling must not reroll an inconclusive completed review"),
+        InvestigationWorkError::EvidenceReviewAlreadyAttempted {
+            evidence: fixture.first_evidence,
+            work: scheduled[0],
+        },
+        "direct and autonomous scheduling must share the same one-real-attempt evidence rule"
+    );
+
+    let envelope =
+        build_save(&registry, &fixture.state).expect("inconclusive review state should save");
+    let mut restored =
+        restore_save(&registry, envelope).expect("inconclusive review state should restore");
+    assert_eq!(
+        restored
+            .legal()
+            .evidence_review_attempt(fixture.first_evidence)
+            .map(|work| work.id()),
+        Some(scheduled[0]),
+        "restore must rebuild completed evidence-review attempt provenance"
+    );
+    assert_eq!(
+        validate_schedule_investigation_work(
+            &registry,
+            &restored,
+            review_draft(&fixture, fixture.first_evidence),
+        )
+        .expect_err("save/load must not reset a completed inconclusive review"),
+        InvestigationWorkError::EvidenceReviewAlreadyAttempted {
+            evidence: fixture.first_evidence,
+            work: scheduled[0],
+        }
+    );
+    assert!(
+        apply_evidence_review_scheduling(&registry, &mut restored)
+            .expect("restored completed review should remain exhausted")
+            .is_empty()
+    );
+
     validate_state(&fixture.state).expect("inconclusive review state should remain valid");
+    validate_state(&restored).expect("restored inconclusive review state should remain valid");
     validate_invariants(&fixture.state);
+    validate_invariants(&restored);
 }
 
 #[test]
@@ -646,6 +692,14 @@ fn custody_cancelled_evidence_review_is_retryable_after_restaffing() {
             .status(),
         InvestigationWorkStatus::Cancelled
     );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .scheduled_work_for_investigator(fixture.investigator)
+            .is_none(),
+        "custody cancellation must release the investigator's live work slot immediately"
+    );
     validate_assign_investigator(
         &fixture.state,
         fixture.investigation,
@@ -667,6 +721,15 @@ fn custody_cancelled_evidence_review_is_retryable_after_restaffing() {
     assert_eq!(
         retry.focus(),
         InvestigationWorkFocus::evidence(fixture.first_evidence)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .evidence_review_attempt(fixture.first_evidence)
+            .map(|record| record.id()),
+        Some(retried[0]),
+        "a cancelled review must release the source so its replacement attempt becomes canonical"
     );
     validate_state(&fixture.state).expect("retried review state should remain valid");
     validate_invariants(&fixture.state);
@@ -1158,6 +1221,14 @@ fn direct_statement_cancels_redundant_pending_interview_without_cancelling_its_c
             .expect("cancelled interview should keep provenance")
             .reason(),
         InvestigationWorkCancellationReason::WitnessStatementRecorded(statement.statement)
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .scheduled_work_for_investigator(fixture.investigator)
+            .is_none(),
+        "direct statement cancellation must release the investigator's live work slot"
     );
     assert!(
         fixture
@@ -1845,10 +1916,25 @@ fn save_round_trip_preserves_due_work_and_deterministic_resolution() {
         build_save(&registry, &fixture.state).expect("pending work should save"),
     )
     .expect("pending work should restore");
+    assert_eq!(
+        restored
+            .legal()
+            .scheduled_work_for_investigator(fixture.investigator)
+            .map(|record| record.id()),
+        Some(work),
+        "restore must rebuild the investigator's live scheduled-work projection"
+    );
     let original_outcome = run_tick(&registry, &mut fixture.state);
     let restored_outcome = run_tick(&registry, &mut restored);
     assert_eq!(original_outcome, restored_outcome);
     assert_eq!(original_outcome.resolved_investigation_work, vec![work]);
+    assert!(
+        restored
+            .legal()
+            .scheduled_work_for_investigator(fixture.investigator)
+            .is_none(),
+        "work completion must release the restored investigator's live work slot"
+    );
 
     let original_resolution = fixture
         .state

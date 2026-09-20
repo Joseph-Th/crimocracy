@@ -175,7 +175,7 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
 pub fn print_starting_player_view(scenario: &Scenario) {
     println!("[ORGANIZATION] Marrow Organization");
     println!(
-        "  (Capabilities show as values; traits and drives are what the organization knows about its own people and its personal contacts. Recruitment pitches land when the approach matches what the candidate wants.)"
+        "  (Capabilities show as values; traits and drives below are internal personnel knowledge about the organization's own people. A personal contact does not reveal a prospect's latent motives.)"
     );
     for character in [
         scenario.boss,
@@ -318,19 +318,6 @@ pub fn print_starting_player_view(scenario: &Scenario) {
         .expect("police organization must exist")
         .name()
         .to_owned();
-    let detective = scenario
-        .state
-        .world()
-        .get_character(scenario.detective)
-        .expect("detective must exist");
-    println!(
-        "[STATE] {} is available to {police_name} with Investigation {}.",
-        detective.name(),
-        detective
-            .capability(CapabilityKind::Investigation)
-            .expect("detective must have investigation capability")
-            .value(),
-    );
     println!(
         "[STATE] {handler_name} keeps a standing Police-channel contact with {contact_name} inside {police_name}; a quiet word costs no street exposure."
     );
@@ -363,81 +350,23 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             );
         }
     }
-    let replacement = scenario
+    let replacement_name = scenario
         .state
         .world()
         .get_character(scenario.danny_ferro)
-        .expect("replacement candidate must exist");
-    let replacement_traits = crimocracy::world::ALL_TRAIT_KINDS
-        .iter()
-        .filter(|kind| replacement.has_trait(**kind))
-        .map(|kind| format!("{kind:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let replacement_drives = crimocracy::world::ALL_DRIVE_KINDS
-        .iter()
-        .filter_map(|kind| {
-            replacement
-                .drive(*kind)
-                .map(|rating| format!("{kind:?} {}", rating.value()))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .expect("replacement candidate must exist")
+        .name();
     println!(
-        "[STATE] {} is an independent with Burglary {} / Stealth {}; traits [{}]; drives [{}]. Marrow holds a personal relationship with him, so he is the fallback entry specialist if the current crew is lost. A Money-driven, Greedy candidate answers a FinancialOpportunity pitch; a frightened, Safety-driven crew member answers Protection.",
-        replacement.name(),
-        replacement
-            .capability(CapabilityKind::Burglary)
-            .expect("replacement must have burglary capability")
-            .value(),
-        replacement
-            .capability(CapabilityKind::Stealth)
-            .expect("replacement must have stealth capability")
-            .value(),
-        if replacement_traits.is_empty() {
-            "-".to_owned()
-        } else {
-            replacement_traits
-        },
-        if replacement_drives.is_empty() {
-            "-".to_owned()
-        } else {
-            replacement_drives
-        },
+        "[STATE] {replacement_name} is an independent entry specialist known through Marrow's personal relationship with him, so he is the fallback if the current crew is lost. His exact capabilities, drives, and traits are not inferred from that relationship."
     );
-    let burglar_record = scenario
+    let burglar_name = scenario
         .state
         .world()
         .get_character(scenario.burglar)
-        .expect("burglar must exist");
-    let burglar_traits = crimocracy::world::ALL_TRAIT_KINDS
-        .iter()
-        .filter(|kind| burglar_record.has_trait(**kind))
-        .map(|kind| format!("{kind:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let burglar_drives = crimocracy::world::ALL_DRIVE_KINDS
-        .iter()
-        .filter_map(|kind| {
-            burglar_record
-                .drive(*kind)
-                .map(|rating| format!("{kind:?} {}", rating.value()))
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .expect("burglar must exist")
+        .name();
     println!(
-        "[STATE] {} carries traits [{}] and drives [{}]; if police exposure ever makes him a poaching target, leadership will need the approach that speaks to what he fears and wants, not a random pitch.",
-        burglar_record.name(),
-        if burglar_traits.is_empty() {
-            "-".to_owned()
-        } else {
-            burglar_traits
-        },
-        if burglar_drives.is_empty() {
-            "-".to_owned()
-        } else {
-            burglar_drives
-        },
+        "[STATE] If police exposure ever makes {burglar_name} a poaching target, leadership can rely on the established Marrow relationship for one personal appeal without pretending that relationship reveals fresh private motive information."
     );
 }
 
@@ -1548,7 +1477,7 @@ pub fn print_experience_readout(
     );
     if rush.win_back_accepted == Some(true) {
         println!(
-            "[WATCH] RUSH recovered its specialist through a drive-matched pitch. A replacement is unnecessary unless that recovery fails; adding headcount would add wages, not repair a missing capability."
+            "[WATCH] RUSH recovered its specialist through a personal appeal grounded in an established relationship. A replacement is unnecessary unless that recovery fails; adding headcount would add wages, not repair a missing capability."
         );
     }
     if press.cold_case_confirmed == Some(true) {

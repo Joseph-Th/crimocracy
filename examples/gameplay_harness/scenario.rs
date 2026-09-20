@@ -255,10 +255,9 @@ pub fn build_scenario(
         },
     )?;
     // Danny Ferro is the act-2 replacement candidate: an independent the organization would need
-    // to court through the canonical executive recruitment path after losing a crew member. His
-    // Gambling-independent career means Burglary 70 / Stealth 58, and he already carries a
-    // pre-existing personal relationship to the boss that makes the pitch deterministic without
-    // any RNG or hidden-state reads.
+    // to court through the canonical executive recruitment path after losing a crew member. The
+    // authored candidate and pitch are fixed fixture policy rather than selected by inspecting his
+    // latent drives or traits; those private characteristics remain production scoring inputs.
     let danny_ferro = insert_character(
         &mut state,
         CharacterDraft {
@@ -341,20 +340,21 @@ pub fn build_scenario(
         burglar,
         boss,
         RelationshipDimensions {
-            trust: level(55),
-            respect: level(45),
+            trust: level(85),
+            respect: level(75),
             fear: level(10),
-            affection: level(40),
+            affection: level(70),
             dependence: level(0),
             resentment: level(0),
-            debt: level(20),
+            debt: level(50),
         },
     )?
     .commit(&mut state)?;
 
-    // Danny's pitch leverages a long-standing personal debt to Marrow, so the relationship edges
-    // run from the candidate to the recruiter and the executive recruitment path stays canonical.
-    // The margin calculation reads only this authored relationship plus the registry definitions.
+    // Danny's pitch has a long-standing personal relationship to Marrow to stand on, so the
+    // relationship edge runs from candidate to recruiter and executive recruitment stays
+    // canonical. Production scoring still considers Danny's own private motives after the
+    // fixture-selected pitch is submitted; harness policy does not inspect them to choose it.
     validate_set_relationship(
         &state,
         danny_ferro,

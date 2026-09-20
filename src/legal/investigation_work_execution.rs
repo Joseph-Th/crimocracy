@@ -70,6 +70,11 @@ pub enum InvestigationWorkError {
         evidence: EvidenceId,
         derived: EvidenceId,
     },
+    #[error("evidence {evidence} already consumed review attempt {work}")]
+    EvidenceReviewAlreadyAttempted {
+        evidence: EvidenceId,
+        work: InvestigationWorkId,
+    },
     #[error("scheduled investigation work {work} already covers this case focus")]
     DuplicateScheduledWork { work: InvestigationWorkId },
     #[error("investigator {investigator} already has scheduled investigation work {work}")]
@@ -408,6 +413,12 @@ fn resolve_review_source(
             derived: derived.id(),
         });
     }
+    if let Some(work) = state.legal.evidence_review_attempt(evidence_id) {
+        return Err(InvestigationWorkError::EvidenceReviewAlreadyAttempted {
+            evidence: evidence_id,
+            work: work.id(),
+        });
+    }
     Ok(BTreeSet::from([evidence_id]))
 }
 
@@ -477,8 +488,7 @@ fn scheduled_work_for_investigator(
 ) -> Option<InvestigationWorkId> {
     state
         .legal
-        .work_for_investigator(investigator)
-        .find(|work| work.status() == InvestigationWorkStatus::Scheduled)
+        .scheduled_work_for_investigator(investigator)
         .map(|work| work.id())
 }
 
@@ -1117,18 +1127,6 @@ fn next_unattempted_review_source(
     state: &AppState,
     investigation: &crate::legal::InvestigationRecord,
 ) -> Result<Option<EvidenceId>, InvestigationWorkError> {
-    // Build the attempted set once for this case. The previous implementation rescanned the
-    // same work history for every evidence item, making a quiet per-minute scheduling pass
-    // quadratic in accumulated case evidence and work history.
-    let attempted_reviews: BTreeSet<EvidenceId> = state
-        .legal
-        .work_for_investigation(investigation.id())
-        .filter(|work| {
-            work.kind() == InvestigationWorkKind::EvidenceReview
-                && work.status() != InvestigationWorkStatus::Cancelled
-        })
-        .filter_map(|work| work.focus().evidence_id())
-        .collect();
     let mut oldest = None;
     for evidence_id in investigation.evidence() {
         // The investigation owns this evidence reference. A missing backing record is a broken
@@ -1138,7 +1136,7 @@ fn next_unattempted_review_source(
             .get_evidence(*evidence_id)
             .ok_or(InvestigationWorkError::InvalidSourceEvidence(*evidence_id))?;
         if !is_reviewable_evidence_kind(evidence.kind())
-            || attempted_reviews.contains(&evidence.id())
+            || state.legal.evidence_review_attempt(evidence.id()).is_some()
         {
             continue;
         }

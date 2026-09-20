@@ -1,6 +1,7 @@
 //! Autonomous delegated-expansion behavior exercised through enterprise production paths.
 
 use super::*;
+use crate::enterprises::autonomous_lifecycle::apply_due_autonomous_enterprise_lifecycle;
 use crate::world::territory_influence::resolve_neighborhood_influence;
 
 fn designate_player(registry: &Registry, state: &mut AppState) -> OrganizationId {
@@ -168,6 +169,320 @@ fn autonomous_expansion_shared_slot_prefers_district_leader_over_organization_id
         "phase-wide contention must honor district leadership before stable organization id"
     );
     assert!(established.contains(&protection.id()));
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_lifecycle_resumes_a_viable_suspended_rival_and_surfaces_the_tick_change() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let enterprise = establish_protection(&registry, &mut fixture);
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("active rival enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("rival suspension should commit");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_439));
+
+    let outcome = run_tick(&registry, &mut fixture.state);
+
+    assert_eq!(outcome.resumed_enterprises, vec![enterprise]);
+    assert!(outcome.retired_enterprises.is_empty());
+    assert!(
+        outcome.autonomous_enterprises.is_empty(),
+        "reopening a racket consumes this mandate's daily enterprise-governance action"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("resumed rival enterprise must persist")
+            .status(),
+        EnterpriseStatus::Active
+    );
+    validate_state(&fixture.state).expect("autonomous resumption should remain structurally valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_lifecycle_resumes_at_most_one_racket_per_mandate_per_day() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let protection = establish_protection(&registry, &mut fixture);
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Lifecycle Capacity Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let second_settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("second settlement account should validate");
+    let hosted = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::LoanSharking,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: second_settlement,
+        },
+    )
+    .expect("second racket under the same mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("second same-mandate racket should commit");
+    for enterprise in [protection, hosted] {
+        validate_suspend_enterprise(&fixture.state, enterprise)
+            .expect("same-mandate racket should suspend")
+            .commit(&mut fixture.state)
+            .expect("same-mandate suspension should commit");
+    }
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state)
+        .expect("same-mandate lifecycle maintenance should resolve");
+
+    assert_eq!(
+        outcome.resumed.len(),
+        1,
+        "one mandate gets one enterprise-governance action per daily pass"
+    );
+    assert_eq!(
+        outcome.resumed_mandates,
+        BTreeSet::from([fixture.authority.mandate])
+    );
+    assert_eq!(
+        [protection, hosted]
+            .into_iter()
+            .filter(|enterprise| {
+                fixture
+                    .state
+                    .enterprises()
+                    .get_enterprise(*enterprise)
+                    .is_some_and(|record| record.status() == EnterpriseStatus::Suspended)
+            })
+            .count(),
+        1,
+        "the second same-mandate suspended racket must wait for a later daily boundary"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_lifecycle_keeps_temporarily_unfunded_racket_suspended() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("active rival enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("rival suspension should commit");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state)
+        .expect("unfunded lifecycle maintenance should resolve");
+
+    assert!(outcome.resumed.is_empty());
+    assert!(outcome.retired.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("unfunded enterprise remains durable")
+            .status(),
+        EnterpriseStatus::Suspended,
+        "lack of current runway is temporary and must not destroy the racket's history or slot"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_lifecycle_retires_suspended_racket_without_manager_discretion() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture_for_kind_and_autonomy(
+        OrganizationKind::Criminal,
+        AutonomyLevel::Guided,
+    );
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let enterprise = establish_protection(&registry, &mut fixture);
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("active rival enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("rival suspension should commit");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state)
+        .expect("non-delegated suspended rival lifecycle should resolve");
+
+    assert!(outcome.resumed.is_empty());
+    assert_eq!(outcome.retired, vec![enterprise]);
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("retired enterprise remains durable history")
+            .status(),
+        EnterpriseStatus::Retired
+    );
+    assert!(
+        !enterprise_location_is_occupied(
+            &fixture.state,
+            EnterpriseKind::Protection,
+            fixture.location,
+        ),
+        "an immutable lack of autonomous discretion must not reserve a rival slot forever"
+    );
+    validate_state(&fixture.state)
+        .expect("non-delegated autonomous retirement should remain structurally valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_lifecycle_retires_revoked_racket_even_while_police_fear_blocks_operations() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let enterprise = establish_protection(&registry, &mut fixture);
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("active rival enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("rival suspension should commit");
+    validate_revoke_mandate(&fixture.state, fixture.authority.mandate)
+        .expect("suspended enterprise should release the mandate's active dependency")
+        .commit(&mut fixture.state)
+        .expect("rival mandate revocation should commit");
+    let reputation = registry.reputation();
+    let fear_delta = i8::try_from(
+        i16::from(reputation.expansion_police_fear_ceiling()) - i16::from(reputation.baseline()),
+    )
+    .expect("authored expansion fear ceiling must fit one bounded setup delta");
+    crate::reputation::reputation_system::apply_reputation_delta(
+        &registry,
+        &mut fixture.state,
+        fixture.organization,
+        crate::reputation::AudienceKind::Police,
+        crate::reputation::ReputationDimension::Fear,
+        fear_delta,
+    )
+    .expect("fixture police fear should apply");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state)
+        .expect("revoked suspended racket should retire independently of temporary police posture");
+
+    assert!(outcome.resumed.is_empty());
+    assert_eq!(outcome.retired, vec![enterprise]);
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("retired enterprise remains durable history")
+            .status(),
+        EnterpriseStatus::Retired,
+        "temporary police fear must not keep a stale revoked configuration reserving its slot"
+    );
+    validate_state(&fixture.state).expect("autonomous retirement should remain structurally valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_lifecycle_retires_rival_racket_after_its_suspended_host_is_sold() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Former Rival Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::LoanSharking,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("hosted rival racket should validate")
+    .commit(&mut fixture.state)
+    .expect("hosted rival racket should commit");
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("hosted rival racket should suspend")
+        .commit(&mut fixture.state)
+        .expect("hosted rival suspension should commit");
+    validate_transfer_business_ownership(&fixture.state, venue, BusinessOwner::Independent)
+        .expect("a suspended racket no longer locks its former venue")
+        .commit(&mut fixture.state)
+        .expect("former venue sale should commit");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state)
+        .expect("structurally obsolete rival racket should resolve");
+
+    assert!(outcome.resumed.is_empty());
+    assert_eq!(outcome.retired, vec![enterprise]);
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("retired racket remains durable history")
+            .status(),
+        EnterpriseStatus::Retired
+    );
+    assert!(
+        !enterprise_location_is_occupied(
+            &fixture.state,
+            EnterpriseKind::LoanSharking,
+            EnterpriseLocation::Business(venue),
+        ),
+        "retirement must release the abandoned suspended slot"
+    );
     validate_invariants(&fixture.state);
 }
 
@@ -1060,7 +1375,7 @@ fn autonomous_expansion_surfaces_enterprise_id_exhaustion_without_partial_establ
         .expect_err("autonomous expansion must surface enterprise allocator exhaustion");
     assert!(matches!(
         error,
-        crate::enterprises::autonomous_expansion::AutonomousExpansionError::Enterprise(
+        crate::enterprises::autonomous_planning::AutonomousEnterpriseError::Enterprise(
             EnterpriseError::IdExhaustion(_)
         )
     ));

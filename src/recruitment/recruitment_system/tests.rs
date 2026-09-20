@@ -570,10 +570,14 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
     assert_eq!(attempt.candidate(), fixture.candidate);
     assert_eq!(
         attempt.approach(),
-        RecruitmentApproach::Protection,
-        "a delegated recruiter should tailor the pitch to the relationship-gated prospect's strongest modeled motive"
+        RecruitmentApproach::PersonalAppeal,
+        "a charismatic delegated recruiter must choose from their own disposition rather than hidden candidate motives"
     );
-    assert_eq!(attempt.factors().drive_alignment(), 90);
+    assert_eq!(
+        attempt.factors().drive_alignment(),
+        0,
+        "the candidate's safety drive still belongs to willingness scoring and does not rewrite the manager's chosen pitch"
+    );
     assert!(matches!(
         attempt.authority(),
         RecruitmentAuthority::Delegated {
@@ -707,14 +711,15 @@ fn delegated_manager_prefers_the_stronger_relationship_not_a_random_prospect() {
     assert_eq!(attempt.candidate(), stronger_candidate);
     assert_eq!(
         attempt.approach(),
-        RecruitmentApproach::FinancialOpportunity,
-        "candidate selection and pitch selection should remain coherent for the selected prospect"
+        RecruitmentApproach::PersonalAppeal,
+        "the prospect's hidden money drive must not leak into the autonomous manager's pitch choice"
     );
+    assert_eq!(attempt.factors().drive_alignment(), 0);
     validate_invariants(&fixture.state);
 }
 
 #[test]
-fn delegated_manager_uses_candidate_trait_affinity_when_drives_do_not_choose_a_pitch() {
+fn delegated_manager_does_not_use_candidate_hidden_traits_to_choose_pitch() {
     let registry = build_registry();
     let mut fixture = fixture();
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
@@ -756,16 +761,22 @@ fn delegated_manager_uses_candidate_trait_affinity_when_drives_do_not_choose_a_p
     assert_eq!(attempt.candidate(), greedy_candidate);
     assert_eq!(
         attempt.approach(),
-        RecruitmentApproach::FinancialOpportunity
+        RecruitmentApproach::PersonalAppeal,
+        "a relationship edge does not reveal the prospect's latent greedy trait to the recruiter"
     );
     assert_eq!(attempt.factors().drive_alignment(), 0);
-    assert!(attempt.factors().trait_adjustment() > 0);
-    validate_state(&fixture.state).expect("trait-aware autonomous recruitment should stay valid");
+    assert_eq!(
+        attempt.factors().trait_adjustment(),
+        0,
+        "hidden candidate traits still affect only pitches whose authored rules actually match"
+    );
+    validate_state(&fixture.state)
+        .expect("knowledge-bounded autonomous recruitment should stay valid");
     validate_invariants(&fixture.state);
 }
 
 #[test]
-fn delegated_manager_personality_breaks_equal_candidate_pitch_fit() {
+fn delegated_manager_personality_determines_autonomous_pitch() {
     let registry = build_registry();
     let mut fixture = fixture();
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
@@ -808,7 +819,7 @@ fn delegated_manager_personality_breaks_equal_candidate_pitch_fit() {
     assert_eq!(
         attempt.approach(),
         RecruitmentApproach::PersonalAppeal,
-        "a charismatic manager should prefer personal appeal only when candidate fit is tied"
+        "a charismatic manager should use the authored personal-appeal preference without consulting hidden prospect state"
     );
     assert_eq!(attempt.factors().drive_alignment(), 0);
     assert_eq!(attempt.factors().trait_adjustment(), 0);
@@ -3040,6 +3051,19 @@ fn player_organization_approval_requests_wait_for_the_player() {
             .pending_for_recruitment_approval(fixture.target, fixture.candidate),
         Some(outcome.approval_requests[0].decision),
         "the player's own queue stays pending"
+    );
+    let request = fixture
+        .state
+        .decisions()
+        .get_decision(outcome.approval_requests[0].decision)
+        .expect("surfaced player recruitment approval should persist");
+    let DecisionContext::RecruitmentApproval(context) = request.context() else {
+        panic!("autonomous personnel request must retain recruitment approval context");
+    };
+    assert_eq!(context.approach(), RecruitmentApproach::PersonalAppeal);
+    assert!(
+        request.summary().contains("PersonalAppeal"),
+        "leadership's approval summary must disclose the frozen pitch it is being asked to authorize"
     );
     assert_eq!(
         fixture

@@ -772,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn drive_matched_win_back_brings_a_frightened_defector_home() {
+    fn relationship_based_win_back_uses_no_hidden_motive_selection() {
         let registry = crimocracy::build_registry();
         let metrics = play_session(
             &registry,
@@ -787,17 +787,21 @@ mod tests {
             "the exposed crew member must still be poached so the win-back has something to answer"
         );
         assert_eq!(
+            metrics.win_back_attempted, true,
+            "the confirmed defector should receive one canonical win-back attempt"
+        );
+        assert_eq!(
             metrics.win_back_accepted,
             Some(true),
-            "a Protection pitch matched to a Safety-driven, EasilyFrightened defector must succeed through production scoring"
+            "the authored boss-defector bond should make the knowledge-bounded personal appeal viable"
         );
         assert!(
             metrics.win_back_margin.is_some_and(|margin| margin >= 0),
-            "the accepted win-back must carry a non-negative production margin"
+            "the accepted canonical win-back must carry a non-negative production margin"
         );
         assert!(
             !metrics.replacement_recruited,
-            "do not hire a redundant specialist after recovery"
+            "do not hire a redundant specialist after relationship-based recovery"
         );
         assert!(
             !metrics.known_rackets.is_empty(),
@@ -814,7 +818,8 @@ mod tests {
             metrics.payroll_paid_cents, 25_600,
             "four members, two payroll days"
         );
-        validate_second_act_evidence(&metrics).expect("a returned crew closes the recovery arc");
+        validate_second_act_evidence(&metrics)
+            .expect("the second act must recover through win-back or canonical replacement");
     }
 
     #[test]
@@ -950,7 +955,7 @@ mod tests {
         // Adjacent policy seeds must not replay one decision sequence: over a window of eight
         // values both binary outcomes must appear, and different salts must not agree.
         // Salts below are the live evaluation-policy salts (defector-watch order, blind
-        // witness-pressure delay); the win-back pitch itself is drive-matched, not salted.
+        // witness-pressure delay); the win-back pitch itself is relationship-based, not salted.
         let outcomes: Vec<u64> = (0..8)
             .map(|offset| bounded_policy_choice(DEFAULT_POLICY_SEED + offset, 0x0DEF, 2))
             .collect();

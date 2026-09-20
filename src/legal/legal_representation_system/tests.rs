@@ -1747,11 +1747,17 @@ fn automatic_policy_concludes_representation_after_release_and_frees_the_contact
         .commit(&mut fixture.state)
         .expect("defendant release should commit");
 
-    // The next automatic-support stage concludes the now-moot matter through the canonical
-    // end path so the Legal contact becomes available again instead of staying locked.
-    let ended = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
-        .expect("automatic legal support should resolve");
-    assert!(ended.is_empty(), "retention must not rerun after release");
+    // The next canonical tick concludes the now-moot matter through the automatic-support
+    // stage so the Legal contact becomes available again instead of staying locked.
+    let outcome = run_tick(&fixture.registry, &mut fixture.state);
+    assert!(
+        outcome.automatic_legal_support.is_empty(),
+        "retention must not rerun after release"
+    );
+    assert_eq!(
+        outcome.concluded_automatic_legal_support, 1,
+        "TickOutcome must surface an automatic-policy representation ending even when no new counsel is retained"
+    );
     let record = fixture
         .state
         .legal()

@@ -9,6 +9,8 @@ use crate::operations::{
     OperationApproach, OperationConstraint, OperationContingency, OperationDraft, OperationKind,
     OperationObjective, OperationStatus, RoleKind,
 };
+use crate::reputation::reputation_system::{apply_reputation_delta, resolve_score};
+use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_neighborhood,
     insert_organization,
@@ -22,6 +24,57 @@ use std::collections::{BTreeMap, BTreeSet};
 
 fn test_rating(value: u8) -> Rating {
     Rating::try_new(value).expect("simulation test rating must be valid")
+}
+
+#[test]
+fn tick_outcome_surfaces_reputation_only_decay_mutation() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xDEC4_1933);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Quiet Reputation Fixture".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("fixture organization should validate");
+    let baseline = registry.reputation().baseline();
+    apply_reputation_delta(
+        &registry,
+        &mut state,
+        organization,
+        AudienceKind::Police,
+        ReputationDimension::Fear,
+        10,
+    )
+    .expect("fixture reputation movement should apply");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(crate::core::time::DAY_MINUTES - 1)
+            .expect("one campaign day minus one minute must fit SimDuration"),
+    ));
+
+    let outcome = run_tick(&registry, &mut state).expect("day-boundary tick should succeed");
+
+    assert_eq!(outcome.now.as_minutes(), crate::core::time::DAY_MINUTES);
+    assert_eq!(outcome.reputation_changes, 1);
+    assert_eq!(
+        resolve_score(
+            &registry,
+            state.reputation(),
+            organization,
+            AudienceKind::Police,
+            ReputationDimension::Fear,
+        ),
+        baseline + 10 - registry.reputation().daily_decay_step(),
+    );
+    assert!(outcome.payrolls.is_empty());
+    assert!(outcome.business_cycles.is_empty());
+    assert!(outcome.enterprise_cycles.is_empty());
+    assert!(outcome.recruitment_attempts.is_empty());
+    assert!(outcome.autonomous_enterprises.is_empty());
+    assert!(outcome.executive_brief.is_none());
+    validate_state(&state).expect("reputation-only tick should remain structurally valid");
 }
 
 #[test]

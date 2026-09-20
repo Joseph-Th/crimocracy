@@ -1556,6 +1556,29 @@ fn incident_intake_resumes_a_matching_suspended_shelf_instead_of_opening_a_paral
     .expect("shelving should validate")
     .commit(&mut state)
     .expect("shelving should commit");
+    assert_eq!(
+        state
+            .legal()
+            .suspended_originated_investigations_for_owner(police)
+            .map(|case| case.id())
+            .collect::<Vec<_>>(),
+        vec![first.investigation],
+        "suspension must enter the owner's resumable originated-shelf projection"
+    );
+    state = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("suspended originated shelf should save"),
+    )
+    .expect("suspended originated shelf should restore");
+    assert_eq!(
+        state
+            .legal()
+            .suspended_originated_investigations_for_owner(police)
+            .map(|case| case.id())
+            .collect::<Vec<_>>(),
+        vec![first.investigation],
+        "restore must rebuild the resumable originated-shelf projection"
+    );
 
     // A validated intake pins which suspended shelf it will resume. If that shelf cycles
     // through another lifecycle change before commit, the stale token must not append evidence
@@ -1613,6 +1636,13 @@ fn incident_intake_resumes_a_matching_suspended_shelf_instead_of_opening_a_paral
         .set_next_raw_for_test(IdKind::Investigation, next_investigation);
     assert_eq!(second.investigation, first.investigation);
     assert!(second.resumed_shelf);
+    assert!(
+        state
+            .legal()
+            .suspended_originated_investigations_for_owner(police)
+            .all(|case| case.id() != first.investigation),
+        "resuming the shelf must release it from the suspended-originated projection"
+    );
     assert_eq!(
         state
             .legal()

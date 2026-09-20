@@ -282,9 +282,7 @@ fn find_resumable_shelf(
 ) -> Option<(InvestigationId, u32)> {
     state
         .legal
-        .investigations_for_owner(draft.owner)
-        .filter(|record| record.status() == InvestigationStatus::Suspended)
-        .filter(|record| record.origin().is_some())
+        .suspended_originated_investigations_for_owner(draft.owner)
         .filter_map(|record| {
             let overlap = record.subjects().intersection(&draft.subjects).count();
             (overlap > 0).then_some((record, overlap))

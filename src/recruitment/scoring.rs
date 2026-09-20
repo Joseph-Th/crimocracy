@@ -102,42 +102,6 @@ pub(crate) fn recruitment_relationship_support(
     positive.saturating_sub(fear_penalty)
 }
 
-/// Candidate-specific pitch fit that is safe for autonomous managerial choice. This deliberately
-/// excludes incumbent-relationship state, perceived legal pressure, organization reputation, and
-/// every other factor that belongs to the final willingness calculation rather than to the
-/// recruiter's choice of what kind of appeal to make. The score reuses the authored drive weight
-/// and approach-specific unconditional trait rules, so autonomous pitch selection cannot drift
-/// away from the same candidate motives the canonical recruitment resolver later scores.
-pub(crate) fn recruitment_personal_approach_fit(
-    definition: &RecruitmentDefinition,
-    candidate: &crate::world::CharacterRecord,
-    approach: RecruitmentApproach,
-) -> i32 {
-    let drive_alignment = definition
-        .drives_for_approach(approach)
-        .iter()
-        .map(|kind| drive_value(candidate, *kind))
-        .max()
-        .unwrap_or(0);
-    let drive_fit = weighted(
-        drive_alignment,
-        i32::from(definition.weights().drive_alignment),
-    );
-    let trait_fit = definition
-        .trait_rules()
-        .iter()
-        .filter(|rule| rule.approach == Some(approach))
-        .filter(|rule| rule.minimum_incumbent_resentment.is_none())
-        .filter(|rule| candidate.has_trait(rule.trait_kind))
-        .try_fold(0_i32, |total, rule| {
-            total.checked_add(i32::from(rule.adjustment))
-        })
-        .expect("validated authored recruitment trait adjustments must fit i32");
-    drive_fit
-        .checked_add(trait_fit)
-        .expect("validated authored recruitment pitch fit must fit i32")
-}
-
 pub(crate) fn recruitment_incumbent_factors(
     definition: &RecruitmentDefinition,
     dimensions: RelationshipDimensions,

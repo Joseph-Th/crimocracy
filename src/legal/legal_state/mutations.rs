@@ -458,6 +458,30 @@ impl LegalState {
             .entry(record.investigator())
             .or_default()
             .insert(id);
+        let previous_investigator = self
+            .indexes
+            .work
+            .scheduled_work_by_investigator
+            .insert(record.investigator(), id);
+        debug_assert!(
+            previous_investigator.is_none(),
+            "Ownership Exclusivity: investigator received overlapping scheduled work"
+        );
+        if record.kind() == InvestigationWorkKind::EvidenceReview {
+            let evidence = record
+                .focus()
+                .evidence_id()
+                .expect("scheduled evidence review must have evidence focus");
+            let previous_review = self
+                .indexes
+                .work
+                .evidence_review_attempt_by_source
+                .insert(evidence, id);
+            debug_assert!(
+                previous_review.is_none(),
+                "Ownership Exclusivity: evidence received multiple live/completed review attempts"
+            );
+        }
         self.indexes
             .work
             .scheduled_work_by_due_at
@@ -491,7 +515,7 @@ impl LegalState {
         resolution: InvestigationWorkResolution,
     ) {
         let resolved_at = resolution.resolved_at();
-        let (due_at, focus_key) = {
+        let (due_at, focus_key, investigator) = {
             let record = self
                 .investigation_work
                 .get(&id)
@@ -499,6 +523,7 @@ impl LegalState {
             (
                 record.due_at(),
                 (record.investigation(), record.kind(), record.focus()),
+                record.investigator(),
             )
         };
         if let Some(ids) = self.indexes.work.scheduled_work_by_due_at.get_mut(&due_at) {
@@ -508,6 +533,16 @@ impl LegalState {
             }
         }
         self.indexes.work.scheduled_work_by_focus.remove(&focus_key);
+        let removed = self
+            .indexes
+            .work
+            .scheduled_work_by_investigator
+            .remove(&investigator);
+        debug_assert_eq!(
+            removed,
+            Some(id),
+            "completed work must own the investigator's scheduled-work slot"
+        );
         let investigation_id = {
             let record = self
                 .investigation_work
@@ -608,16 +643,13 @@ impl LegalState {
         let work = self
             .indexes
             .work
-            .work_by_investigator
+            .scheduled_work_by_investigator
             .get(&investigator)
-            .into_iter()
-            .flatten()
             .copied()
-            .find(|work| {
-                self.investigation_work.get(work).is_some_and(|record| {
-                    record.investigation() == investigation_id
-                        && record.status() == InvestigationWorkStatus::Scheduled
-                })
+            .filter(|work| {
+                self.investigation_work
+                    .get(work)
+                    .is_some_and(|record| record.investigation() == investigation_id)
             });
         let Some(work) = work else {
             return;
@@ -643,7 +675,7 @@ impl LegalState {
         id: InvestigationWorkId,
         cancellation: InvestigationWorkCancellation,
     ) -> InvestigationId {
-        let (due_at, focus_key) = {
+        let (due_at, focus_key, investigator, review_source) = {
             let record = self
                 .investigation_work
                 .get(&id)
@@ -651,6 +683,10 @@ impl LegalState {
             (
                 record.due_at(),
                 (record.investigation(), record.kind(), record.focus()),
+                record.investigator(),
+                (record.kind() == InvestigationWorkKind::EvidenceReview)
+                    .then(|| record.focus().evidence_id())
+                    .flatten(),
             )
         };
         if let Some(ids) = self.indexes.work.scheduled_work_by_due_at.get_mut(&due_at) {
@@ -660,6 +696,28 @@ impl LegalState {
             }
         }
         self.indexes.work.scheduled_work_by_focus.remove(&focus_key);
+        let removed = self
+            .indexes
+            .work
+            .scheduled_work_by_investigator
+            .remove(&investigator);
+        debug_assert_eq!(
+            removed,
+            Some(id),
+            "cancelled work must own the investigator's scheduled-work slot"
+        );
+        if let Some(evidence) = review_source {
+            let removed = self
+                .indexes
+                .work
+                .evidence_review_attempt_by_source
+                .remove(&evidence);
+            debug_assert_eq!(
+                removed,
+                Some(id),
+                "cancelled evidence review must own the source's attempt slot"
+            );
+        }
         {
             let record = self
                 .investigation_work
@@ -688,6 +746,7 @@ impl LegalState {
             .get_mut(&investigation_id)
             .expect("validated investigation disappeared before lifecycle commit");
         let owner = investigation.owner;
+        let originated = investigation.origin.is_some();
         investigation.status = status;
         investigation.version = advance_version_preflighted(investigation.version);
         // Shelving or closing a case releases its lead: a case nobody works holds no
@@ -739,6 +798,33 @@ impl LegalState {
                 if ids.is_empty() {
                     self.indexes.investigations.active_by_owner.remove(&owner);
                 }
+            }
+        }
+        if previous_status == InvestigationStatus::Active
+            && status == InvestigationStatus::Suspended
+            && originated
+        {
+            self.indexes
+                .investigations
+                .suspended_originated_by_owner
+                .entry(owner)
+                .or_default()
+                .insert(investigation_id);
+        } else if previous_status == InvestigationStatus::Suspended
+            && status != InvestigationStatus::Suspended
+            && originated
+            && let Some(ids) = self
+                .indexes
+                .investigations
+                .suspended_originated_by_owner
+                .get_mut(&owner)
+        {
+            ids.remove(&investigation_id);
+            if ids.is_empty() {
+                self.indexes
+                    .investigations
+                    .suspended_originated_by_owner
+                    .remove(&owner);
             }
         }
         match (previous_status, status) {
