@@ -10,7 +10,7 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::core::version::advance_version_preflighted;
-use crate::delegation::{MandateAuthority, ResponsibilityScope};
+use crate::delegation::{BudgetPeriod, MandateAuthority, ResponsibilityScope};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -223,10 +223,16 @@ pub struct FinanceState {
     #[serde(skip)]
     transactions_by_mandate: BTreeMap<MandateId, BTreeSet<LedgerTransactionId>>,
     /// Running per-(mandate, period) charged totals, updated at ledger commit. Budget
-    /// authority checks read this O(log n) instead of rescanning the mandate's full
-    /// transaction history (which grows for the life of the campaign) on every spend.
+    /// records retain their original authored window, so this exact-window aggregate is kept
+    /// for restore/invariant verification even when a later mandate revision changes cadence.
     #[serde(skip)]
     budget_used_by_period: BTreeMap<(MandateId, SimTime, SimTime), Money>,
+    /// Running per-(mandate, campaign day) authorized spend. Current authority queries sum the
+    /// one or seven day buckets covered by the mandate's *current* Daily/Weekly window. This
+    /// prevents a mandate revision from resetting already-spent authority merely by changing
+    /// period, funding account, or limit while retaining O(log n) bounded lookup work.
+    #[serde(skip)]
+    budget_used_by_day: BTreeMap<(MandateId, SimTime), Money>,
 }
 
 impl FinanceState {
@@ -238,6 +244,7 @@ impl FinanceState {
         self.accounts_by_owner.clear();
         self.transactions_by_mandate.clear();
         self.budget_used_by_period.clear();
+        self.budget_used_by_day.clear();
         for account in self.accounts.values() {
             self.accounts_by_owner
                 .entry(account.owner())
@@ -263,6 +270,20 @@ impl FinanceState {
                 return false;
             };
             budget_cents.insert(key, total);
+
+            let day_start = BudgetPeriod::Daily
+                .window(transaction.occurred_at())
+                .start();
+            let day_key = (usage.mandate(), day_start);
+            let day_total = self
+                .budget_used_by_day
+                .get(&day_key)
+                .copied()
+                .unwrap_or(Money::ZERO);
+            let Some(day_total) = day_total.checked_add(usage.amount()) else {
+                return false;
+            };
+            self.budget_used_by_day.insert(day_key, day_total);
         }
         for (key, cents) in budget_cents {
             let Ok(cents) = i64::try_from(cents) else {
@@ -301,18 +322,35 @@ impl FinanceState {
         self.transactions.values()
     }
 
-    /// The running charged total for one (mandate, period) window, maintained at ledger
-    /// commit time.
-    pub(crate) fn budget_used_for(
+    /// Authorized spend by this mandate whose transaction timestamp falls inside the supplied
+    /// current budget window. Daily and weekly windows are calendar-aligned, so at most seven
+    /// day buckets contribute regardless of campaign age.
+    pub(crate) fn budget_used_in_window(
         &self,
         mandate: MandateId,
         period_start: SimTime,
         period_end: SimTime,
-    ) -> Money {
-        self.budget_used_by_period
-            .get(&(mandate, period_start, period_end))
-            .copied()
-            .unwrap_or(Money::ZERO)
+    ) -> Option<Money> {
+        debug_assert!(period_start < period_end);
+        // We aggregate whole campaign-day buckets, so using the last minute strictly before the
+        // persisted end works for both ordinary half-open windows and the clamped terminal window:
+        // `u64::MAX - 1` and the inclusive terminal instant are necessarily in the same authored
+        // day because `u64::MAX` is not a day boundary.
+        let last_included = SimTime::from_minutes(
+            period_end
+                .as_minutes()
+                .checked_sub(1)
+                .expect("nonempty budget window must end after minute zero"),
+        );
+        let last_day_start = BudgetPeriod::Daily.window(last_included).start();
+        let mut used = Money::ZERO;
+        for (_, amount) in self
+            .budget_used_by_day
+            .range((mandate, period_start)..=(mandate, last_day_start))
+        {
+            used = used.checked_add(*amount)?;
+        }
+        Some(used)
     }
 
     fn insert_account(&mut self, record: FinancialAccountRecord) {
@@ -333,8 +371,10 @@ impl FinanceState {
         self.budget_used_by_period.iter()
     }
 
-    pub(crate) fn budget_used_entry_count(&self) -> usize {
-        self.budget_used_by_period.len()
+    pub(crate) fn budget_used_day_entries(
+        &self,
+    ) -> impl Iterator<Item = (&(MandateId, SimTime), &Money)> {
+        self.budget_used_by_day.iter()
     }
 
     pub(crate) fn accounts(&self) -> impl Iterator<Item = &FinancialAccountRecord> {
@@ -385,6 +425,18 @@ impl FinanceState {
                 .checked_add(usage.amount())
                 .expect("budget usage accumulator overflowed");
             self.budget_used_by_period.insert(key, total);
+
+            let day_start = BudgetPeriod::Daily.window(record.occurred_at()).start();
+            let day_key = (usage.mandate(), day_start);
+            let day_used = self
+                .budget_used_by_day
+                .get(&day_key)
+                .copied()
+                .unwrap_or(Money::ZERO);
+            let day_total = day_used
+                .checked_add(usage.amount())
+                .expect("daily budget usage accumulator overflowed after validation");
+            self.budget_used_by_day.insert(day_key, day_total);
         }
         let previous = self.transactions.insert(record.id(), record);
         debug_assert!(

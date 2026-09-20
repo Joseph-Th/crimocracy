@@ -558,11 +558,14 @@ pub fn resolve_budget_usage(
         .budget()
         .ok_or(FinanceError::MissingBudget(mandate))?;
     let window = budget.period.window(at);
-    // Served from the running per-period aggregate maintained at ledger commit, so a
-    // delegated spend costs O(log n) instead of rescanning the mandate's whole history.
+    // Served from campaign-day aggregates maintained at ledger commit. Summing the one or seven
+    // buckets covered by the *current* authored window means revising a mandate's cadence,
+    // funding account, or limit cannot erase spending that already occurred inside that window.
+    // Lookup stays bounded instead of rescanning the mandate's campaign-length history.
     let used = state
         .finance
-        .budget_used_for(mandate, window.start(), window.end());
+        .budget_used_in_window(mandate, window.start(), window.end())
+        .ok_or(FinanceError::BudgetOverflow(mandate))?;
     let remaining = budget
         .limit
         .checked_sub(used)

@@ -5,6 +5,7 @@ use crate::core::id::MandateId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::delegation::BudgetPeriod;
 use crate::finance::{BudgetUsageRecord, FinancialAccountRecord, LedgerTransactionRecord, Money};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,6 +14,7 @@ type BudgetPeriodKey = (
     crate::core::time::SimTime,
     crate::core::time::SimTime,
 );
+type BudgetDayKey = (MandateId, SimTime);
 
 struct FinanceValidationScratch {
     account_ids: Vec<crate::core::id::FinancialAccountId>,
@@ -20,6 +22,7 @@ struct FinanceValidationScratch {
     derived_account_versions: Vec<u32>,
     expected_mandate_entries: usize,
     derived_budget_totals: BTreeMap<BudgetPeriodKey, i64>,
+    derived_budget_day_totals: BTreeMap<BudgetDayKey, i64>,
     seen_posting_accounts: BTreeSet<crate::core::id::FinancialAccountId>,
     last_transaction_time: Option<SimTime>,
 }
@@ -96,6 +99,7 @@ fn initialize_ledger_scratch(state: &AppState) -> FinanceValidationScratch {
         derived_account_versions: Vec::with_capacity(account_count),
         expected_mandate_entries: 0,
         derived_budget_totals: BTreeMap::new(),
+        derived_budget_day_totals: BTreeMap::new(),
         // Reused for every transaction to avoid allocating a new ordered set in the
         // campaign-length ledger loop.
         seen_posting_accounts: BTreeSet::new(),
@@ -250,7 +254,7 @@ fn validate_budget_usage(
             && !mandate.scopes().contains(&usage.scope()))
         || !current_budget_matches
         || usage.period_start() >= usage.period_end()
-        || !persisted_budget_window_contains(
+        || !is_authored_budget_window(
             usage.period_start(),
             usage.period_end(),
             transaction.occurred_at(),
@@ -270,20 +274,30 @@ fn validate_budget_usage(
             transaction: transaction.id(),
         },
     )?;
+    let day_start = BudgetPeriod::Daily
+        .window(transaction.occurred_at())
+        .start();
+    let day_total = scratch
+        .derived_budget_day_totals
+        .entry((usage.mandate(), day_start))
+        .or_insert(0);
+    *day_total = day_total.checked_add(usage.amount().cents()).ok_or(
+        StateValidationError::LedgerArithmeticOverflow {
+            transaction: transaction.id(),
+        },
+    )?;
     Ok(())
 }
 
-/// Historical mandate revisions can replace the current period definition, so old budget usage
-/// must validate its persisted bounds without consulting today's mandate configuration. Normal
-/// windows are half-open; an end at `u64::MAX` denotes the clamped final partial period and
-/// therefore includes the last representable instant.
-fn persisted_budget_window_contains(start: SimTime, end: SimTime, at: SimTime) -> bool {
-    at >= start
-        && if end.as_minutes() == u64::MAX {
-            at <= end
-        } else {
-            at < end
-        }
+/// Historical mandate revisions can replace the current cadence, but the vocabulary itself is
+/// closed: every persisted usage window must still be exactly the Daily or Weekly authored window
+/// that contained the transaction. This rejects arbitrary historical intervals without needing a
+/// second mandate-revision history solely for validation.
+fn is_authored_budget_window(start: SimTime, end: SimTime, at: SimTime) -> bool {
+    [BudgetPeriod::Daily, BudgetPeriod::Weekly]
+        .into_iter()
+        .map(|period| period.window(at))
+        .any(|window| window.start() == start && window.end() == end && window.contains(at))
 }
 
 fn validate_finance_aggregates(
@@ -293,14 +307,26 @@ fn validate_finance_aggregates(
     if state.finance.indexed_mandate_entries() != scratch.expected_mandate_entries {
         return Err(finance_index_error());
     }
-    let aggregate_matches = state.finance.budget_used_entries().all(|(key, total)| {
-        scratch
+    let aggregate_matches = state
+        .finance
+        .budget_used_entries()
+        .map(|(key, total)| (key, total.cents()))
+        .eq(scratch
             .derived_budget_totals
-            .get(key)
-            .is_some_and(|derived| *derived == total.cents())
-    }) && scratch.derived_budget_totals.len()
-        == state.finance.budget_used_entry_count();
+            .iter()
+            .map(|(key, total)| (key, *total)));
     if !aggregate_matches {
+        return Err(finance_index_error());
+    }
+    let day_aggregate_matches = state
+        .finance
+        .budget_used_day_entries()
+        .map(|(key, total)| (key, total.cents()))
+        .eq(scratch
+            .derived_budget_day_totals
+            .iter()
+            .map(|(key, total)| (key, *total)));
+    if !day_aggregate_matches {
         return Err(finance_index_error());
     }
     for account in state.finance.accounts() {

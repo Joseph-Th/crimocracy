@@ -81,6 +81,194 @@ fn transaction_validation_rejects_backdated_ledger_mutation() {
 }
 
 #[test]
+fn mandate_budget_revision_cannot_reset_spend_inside_new_current_window() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Weekly spend before cadence revision".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-1_000),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(1_000),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("initial weekly spend should fit authority")
+    .commit(&mut state)
+    .expect("initial weekly spend should commit");
+
+    let record = state
+        .delegation()
+        .get_mandate(mandate)
+        .expect("mandate should persist");
+    validate_revise_mandate(
+        &state,
+        mandate,
+        MandateRevisionDraft {
+            scopes: record.scopes().clone(),
+            standing_orders: record.standing_orders().clone(),
+            budget: Some(BudgetAuthority {
+                funding_account: funding,
+                limit: Money::from_cents(1_200),
+                period: BudgetPeriod::Daily,
+            }),
+        },
+    )
+    .expect("weekly-to-daily budget revision should validate")
+    .commit(&mut state)
+    .expect("weekly-to-daily budget revision should commit");
+
+    let usage = resolve_budget_usage(&state, mandate, state.now())
+        .expect("revised current budget usage should resolve");
+    assert_eq!(usage.limit, Money::from_cents(1_200));
+    assert_eq!(usage.used, Money::from_cents(1_000));
+    assert_eq!(usage.remaining, Money::from_cents(200));
+
+    let error = match validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Cadence-reset overspend attempt".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-300),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(300),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    ) {
+        Ok(_) => panic!("changing cadence must not reset current-window spending"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        FinanceError::BudgetExceeded {
+            mandate,
+            limit_cents: 1_200,
+            used_cents: 1_000,
+            requested_cents: 300,
+        }
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn weekly_budget_after_daily_revision_counts_prior_days_in_same_week() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+    let record = state
+        .delegation()
+        .get_mandate(mandate)
+        .expect("mandate should exist");
+    validate_revise_mandate(
+        &state,
+        mandate,
+        MandateRevisionDraft {
+            scopes: record.scopes().clone(),
+            standing_orders: record.standing_orders().clone(),
+            budget: Some(BudgetAuthority {
+                funding_account: funding,
+                limit: Money::from_cents(1_000),
+                period: BudgetPeriod::Daily,
+            }),
+        },
+    )
+    .expect("weekly-to-daily fixture revision should validate")
+    .commit(&mut state)
+    .expect("weekly-to-daily fixture revision should commit");
+
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "First daily allocation".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-800),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(800),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("first daily allocation should validate")
+    .commit(&mut state)
+    .expect("first daily allocation should commit");
+
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(crate::core::time::DAY_MINUTES)
+            .expect("one campaign day must fit SimDuration"),
+    ));
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Second daily allocation".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-600),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(600),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("second-day allocation should have a fresh daily window")
+    .commit(&mut state)
+    .expect("second-day allocation should commit");
+
+    let record = state
+        .delegation()
+        .get_mandate(mandate)
+        .expect("mandate should persist");
+    validate_revise_mandate(
+        &state,
+        mandate,
+        MandateRevisionDraft {
+            scopes: record.scopes().clone(),
+            standing_orders: record.standing_orders().clone(),
+            budget: Some(BudgetAuthority {
+                funding_account: funding,
+                limit: Money::from_cents(1_500),
+                period: BudgetPeriod::Weekly,
+            }),
+        },
+    )
+    .expect("daily-to-weekly budget revision should validate")
+    .commit(&mut state)
+    .expect("daily-to-weekly budget revision should commit");
+
+    let usage = resolve_budget_usage(&state, mandate, state.now())
+        .expect("weekly usage should aggregate prior daily spending in this week");
+    assert_eq!(usage.used, Money::from_cents(1_400));
+    assert_eq!(usage.remaining, Money::from_cents(100));
+    validate_invariants(&state);
+}
+
+#[test]
 fn validated_transaction_cannot_commit_after_simulation_time_advances() {
     let (mut state, _, funding, destination) = make_test_budget();
     let occurred_at = state.now();
@@ -145,6 +333,100 @@ fn validated_transaction_cannot_commit_after_simulation_time_advances() {
         destination_balance
     );
     validate_invariants(&state);
+}
+
+#[test]
+fn restore_rejects_historical_budget_usage_with_non_authored_window() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+    let transaction = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Historical budget-window persistence fixture".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-500),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(500),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("budgeted transaction should validate")
+    .commit(&mut state)
+    .expect("budgeted transaction should commit");
+
+    let mandate_record = state
+        .delegation()
+        .get_mandate(mandate)
+        .expect("mandate should exist");
+    let current_budget = mandate_record.budget().expect("mandate should have budget");
+    validate_revise_mandate(
+        &state,
+        mandate,
+        MandateRevisionDraft {
+            scopes: mandate_record.scopes().clone(),
+            standing_orders: mandate_record.standing_orders().clone(),
+            budget: Some(BudgetAuthority {
+                funding_account: current_budget.funding_account,
+                limit: current_budget.limit,
+                period: BudgetPeriod::Daily,
+            }),
+        },
+    )
+    .expect("cadence revision should make the transaction historical")
+    .commit(&mut state)
+    .expect("cadence revision should commit");
+
+    let record = state
+        .finance()
+        .get_transaction(transaction)
+        .expect("historical transaction should persist");
+    let mut corrupted = transaction_wire(record);
+    let usage = corrupted
+        .budget_usage
+        .as_mut()
+        .expect("delegated transaction should carry budget usage");
+    assert!(
+        usage.mandate_version
+            < state
+                .delegation()
+                .get_mandate(mandate)
+                .expect("revised mandate should persist")
+                .version()
+    );
+    usage.period_end = SimTime::from_minutes(
+        usage
+            .period_end
+            .as_minutes()
+            .checked_add(1)
+            .expect("fixture period end should have room for corruption"),
+    );
+
+    let registry = build_registry();
+    let error = restore_save(
+        &registry,
+        replace_serialized_transaction(
+            build_save(&registry, &state)
+                .expect("valid revised state should save before corruption"),
+            record,
+            &corrupted,
+        ),
+    )
+    .expect_err("historical budget usage must still retain an authored period shape");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBudgetUsage {
+                transaction: invalid
+            }
+        ) if invalid == transaction
+    ));
 }
 
 #[test]
@@ -1249,6 +1531,56 @@ fn mandate_budget_usage_is_derived_from_ledger_and_enforced() {
             .expect("destination account should exist")
             .balance(),
         Money::from_cents(1_500)
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn delegated_spend_may_exhaust_budget_and_funding_balance_exactly() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Exact delegated budget exhaustion".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-2_500),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(2_500),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("spending exactly the remaining limit from an exactly funded account must be valid")
+    .commit(&mut state)
+    .expect("exact delegated exhaustion should commit");
+
+    let usage = resolve_budget_usage(&state, mandate, state.now())
+        .expect("exhausted mandate budget should still resolve");
+    assert_eq!(usage.used, Money::from_cents(2_500));
+    assert_eq!(usage.remaining, Money::ZERO);
+    assert_eq!(
+        state
+            .finance()
+            .get_account(funding)
+            .expect("funding account should persist")
+            .balance(),
+        Money::ZERO
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(destination)
+            .expect("destination account should persist")
+            .balance(),
+        Money::from_cents(2_500)
     );
     validate_invariants(&state);
 }
