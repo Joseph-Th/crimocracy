@@ -309,6 +309,12 @@ impl LegalState {
                     .active_by_character
                     .insert(arrest.character(), arrest.id());
                 self.indexes.arrests.detained.insert(arrest.id());
+                self.indexes
+                    .arrests
+                    .detained_by_arrested_at
+                    .entry(arrest.arrested_at())
+                    .or_default()
+                    .insert(arrest.id());
             }
         }
     }

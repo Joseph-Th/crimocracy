@@ -466,9 +466,13 @@ pub(super) struct ProsecutionIndexes {
 pub(super) struct ArrestIndexes {
     pub(super) by_investigation: BTreeMap<InvestigationId, BTreeSet<ArrestId>>,
     pub(super) active_by_character: BTreeMap<CharacterId, ArrestId>,
-    /// Every currently detained arrest, so per-tick custody passes (informant recruitment,
-    /// automatic legal support) scan detainees instead of the full arrest history.
+    /// Every currently detained arrest, so custody-wide consumers such as automatic legal
+    /// support scan live detainees instead of the full arrest history.
     pub(super) detained: BTreeSet<ArrestId>,
+    /// Currently detained arrests grouped by their immutable custody start. Release and
+    /// one-shot informant timing can therefore select only the relevant chronology slice
+    /// instead of rescanning every live detainee each minute.
+    pub(super) detained_by_arrested_at: BTreeMap<SimTime, BTreeSet<ArrestId>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

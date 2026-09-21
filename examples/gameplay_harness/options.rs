@@ -42,6 +42,7 @@ pub fn parse_options(
     let mut strategy_was_passed = false;
     let mut samples_were_explicit = false;
     let mut artifact_dir: Option<PathBuf> = None;
+    let mut detail = false;
     while let Some(argument) = arguments.next() {
         // Support both --flag value and --flag=value forms.
         let (flag, inline_value) = if let Some((f, v)) = split_flag_value(&argument) {
@@ -112,6 +113,15 @@ pub fn parse_options(
                 }
                 artifact_dir = Some(PathBuf::from(value));
             }
+            "--detail" => {
+                if let Some(value) = inline_value {
+                    return Err(HarnessCliError::InvalidValue {
+                        flag: "--detail",
+                        value,
+                    });
+                }
+                detail = true;
+            }
             // Standard end-of-options marker. Cargo aliases like `harness-full` already
             // carry their own `--`, so `cargo harness-full -- --samples 8` arrives here
             // with a second marker; the harness takes no positional arguments, so any
@@ -137,12 +147,13 @@ pub fn parse_options(
         policy_seed,
         strategy,
         artifact_dir,
+        detail,
     }))
 }
 
 pub fn print_usage() {
     println!(
-        "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--world-seed HEX|DEC] [--policy-seed HEX|DEC] [--artifact-dir DIR]"
+        "Usage: cargo run --example gameplay_harness -- [--mode smoke|full] [--strategy all|rush|press|recon] [--samples 1..={MAX_BATCH_SAMPLES}] [--world-seed HEX|DEC] [--policy-seed HEX|DEC] [--artifact-dir DIR] [--detail]"
     );
     println!("  smoke  Fast canonical-path check for the local gate and iteration (default).");
     println!("         --strategy rush|press|recon focuses one branch; default is all.");
@@ -150,7 +161,12 @@ pub fn print_usage() {
         "         --world-seed controls fixture/simulation variation; --policy-seed controls evaluation-owned choices."
     );
     println!("         Both seed flags accept 0xHEX or decimal; --flag=value is supported.");
-    println!("  full   Narrative session, legal check, matched batch, and sensitivity report.");
+    println!(
+        "  full   Concise strategy/probe summaries, matched batch, sensitivity report, and artifacts."
+    );
+    println!(
+        "         --detail additionally prints the primary full-session narrative and deep metrics."
+    );
     println!(
         "         --artifact-dir writes per-run JSON artifacts (default: target/harness-runs/)."
     );

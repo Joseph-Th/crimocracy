@@ -23,28 +23,24 @@ test-all = ["test", "--locked", "--lib", "--quiet"]
 test-release = ["test", "--locked", "--release", "--quiet"]
 # Soak stress test only (mixed-state invariant exercise).
 soak = ["test", "--locked", "--lib", "--quiet", "soak", "--", "--nocapture"]
-# Quick single-domain aliases — sugar over `cargo test-focused <domain>`.
-# Each still compiles the single lib test binary, but filters execution to one domain.
-test-world = ["test", "--locked", "--lib", "--quiet", "world"]
-test-finance = ["test", "--locked", "--lib", "--quiet", "finance"]
-test-legal = ["test", "--locked", "--lib", "--quiet", "legal"]
-test-operations = ["test", "--locked", "--lib", "--quiet", "operations"]
-test-enterprises = ["test", "--locked", "--lib", "--quiet", "enterprises"]
-test-economy = ["test", "--locked", "--lib", "--quiet", "economy"]
-test-recruitment = ["test", "--locked", "--lib", "--quiet", "recruitment"]
-test-delegation = ["test", "--locked", "--lib", "--quiet", "delegation"]
+# Harness implementation contracts. Scenario-scale checks are explicitly ignored from the
+# routine target; the deep lane runs every ignored harness test.
+test-harness = ["test", "--locked", "--quiet", "--example", "gameplay_harness"]
+test-harness-deep = ["test", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--ignored"]
 
 # ── gameplay harness ──────────────────────────────────────────────────────────
-# Harness execution uses [profile.harness] so gameplay runs keep a separate cache.
-# The harness itself owns narrative output; Cargo build logging stays quiet.
+# Smoke/focused harness execution stays on the ordinary dev profile so normal iteration reuses
+# one gameplay-build cache. The harness owns its own output; Cargo build logging stays quiet.
 # Windows: if rebuilds feel pathological, exclude the repository target directory
 # from Defender real-time scanning.
-harness = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness"]
-harness-rush = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
-harness-press = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]
-harness-recon = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "recon"]
-# Full controlled comparison (narrative rotation, probes, and matched-seed batches).
+harness = ["run", "--locked", "--quiet", "--example", "gameplay_harness"]
+harness-rush = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
+harness-press = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]
+harness-recon = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "recon"]
+# Full comparison is a deep, simulation-heavy lane. Use the modestly optimized harness profile
+# so repeated studies spend time simulating rather than interpreting unoptimized minute ticks.
 harness-full = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full"]
+harness-full-detail = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--detail"]
 
 [term]
 quiet = false

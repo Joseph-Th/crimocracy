@@ -67,6 +67,7 @@ use crate::*;
 pub fn run_repeat_take_probe(
     registry: &Registry,
     seeds: EvaluationSeeds,
+    detail: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let target = scenario.target;
@@ -202,17 +203,19 @@ pub fn run_repeat_take_probe(
         )
         .into());
     }
-    println!(
-        "[REPEAT TAKE] The first score on {} held {}; an immediate re-score recovered only {} - the target had not replaced its stock.",
-        scenario
-            .state
-            .world()
-            .get_business(target)
-            .expect("probe target must persist")
-            .name(),
-        format_cents(first_take),
-        format_cents(second_take),
-    );
+    if detail {
+        println!(
+            "[REPEAT TAKE] The first score on {} held {}; an immediate re-score recovered only {} - the target had not replaced its stock.",
+            scenario
+                .state
+                .world()
+                .get_business(target)
+                .expect("probe target must persist")
+                .name(),
+            format_cents(first_take),
+            format_cents(second_take),
+        );
+    }
 
     // Let the authored recovery window pass so both prior hits fully age out, then confirm the
     // target's typical contents return to full value.
@@ -233,10 +236,12 @@ pub fn run_repeat_take_probe(
         )
         .into());
     }
-    println!(
-        "[REPEAT TAKE] After letting the target rest, the next score held {} again. Repeat takes decay and recover through production rules.",
-        format_cents(third_take)
-    );
+    if detail {
+        println!(
+            "[REPEAT TAKE] After letting the target rest, the next score held {} again. Repeat takes decay and recover through production rules.",
+            format_cents(third_take)
+        );
+    }
     validate_harness_state(registry, &scenario.state)?;
     Ok(())
 }
@@ -252,6 +257,7 @@ pub fn run_repeat_take_probe(
 pub fn run_enforcement_attention_probe(
     registry: &Registry,
     seeds: EvaluationSeeds,
+    detail: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let enterprise_id = scenario.enterprise;
@@ -289,12 +295,14 @@ pub fn run_enforcement_attention_probe(
     {
         return Err("clean-district control cycle drew attention; the enforcement contract requires clean districts to stay clean".into());
     }
-    println!(
-        "[VICE CONTROL] {}: {} settled a clean-district cycle (net {}) with no street surcharge and no inquiry.",
-        stamp(control_cycle.occurred_at().as_minutes()),
-        enterprise_name,
-        format_cents(control_cycle.net_cash().cents()),
-    );
+    if detail {
+        println!(
+            "[VICE CONTROL] {}: {} settled a clean-district cycle (net {}) with no street surcharge and no inquiry.",
+            stamp(control_cycle.occurred_at().as_minutes()),
+            enterprise_name,
+            format_cents(control_cycle.net_cash().cents()),
+        );
+    }
 
     // Originate enough parallel district cases through canonical intake that the authored
     // per-case conversion rate reaches certainty on the racket's next cycle.
@@ -351,11 +359,13 @@ pub fn run_enforcement_attention_probe(
         .economics()
         .heat_surcharge_per_active_case()
         .cents();
-    println!(
-        "[VICE HEAT] {} originated case(s) now target the racket's district; the next cycle pays {} of compounded street heat.",
-        needed_cases,
-        format_cents(surcharge_per_case * i64::from(needed_cases)),
-    );
+    if detail {
+        println!(
+            "[VICE HEAT] {} originated case(s) now target the racket's district; the next cycle pays {} of compounded street heat.",
+            needed_cases,
+            format_cents(surcharge_per_case * i64::from(needed_cases)),
+        );
+    }
 
     // The heated cycle: the surcharge compounds per active case and the visibility roll is
     // guaranteed, so this settlement must open the inquiry and surface only what the manager
@@ -416,16 +426,18 @@ pub fn run_enforcement_attention_probe(
                 .into(),
         );
     }
-    println!(
-        "[VICE DRAW] {}: the racket's cycle under sustained casework paid {} of street heat (net {}) and drew a dedicated inquiry.",
-        stamp(heated_cycle.occurred_at().as_minutes()),
-        format_cents(heated_cycle.investigation_heat().cents()),
-        format_cents(heated_cycle.net_cash().cents()),
-    );
-    println!("[ENTERPRISE] {manager_report}");
-    println!(
-        "[VICE PRIVACY] formal case knowledge remains undisclosed; the organization has only the manager's observable warning."
-    );
+    if detail {
+        println!(
+            "[VICE DRAW] {}: the racket's cycle under sustained casework paid {} of street heat (net {}) and drew a dedicated inquiry.",
+            stamp(heated_cycle.occurred_at().as_minutes()),
+            format_cents(heated_cycle.investigation_heat().cents()),
+            format_cents(heated_cycle.net_cash().cents()),
+        );
+        println!("[ENTERPRISE] {manager_report}");
+        println!(
+            "[VICE PRIVACY] formal case knowledge remains undisclosed; the organization has only the manager's observable warning."
+        );
+    }
     // The inquiry itself must be real institutional state owned by the intake authority,
     // linked back to the racket as an originated case.
     let inquiry_on_racket = scenario
@@ -445,13 +457,15 @@ pub fn run_enforcement_attention_probe(
         );
     }
     validate_harness_state(registry, &scenario.state)?;
-    println!(
-        "[ENFORCEMENT PASS] clean districts stay clean; sustained casework taxes cycles, opens a dedicated inquiry, and exposes only manager-observable enforcement attention."
-    );
+    if detail {
+        println!(
+            "[ENFORCEMENT PASS] clean districts stay clean; sustained casework taxes cycles, opens a dedicated inquiry, and exposes only manager-observable enforcement attention."
+        );
+    }
     Ok(())
 }
 
-pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Error>> {
+pub fn run_legal_foundation_check(registry: &Registry, detail: bool) -> Result<(), Box<dyn Error>> {
     let mut state = AppState::new(0x1E6A_1933);
 
     let sponsor = insert_organization(
@@ -831,9 +845,11 @@ pub fn run_legal_foundation_check(registry: &Registry) -> Result<(), Box<dyn Err
     }
     validate_harness_state(registry, &state)?;
 
-    println!(
-        "[LEGAL PASS] arrest -> paid counsel -> police custody-preserving referral -> terminal prosecution decline -> named case witness intimidated through canonical pressure"
-    );
+    if detail {
+        println!(
+            "[LEGAL PASS] arrest -> paid counsel -> police custody-preserving referral -> terminal prosecution decline -> named case witness intimidated through canonical pressure"
+        );
+    }
     Ok(())
 }
 
@@ -1168,6 +1184,7 @@ pub fn persist_run_artifact(
 pub fn run_opportunity_portfolio_probe(
     registry: &Registry,
     seeds: EvaluationSeeds,
+    detail: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let valid_until = Some(SimTime::from_minutes(180));
@@ -1200,11 +1217,13 @@ pub fn run_opportunity_portfolio_probe(
         },
     )?
     .commit(&mut scenario.state)?;
-    println!(
-        "[PORTFOLIO] Two burglary opportunities are open until minute 180: {} (street rumor) and {} (direct, precise observation).",
-        scenario.variation.target_name(),
-        scenario.variation.alternate_target_name(),
-    );
+    if detail {
+        println!(
+            "[PORTFOLIO] Two burglary opportunities are open until minute 180: {} (street rumor) and {} (direct, precise observation).",
+            scenario.variation.target_name(),
+            scenario.variation.alternate_target_name(),
+        );
+    }
 
     // This is an explicit player-visible prioritization rule: commit the opportunity with the
     // strongest available source instead of treating every open card as equally actionable.
@@ -1289,7 +1308,9 @@ pub fn run_opportunity_portfolio_probe(
             .reports()
             .get_report(report_id)
             .expect("expired opportunity report must persist");
-        print_report("PORTFOLIO EXPIRY REPORT", report, &scenario);
+        if detail {
+            print_report("PORTFOLIO EXPIRY REPORT", report, &scenario);
+        }
     }
     // Prove the Dismissed lifecycle is distinct from Expiry: dismiss a fresh opportunity
     // through its canonical path and verify the lifecycle report, proving the harness is not
@@ -1326,11 +1347,13 @@ pub fn run_opportunity_portfolio_probe(
     {
         return Err("dismiss lifecycle must persist its lifecycle report".into());
     }
-    println!(
-        "[PORTFOLIO] Selected {} from player-visible source quality, converted it into {}, left the weaker opportunity to expire, and dismissed a decoy through the canonical lifecycle.",
-        scenario.variation.alternate_target_name(),
-        terminal_label(&metrics),
-    );
+    if detail {
+        println!(
+            "[PORTFOLIO] Selected {} from player-visible source quality, converted it into {}, left the weaker opportunity to expire, and dismissed a decoy through the canonical lifecycle.",
+            scenario.variation.alternate_target_name(),
+            terminal_label(&metrics),
+        );
+    }
     Ok(())
 }
 
@@ -1341,6 +1364,7 @@ pub fn run_opportunity_portfolio_probe(
 pub fn run_organizational_capacity_probe(
     registry: &Registry,
     seeds: EvaluationSeeds,
+    detail: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let first_start = scenario.timeline.initial_burglary_at;
@@ -1402,9 +1426,11 @@ pub fn run_organizational_capacity_probe(
         .expect("capacity-probe specialist must persist")
         .name()
         .to_owned();
-    println!(
-        "[CAPACITY] {specialist_name} was reserved for the first burglary; the overlapping second plan was rejected ({specialist_name} is already booked on that crew) without changing authoritative state."
-    );
+    if detail {
+        println!(
+            "[CAPACITY] {specialist_name} was reserved for the first burglary; the overlapping second plan was rejected ({specialist_name} is already booked on that crew) without changing authoritative state."
+        );
+    }
 
     let mut first_metrics = RunMetrics {
         strategy: Some(Strategy::Rush),
@@ -1435,18 +1461,20 @@ pub fn run_organizational_capacity_probe(
     run_until_operation_terminal(&mut scenario, second, false, &mut second_metrics)?;
     capture_terminal_status(&scenario, second, &mut second_metrics);
     validate_harness_state(registry, &scenario.state)?;
-    println!(
-        "[CAPACITY] After the first burglary became {}, {} was released and the second plan authorized at minute {} (terminal {}).",
-        terminal_label(&first_metrics),
-        scenario
-            .state
-            .world()
-            .get_character(scenario.burglar)
-            .expect("capacity-probe specialist must persist")
-            .name(),
-        released_start.as_minutes(),
-        terminal_label(&second_metrics),
-    );
+    if detail {
+        println!(
+            "[CAPACITY] After the first burglary became {}, {} was released and the second plan authorized at minute {} (terminal {}).",
+            terminal_label(&first_metrics),
+            scenario
+                .state
+                .world()
+                .get_character(scenario.burglar)
+                .expect("capacity-probe specialist must persist")
+                .name(),
+            released_start.as_minutes(),
+            terminal_label(&second_metrics),
+        );
+    }
     // Prove delegation lifecycle is not stale: extend the player's mandate with Personnel
     // authority and its matching recruitment standing order, verify the version advances, then
     // ensure state remains valid. Standing orders are scoped authority, so the probe must not
@@ -1491,12 +1519,14 @@ pub fn run_organizational_capacity_probe(
         return Err("mandate revision did not advance version".into());
     }
     validate_harness_state(registry, &scenario.state)?;
-    println!(
-        "[CAPACITY] Mandate {:?} revised (v{} -> v{}) with updated standing orders, proving delegation lifecycle tracks the game.",
-        player_mandate,
-        prior_version,
-        revised.version()
-    );
+    if detail {
+        println!(
+            "[CAPACITY] Mandate {:?} revised (v{} -> v{}) with updated standing orders, proving delegation lifecycle tracks the game.",
+            player_mandate,
+            prior_version,
+            revised.version()
+        );
+    }
     // Approach variation probe: authorize a WitnessPressure operation with a non-Covert
     // approach to prove the harness is not hard-coded to one tactical axis.
     let approach = match seeds.policy % 3 {
@@ -1531,11 +1561,13 @@ pub fn run_organizational_capacity_probe(
     // validation path, not asserting a specific operational outcome. A successful validation
     // proves the vocabulary is live; a typed rejection proves the harness tracks the game.
     validate_harness_state(registry, &scenario.state)?;
-    println!(
-        "[CAPACITY] Approach-variation probe exercised {:?} + {:?} through canonical validation.",
-        OperationKind::WitnessPressure,
-        approach
-    );
+    if detail {
+        println!(
+            "[CAPACITY] Approach-variation probe exercised {:?} + {:?} through canonical validation.",
+            OperationKind::WitnessPressure,
+            approach
+        );
+    }
     // Recruitment-approach variation: validate a non-FinancialOpportunity pitch through the
     // canonical path to prove the harness is not hard-coded to one approach. The probe uses
     // the same deterministic relationship so margin math stays registry-derived.
@@ -1556,9 +1588,11 @@ pub fn run_organizational_capacity_probe(
         },
     );
     validate_harness_state(registry, &scenario.state)?;
-    println!(
-        "[CAPACITY] Recruitment-approach probe exercised {:?} through canonical validation.",
-        alt_approach
-    );
+    if detail {
+        println!(
+            "[CAPACITY] Recruitment-approach probe exercised {:?} through canonical validation.",
+            alt_approach
+        );
+    }
     Ok(())
 }

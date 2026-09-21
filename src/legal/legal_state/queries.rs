@@ -688,6 +688,34 @@ impl LegalState {
                 .expect("detained-arrest index must reference an arrest")
         })
     }
+    /// Detained arrests that began at one exact instant, in arrest-id order.
+    pub(crate) fn detained_arrests_arrested_at(
+        &self,
+        arrested_at: SimTime,
+    ) -> impl Iterator<Item = &ArrestRecord> {
+        self.indexes
+            .arrests
+            .detained_by_arrested_at
+            .get(&arrested_at)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.arrests
+                    .get(id)
+                    .expect("detained-arrest chronology index must reference an arrest")
+            })
+    }
+    /// IDs for detained arrests no newer than the supplied custody-start cutoff.
+    pub(crate) fn detained_arrest_ids_arrested_on_or_before(
+        &self,
+        cutoff: SimTime,
+    ) -> impl Iterator<Item = ArrestId> + '_ {
+        self.indexes
+            .arrests
+            .detained_by_arrested_at
+            .range(..=cutoff)
+            .flat_map(|(_, ids)| ids.iter().copied())
+    }
     /// O(1) emptiness probes over the custody-cluster indexes, so per-tick passes can skip
     /// their cross-referenced scans entirely on ticks with no live custody work.
     pub(crate) fn has_detained_arrests(&self) -> bool {

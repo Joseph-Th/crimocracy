@@ -9,21 +9,28 @@ cockpit routing is in [`AGENTS.md`](AGENTS.md).
 ```
 Which change did you make?
   │
+  ├─ Documentation / command routes only?
+  │   Complete: .\scripts\check-docs.cmd   (compile-free)
+  │
   ├─ Syntax / type error?
   │   Fastest: cargo check-fast
   │            .\scripts\verify.cmd -Check   (includes fmt)
   │
   ├─ One library behavior (single module, single system)
   │   Focused: cargo test-focused <filter>
-  │   Complete: .\scripts\verify.cmd -Fast
+  │   Complete: .\scripts\verify.cmd -Fast -Filter <filter>
   │
   ├─ Library implementation (no harness surface touched)
   │   Focused: cargo check-fast  or  cargo test-focused <filter>
   │   Complete: .\scripts\verify.cmd -Fast
   │
   ├─ Harness surface (examples/gameplay_harness/*.rs)
-  │   Focused: cargo harness-rush
-  │   Complete: .\scripts\verify.cmd -Fast -Harness
+  │   Focused: cargo test-harness  or  cargo harness-rush
+  │   Complete: .\scripts\verify.cmd -Harness
+  │
+  ├─ Scenario-scale harness contract / presentation equivalence
+  │   Focused: cargo test-harness-deep
+  │   Complete: cargo harness-full --samples <needed evidence>
   │
   └─ Persistence, invariants, cross-domain, or verification infra
       Focused: owning module's focused test (e.g. cargo test-focused finance) plus a save/restore round-trip
@@ -32,10 +39,12 @@ Which change did you make?
 
 | Change | Focused feedback | Completion lane |
 |---|---|---|
+| Documentation/routes only | `.\scripts\check-docs.cmd` | same command |
 | Syntax / types | `cargo check-fast` | `.\scripts\verify.cmd -Check` |
-| One library behavior | `cargo test-focused <filter>` | `.\scripts\verify.cmd -Fast` |
+| One library behavior | `cargo test-focused <filter>` | `.\scripts\verify.cmd -Fast -Filter <filter>` |
 | Library implementation | `cargo check-fast` or focused test | `.\scripts\verify.cmd -Fast` |
-| Harness filter | `cargo harness-rush` | `.\scripts\verify.cmd -Fast -Harness` |
+| Harness implementation | `cargo test-harness` or focused smoke | `.\scripts\verify.cmd -Harness` |
+| Scenario-scale harness behavior | `cargo test-harness-deep` | `cargo harness-full --samples <N>` |
 | Persistence, invariants, or cross-domain | Focused owner test | `.\scripts\verify.cmd` (broad gate) |
 
 The columns are not a required sequence. Use focused feedback while iterating or
@@ -79,9 +88,9 @@ invariants, serialization, deterministic continuation, and failure paths.
 Ordinary tests live with their owning module under `#[cfg(test)]`, named after
 behavior. Use `make_test_*` for local fixtures and the idempotent `*_for_test`
 pattern when extending the shared production registry. Soak-class tests carry the
-substring `soak` and are excluded from fast lanes with `--skip soak`, so renames
-cannot silently un-exclude them; the invariant soak is stress evidence, not a
-replacement for focused behavioral tests.
+substring `soak`. Scenario-scale harness tests are explicitly `#[ignore]` with a reason that
+names `cargo test-harness-deep`; that alias runs every ignored harness test, so a function rename
+cannot silently drop deep coverage. These deeper tiers are evidence, not prerequisites for unrelated edits.
 
 ### Accretion checklist for a new test
 
@@ -97,24 +106,27 @@ replacement for focused behavioral tests.
 
 | Need | Command | What it proves |
 |---|---|---|
+| Docs/routes only | `.\scripts\check-docs.cmd` | authorities, links, routes, aliases, published versions; no Rust build |
 | Type-check lib | `cargo check-fast` | `src/` compiles |
 | Type-check all | `cargo check-all` | lib + harness compile |
 | Type-check harness | `cargo check-harness` | example adapter compiles |
 | Lib tests (no soak) | `cargo test-fast` | all library tests except soak-class tests |
 | One test / module | `cargo test-focused <filter>` | owning module's `#[cfg(test)]` |
-| One domain | `cargo test-legal` / `test-finance` / `test-world` … | sugar over `test-focused <domain>` |
-| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter`, `-Harness`, `-Check`) | reruns the selected local lane |
+| Harness contracts | `cargo test-harness` | fast harness implementation tests; deep scenario tests excluded |
+| Deep harness contracts | `cargo test-harness-deep` | explicit scenario-scale comparison tests |
+| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter` or `-Harness`) | lib check by default; selected executable proof on demand |
 | Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | one strategy branch |
 | Full-mode batch | `cargo harness-full --samples 8` | all strategies, matched seeds, artifacts |
-| Check lane | `.\scripts\verify.cmd -Check` | fmt + type-check |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | iteration gate |
-| Fast harness lane | `.\scripts\verify.cmd -Fast -Harness` | smoke contract only |
-| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pat>` | focused tests + fmt |
+| Check lane | `.\scripts\verify.cmd -Check` | fmt + lib type-check |
+| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | library completion gate |
+| Harness lane | `.\scripts\verify.cmd -Harness` | fmt + fast harness contracts + executable smoke |
+| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pat>` | fail-closed focused tests + fmt |
 | Soak only | `cargo soak` | mixed-state invariant stress |
 
 `cargo check-fast` is the absolute fastest; `cargo test-focused` is the inner loop
-for behavior; `.\scripts\verify.cmd -Fast` is the iteration gate. The full gate
-is reserved for persistence/invariant/cross-domain work.
+for behavior. A single-owner change can complete through the filtered fast lane
+without rerunning every library test. The broad gate is reserved for contracts that
+actually cross persistence, invariant, domain, or verification boundaries.
 
 Build-profile tuning and measured compile-cost observations live with Cargo configuration.
 This document owns behavioral proof selection, not machine-specific timing claims.
@@ -130,23 +142,25 @@ This document owns behavioral proof selection, not machine-specific timing claim
 
 Fail-fast stages, in order (see [`scripts/verify.ps1`](scripts/verify.ps1)):
 
-1. `cargo fmt --check`
-2. `cargo test --locked --lib --tests --quiet`
-3. Harness unit tests (`cargo test --locked --quiet --example gameplay_harness --lib`): the example's own options-parsing and financial-branch contract tests, which stage 2 never compiles
-4. Exact ignored test `tests::smoke_mode_covers_canonical_paths` (selected fail-closed — `verify.ps1 -SelfTest` validates the count must be exactly 1)
-5. Gameplay-harness full mode, one sample (`--mode full --samples 1`): narrative arcs, probes, and cross-branch contracts that smoke skips
+1. Compile-free documentation/route/alias/version contracts (`scripts/check-docs.ps1`)
+2. `cargo fmt --check`
+3. `cargo test --locked --lib --quiet`
+4. Fast gameplay-harness implementation contracts (`cargo test-harness`)
+5. Gameplay-harness smoke executable (`--mode smoke`): canonical strategies plus the legal-foundation chain
 6. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
 
-[`scripts/verify.ps1`](scripts/verify.ps1) owns the gate; [`scripts/verify.cmd`](scripts/verify.cmd) wraps it. The smoke stage requires exactly one selectable ignored test; `.\scripts\verify.ps1 -SelfTest` checks that selection. [`tests/documentation_contracts.rs`](tests/documentation_contracts.rs) protects the authority set, local links, concrete routes, Cargo aliases, and published schema/content revisions.
+[`scripts/verify.ps1`](scripts/verify.ps1) owns the broad gate; [`scripts/verify.cmd`](scripts/verify.cmd) wraps it. Scenario-scale harness comparisons stay explicit instead of taxing every persistence or cross-domain change. `scripts/check-docs.ps1` replaces the former Rust integration test for authority/link/route/alias/version checks, so documentation-only completion does not compile the crate.
 
 **When to run what:**
 
-- Ordinary library work completes with `.\scripts\verify.cmd -Fast`; harness work with `.\scripts\verify.cmd -Fast -Harness`.
-- Run the broad gate only when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider harness/Clippy coverage, or for an explicit broad checkpoint. Never rerun it after a passing fast lane merely for reassurance.
-- Run `cargo soak` or `cargo harness-full --samples 8` only when the changed contract requires that evidence.
+- One-owner behavior work may complete with `.\scripts\verify.cmd -Fast -Filter <filter>`; broader library work with `.\scripts\verify.cmd -Fast`; harness implementation work with `.\scripts\verify.cmd -Harness`.
+- Run the broad gate only when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider smoke/Clippy coverage, or for an explicit broad checkpoint. It intentionally stops at canonical smoke; a full gameplay study is specialized evidence, not a tax on unrelated changes. Never rerun it after a passing narrower lane merely for reassurance.
+- Run `cargo soak`, `cargo test-harness-deep`, or a multi-sample `cargo harness-full` only when the changed contract requires that evidence.
 - When optimized compilation could change behavior, also run `cargo test-release`.
 
-Gate flags: `-Check` (type-check only) | `-Fast` (skip soak/harness-full/clippy) | `-Harness` (smoke only, requires `-Fast`) | `-Filter <pat>` (one module, implies `-Fast`) | `-Jobs N` (cap parallelism) | `-NoClippy` / `-NoFmt` (skip known-passing) | `-Verbose` / `-Detail` (show cargo output on success). Build profiles are tuned for this crate; alternatives and machine-specific notes live in [`Cargo.toml`](Cargo.toml) and [`.cargo/config.toml`](.cargo/config.toml).
+Gate flags: `-Check` (fmt + lib type-check) | `-Fast` (library tests, soak excluded) | `-Harness` (fast harness contracts + smoke) | `-Filter <pat>` (fail-closed focused library tests; implies `-Fast`) | `-Jobs N` (cap parallelism) | `-NoClippy` / `-NoFmt` (skip known-passing) | `-Verbose` / `-Detail` (show captured output on success).
+
+Documentation contracts are intentionally outside Rust's integration-test graph. The checker reads source declarations directly, so Markdown and command-surface changes have a complete compile-free path and the broad gate no longer links a second test binary merely to validate documentation.
 
 ## Gameplay-harness evidence — bounded evaluation surface
 
@@ -158,9 +172,10 @@ Gate flags: `-Check` (type-check only) | `-Fast` (skip soak/harness-full/clippy)
 |---|---|---|
 | `smoke` (default) | `cargo harness` | Canonical strategies + legal-foundation chain; sessions observe the whole first campaign day so recruitment counters carry real rival-attempt evidence |
 | focused smoke | `cargo harness-rush` / `-press` / `-recon` | One strategy branch only |
-| `full` | `cargo harness-full --samples 8` | Narrative strategy arcs, probes, matched world/policy seed channels, scenario sensitivity, artifacts |
+| `full` | `cargo harness-full --samples 8` | Concise strategy/probe summaries, matched world/policy seed channels, scenario sensitivity, artifacts |
+| `full detail` | `cargo harness-full-detail --samples 8` | Same gameplay evidence plus the primary player-facing narrative/deep metric readout |
 
-Commands: `cargo harness` runs smoke by default; `cargo harness-full --samples 8` runs explicit comparison; append `--artifact-dir target/my-run` to relocate artifacts. `cargo harness -- --mode smoke --strategy press` selects one branch.
+Commands: `cargo harness` runs smoke by default on the normal dev cache; `cargo harness-full --samples 8` runs the explicit optimized deep profile; append `--artifact-dir target/my-run` to relocate artifacts. `cargo harness-full-detail` changes presentation only, not policy or simulation behavior. `cargo harness -- --mode smoke --strategy press` selects one branch.
 
 ### Information boundary
 
@@ -182,7 +197,7 @@ RUSH, PRESS, and RECON act on the same world-selected authored fixture and the s
 
 The harness must not replay one exact story, but variation axes remain attributable:
 
-- Full mode rotates its narrative comparison across `NARRATIVE_SEED_ROTATION` adjacent world seeds while holding policy seed fixed, covering every authored fixture variation (economy profile, police presence, patrol windows, target names, till kind). Every set validates deterministic contracts plus any stochastic consequence that actually occurs, but player follow-up is required only when player-visible evidence crossed the acting-policy boundary: a hidden trace-level institutional case remains diagnostic evidence and must not manufacture a contact query or counter-surveillance action. Stochastic reachability contracts are evaluated across sufficiently broad world-seed batches rather than forced in every sample. The deep metrics and experience readout run on the primary world seed, while other sets print compact summaries.
+- Full mode rotates its narrative comparison across `NARRATIVE_SEED_ROTATION` adjacent world seeds while holding policy seed fixed, covering every authored fixture variation (economy profile, police presence, patrol windows, target names, till kind). Every set validates deterministic contracts plus any stochastic consequence that actually occurs, but player follow-up is required only when player-visible evidence crossed the acting-policy boundary: a hidden trace-level institutional case remains diagnostic evidence and must not manufacture a contact query or counter-surveillance action. Stochastic reachability contracts are evaluated across sufficiently broad world-seed batches rather than forced in every sample. Detailed mode prints the deep metrics and experience readout for the primary world seed; concise mode prints compact summaries for every rotated set. Both execute the same validation contracts.
 - Authored-content-derived timing: scenario anchors come from authored operation durations, recruitment cadence, and the cold-case window; the terminal-wait guard's slack equals the longest authored operation duration, so it tracks content instead of a constant.
 - Policy-seed-derived variation inside fixed branch identities: the witness-pressure delay used only when no actionable patrol pattern is known, and which rival the defector watch visits first. The win-back pitch is not policy-seed variation: after surveillance confirms the defector's destination, leadership makes one PersonalAppeal grounded in the already-authored boss-member relationship. The harness does not inspect latent candidate drives or traits to choose that pitch; production recruitment scoring still uses the candidate's private willingness factors to determine whether the appeal succeeds.
 - World-seed-authored fixture axes stay live: the racket till is street cash on even world seeds and concealed cash on odd world seeds, and the PRESS arc adapts to what its books actually hold (see the wealth-gate contract).

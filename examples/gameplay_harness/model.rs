@@ -133,6 +133,9 @@ pub struct HarnessOptions {
     pub policy_seed: u64,
     pub strategy: Option<Strategy>,
     pub artifact_dir: Option<PathBuf>,
+    /// Print the primary full-session narrative and deep metric readout. Full mode defaults to
+    /// concise summaries because artifacts retain the detailed evidence.
+    pub detail: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1042,6 +1045,35 @@ impl Aggregate {
             } else {
                 self.accounted_balance_total_cents as f64 / self.accounted_balance_samples as f64
             }),
+        );
+    }
+
+    pub fn print_compact(&self, label: &str) {
+        let avg_exposure = if self.exposure_samples == 0 {
+            0.0
+        } else {
+            self.exposure_total as f64 / self.exposure_samples as f64
+        };
+        let avg_intelligence = if self.intelligence_samples == 0 {
+            0.0
+        } else {
+            self.intelligence_total as f64 / self.intelligence_samples as f64
+        };
+        println!(
+            "{label:<5} n={} fixtures={} | achieved {} partial {} failed {} aborted {} standdown {} | police {} cases {} decisions {} | avg exposure {:.1} intel {:.1} | departures {}",
+            self.samples,
+            self.fixture_variations.len(),
+            self.achieved,
+            self.partial,
+            self.failed,
+            self.aborted,
+            self.opening_standdowns,
+            self.police_arrived,
+            self.investigations,
+            self.decisions,
+            avg_exposure,
+            avg_intelligence,
+            self.player_personnel_departures,
         );
     }
 }

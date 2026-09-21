@@ -26,6 +26,12 @@ impl LegalState {
             "Ownership Exclusivity: character has multiple active detentions"
         );
         self.indexes.arrests.detained.insert(id);
+        self.indexes
+            .arrests
+            .detained_by_arrested_at
+            .entry(record.arrested_at())
+            .or_default()
+            .insert(id);
         let previous = self.arrests.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -33,11 +39,13 @@ impl LegalState {
         );
     }
     pub(in crate::legal) fn release_arrest(&mut self, id: ArrestId, released_at: SimTime) {
-        let character = self
-            .arrests
-            .get(&id)
-            .expect("validated arrest disappeared before release commit")
-            .character();
+        let (character, arrested_at) = {
+            let arrest = self
+                .arrests
+                .get(&id)
+                .expect("validated arrest disappeared before release commit");
+            (arrest.character(), arrest.arrested_at())
+        };
         let removed = self.indexes.arrests.active_by_character.remove(&character);
         debug_assert_eq!(
             removed,
@@ -49,6 +57,23 @@ impl LegalState {
             removed_detained,
             "Derived Data Consistency: released arrest was not indexed as detained"
         );
+        let arrested_at_ids = self
+            .indexes
+            .arrests
+            .detained_by_arrested_at
+            .get_mut(&arrested_at)
+            .expect("detained arrest chronology index must contain released arrest");
+        let removed_chronology = arrested_at_ids.remove(&id);
+        debug_assert!(
+            removed_chronology,
+            "Derived Data Consistency: released arrest was not indexed by custody start"
+        );
+        if arrested_at_ids.is_empty() {
+            self.indexes
+                .arrests
+                .detained_by_arrested_at
+                .remove(&arrested_at);
+        }
         let record = self
             .arrests
             .get_mut(&id)

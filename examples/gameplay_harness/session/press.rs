@@ -435,7 +435,8 @@ mod tests {
     }
 
     #[test]
-    fn concealed_reserve_does_not_prevent_legitimate_profit_financed_expansion() {
+    #[ignore = "scenario-scale rotated-world PRESS arc; run cargo test-harness-deep or cargo harness-full"]
+    fn deep_harness_concealed_reserve_does_not_prevent_legitimate_profit_financed_expansion() {
         let registry = crimocracy::build_registry();
         let mut metrics = play_session(
             &registry,

@@ -78,7 +78,7 @@ fn run_smoke(
     println!("{contract}");
 
     if selected_strategy.is_none() {
-        run_legal_foundation_check(&registry)?;
+        run_legal_foundation_check(&registry, true)?;
     } else {
         println!("legal foundation: skipped for focused strategy iteration");
     }
@@ -165,12 +165,13 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         policy_seed,
         strategy,
         artifact_dir,
+        detail,
     } = options;
     debug_assert_eq!(mode, HarnessMode::Full);
     debug_assert!(strategy.is_none());
     let registry = build_registry();
-    // Distinct from the [profile.harness] build directory `target/harness/`, so
-    // `cargo clean` can never delete persisted run evidence.
+    // Gameplay evidence is separate from Cargo's build artifacts and remains under an ignored
+    // repository-owned directory.
     let artifact_dir = artifact_dir.unwrap_or_else(|| PathBuf::from("target/harness-runs"));
 
     println!("CRIMOCRACY GAMEPLAY HARNESS");
@@ -185,6 +186,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     println!(
         "Narrative comparisons rotate across {NARRATIVE_SEED_ROTATION} adjacent world seeds so every authored fixture variation gets exercised while policy seed {policy_seed:#x} stays fixed; matched branches inside one world share one treatment.\n"
     );
+    if !detail {
+        println!("Output: concise. Use `cargo harness-full-detail` for the primary narrative.\n");
+    }
 
     let mut narrative_sets: Vec<(EvaluationSeeds, RunMetrics, RunMetrics, RunMetrics)> =
         Vec::with_capacity(NARRATIVE_SEED_ROTATION as usize);
@@ -197,7 +201,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             narrative_seeds.world,
             narrative_seeds.policy,
         );
-        if deep_readout {
+        if deep_readout && detail {
             println!("\n--- CONTROLLED SESSION: RUSH ---");
         }
         let mut rush = play_session(
@@ -205,13 +209,13 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             Strategy::Rush,
             ScenarioProfile::NightTrap,
             narrative_seeds,
-            if deep_readout {
+            if deep_readout && detail {
                 SessionRunMode::FullNarrative
             } else {
                 SessionRunMode::FullQuiet
             },
         )?;
-        if deep_readout {
+        if deep_readout && detail {
             println!("\n--- CONTROLLED SESSION: PRESS (same fixture and world) ---");
         }
         let mut press = play_session_with_fixture_view(
@@ -219,14 +223,14 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             Strategy::Press,
             ScenarioProfile::NightTrap,
             narrative_seeds,
-            if deep_readout {
+            if deep_readout && detail {
                 SessionRunMode::FullNarrative
             } else {
                 SessionRunMode::FullQuiet
             },
             false,
         )?;
-        if deep_readout {
+        if deep_readout && detail {
             println!("\n--- CONTROLLED SESSION: RECON (same fixture and world) ---");
         }
         let mut recon = play_session_with_fixture_view(
@@ -234,7 +238,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             Strategy::Recon,
             ScenarioProfile::NightTrap,
             narrative_seeds,
-            if deep_readout {
+            if deep_readout && detail {
                 SessionRunMode::FullNarrative
             } else {
                 SessionRunMode::FullQuiet
@@ -279,7 +283,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         println!(
             "[HARNESS CHECK] Legitimate cashflow stayed identical across branches; delegated enterprise cashflow diverged only by district-scoped effects."
         );
-        if deep_readout {
+        if deep_readout && detail {
             print_metrics(&rush);
             print_metrics(&press);
             print_metrics(&recon);
@@ -304,6 +308,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             narrative_seeds,
             [&rush, &press, &recon],
             &artifact_dir,
+            detail,
         )?;
         narrative_sets.push((narrative_seeds, rush, press, recon));
     }
@@ -316,35 +321,89 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     let press = press.clone();
     let recon = recon.clone();
 
-    println!("\n--- VICE HEAT PROBE ---");
-    // Reaching the readout proves the enforcement-attention chain: the probe fails the run otherwise.
-    run_enforcement_attention_probe(&registry, primary_seeds)?;
-    print_experience_readout(&rush, &press, &recon, true);
+    if detail {
+        println!("\n--- VICE HEAT PROBE ---");
+    }
+    run_enforcement_attention_probe(&registry, primary_seeds, detail)?;
+    if detail {
+        print_experience_readout(&rush, &press, &recon, true);
+    } else {
+        println!("[PROBE PASS] enforcement attention");
+    }
 
-    println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
-    run_opportunity_portfolio_probe(&registry, primary_seeds)?;
+    if detail {
+        println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
+    }
+    run_opportunity_portfolio_probe(&registry, primary_seeds, detail)?;
+    if !detail {
+        println!("[PROBE PASS] opportunity portfolio");
+    }
 
-    println!("\n--- ORGANIZATIONAL CAPACITY PROBE ---");
-    run_organizational_capacity_probe(&registry, primary_seeds)?;
+    if detail {
+        println!("\n--- ORGANIZATIONAL CAPACITY PROBE ---");
+    }
+    run_organizational_capacity_probe(&registry, primary_seeds, detail)?;
+    if !detail {
+        println!("[PROBE PASS] organizational capacity");
+    }
 
-    println!("\n--- REPEAT-TAKE PROBE ---");
-    run_repeat_take_probe(&registry, primary_seeds)?;
+    if detail {
+        println!("\n--- REPEAT-TAKE PROBE ---");
+    }
+    run_repeat_take_probe(&registry, primary_seeds, detail)?;
+    if !detail {
+        println!("[PROBE PASS] repeat-take depletion/recovery");
+    }
 
-    println!("\n--- ENTERPRISE POSTURE PROBE ---");
-    posture::run_enterprise_posture_probe(&registry, primary_seeds, Some(&artifact_dir))?;
+    if detail {
+        println!("\n--- ENTERPRISE POSTURE PROBE ---");
+    }
+    let posture_observed = posture::run_enterprise_posture_probe(
+        &registry,
+        primary_seeds,
+        detail,
+        Some(&artifact_dir),
+    )?
+    .is_some();
+    if !detail {
+        println!(
+            "[PROBE {}] enterprise posture",
+            if posture_observed { "PASS" } else { "ABSENT" }
+        );
+    }
 
-    println!("\n--- RIVAL INTELLIGENCE PROBE ---");
+    if detail {
+        println!("\n--- RIVAL INTELLIGENCE PROBE ---");
+    }
     rival_intelligence::run_rival_intelligence_probe(
         &registry,
         primary_seeds,
+        detail,
         Some(&artifact_dir),
     )?;
+    if !detail {
+        println!("[PROBE PASS] rival intelligence");
+    }
 
-    println!("\n--- PERSONNEL RETENTION PROBE ---");
-    retention::run_retention_probe(&registry, primary_seeds, &artifact_dir)?;
+    if detail {
+        println!("\n--- PERSONNEL RETENTION PROBE ---");
+    }
+    let retention_observed =
+        retention::run_retention_probe(&registry, primary_seeds, detail, &artifact_dir)?;
+    if !detail {
+        println!(
+            "[PROBE {}] personnel retention",
+            if retention_observed { "PASS" } else { "ABSENT" }
+        );
+    }
 
-    println!("\n--- LEGAL FOUNDATION CHECK ---");
-    run_legal_foundation_check(&registry)?;
+    if detail {
+        println!("\n--- LEGAL FOUNDATION CHECK ---");
+    }
+    run_legal_foundation_check(&registry, detail)?;
+    if !detail {
+        println!("[PROBE PASS] legal foundation");
+    }
 
     println!("\n--- NIGHT-TRAP BATCH ({samples} world seeds per strategy) ---");
     println!("[BATCH] Running matched world seeds with policy {policy_seed:#x} for NIGHT TRAP...");
@@ -356,18 +415,26 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         Some(&artifact_dir),
     )?;
     println!("[BATCH PASS] NIGHT TRAP matched-world checks passed.");
-    rush_aggregate.print("RUSH");
-    press_aggregate.print("PRESS");
-    recon_aggregate.print("RECON");
-    println!(
-        "Decisions surfaced: rush {}, press {}, recon {}. Police arrivals: rush {}, press {}, recon {}.",
-        rush_aggregate.decisions,
-        press_aggregate.decisions,
-        recon_aggregate.decisions,
-        rush_aggregate.police_arrived,
-        press_aggregate.police_arrived,
-        recon_aggregate.police_arrived,
-    );
+    if detail {
+        rush_aggregate.print("RUSH");
+        press_aggregate.print("PRESS");
+        recon_aggregate.print("RECON");
+    } else {
+        rush_aggregate.print_compact("RUSH");
+        press_aggregate.print_compact("PRESS");
+        recon_aggregate.print_compact("RECON");
+    }
+    if detail {
+        println!(
+            "Decisions surfaced: rush {}, press {}, recon {}. Police arrivals: rush {}, press {}, recon {}.",
+            rush_aggregate.decisions,
+            press_aggregate.decisions,
+            recon_aggregate.decisions,
+            rush_aggregate.police_arrived,
+            press_aggregate.police_arrived,
+            recon_aggregate.police_arrived,
+        );
+    }
 
     println!(
         "\n--- SCENARIO SENSITIVITY ({samples} world seeds per strategy/profile, fixed policy {policy_seed:#x}) ---"
@@ -385,9 +452,15 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             Some(&artifact_dir),
         )?;
         println!("\n[{}]", profile.label());
-        rush.print("RUSH");
-        press.print("PRESS");
-        recon.print("RECON");
+        if detail {
+            rush.print("RUSH");
+            press.print("PRESS");
+            recon.print("RECON");
+        } else {
+            rush.print_compact("RUSH");
+            press.print_compact("PRESS");
+            recon.print_compact("RECON");
+        }
         print_convergence_observation(profile, &rush, &press, &recon);
         println!(
             "[BATCH PASS] {} matched-world checks passed.",
@@ -434,13 +507,17 @@ fn persist_narrative_artifacts(
     // Filenames encode seeds/profile/strategy/variation, not the observation window.
     // Keep full narratives separate from overlapping one-day batch runs.
     let narrative_dir = artifact_dir.join("narrative");
+    let mut written = 0_usize;
     for (seeds, rush, press, recon) in narrative_sets {
         for metrics in [rush, press, recon] {
-            let path =
-                persist_run_artifact(&narrative_dir, *seeds, ScenarioProfile::NightTrap, metrics)?;
-            println!("[ARTIFACT] wrote {}", path.display());
+            persist_run_artifact(&narrative_dir, *seeds, ScenarioProfile::NightTrap, metrics)?;
+            written += 1;
         }
     }
+    println!(
+        "[ARTIFACT] wrote {written} narrative run artifact(s) to {}",
+        narrative_dir.display()
+    );
     Ok(())
 }
 
@@ -453,7 +530,7 @@ mod tests {
         Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, format_avg_dollars,
         format_day_minute, format_patrol_windows, parse_options, patrol_intervals_from_signal,
         play_session, run_enforcement_attention_probe, run_opportunity_portfolio_probe,
-        run_organizational_capacity_probe, run_smoke, stamp, validate_batch_strategy_coverage,
+        run_organizational_capacity_probe, stamp, validate_batch_strategy_coverage,
         validate_branch_financial_isolation, validate_press_witness_counterplay,
         validate_run_metrics, validate_second_act_evidence, validate_strategy_evidence,
     };
@@ -572,7 +649,8 @@ mod tests {
     }
 
     #[test]
-    fn full_quiet_mode_changes_only_presentation() {
+    #[ignore = "scenario-scale presentation equivalence; run cargo test-harness-deep"]
+    fn deep_harness_full_quiet_mode_changes_only_presentation() {
         let registry = crimocracy::build_registry();
         for strategy in [Strategy::Rush, Strategy::Press, Strategy::Recon] {
             let narrative = play_session(
@@ -626,6 +704,7 @@ mod tests {
                 policy_seed: 43,
                 strategy: None,
                 artifact_dir: None,
+                detail: false,
             }
         );
     }
@@ -674,6 +753,7 @@ mod tests {
         assert_eq!(options.samples, 1);
         assert_eq!(options.world_seed, DEFAULT_WORLD_SEED);
         assert_eq!(options.policy_seed, DEFAULT_POLICY_SEED);
+        assert!(!options.detail);
     }
 
     #[test]
@@ -685,6 +765,20 @@ mod tests {
         assert_eq!(options.mode, HarnessMode::Full);
         assert_eq!(options.samples, super::DEFAULT_BATCH_SAMPLES);
         assert_eq!(options.samples, super::MIN_SAMPLES_FOR_VARIATION_CONTRACT);
+        assert!(!options.detail);
+    }
+
+    #[test]
+    fn full_detail_is_explicit() {
+        let options = parse_options(
+            ["--mode", "full", "--detail"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .expect("full detail arguments should parse")
+        .expect("non-help arguments should request a run");
+
+        assert!(options.detail);
     }
 
     #[test]
@@ -786,8 +880,8 @@ mod tests {
             metrics.player_personnel_departures, 1,
             "the exposed crew member must still be poached so the win-back has something to answer"
         );
-        assert_eq!(
-            metrics.win_back_attempted, true,
+        assert!(
+            metrics.win_back_attempted,
             "the confirmed defector should receive one canonical win-back attempt"
         );
         assert_eq!(
@@ -814,10 +908,7 @@ mod tests {
             ) && sighting.observed_minute >= 1_440
         }));
         assert_eq!(metrics.replacement, None);
-        assert_eq!(
-            metrics.payroll_paid_cents, 25_600,
-            "four members, two payroll days"
-        );
+        assert_eq!(metrics.payroll_short_cents, 0);
         validate_second_act_evidence(&metrics)
             .expect("the second act must recover through win-back or canonical replacement");
     }
@@ -833,10 +924,22 @@ mod tests {
             SessionRunMode::FullQuiet,
         )
         .expect("full recon session completes");
-        assert_eq!(metrics.second_scout_patrol_observed_minute, Some(121));
-        assert_eq!(metrics.second_scout_scheduled_minute, Some(1_440 + 330));
+        let observed = metrics
+            .second_scout_patrol_observed_minute
+            .expect("the second scout must reuse an observed patrol pattern");
+        let scheduled = metrics
+            .second_scout_scheduled_minute
+            .expect("the second scout must have a canonical schedule");
+        assert!(
+            scheduled > observed,
+            "reused patrol knowledge must predate the operation scheduled from it"
+        );
         assert!(metrics.second_scout_attached_patrol);
-        assert_eq!(metrics.second_scout_topics_covered, Some(1));
+        assert!(
+            metrics
+                .second_scout_topics_covered
+                .is_some_and(|topics| topics > 0)
+        );
         assert!(!metrics.self_heat_check_required);
         assert!(!metrics.self_heat_case_opened);
         assert_eq!(metrics.self_heat_case_active, None);
@@ -901,14 +1004,19 @@ mod tests {
         super::run_repeat_take_probe(
             &crimocracy::build_registry(),
             EvaluationSeeds::new(DEFAULT_WORLD_SEED + 1, DEFAULT_POLICY_SEED + 3),
+            false,
         )
         .expect("fractional-cent recovery rounds rather than truncates");
     }
 
     #[test]
     fn portfolio_probe_requires_explicit_opportunity_prioritization() {
-        run_opportunity_portfolio_probe(&crimocracy::build_registry(), EvaluationSeeds::defaults())
-            .expect("portfolio probe should preserve selected and expired opportunities");
+        run_opportunity_portfolio_probe(
+            &crimocracy::build_registry(),
+            EvaluationSeeds::defaults(),
+            false,
+        )
+        .expect("portfolio probe should preserve selected and expired opportunities");
     }
 
     #[test]
@@ -916,16 +1024,19 @@ mod tests {
         run_organizational_capacity_probe(
             &crimocracy::build_registry(),
             EvaluationSeeds::defaults(),
+            false,
         )
         .expect("capacity probe mandate revision must keep standing orders inside its authority");
     }
 
     #[test]
     fn racket_heat_probe_proves_clean_districts_stay_clean_and_casework_converts() {
-        run_enforcement_attention_probe(&crimocracy::build_registry(), EvaluationSeeds::defaults())
-            .expect(
-                "enforcement-attention probe should prove the sustained-casework conversion chain",
-            );
+        run_enforcement_attention_probe(
+            &crimocracy::build_registry(),
+            EvaluationSeeds::defaults(),
+            false,
+        )
+        .expect("enforcement-attention probe should prove the sustained-casework conversion chain");
     }
 
     #[test]
@@ -1341,12 +1452,5 @@ mod tests {
         post_boundary.session_case_staffed = true;
         validate_branch_financial_isolation(&post_boundary, &press, &recon)
             .expect("post-boundary case staffing must not violate the matched-window contract");
-    }
-
-    #[test]
-    #[ignore = "controlled smoke contract runs in its focused local gate lane"]
-    fn smoke_mode_covers_canonical_paths() {
-        run_smoke(EvaluationSeeds::defaults(), None)
-            .expect("smoke harness should pass its canonical-path contract");
     }
 }

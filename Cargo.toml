@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [package.metadata.git-wizard.validation]
-quick = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1 -Fast"
+quick = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1 -Check"
 standard = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1 -Fast"
 full = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
 
@@ -19,23 +19,27 @@ thiserror = "1.0"
 bincode = "1.3.3"
 serde_json = "1.0"
 
-# Development and harness profiles keep their caches separate. Incremental compilation remains
-# enabled for edit-loop reuse; verification may choose narrower targets but does not disable the
-# shared Cargo cache policy.
+# Routine development/test work shares its normal incremental caches. Only the explicit deep
+# gameplay study below uses a separate optimized profile because unoptimized simulation is much slower.
 [profile.dev]
 debug = false
 incremental = true
 codegen-units = 32
 overflow-checks = true
 
-# Harness artifacts use their own profile/cache so gameplay runs do not invalidate the
-# development library/test cache.
+# Local tests do not need debugger symbols. On Windows this avoids large PDB writes and
+# unnecessary link work while preserving debug assertions and overflow checks.
+[profile.test]
+debug = false
+
+# Full gameplay evaluation is simulation-heavy and explicitly opt-in. Give only that deep lane
+# a modest optimization profile; smoke, focused tests, and checks keep their normal warm caches.
 [profile.harness]
 inherits = "dev"
 opt-level = 1
 
-# Dependencies are optimized in development-derived profiles because they change only with
-# dependency updates while several sit on hot deterministic simulation paths.
+# Dependencies are optimized in development because they change only with dependency updates
+# while several sit on hot deterministic simulation paths.
 [profile.dev.package."*"]
 opt-level = 3
 

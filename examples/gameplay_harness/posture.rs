@@ -140,6 +140,7 @@ pub struct PostureEvidence {
 pub fn run_enterprise_posture_probe(
     registry: &Registry,
     seeds: EvaluationSeeds,
+    detail: bool,
     artifact_dir: Option<&Path>,
 ) -> Result<Option<PostureEvidence>, Box<dyn Error>> {
     let mut open = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
@@ -192,9 +193,11 @@ pub fn run_enterprise_posture_probe(
             };
         }
         if trigger_time.as_minutes() >= first_due.as_minutes() + 4 * DAY_MINUTES {
-            println!(
-                "[POSTURE ABSENT] No new home-racket surcharge report within four days of the first due cycle; no posture comparison was performed. Due work may be blocked by personnel availability; no case was injected."
-            );
+            if detail {
+                println!(
+                    "[POSTURE ABSENT] No new home-racket surcharge report within four days of the first due cycle; no posture comparison was performed. Due work may be blocked by personnel availability; no case was injected."
+                );
+            }
             return Ok(None);
         }
         // Due work can be blocked by custody. Poll the next canonical minute, not the
@@ -306,7 +309,9 @@ pub fn run_enterprise_posture_probe(
         case_clearance_claimed: false,
     };
     validate_harness_state(registry, &paused.state)?;
-    print_posture_readout(&evidence);
+    if detail {
+        print_posture_readout(&evidence);
+    }
     if let Some(dir) = artifact_dir {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!(
@@ -315,7 +320,9 @@ pub fn run_enterprise_posture_probe(
         ));
         let payload = serde_json::json!({ "player_visible": &evidence });
         std::fs::write(&path, serde_json::to_string_pretty(&payload)?)?;
-        println!("[ARTIFACT] wrote {}", path.display());
+        if detail {
+            println!("[ARTIFACT] wrote {}", path.display());
+        }
     }
     Ok(Some(evidence))
 }
@@ -364,11 +371,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hot_report_then_suspend_preserves_trade_and_full_cycle_restart() {
+    #[ignore = "scenario-scale posture comparison; run cargo test-harness-deep or cargo harness-full"]
+    fn deep_harness_hot_report_then_suspend_preserves_trade_and_full_cycle_restart() {
         let registry = crimocracy::build_registry();
-        let evidence = run_enterprise_posture_probe(&registry, EvaluationSeeds::defaults(), None)
-            .expect("matched posture must preserve continuity and restart without backlog")
-            .expect("primary PRESS world must produce a reported surcharge");
+        let evidence =
+            run_enterprise_posture_probe(&registry, EvaluationSeeds::defaults(), false, None)
+                .expect("matched posture must preserve continuity and restart without backlog")
+                .expect("primary PRESS world must produce a reported surcharge");
         assert_eq!(
             evidence.window_end_minute - evidence.window_start_minute,
             POSTURE_WINDOW_DAYS * DAY_MINUTES

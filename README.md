@@ -29,15 +29,19 @@ intent. If authorities conflict, repair the owning document and implementation.
 ```powershell
 cargo check-fast
 cargo test-focused <filter>
+.\scripts\check-docs.cmd
 .\scripts\verify.cmd -Check
+.\scripts\verify.cmd -Fast -Filter <filter>
 .\scripts\verify.cmd -Fast
-.\scripts\verify.cmd -Fast -Harness
+.\scripts\verify.cmd -Harness
 .\scripts\verify.cmd
+cargo test-harness
 cargo harness
 cargo harness-rush
 cargo harness-press
 cargo harness-recon
 cargo harness-full --samples 8
+cargo harness-full-detail --samples 8
 ```
 
 Optional Rust diagnostics are deliberately outside the completion lanes:

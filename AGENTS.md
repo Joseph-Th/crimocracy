@@ -144,8 +144,8 @@ which lane completes each change class. Use focused checks while editing when th
 shorten feedback. The broad local gate is required for persistence, invariant,
 cross-domain, or verification-infrastructure changes.
 
-`tests/documentation_contracts.rs` mechanically checks the live documentation routes,
-Cargo aliases, and persistence-version publication rules.
+`scripts/check-docs.ps1` mechanically checks the live documentation routes, Cargo aliases,
+and persistence-version publication rules without compiling the crate.
 
 ---
 
@@ -263,8 +263,10 @@ wording as part of the change.
 Use focused checks while editing when they shorten feedback or isolate a failure. For completion, run the smallest lane that covers the changed surface; if the implementation is already ready for that lane, go directly to it instead of forcing a focused build first:
 
 - `cargo check-fast` / `cargo test-focused <filter>` while editing
-- `.\scripts\verify.cmd -Fast` for ordinary library work
-- `.\scripts\verify.cmd -Fast -Harness` when the harness surface changes
+- `.\scripts\check-docs.cmd` for documentation/route-only changes
+- `.\scripts\verify.cmd -Fast -Filter <filter>` for one-owner behavior work
+- `.\scripts\verify.cmd -Fast` for broader library work
+- `.\scripts\verify.cmd -Harness` when the harness implementation changes
 - `.\scripts\verify.cmd` only for persistence/invariant/cross-domain work, verification infrastructure, or an explicit broad checkpoint
 
 Before handoff, confirm ownership, determinism, persistence, invariants, adapters, tests, documentation, and worktree scope remain coherent.

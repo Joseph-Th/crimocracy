@@ -247,6 +247,15 @@ impl LegalState {
             {
                 return false;
             }
+            let chronology_indexed = self
+                .indexes
+                .arrests
+                .detained_by_arrested_at
+                .get(&arrest.arrested_at())
+                .is_some_and(|ids| ids.contains(&id));
+            if chronology_indexed != (arrest.status() == ArrestStatus::Detained) {
+                return false;
+            }
         }
         for (investigation, ids) in &self.indexes.arrests.by_investigation {
             if ids.iter().any(|id| {
@@ -271,6 +280,16 @@ impl LegalState {
                 .get(id)
                 .is_some_and(|record| record.status() == ArrestStatus::Detained)
             {
+                return false;
+            }
+        }
+        for (arrested_at, ids) in &self.indexes.arrests.detained_by_arrested_at {
+            if ids.iter().any(|id| {
+                !self.arrests.get(id).is_some_and(|record| {
+                    record.status() == ArrestStatus::Detained
+                        && record.arrested_at() == *arrested_at
+                })
+            }) {
                 return false;
             }
         }

@@ -6,6 +6,7 @@ use crate::core::id::{
     InvestigationId, OrganizationId,
 };
 use crate::core::state::AppState;
+use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
 use crate::legal::{
@@ -414,24 +415,16 @@ pub(crate) fn apply_detainee_informant_recruitment(
 
     let decision_delay = registry.legal().informant_decision_delay().as_minutes();
     let now = state.now();
-    // The decision instant is a pure function of `arrested_at`, so the cheap timing gate
-    // runs first: a detainee not reaching their decision minute this tick skips every
-    // record lookup below. Predicates are pure reads, so evaluating them in this order
-    // selects exactly the same candidates.
-    let due_arrests: Vec<_> = state
-        .legal
-        .detained_arrests()
-        .filter(|arrest| {
-            let minutes_in_custody = now
-                .as_minutes()
-                .checked_sub(arrest.arrested_at().as_minutes())
-                .expect("active arrest chronology must not begin in the future");
-            // Exact equality is safe because the canonical pipeline advances exactly one
-            // minute per tick and this pass runs every tick: each detention reaches its
-            // decision minute under observation exactly once. A batched or skipped pass
-            // would need a persisted decided-marker instead.
-            minutes_in_custody == u64::from(decision_delay)
-        })
+    // Exact equality is safe because the canonical pipeline advances exactly one minute per
+    // tick and this pass runs every tick. Select that custody cohort directly from the derived
+    // chronology index instead of rescanning every live detainee to rediscover the same fact.
+    // A batched or skipped pass would still need a persisted decided-marker instead.
+    let due_arrests: Vec<_> = now
+        .as_minutes()
+        .checked_sub(u64::from(decision_delay))
+        .map(SimTime::from_minutes)
+        .into_iter()
+        .flat_map(|arrested_at| state.legal.detained_arrests_arrested_at(arrested_at))
         .map(|arrest| (arrest.id(), arrest.character(), arrest.authority()))
         .collect();
 

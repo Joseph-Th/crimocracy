@@ -1047,7 +1047,7 @@ pub(crate) fn resolve_business_disruption_horizon(now: SimTime, duration: SimDur
         .checked_sub(1)
         .expect("registry-validated business disruption duration must be positive");
     now.checked_add(SimDuration::from_minutes(last_affected_minutes))
-        .unwrap_or(SimTime::from_minutes(u64::MAX))
+        .unwrap_or(SimTime::MAX)
 }
 
 pub fn validate_disrupt_business_economy(

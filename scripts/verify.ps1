@@ -5,12 +5,12 @@
 # Cargo profiles own cache and incremental behavior. This gate deliberately does not override
 # CARGO_INCREMENTAL, so focused and repeated local runs can reuse the repository's normal cache.
 #
-# Stages (full gate, in order, fail-fast):
-#   1. cargo fmt --check
-#   2. cargo test --locked --lib --tests --quiet         (lib + integration)
-#   3. cargo test --locked --quiet --example gameplay_harness --lib
-#   4. harness smoke contract (exact ignored test, fail-closed)
-#   5. harness full --samples 1 on [profile.harness]      (narratives + probes)
+# Stages (broad gate, in order, fail-fast):
+#   1. compile-free documentation contracts
+#   2. cargo fmt --check
+#   3. cargo test --locked --lib --quiet
+#   4. fast gameplay-harness implementation contracts
+#   5. gameplay-harness smoke executable
 #   6. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
 #
 # Tests run before clippy so the hot test cache is not invalidated by clippy's
@@ -19,8 +19,8 @@
 # Lanes:
 #   .\scripts\verify.cmd                  broad gate for contracts that require it
 #   .\scripts\verify.cmd -Fast            fmt + lib tests --skip soak
-#   .\scripts\verify.cmd -Fast -Harness   fmt + smoke contract only
-#   .\scripts\verify.cmd -Check           type-check only, no tests
+#   .\scripts\verify.cmd -Harness         fmt + harness contracts + smoke
+#   .\scripts\verify.cmd -Check           fmt + lib type-check only
 #   .\scripts\verify.cmd -Fast -Filter X  fmt + matching lib tests
 #   cargo check-fast / test-fast / harness  even more targeted, via .cargo aliases
 #
@@ -34,7 +34,6 @@ param(
     [switch]$Fast,
     [switch]$Harness,
     [switch]$Check,
-    [switch]$SelfTest,
     [string]$Filter = "",
     [switch]$NoClippy,
     [switch]$NoFmt,
@@ -47,62 +46,14 @@ if ($VerbosePreference -eq 'Continue' -and -not $Detail) { $Detail = $true }
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-$SmokeContract = "tests::smoke_mode_covers_canonical_paths"
-
 # ── helpers ──────────────────────────────────────────────────────────────────
-
-function Get-SmokeContractSelectableCount {
-    param([string[]]$ListingLines)
-    return @($ListingLines | Where-Object {
-        $_ -match ('^' + [regex]::Escape($SmokeContract) + ':\s+test\s*$')
-    }).Count
-}
-
-function Invoke-SmokeContractSelectionSelfTest {
-    $present = @("$($SmokeContract): test", "1 test, 0 benchmarks")
-    $missing = @("tests::some_other_renamed_contract: test", "1 test, 0 benchmarks")
-    $ambiguous = @("$($SmokeContract): test", "tests::smoke_mode_covers_canonical_paths: test", "2 tests, 0 benchmarks")
-    $zero = @("0 test, 0 benchmarks")
-    $expectations = @(
-        @{ Name = "present"; Lines = $present; Want = 1 },
-        @{ Name = "missing"; Lines = $missing; Want = 0 },
-        @{ Name = "ambiguous"; Lines = $ambiguous; Want = 2 },
-        @{ Name = "zero"; Lines = $zero; Want = 0 }
-    )
-    foreach ($case in $expectations) {
-        $got = Get-SmokeContractSelectableCount -ListingLines $case.Lines
-        if ($got -ne $case.Want) {
-            Write-Host "[FAIL] smoke-selection selftest '$($case.Name)': expected $($case.Want), got $got" -ForegroundColor Red
-            exit 1
-        }
-        Write-Host "[PASS] smoke-selection selftest '$($case.Name)' ($got)" -ForegroundColor Green
-    }
-}
-
-function Assert-SmokeContractSelectable {
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = "SilentlyContinue"
-    $smokeListing = & cargo test --locked --quiet --example gameplay_harness -- --list --ignored 2>&1
-    $code = $LASTEXITCODE
-    $ErrorActionPreference = $prevEAP
-    if ($code -ne 0) {
-        Write-Host "[FAIL] harness smoke contract -- could not list ignored tests (cargo exited $code)" -ForegroundColor Red
-        Write-Host ($smokeListing -join "`n") -ForegroundColor DarkGray
-        exit $code
-    }
-    $smokeSelectable = Get-SmokeContractSelectableCount -ListingLines $smokeListing
-    if ($smokeSelectable -ne 1) {
-        Write-Host "[FAIL] harness smoke contract -- expected exactly '$SmokeContract', found $smokeSelectable matching line(s)" -ForegroundColor Red
-        Write-Host ($smokeListing | Where-Object { $_ -match "smoke_mode" } | Out-String) -ForegroundColor DarkGray
-        exit 1
-    }
-}
 
 function Invoke-CargoStage {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [bool]$AllowJobs = $true,
+        [int]$MinimumPassed = 0,
         [switch]$ShowOutputOnPass
     )
     $displayName = if ($Name.Length -gt 28) { $Name.Substring(0, 28) } else { $Name.PadRight(28) }
@@ -145,9 +96,8 @@ function Invoke-CargoStage {
             "fmt*"              { "fix formatting: cargo fmt" }
             "lib*tests"         { "re-run: cargo test-focused <filter>  or  cargo test --lib -- --nocapture" }
             "test-focused*"     { "re-run: cargo test-focused <filter> -- --nocapture" }
-            "harness unit*"     { "re-run: cargo test --quiet --example gameplay_harness --lib -- --nocapture" }
-            "harness smoke"     { "re-run: cargo harness-rush  or  cargo test --example gameplay_harness -- --ignored --nocapture" }
-            "harness full*"     { "re-run: cargo harness-full --samples 1" }
+            "harness contracts*" { "re-run: cargo test-harness -- --nocapture" }
+            "harness smoke"      { "re-run: cargo harness  or  cargo harness-rush" }
             "clippy*"           { "fix lints: cargo clippy --lib --example gameplay_harness -- -D warnings" }
             "check*"            { "re-run: cargo check-fast  or  cargo check-all" }
             default             { "" }
@@ -155,13 +105,12 @@ function Invoke-CargoStage {
         if ($hint) { Write-Host "  hint: $hint" -ForegroundColor Yellow }
         exit $exit
     }
-    # Extract pass count for the success line when available.
-    # Some stages (harness unit tests: `cargo test --example X --lib` runs both
-    # the main lib and the example's lib) report multiple binaries; sum them.
+    # Extract pass count for the success line when available. Some Cargo test
+    # invocations report multiple binaries; sum them for one concise stage result.
     $countSuffix = ""
+    $totalPassed = 0
     $allPassed = [regex]::Matches($output, '(\d+) passed')
     if ($allPassed.Count -gt 0) {
-        $totalPassed = 0
         foreach ($m in $allPassed) { $totalPassed += [int]$m.Groups[1].Value }
         if ($allPassed.Count -gt 1) {
             $countSuffix = "  $totalPassed passed ($($allPassed.Count) binaries)"
@@ -172,6 +121,12 @@ function Invoke-CargoStage {
         $totalFailed = 0
         foreach ($m in $allFailed) { $totalFailed += [int]$m.Groups[1].Value }
         if ($totalFailed -gt 0) { $countSuffix += "  $totalFailed FAILED" }
+    }
+    if ($MinimumPassed -gt 0 -and $totalPassed -lt $MinimumPassed) {
+        Write-Host "FAIL $timing" -ForegroundColor Red
+        Write-Host "  expected at least $MinimumPassed matching test(s), but Cargo ran $totalPassed" -ForegroundColor Red
+        Write-Host "  -> cargo $($cargoArgs -join ' ')" -ForegroundColor Red
+        exit 1
     }
     if ($Detail -or $ShowOutputOnPass) {
         $trimmed = $output.Trim()
@@ -185,6 +140,29 @@ function Invoke-CargoStage {
     } else {
         Write-Host "ok   $timing" -ForegroundColor Green
     }
+}
+
+function Invoke-DocsStage {
+    $displayName = "docs contracts".PadRight(28)
+    Write-Host "  $displayName " -NoNewline -ForegroundColor Cyan
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    $output = & powershell -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot\check-docs.ps1" 2>&1 | Out-String
+    $exit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    $sw.Stop()
+    $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    $timing = ("{0,5}s" -f $elapsed)
+    if ($exit -ne 0) {
+        Write-Host "FAIL $timing" -ForegroundColor Red
+        if ($output.Trim()) { Write-Host $output.Trim() -ForegroundColor DarkGray }
+        Write-Host "  -> .\scripts\check-docs.cmd" -ForegroundColor Red
+        exit $exit
+    }
+    $script:GateStagesPassed++
+    $script:GateTimings += [pscustomobject]@{ Stage = "docs contracts"; Seconds = $elapsed }
+    Write-Host "ok   $timing" -ForegroundColor Green
 }
 
 function Skip-Stage {
@@ -208,22 +186,11 @@ try { $gitShort = (& git rev-parse --short HEAD 2>$null).Trim() } catch {}
 Write-Host ""
 Write-Host "CRIMOCRACY LOCAL VERIFICATION" -ForegroundColor Cyan
 if ($gitBranch) {
-    Write-Host "  branch $gitBranch @ $gitShort  " -NoNewline -ForegroundColor DarkGray
-    Write-Host "|  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor DarkGray
+    Write-Host "  branch $gitBranch @ $gitShort" -ForegroundColor DarkGray
 }
 
-if ($SelfTest) {
-    if ($Fast -or $Harness -or $Filter -or $Check) {
-        Write-Host "[FAIL] -SelfTest cannot be combined with -Fast, -Harness, -Check, or -Filter" -ForegroundColor Red
-        exit 1
-    }
-    Invoke-SmokeContractSelectionSelfTest
-    Write-Host "SMOKE-SELECTION SELFTEST PASS" -ForegroundColor Green
-    exit 0
-}
-
-if ($Harness -and -not $Fast) {
-    Write-Host "[FAIL] -Harness requires -Fast" -ForegroundColor Red
+if ($Harness -and ($Fast -or $Filter)) {
+    Write-Host "[FAIL] -Harness is its own lane; do not combine it with -Fast or -Filter" -ForegroundColor Red
     exit 1
 }
 if ($Check -and ($Fast -or $Harness -or $Filter)) {
@@ -239,38 +206,50 @@ if ($Filter -and -not $Fast) {
 
 if ($Check) {
     $gate = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-Host "CHECK LANE: type-check (lib + harness)" -ForegroundColor Yellow
+    Write-Host "CHECK LANE: library type-check" -ForegroundColor Yellow
     if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
-    Invoke-CargoStage "check (lib + harness)" @("check", "--locked", "--lib", "--example", "gameplay_harness")
+    Invoke-CargoStage "check lib" @("check", "--locked", "--lib")
     $gate.Stop()
     Write-Host "CHECK PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  type-check only" -ForegroundColor Green
-    Write-Host "  next: .\scripts\verify.cmd -Fast  (tests)  |  cargo check-fast  (lib only, even faster)" -ForegroundColor DarkGray
+    Write-Host "  harness compile: cargo check-harness  |  behavior: cargo test-focused <filter>" -ForegroundColor DarkGray
     exit 0
 }
 
 # ── fast lanes ───────────────────────────────────────────────────────────────
+
+if ($Harness) {
+    $gate = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Host "HARNESS LANE: implementation contracts + canonical smoke" -ForegroundColor Yellow
+    if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
+    Invoke-CargoStage "harness contracts" @("test", "--locked", "--quiet", "--example", "gameplay_harness")
+    Invoke-CargoStage "harness smoke" @("run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke")
+    $gate.Stop()
+    $totalSec = [math]::Round($gate.Elapsed.TotalSeconds, 1)
+    if ($script:GateTimings.Count -gt 0) {
+        $table = ($script:GateTimings | ForEach-Object { "$($_.Stage): $($_.Seconds)s" }) -join "  |  "
+        Write-Host "  stages: $table" -ForegroundColor DarkGray
+    }
+    Write-Host "HARNESS PASS ($totalSec`s)" -ForegroundColor Green
+    Write-Host "  scenario-scale checks remain explicit: cargo test-harness-deep  |  cargo harness-full" -ForegroundColor DarkGray
+    exit 0
+}
 
 if ($Fast) {
     $gate = [System.Diagnostics.Stopwatch]::StartNew()
     if ($Filter) {
         Write-Host "FAST: focused lib tests matching '$Filter'" -ForegroundColor Yellow
         if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
-        Invoke-CargoStage "test-focused $Filter" @("test", "--locked", "--lib", "--quiet", $Filter) -ShowOutputOnPass:$Detail
+        Invoke-CargoStage "test-focused $Filter" @("test", "--locked", "--lib", "--quiet", $Filter) -MinimumPassed 1 -ShowOutputOnPass:$Detail
         $gate.Stop()
         Write-Host "FAST PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  filter: $Filter" -ForegroundColor Green
         Write-Host "  broader gate is required only for persistence, invariants, cross-domain work, or verification infrastructure" -ForegroundColor DarkGray
         exit 0
     }
 
-    $lane = if ($Harness) { "harness smoke" } else { "library unit tests (soak excluded)" }
+    $lane = "library unit tests (soak excluded)"
     Write-Host "FAST LANE: $lane" -ForegroundColor Yellow
     if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
-    if ($Harness) {
-        Assert-SmokeContractSelectable
-        Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
-    } else {
-        Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
-    }
+    Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
     $gate.Stop()
     $totalSec = [math]::Round($gate.Elapsed.TotalSeconds, 1)
     if ($script:GateTimings.Count -gt 0) {
@@ -282,11 +261,13 @@ if ($Fast) {
     exit 0
 }
 
-# ── full completion gate ─────────────────────────────────────────────────────
+# ── broad completion gate ────────────────────────────────────────────────────
 
 $gate = [System.Diagnostics.Stopwatch]::StartNew()
 $jobsDisplay = if ($Jobs -eq 0) { "auto" } else { "$Jobs" }
-Write-Host "FULL GATE  (fmt -> lib+integration -> harness units -> smoke -> full n=1 -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
+Write-Host "BROAD GATE  (docs -> fmt -> lib -> harness contracts -> smoke -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
+
+Invoke-DocsStage
 
 if ($NoFmt) {
     Skip-Stage -Name "fmt --check" -Reason "--NoFmt"
@@ -294,18 +275,12 @@ if ($NoFmt) {
     Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false
 }
 
-Invoke-CargoStage "lib+integration tests" @("test", "--locked", "--lib", "--tests", "--quiet")
+Invoke-CargoStage "lib tests" @("test", "--locked", "--lib", "--quiet")
 
-# Harness unit tests (options parsing, financial contracts) live in the example
-# target; --lib --tests never compiles example test targets, so run them here.
-Invoke-CargoStage "harness unit tests" @("test", "--locked", "--quiet", "--example", "gameplay_harness", "--lib")
-
-Assert-SmokeContractSelectable
-Invoke-CargoStage "harness smoke" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $SmokeContract, "--", "--ignored", "--exact", "--nocapture") -ShowOutputOnPass
-
-# Full mode exercises every narrative, probe, and cross-branch contract that
-# smoke skips. Runs on [profile.harness], which has a separate incremental cache from dev.
-Invoke-CargoStage "harness full (n=1)" @("run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--samples", "1")
+# Verification-infrastructure and cross-domain changes need the harness adapter's fast contracts,
+# but scenario-scale comparisons stay in their explicit deep tier.
+Invoke-CargoStage "harness contracts" @("test", "--locked", "--quiet", "--example", "gameplay_harness")
+Invoke-CargoStage "harness smoke" @("run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke")
 
 if ($NoClippy) {
     Skip-Stage -Name "clippy (lib+harness)" -Reason "--NoClippy"
@@ -322,5 +297,5 @@ if ($script:GateTimings.Count -gt 0) {
     Write-Host "  stages: $table" -ForegroundColor DarkGray
 }
 $skippedNote = if ($script:GateStagesSkipped -gt 0) { ", $($script:GateStagesSkipped) skipped by flag" } else { "" }
-Write-Host "GATE PASS  $($script:GateStagesPassed) stages$skippedNote in ${totalSec}s" -ForegroundColor Green
-Write-Host "  tip: -Fast for iteration  |  -Check for type-check only  |  -Filter <name> for one test  |  -Jobs N on a hot machine" -ForegroundColor DarkGray
+Write-Host "BROAD PASS  $($script:GateStagesPassed) stages$skippedNote in ${totalSec}s" -ForegroundColor Green
+Write-Host "  deep gameplay evidence stays explicit: cargo test-harness-deep  |  cargo harness-full --samples N" -ForegroundColor DarkGray

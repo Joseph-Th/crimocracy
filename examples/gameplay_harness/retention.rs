@@ -149,42 +149,47 @@ fn collect(
 pub(crate) fn run_retention_probe(
     registry: &Registry,
     seeds: EvaluationSeeds,
+    detail: bool,
     directory: &Path,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<bool, Box<dyn Error>> {
     let Some(evidence) = collect(registry, seeds)? else {
-        println!(
-            "[RETENTION ABSENT] No confirmed accepted recovery; no retention comparison manufactured."
-        );
-        return Ok(());
-    };
-    println!(
-        "[RETENTION] Matched continuation from {} to {}; no new street jobs, routine wages and rivals continue. Only the returned member's supervisor changes.",
-        stamp(evidence.start_minute),
-        stamp(evidence.end_minute)
-    );
-    for arm in [
-        &evidence.leave_under_recruiter,
-        &evidence.restore_trusted_supervisor,
-    ] {
-        println!(
-            "  [{}] retained {}, departures {}, loyalty warnings {}, unpaid wages {} cents",
-            if arm.restored_reporting_line {
-                "restore trusted lieutenant"
-            } else {
-                "leave under recruiter"
-            },
-            arm.retained,
-            arm.departures,
-            arm.loyalty_warnings,
-            arm.wages_short_cents
-        );
-        for entry in &arm.reports {
-            println!("    {} {}", stamp(entry.minute), entry.summary);
+        if detail {
+            println!(
+                "[RETENTION ABSENT] No confirmed accepted recovery; no retention comparison manufactured."
+            );
         }
+        return Ok(false);
+    };
+    if detail {
+        println!(
+            "[RETENTION] Matched continuation from {} to {}; no new street jobs, routine wages and rivals continue. Only the returned member's supervisor changes.",
+            stamp(evidence.start_minute),
+            stamp(evidence.end_minute)
+        );
+        for arm in [
+            &evidence.leave_under_recruiter,
+            &evidence.restore_trusted_supervisor,
+        ] {
+            println!(
+                "  [{}] retained {}, departures {}, loyalty warnings {}, unpaid wages {} cents",
+                if arm.restored_reporting_line {
+                    "restore trusted lieutenant"
+                } else {
+                    "leave under recruiter"
+                },
+                arm.retained,
+                arm.departures,
+                arm.loyalty_warnings,
+                arm.wages_short_cents
+            );
+            for entry in &arm.reports {
+                println!("    {} {}", stamp(entry.minute), entry.summary);
+            }
+        }
+        println!(
+            "[READ] Getting someone back is not the same as keeping them. Reporting lines use existing personal bonds; no relationship bonus, immunity, or cash was injected. Retention here is bounded, not a lifetime guarantee."
+        );
     }
-    println!(
-        "[READ] Getting someone back is not the same as keeping them. Reporting lines use existing personal bonds; no relationship bonus, immunity, or cash was injected. Retention here is bounded, not a lifetime guarantee."
-    );
     std::fs::create_dir_all(directory)?;
     std::fs::write(
         directory.join(format!(
@@ -193,14 +198,15 @@ pub(crate) fn run_retention_probe(
         )),
         serde_json::to_vec_pretty(&evidence)?,
     )?;
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn reporting_line_changes_retention_after_rival_retry() {
+    #[ignore = "scenario-scale retention comparison; run cargo test-harness-deep or cargo harness-full"]
+    fn deep_harness_reporting_line_changes_retention_after_rival_retry() {
         let registry = crimocracy::build_registry();
         let evidence = collect(&registry, EvaluationSeeds::defaults())
             .unwrap()

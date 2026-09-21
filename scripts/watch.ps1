@@ -1,16 +1,14 @@
 # watch.ps1 -- zero-touch targeted iteration loop for a solo developer.
 #
-# Watches repository sources (*.rs, *.toml, *.md; target\ ignored) for saves
+# Watches repository code/config (*.rs, *.toml; target\ ignored) for saves
 # and reruns one focused lane, so you edit-and-save instead of retyping
 # commands. Each run reuses cargo's warm cache; only the lane you chose is
-# ever built. Markdown is watched because tests/documentation_contracts.rs
-# compiles the authority documents in via include_str!.
+# ever built. Documentation edits deliberately do not trigger Rust builds.
 #
 # Usage:
-#   powershell -NoProfile -File scripts\watch.ps1                  # fast lib tests (soak excluded)
+#   powershell -NoProfile -File scripts\watch.ps1                  # lib type-check (default)
 #   powershell -NoProfile -File scripts\watch.ps1 -Filter <name>   # matching lib tests only
-#   powershell -NoProfile -File scripts\watch.ps1 -Harness         # harness smoke contract
-#   powershell -NoProfile -File scripts\watch.ps1 -Check           # type-check lib + harness only
+#   powershell -NoProfile -File scripts\watch.ps1 -Harness         # harness smoke executable
 #
 # The first run starts immediately; later runs start ~300ms after your last
 # save. Press Ctrl+C to stop. Works on both Windows PowerShell 5.1 and pwsh.
@@ -20,40 +18,38 @@
 param(
     [string]$Filter = "",
     [switch]$Harness,
-    [switch]$Check,
     [switch]$Clear
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
+if ($Filter -and $Harness) {
+    Write-Host "[FAIL] -Filter and -Harness select different lanes" -ForegroundColor Red
+    exit 1
+}
+
 # ── resolve the lane once ────────────────────────────────────────────────────
 
 $title = if ($Filter) {
     "focused tests: $Filter"
 } elseif ($Harness) {
-    "harness smoke contract"
-} elseif ($Check) {
-    "type-check (lib + harness)"
+    "harness smoke"
 } else {
-    "fast lib tests (soak excluded)"
+    "lib type-check"
 }
 
-# Soak tests carry the "soak" substring by convention; fast lanes skip them
-# with a substring filter so renames cannot silently un-exclude them.
 $cargoArgs = if ($Filter) {
     @("test", "--locked", "--lib", "--quiet", $Filter)
 } elseif ($Harness) {
-    @("test", "--locked", "--quiet", "--example", "gameplay_harness",
-        "tests::smoke_mode_covers_canonical_paths", "--", "--ignored", "--exact")
-} elseif ($Check) {
-    @("check", "--locked", "--quiet", "--lib", "--example", "gameplay_harness")
+    @("run", "--locked", "--quiet", "--example", "gameplay_harness",
+        "--", "--mode", "smoke")
 } else {
-    @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
+    @("check", "--locked", "--quiet", "--lib")
 }
 
 # Each run prints its measured elapsed time without inferring cache or rebuild state.
-$laneIsCheck = $Check
+$laneIsCheck = -not $Filter -and -not $Harness
 
 function Invoke-Lane {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -62,11 +58,19 @@ function Invoke-Lane {
     $sw.Stop()
     # Extract test count from cargo output for concise summary.
     $testCount = ""
+    $passed = $null
     if (-not $laneIsCheck) {
         $m = [regex]::Match($output, '(\d+) passed')
-        if ($m.Success) { $testCount = "  $($m.Groups[1].Value) passed" }
+        if ($m.Success) {
+            $passed = [int]$m.Groups[1].Value
+            $testCount = "  $passed passed"
+        }
         $fm = [regex]::Match($output, '(\d+) failed')
         if ($fm.Success) { $testCount += "  $($fm.Groups[1].Value) FAILED" }
+    }
+    if ($Filter -and $exit -eq 0 -and ($null -eq $passed -or $passed -eq 0)) {
+        $exit = 1
+        $output = "focused filter '$Filter' matched zero tests"
     }
     [pscustomobject]@{
         Exit      = $exit
@@ -90,7 +94,7 @@ $watcher.InternalBufferSize = 65536
 
 $onChange = {
     $path = $Event.SourceEventArgs.FullPath
-    if ($path -notmatch '[\\/]target[\\/]' -and $path -match '\.(rs|toml|md)$') {
+    if ($path -notmatch '[\\/]target[\\/]' -and $path -match '\.(rs|toml)$') {
         $global:WatchPending = $true
         $global:WatchLastPath = $path
     }
@@ -108,7 +112,7 @@ try {
     $watcher.EnableRaisingEvents = $true
     Write-Host "CRIMOCRACY WATCH" -ForegroundColor Cyan
     Write-Host "  lane: $title   (save a file to rerun, Ctrl+C to stop)" -ForegroundColor DarkGray
-    Write-Host "  tip:  .\scripts\watch.cmd -Check  for type-check only (fastest)" -ForegroundColor DarkGray
+    Write-Host "  tip:  -Filter <name> for one behavior  |  -Harness for gameplay smoke" -ForegroundColor DarkGray
 
     $runCount = 0
     while ($true) {
@@ -120,7 +124,7 @@ try {
         $color = if ($result.Exit -eq 0) { "Green" } else { "Red" }
         $countInfo = if ($result.TestCount) { $result.TestCount } else { "" }
         Write-Host ("{0}  {1,5}s{2}" -f $status, $result.Seconds, $countInfo) -ForegroundColor $color
-        if ($result.Output -and ($result.Exit -ne 0 -or $Filter)) {
+        if ($result.Output -and $result.Exit -ne 0) {
             # Cap watch failure output so the terminal stays scannable.
             $lines = $result.Output -split "`n"
             if ($lines.Count -gt 60) {

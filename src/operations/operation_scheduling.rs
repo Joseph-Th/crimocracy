@@ -88,7 +88,7 @@ pub(crate) fn projected_authorized_operation_window(
     let start = earliest_operation_start_from_authorization(authorized_at, scheduled_for);
     let mut end = start
         .checked_add(registry.get_operation(kind).execution().duration())
-        .unwrap_or(SimTime::from_minutes(u64::MAX));
+        .unwrap_or(SimTime::MAX);
     for constraint in constraints {
         let OperationConstraint::CompleteBy(deadline) = constraint else {
             continue;
@@ -119,7 +119,7 @@ pub(crate) fn projected_operation_window(
         && let Some(paused_at) = existing.awaiting_decision_since()
     {
         end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, now))
-            .unwrap_or(SimTime::from_minutes(u64::MAX));
+            .unwrap_or(SimTime::MAX);
     }
     Some((start, end))
 }
@@ -177,7 +177,7 @@ pub(crate) fn resolve_operation_booking_window_at(
         && paused_at <= at
     {
         end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, at))
-            .unwrap_or(SimTime::from_minutes(u64::MAX));
+            .unwrap_or(SimTime::MAX);
     }
     Some((start, end))
 }

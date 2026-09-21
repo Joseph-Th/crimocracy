@@ -10,6 +10,7 @@ pub struct SimTime(u64);
 
 impl SimTime {
     pub const ZERO: Self = Self(0);
+    pub const MAX: Self = Self(u64::MAX);
 
     pub const fn from_minutes(minutes: u64) -> Self {
         Self(minutes)

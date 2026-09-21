@@ -851,6 +851,124 @@ fn recruitment_skips_a_detainee_already_informing_for_the_handler() {
 }
 
 #[test]
+fn autonomous_recruitment_ignores_detainees_outside_criminal_organizations_without_drawing_rng() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let legal_services = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Independent Defense Office".to_owned(),
+            kind: OrganizationKind::LegalServices,
+        },
+    )
+    .expect("legal-services fixture should validate");
+    let detainee = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Civilian Legal Clerk".to_owned(),
+            organization: Some(legal_services),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::from([(
+                DriveKind::Safety,
+                Rating::try_new(100).expect("maximum Safety drive should validate"),
+            )]),
+        },
+    )
+    .expect("non-criminal detainee fixture should validate");
+    let case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Legal office custody inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(detainee)]),
+        },
+    )
+    .expect("custody case should validate")
+    .commit(&mut fixture.state)
+    .expect("custody case should commit");
+    let strong = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("strong evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("strong evidence should commit");
+    let corroborating = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("corroborating evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("corroborating evidence should commit");
+    crate::legal::arrest_system::validate_arrest(
+        &registry,
+        &fixture.state,
+        ArrestDraft {
+            character: detainee,
+            investigation: case,
+            evidence: BTreeSet::from([strong, corroborating]),
+        },
+    )
+    .expect("non-criminal suspect arrest should validate")
+    .commit(&mut fixture.state)
+    .expect("non-criminal suspect arrest should commit");
+
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        registry.legal().informant_decision_delay().as_minutes(),
+    ));
+    let mut untouched = fixture.state.clone();
+    let recruited = apply_detainee_informant_recruitment(&registry, &mut fixture.state)
+        .expect("non-criminal detainee should be an ordinary non-candidate");
+    assert!(
+        recruited.is_empty(),
+        "automatic confidential-source recruitment is reserved for criminal-organization members"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .informant_for(detainee, fixture.police)
+            .is_none()
+    );
+    let after_pass =
+        crate::core::simulation::draw_index(fixture.state.investigation_rng_mut(), 100)
+            .expect("comparison draw should succeed");
+    let untouched_draw =
+        crate::core::simulation::draw_index(untouched.investigation_rng_mut(), 100)
+            .expect("control draw should succeed");
+    assert_eq!(
+        after_pass, untouched_draw,
+        "an ineligible non-criminal detainee must not consume an informant-decision draw"
+    );
+    validate_state(&fixture.state).expect("non-criminal custody state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn active_counsel_materially_reduces_detainee_flip_risk() {
     let legal = build_registry().legal();
     assert_eq!(resolve_informant_flip_chance(legal, 100, false), 75);

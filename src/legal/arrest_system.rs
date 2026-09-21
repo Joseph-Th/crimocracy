@@ -164,7 +164,7 @@ pub enum ArrestError {
 pub(crate) fn custody_release_at(arrested_at: SimTime, maximum_detention: SimDuration) -> SimTime {
     arrested_at
         .checked_add(maximum_detention)
-        .unwrap_or(SimTime::from_minutes(u64::MAX))
+        .unwrap_or(SimTime::MAX)
 }
 
 struct ValidatedCustodyOperationPreemption {
@@ -881,12 +881,27 @@ pub(crate) fn apply_due_custody_releases(
     state: &mut AppState,
     maximum_detention: SimDuration,
 ) -> Result<Vec<ArrestId>, ArrestError> {
-    let due: Vec<ArrestId> = state
-        .legal
-        .detained_arrests()
-        .filter(|arrest| state.now() >= custody_release_at(arrest.arrested_at(), maximum_detention))
-        .map(|arrest| arrest.id())
-        .collect();
+    let now = state.now();
+    let mut due: Vec<ArrestId> = if now == SimTime::MAX {
+        state
+            .legal
+            .detained_arrests()
+            .map(|arrest| arrest.id())
+            .collect()
+    } else if let Some(cutoff_minutes) = now
+        .as_minutes()
+        .checked_sub(u64::from(maximum_detention.as_minutes()))
+    {
+        state
+            .legal
+            .detained_arrest_ids_arrested_on_or_before(SimTime::from_minutes(cutoff_minutes))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // The chronology index groups by arrest time. Preserve the custody pass's canonical
+    // arrest-id order so this optimization cannot alter observable tick ordering.
+    due.sort_unstable();
     for arrest in &due {
         // IDs came from the authoritative detained index in this same pass. A rejection here
         // is therefore broken current state, not an ordinary race to ignore.

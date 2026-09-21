@@ -72,27 +72,32 @@ struct ProbeEvidence {
 pub fn run_rival_intelligence_probe(
     registry: &Registry,
     seeds: EvaluationSeeds,
+    detail: bool,
     artifact_dir: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     let evidence = collect_probe(registry, seeds)?;
-    println!(
-        "[RIVAL INTELLIGENCE] world {:#x}, policy {:#x}; canonical NightTrap fixture, one daily expansion boundary. {}",
-        seeds.world, seeds.policy, evidence.timing_policy,
-    );
-    print_watch("DISCOVERY", &evidence.player_visible.discovery);
-    if let Some(followup) = &evidence.player_visible.followup {
+    if detail {
         println!(
-            "[DECIDE] Follow the first observed enterprise, attaching source {:?}; no hidden racket inventory was consulted.",
-            evidence.player_visible.selected_source,
+            "[RIVAL INTELLIGENCE] world {:#x}, policy {:#x}; canonical NightTrap fixture, one daily expansion boundary. {}",
+            seeds.world, seeds.policy, evidence.timing_policy,
         );
-        print_watch("FOLLOW-UP", followup);
-    }
-    if let Some(absence) = evidence.player_visible.absence {
-        println!("[OBSERVED ABSENCE] {absence}");
+        print_watch("DISCOVERY", &evidence.player_visible.discovery);
+        if let Some(followup) = &evidence.player_visible.followup {
+            println!(
+                "[DECIDE] Follow the first observed enterprise, attaching source {:?}; no hidden racket inventory was consulted.",
+                evidence.player_visible.selected_source,
+            );
+            print_watch("FOLLOW-UP", followup);
+        }
+        if let Some(absence) = evidence.player_visible.absence {
+            println!("[OBSERVED ABSENCE] {absence}");
+        }
     }
     if let Some(directory) = artifact_dir {
         let path = persist_evidence(directory, &evidence)?;
-        println!("[ARTIFACT] wrote {}", path.display());
+        if detail {
+            println!("[ARTIFACT] wrote {}", path.display());
+        }
     }
     Ok(())
 }
