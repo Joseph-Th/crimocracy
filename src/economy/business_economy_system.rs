@@ -18,7 +18,9 @@ pub use profit_sweep::{
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{BusinessCycleId, BusinessId, FinancialAccountId, IdExhaustionError, IdKind};
+use crate::core::id::{
+    BusinessCycleId, BusinessId, EnterpriseId, FinancialAccountId, IdExhaustionError, IdKind,
+};
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::core::version::{
@@ -28,6 +30,7 @@ use crate::economy::{
     BusinessCycleRecord, BusinessEconomyDraft, BusinessOperatingStatus, OperatingCapitalFloor,
     build_business_economy_record,
 };
+use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::finance::finance_system::{
     FinanceError, ValidatedFinancialAccountOpenings, ValidatedLedgerTransaction,
     validate_record_business_transaction,
@@ -73,6 +76,19 @@ pub enum BusinessEconomyError {
     EconomyNotActive(BusinessId),
     #[error("business {0} operating economy is not suspended")]
     EconomyNotSuspended(BusinessId),
+    #[error("business {business} is required by active enterprise {enterprise}")]
+    ActiveEnterpriseDependency {
+        business: BusinessId,
+        enterprise: EnterpriseId,
+    },
+    #[error(
+        "business {business} enterprise dependency changed after cycle planning; expected {expected:?}, found {found:?}"
+    )]
+    StaleEnterpriseDependency {
+        business: BusinessId,
+        expected: Option<EnterpriseId>,
+        found: Option<EnterpriseId>,
+    },
     #[error("business {business} is not due for a cycle until {due_at:?}")]
     CycleNotDue {
         business: BusinessId,
@@ -373,9 +389,18 @@ struct BusinessCycleSnapshot {
     /// the finite simulation clock. The economy remains operational; there is simply no further
     /// representable settlement instant to schedule.
     next_cycle_at: Option<SimTime>,
-    /// Set when this losing settlement reaches the authored consecutive-loss threshold:
-    /// commit suspends the economy instead of leaving the next cycle scheduled.
-    suspends_after_settlement: bool,
+    /// Whether this settlement reaches the authored consecutive-loss threshold. At that point
+    /// active enterprise infrastructure may require the otherwise-closing front to remain open.
+    loss_threshold_reached: bool,
+    /// Deterministic active enterprise dependency observed when the loss threshold was reached.
+    /// This is pinned because enterprise lifecycle changes independently from business versions.
+    blocking_enterprise: Option<EnterpriseId>,
+}
+
+impl BusinessCycleSnapshot {
+    fn suspends_after_settlement(&self) -> bool {
+        self.loss_threshold_reached && self.blocking_enterprise.is_none()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -461,10 +486,15 @@ pub fn decide_business_cycle(
     let trailing_losing_cycles =
         count_trailing_losing_cycles(state, business, economics.losing_cycles_before_suspension());
     // A losing settlement that reaches the authored consecutive-loss threshold suspends the
-    // economy: the domain owner acts on the negative result instead of scheduling another
-    // identical loss. Resume stays a manual canonical decision.
-    let suspends_after_settlement = net_cash < Money::ZERO
+    // economy unless an active racket currently depends on this business as live infrastructure.
+    // In that case the front stays open and keeps realizing its legitimate losses until the
+    // racket is suspended or retired; silently closing it would invalidate active enterprise
+    // requirements across domain ownership boundaries.
+    let loss_threshold_reached = net_cash < Money::ZERO
         && trailing_losing_cycles + 1 >= u32::from(economics.losing_cycles_before_suspension());
+    let blocking_enterprise = loss_threshold_reached
+        .then(|| active_enterprise_dependency(state, business))
+        .flatten();
     // Settling work that is due now must not fail only because its *next* recurrence lies past
     // the finite clock. `None` is persisted as an exhausted recurrence and registry-aware
     // validation proves that the authored cadence really does overflow from this settlement.
@@ -481,7 +511,8 @@ pub fn decide_business_cycle(
             // from now rather than from the stale due time, so missed cycles do not resolve as a
             // rapid one-per-minute backlog when work resumes.
             next_cycle_at,
-            suspends_after_settlement,
+            loss_threshold_reached,
+            blocking_enterprise,
         },
         economics: BusinessCycleEconomics {
             gross_revenue,
@@ -518,6 +549,41 @@ fn count_trailing_losing_cycles(state: &AppState, business: BusinessId, limit: u
         anchor,
         limit,
     )
+}
+
+pub(super) fn active_enterprise_dependency(
+    state: &AppState,
+    business: BusinessId,
+) -> Option<EnterpriseId> {
+    state
+        .enterprises()
+        .enterprises_supported_by_business(business)
+        .chain(
+            state
+                .enterprises()
+                .enterprises_at(EnterpriseLocation::Business(business)),
+        )
+        .filter(|enterprise| enterprise.status() == EnterpriseStatus::Active)
+        .map(|enterprise| enterprise.id())
+        .min()
+}
+
+fn validate_business_cycle_enterprise_dependency(
+    state: &AppState,
+    snapshot: &BusinessCycleSnapshot,
+) -> Result<(), BusinessEconomyError> {
+    if !snapshot.loss_threshold_reached {
+        return Ok(());
+    }
+    let found = active_enterprise_dependency(state, snapshot.business);
+    if found != snapshot.blocking_enterprise {
+        return Err(BusinessEconomyError::StaleEnterpriseDependency {
+            business: snapshot.business,
+            expected: snapshot.blocking_enterprise,
+            found,
+        });
+    }
+    Ok(())
 }
 
 pub struct ValidatedBusinessCycle {
@@ -560,7 +626,7 @@ impl ValidatedBusinessCycle {
         }
         ensure_version_can_advance_by(
             economy.version(),
-            1 + u32::from(self.plan.snapshot.suspends_after_settlement),
+            1 + u32::from(self.plan.snapshot.suspends_after_settlement()),
             "business economy",
         )?;
         if economy.status() != BusinessOperatingStatus::Active {
@@ -568,6 +634,7 @@ impl ValidatedBusinessCycle {
                 self.plan.snapshot.business,
             ));
         }
+        validate_business_cycle_enterprise_dependency(state, &self.plan.snapshot)?;
         crate::core::time::ensure_time_current(state.now(), self.plan.snapshot.occurred_at)
             .map_err(|(expected, found)| BusinessEconomyError::StaleCycleTime {
                 expected,
@@ -617,7 +684,7 @@ impl ValidatedBusinessCycle {
             },
             self.plan.snapshot.next_cycle_at,
         );
-        if self.plan.snapshot.suspends_after_settlement {
+        if self.plan.snapshot.suspends_after_settlement() {
             // Domain-owner consequence for chronic losses: suspend instead of scheduling
             // another identical loss. Any later restart still uses the canonical resume token;
             // non-player books may exercise that token through daily autonomous maintenance.
@@ -661,7 +728,7 @@ pub fn validate_business_cycle_plan(
     }
     ensure_version_can_advance_by(
         economy.version(),
-        1 + u32::from(plan.snapshot.suspends_after_settlement),
+        1 + u32::from(plan.snapshot.suspends_after_settlement()),
         "business economy",
     )?;
     if economy.status() != BusinessOperatingStatus::Active {
@@ -669,6 +736,7 @@ pub fn validate_business_cycle_plan(
             plan.snapshot.business,
         ));
     }
+    validate_business_cycle_enterprise_dependency(state, &plan.snapshot)?;
     crate::core::time::ensure_time_current(state.now(), plan.snapshot.occurred_at)
         .map_err(|(expected, found)| BusinessEconomyError::StaleCycleTime { expected, found })?;
     validate_accounts(
@@ -732,9 +800,13 @@ pub fn validate_business_cycle_plan(
                     crate::finance::helpers::describe_gross_variance(
                         plan.economics.variance_basis_points
                     ),
-                    if plan.snapshot.suspends_after_settlement {
+                    if plan.snapshot.suspends_after_settlement() {
                         " Repeated losses have suspended operations until the business is resumed."
                             .to_owned()
+                    } else if let Some(enterprise) = plan.snapshot.blocking_enterprise {
+                        format!(
+                            " Repeated losses would normally suspend operations, but active enterprise {enterprise} requires this business to remain open."
+                        )
                     } else {
                         String::new()
                     }

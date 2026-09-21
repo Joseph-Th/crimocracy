@@ -278,6 +278,28 @@ fn validate_active_enterprise(
     enterprise: &EnterpriseRecord,
     refs: &EnterpriseAuthorityRefs<'_>,
 ) -> Result<(), StateValidationError> {
+    if let EnterpriseLocation::Business(business) = enterprise.location()
+        && !crate::enterprises::enterprise_execution::business_is_available_for_enterprise(
+            state, business,
+        )
+    {
+        return Err(StateValidationError::ActiveEnterpriseSuspendedBusiness {
+            enterprise: enterprise.id(),
+            business,
+        });
+    }
+    if let Some(business) = refs.supporting_businesses.iter().find_map(|business| {
+        (!crate::enterprises::enterprise_execution::business_is_available_for_enterprise(
+            state,
+            business.id(),
+        ))
+        .then_some(business.id())
+    }) {
+        return Err(StateValidationError::ActiveEnterpriseSuspendedBusiness {
+            enterprise: enterprise.id(),
+            business,
+        });
+    }
     let authority = enterprise.authority();
     let authority_covers_location =
         crate::enterprises::enterprise_execution::can_authority_cover_location(

@@ -144,7 +144,19 @@ fn validate_business_location_requirements(
             organization,
         });
     }
+    if !business_is_available_for_enterprise(state, business_id) {
+        return Err(EnterpriseError::HostBusinessSuspended {
+            business: business_id,
+        });
+    }
     Ok(())
+}
+
+pub(crate) fn business_is_available_for_enterprise(state: &AppState, business: BusinessId) -> bool {
+    state
+        .economy()
+        .get_business_economy(business)
+        .is_none_or(|economy| economy.status() == crate::economy::BusinessOperatingStatus::Active)
 }
 
 pub(super) fn validate_enterprise_business_dependencies(
@@ -209,6 +221,11 @@ pub(super) fn validate_supporting_businesses(
                 business: *business_id,
                 owner: business.owner(),
                 organization,
+            });
+        }
+        if !business_is_available_for_enterprise(state, *business_id) {
+            return Err(EnterpriseError::SupportingBusinessSuspended {
+                business: *business_id,
             });
         }
     }

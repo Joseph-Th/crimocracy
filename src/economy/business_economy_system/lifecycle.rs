@@ -37,6 +37,14 @@ impl ValidatedBusinessEconomyStatusChange {
                 found: economy.version(),
             });
         }
+        if self.change == BusinessEconomyStatusChange::Suspend
+            && let Some(enterprise) = super::active_enterprise_dependency(state, self.business)
+        {
+            return Err(BusinessEconomyError::ActiveEnterpriseDependency {
+                business: self.business,
+                enterprise,
+            });
+        }
         ensure_version_can_advance(economy.version(), "business economy")?;
         if matches!(
             self.change,
@@ -122,6 +130,12 @@ pub fn validate_suspend_business_economy(
         BusinessOperatingStatus::Suspended => {
             return Err(BusinessEconomyError::EconomyNotActive(business));
         }
+    }
+    if let Some(enterprise) = super::active_enterprise_dependency(state, business) {
+        return Err(BusinessEconomyError::ActiveEnterpriseDependency {
+            business,
+            enterprise,
+        });
     }
     ensure_version_can_advance(economy.version(), "business economy")?;
     Ok(ValidatedBusinessEconomyStatusChange {

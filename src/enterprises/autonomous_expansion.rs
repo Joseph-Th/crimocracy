@@ -352,6 +352,12 @@ fn decide_autonomous_expansion(
     let owned_venues: BTreeMap<BusinessId, &crate::world::BusinessRecord> = state
         .world()
         .businesses_owned_by_organization(organization)
+        .filter(|business| {
+            crate::enterprises::enterprise_execution::business_is_available_for_enterprise(
+                state,
+                business.id(),
+            )
+        })
         .map(|business| (business.id(), business))
         .collect();
     let management = state

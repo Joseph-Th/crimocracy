@@ -12,7 +12,10 @@ use support::{
     validate_enterprise_business_dependencies, validate_enterprise_environment,
     validate_supporting_business_versions, validate_supporting_businesses,
 };
-pub(crate) use support::{can_authority_cover_location, resolve_location_neighborhood};
+pub(crate) use support::{
+    business_is_available_for_enterprise, can_authority_cover_location,
+    resolve_location_neighborhood,
+};
 
 pub use cycle_planning::decide_enterprise_cycle;
 pub(crate) use cycle_planning::enterprise_heat_change_is_reportable;
@@ -128,6 +131,10 @@ pub enum EnterpriseError {
         owner: BusinessOwner,
         organization: OrganizationId,
     },
+    #[error("hosted business {business} has suspended operations")]
+    HostBusinessSuspended { business: BusinessId },
+    #[error("supporting business {business} has suspended operations")]
+    SupportingBusinessSuspended { business: BusinessId },
     #[error("supporting business {business} duplicates the enterprise's hosted business location")]
     DuplicateSupportingLocation { business: BusinessId },
     #[error("enterprise support network lacks required function {function:?}")]

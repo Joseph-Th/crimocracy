@@ -13,6 +13,11 @@ use crate::delegation::delegation_system::{
     validate_revoke_mandate,
 };
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
+use crate::economy::business_economy_system::{
+    BusinessEconomyError, decide_business_cycle, validate_business_cycle_plan,
+    validate_establish_business_economy, validate_suspend_business_economy,
+};
+use crate::economy::{BusinessEconomyDraft, BusinessOperatingStatus};
 use crate::enterprises::EnterpriseKind;
 use crate::enterprises::autonomous_expansion::apply_due_autonomous_enterprises_excluding;
 use crate::enterprises::autonomous_lifecycle::apply_due_autonomous_enterprise_lifecycle;
@@ -2082,6 +2087,427 @@ fn insert_support_business(
         },
     )
     .expect("support business fixture should validate")
+}
+
+fn establish_business_economy_for_enterprise_business(
+    registry: &Registry,
+    fixture: &mut EnterpriseFixture,
+    business: BusinessId,
+) {
+    let operating_account = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("business operating account fixture should validate");
+    let settlement_account = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("business settlement account fixture should validate");
+    validate_establish_business_economy(
+        registry,
+        &fixture.state,
+        BusinessEconomyDraft {
+            business,
+            operating_account,
+            settlement_account,
+        },
+    )
+    .expect("business economy fixture should validate")
+    .commit(&mut fixture.state)
+    .expect("business economy fixture should commit");
+}
+
+#[test]
+fn suspended_host_blocks_establishment_and_held_establishment_commit() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Closed Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    establish_business_economy_for_enterprise_business(&registry, &mut fixture, venue);
+    let draft = EnterpriseDraft {
+        kind: EnterpriseKind::Gambling,
+        organization,
+        authority: fixture.authority,
+        location: EnterpriseLocation::Business(venue),
+        supporting_businesses: BTreeSet::new(),
+        cash_account: fixture.cash,
+        settlement_account: fixture.settlement,
+    };
+    let held = validate_establish_enterprise(&registry, &fixture.state, draft.clone())
+        .expect("open venue should validate for establishment");
+
+    validate_suspend_business_economy(&fixture.state, venue)
+        .expect("uncommitted enterprise must not reserve the venue")
+        .commit(&mut fixture.state)
+        .expect("venue economy should suspend");
+
+    let error = held
+        .commit(&mut fixture.state)
+        .expect_err("held establishment must recheck the independently versioned economy status");
+    assert_eq!(
+        error,
+        EnterpriseError::HostBusinessSuspended { business: venue }
+    );
+    let error = match validate_establish_enterprise(&registry, &fixture.state, draft) {
+        Ok(_) => panic!("a suspended venue must not validate as a live racket host"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::HostBusinessSuspended { business: venue }
+    );
+    assert_eq!(fixture.state.enterprises().enterprises().count(), 0);
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("suspended unused venue should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn suspended_support_business_cannot_supply_live_enterprise_functions() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let (transport, retail) = alcohol_support_network(&registry, &mut fixture);
+    establish_business_economy_for_enterprise_business(&registry, &mut fixture, retail);
+    validate_suspend_business_economy(&fixture.state, retail)
+        .expect("unused retail front should suspend")
+        .commit(&mut fixture.state)
+        .expect("retail front suspension should commit");
+
+    let error = establish_alcohol_distribution(
+        &registry,
+        &mut fixture,
+        BTreeSet::from([transport, retail]),
+    )
+    .expect_err("a closed retail front cannot provide customer access to a live network");
+    assert_eq!(
+        error,
+        EnterpriseError::SupportingBusinessSuspended { business: retail }
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("rejected enterprise must leave the suspended support state valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn held_business_suspension_rechecks_active_enterprise_dependency() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Held Closure Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    establish_business_economy_for_enterprise_business(&registry, &mut fixture, venue);
+    let held_suspension = validate_suspend_business_economy(&fixture.state, venue)
+        .expect("unused open venue should validate for suspension");
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("open venue should validate as a racket host")
+    .commit(&mut fixture.state)
+    .expect("racket establishment should commit");
+    let before = bincode::serialize(&fixture.state).expect("pre-rejection state should serialize");
+
+    let error = held_suspension
+        .commit(&mut fixture.state)
+        .expect_err("held suspension must recheck newly active racket dependencies");
+    assert_eq!(
+        error,
+        BusinessEconomyError::ActiveEnterpriseDependency {
+            business: venue,
+            enterprise,
+        }
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "stale suspension rejection must be atomic"
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("active racket must retain an active host economy");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("active racket dependency state should remain saveable"),
+    )
+    .expect("active racket dependency state should restore without losing its open host");
+    assert_eq!(
+        restored
+            .economy()
+            .get_business_economy(venue)
+            .map(|economy| economy.status()),
+        Some(BusinessOperatingStatus::Active)
+    );
+    assert_eq!(
+        restored
+            .enterprises()
+            .get_enterprise(enterprise)
+            .map(|enterprise| enterprise.status()),
+        Some(EnterpriseStatus::Active)
+    );
+    validate_invariants(&fixture.state);
+    validate_invariants(&restored);
+}
+
+#[test]
+fn active_racket_keeps_losing_front_open_until_dependency_is_released() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture_with_inputs(
+        OrganizationKind::Criminal,
+        AutonomyLevel::Delegated,
+        NeighborhoodProfile {
+            economy: NeighborhoodEconomyProfile {
+                wealth: rating(5),
+                commercial_activity: rating(5),
+                illicit_demand: rating(5),
+            },
+            institutions: NeighborhoodInstitutionProfile {
+                police_presence: rating(95),
+            },
+        },
+        Some(rating(80)),
+    );
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Loss-Leader Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    establish_business_economy_for_enterprise_business(&registry, &mut fixture, venue);
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("open loss-leading venue should host a racket")
+    .commit(&mut fixture.state)
+    .expect("racket establishment should commit");
+
+    let error = match validate_suspend_business_economy(&fixture.state, venue) {
+        Ok(_) => panic!("an active racket dependency must block explicit front closure"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        BusinessEconomyError::ActiveEnterpriseDependency {
+            business: venue,
+            enterprise,
+        }
+    );
+
+    let business_definition = registry.get_business(BusinessKind::Hospitality).economics();
+    let threshold = usize::from(business_definition.losing_cycles_before_suspension());
+    let downside = -i16::try_from(business_definition.gross_variance_basis_points())
+        .expect("authored hospitality variance must fit i16");
+    let mut last_cycle = None;
+    for _ in 0..threshold {
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        let cycle = validate_business_cycle_plan(
+            &fixture.state,
+            decide_business_cycle(&registry, &fixture.state, venue, downside)
+                .expect("loss-leading front cycle should decide"),
+        )
+        .expect("loss-leading front cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("loss-leading front cycle should commit");
+        last_cycle = Some(cycle);
+        assert!(
+            fixture
+                .state
+                .economy()
+                .get_cycle(cycle)
+                .expect("business cycle should persist")
+                .net_cash()
+                .cents()
+                < 0,
+            "fixture must realize a legitimate loss each cycle"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .economy()
+                .get_business_economy(venue)
+                .map(|economy| economy.status()),
+            Some(BusinessOperatingStatus::Active),
+            "a strategically required front must stay open despite the ordinary loss cutoff"
+        );
+    }
+    let last_information = fixture
+        .state
+        .economy()
+        .get_cycle(last_cycle.expect("threshold cycle should settle"))
+        .and_then(|cycle| cycle.information())
+        .and_then(|information| fixture.state.intelligence().get_information(information))
+        .expect("threshold loss should produce accountant information");
+    assert!(
+        last_information
+            .summary()
+            .contains("requires this business to remain open"),
+        "the accountant should explain why the ordinary loss suspension was overridden"
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let held_cycle = validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, venue, downside)
+            .expect("dependent loss-leading front cycle should decide"),
+    )
+    .expect("dependent loss-leading front cycle should validate");
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("racket should suspend before releasing its front")
+        .commit(&mut fixture.state)
+        .expect("racket suspension should commit");
+    let error = held_cycle
+        .commit(&mut fixture.state)
+        .expect_err("held business cycle must stale when its enterprise dependency is released");
+    assert_eq!(
+        error,
+        BusinessEconomyError::StaleEnterpriseDependency {
+            business: venue,
+            expected: Some(enterprise),
+            found: None,
+        }
+    );
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, venue, downside)
+            .expect("released loss-leading front cycle should re-decide"),
+    )
+    .expect("released loss-leading front cycle should validate")
+    .commit(&mut fixture.state)
+    .expect("released loss-leading front cycle should commit");
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(venue)
+            .map(|economy| economy.status()),
+        Some(BusinessOperatingStatus::Suspended),
+        "once no live racket depends on it, the already-loss-making front should close normally"
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("released front and suspended racket should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn held_enterprise_resume_rechecks_host_economy_status() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Resume Window Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    establish_business_economy_for_enterprise_business(&registry, &mut fixture, venue);
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("open venue should validate")
+    .commit(&mut fixture.state)
+    .expect("racket should establish");
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("racket should suspend")
+        .commit(&mut fixture.state)
+        .expect("racket suspension should commit");
+    let held_resume = validate_resume_enterprise(&registry, &fixture.state, enterprise)
+        .expect("open host should permit a resume token");
+
+    validate_suspend_business_economy(&fixture.state, venue)
+        .expect("suspended racket releases the business for closure")
+        .commit(&mut fixture.state)
+        .expect("business suspension should commit");
+    let error = held_resume
+        .commit(&mut fixture.state)
+        .expect_err("held resume must reject after host economy closure");
+    assert_eq!(
+        error,
+        EnterpriseError::HostBusinessSuspended { business: venue }
+    );
+    let error = match validate_resume_enterprise(&registry, &fixture.state, enterprise) {
+        Ok(_) => panic!("a racket must not resume into a suspended host business"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::HostBusinessSuspended { business: venue }
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("suspended racket may remain parked on a closed host until either is reopened");
+    validate_invariants(&fixture.state);
 }
 
 fn alcohol_support_network(

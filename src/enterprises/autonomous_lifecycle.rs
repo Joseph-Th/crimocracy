@@ -90,6 +90,8 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
                 continue;
             }
             Err(EnterpriseError::Delegation(DelegationError::DetainedManager { .. }))
+            | Err(EnterpriseError::HostBusinessSuspended { .. })
+            | Err(EnterpriseError::SupportingBusinessSuspended { .. })
             | Err(EnterpriseError::SimulationTimeOverflow) => continue,
             Err(error) => return Err(error.into()),
         }

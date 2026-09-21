@@ -52,6 +52,11 @@ impl ValidatedEnterpriseEstablishment {
                     found: business.version(),
                 });
             }
+            if !business_is_available_for_enterprise(state, business_id) {
+                return Err(EnterpriseError::HostBusinessSuspended {
+                    business: business_id,
+                });
+            }
         }
         validate_supporting_business_versions(state, &self.supporting_business_versions)?;
         validate_supporting_businesses(

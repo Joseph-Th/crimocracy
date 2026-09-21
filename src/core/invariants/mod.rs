@@ -356,6 +356,11 @@ pub enum StateValidationError {
         business: BusinessId,
         function: BusinessFunction,
     },
+    #[error("active enterprise {enterprise} depends on suspended business {business}")]
+    ActiveEnterpriseSuspendedBusiness {
+        enterprise: EnterpriseId,
+        business: BusinessId,
+    },
     #[error("enterprise {enterprise} has invalid supporting business {business}")]
     InvalidEnterpriseSupportingBusiness {
         enterprise: EnterpriseId,

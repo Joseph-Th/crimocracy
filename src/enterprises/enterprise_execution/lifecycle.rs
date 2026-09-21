@@ -67,6 +67,11 @@ impl ValidatedEnterpriseStatusChange {
                         found: business.version(),
                     });
                 }
+                if !business_is_available_for_enterprise(state, business_id) {
+                    return Err(EnterpriseError::HostBusinessSuspended {
+                        business: business_id,
+                    });
+                }
             }
             validate_supporting_businesses(
                 state,
