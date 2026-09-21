@@ -78,6 +78,7 @@ pub struct TickOutcome {
     /// conclusion-only tick visible to adapters and validation.
     pub concluded_automatic_legal_support: usize,
     pub business_cycles: Vec<BusinessCycleId>,
+    pub resumed_businesses: Vec<crate::core::id::BusinessId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
     /// Number of individual reputation dimensions that actually moved this tick, including
@@ -125,7 +126,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // durable lifecycle report is available to every remaining same-minute consumer; then
     // operations (police arrivals, starts, overdue cleanup, resolution), legal institutional work
     // (staffing, detective work, new custody, representation, informants, cold decay), economy
-    // cycles (businesses, enterprises), then the day-boundary governance cluster: payroll,
+    // cycles plus legitimate-business recovery, then the day-boundary governance cluster: payroll,
     // reputation (decay before current consequences), recruitment, delegated expansion (which
     // consumes current police fear), and executive synthesis last so the due brief sees everything
     // above.
@@ -200,6 +201,15 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     let cold_case_decay = apply_cold_case_decay(state, registry.legal().cold_case_window())
         .expect("valid state should resolve cold-case decay");
     let business_cycles = run_business_cycle_phase(registry, state);
+    // Legitimate-business recovery follows today's settlements so a chronic-loss suspension has
+    // already taken effect. The lifecycle pass skips a business suspended at this exact instant,
+    // and only non-player owners with positive current zero-variance economics resume through the
+    // canonical economy lifecycle token.
+    let resumed_businesses =
+        crate::economy::business_economy_system::apply_due_autonomous_business_lifecycle(
+            registry, state,
+        )
+        .expect("valid state should maintain suspended non-player business economies");
     let enterprise_cycles = run_enterprise_cycle_phase(registry, state);
     // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
     // the same day's wages. Reputation then settles the day boundary before recruitment: daily
@@ -262,6 +272,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         automatic_legal_support,
         concluded_automatic_legal_support,
         business_cycles,
+        resumed_businesses,
         enterprise_cycles,
         payrolls,
         reputation_changes,

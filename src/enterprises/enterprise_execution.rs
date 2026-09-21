@@ -1,25 +1,25 @@
-//! Enterprise cycle planning and atomic settlement, with establishment/lifecycle helpers in sibling modules.
+//! Enterprise cycle settlement facade, with planning and lifecycle concerns split into focused siblings.
 
+mod cycle_planning;
 mod economics;
 mod establishment;
 mod lifecycle;
 mod support;
 
 use support::{
-    build_cycle_report_summary, build_enforcement_incident_draft, count_district_originated_cases,
-    has_active_enterprise_inquiry, resolve_location_profile, snapshot_supporting_business_versions,
-    validate_enterprise_accounts, validate_enterprise_business_dependencies,
-    validate_enterprise_environment, validate_supporting_business_versions,
-    validate_supporting_businesses,
+    build_cycle_report_summary, count_district_originated_cases, has_active_enterprise_inquiry,
+    resolve_location_profile, snapshot_supporting_business_versions, validate_enterprise_accounts,
+    validate_enterprise_business_dependencies, validate_enterprise_environment,
+    validate_supporting_business_versions, validate_supporting_businesses,
 };
 pub(crate) use support::{can_authority_cover_location, resolve_location_neighborhood};
+
+pub use cycle_planning::decide_enterprise_cycle;
+pub(crate) use cycle_planning::enterprise_heat_change_is_reportable;
 
 pub(crate) use economics::{
     decode_enterprise_investigation_case_count, resolve_enterprise_financial_projection,
     resolve_enterprise_operating_cost_projection, resolve_historical_enterprise_cycle_financials,
-};
-use economics::{
-    resolve_basis_point_variance, resolve_gross_before_variance, resolve_operating_cost,
 };
 pub use establishment::{ValidatedEnterpriseEstablishment, validate_establish_enterprise};
 pub(crate) use establishment::{
@@ -65,16 +65,16 @@ use crate::intelligence::{
 use crate::legal::investigation_system::validate_incident_intake;
 use crate::legal::jurisdiction_system::{
     CaseIntakeAuthoritySnapshot, CaseIntakeAuthoritySnapshotError,
-    resolve_case_intake_authority_snapshot, validate_case_intake_authority_snapshot,
+    validate_case_intake_authority_snapshot,
 };
 use crate::registry::{EnterpriseDefinition, Registry};
 use crate::reports::report_system::{
     ReportError, ValidatedReport, validate_record_report_with_planned_information,
 };
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::{
-    BusinessFunction, BusinessOwner, CapabilityKind, NeighborhoodProfile, OrganizationKind,
-};
+#[cfg(test)]
+use crate::world::CapabilityKind;
+use crate::world::{BusinessFunction, BusinessOwner, NeighborhoodProfile, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -348,201 +348,6 @@ impl EnterpriseCycleRandomness {
     }
 }
 
-pub fn decide_enterprise_cycle(
-    registry: &Registry,
-    state: &AppState,
-    enterprise: EnterpriseId,
-    randomness: EnterpriseCycleRandomness,
-) -> Result<EnterpriseCyclePlan, EnterpriseError> {
-    let record = state
-        .enterprises
-        .get_enterprise(enterprise)
-        .ok_or(EnterpriseError::MissingEnterprise(enterprise))?;
-    if record.status() != EnterpriseStatus::Active {
-        return Err(EnterpriseError::EnterpriseNotActive(enterprise));
-    }
-    let Some(due_at) = record.next_cycle_at() else {
-        return Err(EnterpriseError::SimulationTimeOverflow);
-    };
-    if state.now() < due_at {
-        return Err(EnterpriseError::CycleNotDue { enterprise, due_at });
-    }
-    let definition = registry.get_enterprise(record.kind());
-    let variance_basis_points = randomness.variance_basis_points();
-    let variance_limit = definition.economics().gross_variance_basis_points();
-    if i32::from(variance_basis_points).unsigned_abs() > u32::from(variance_limit) {
-        return Err(EnterpriseError::VarianceOutOfRange {
-            basis_points: variance_basis_points,
-            limit: variance_limit,
-        });
-    }
-    let authority = resolve_mandate_authority(state, record.authority())?;
-    validate_enterprise_environment(
-        state,
-        record.organization(),
-        record.authority(),
-        record.location(),
-        record.supporting_businesses(),
-    )?;
-    validate_enterprise_business_dependencies(
-        definition,
-        state,
-        record.organization(),
-        record.location(),
-        record.supporting_businesses(),
-    )?;
-    validate_enterprise_accounts(
-        state,
-        record.organization(),
-        record.cash_account(),
-        record.settlement_account(),
-        Some(record.id()),
-    )?;
-    let neighborhood = resolve_location_profile(state, record.location())?;
-    let district = resolve_location_neighborhood(state, record.location())?;
-    // Sustained originated casework in the racket's district is resolved once per cycle:
-    // the shared pressure signal behind both the street-heat surcharge and enforcement attention.
-    let active_district_cases = count_district_originated_cases(state, district);
-    let manager = state
-        .world
-        .get_character(record.manager())
-        .expect("resolved enterprise authority manager must exist");
-    let manager_management = manager.capability(CapabilityKind::Management);
-    let economics = definition.economics();
-    let gross_before_variance =
-        resolve_gross_before_variance(enterprise, economics, neighborhood, manager_management)?;
-    let gross_revenue =
-        resolve_basis_point_variance(enterprise, gross_before_variance, variance_basis_points)?;
-    let cost = resolve_operating_cost(
-        economics,
-        neighborhood,
-        record.supporting_businesses().len(),
-        active_district_cases,
-        enterprise,
-    )?;
-    let operating_cost = cost.total;
-    // Active casework converts into enforcement attention: every cycle run under an active case
-    // risks a dedicated inquiry on this racket. An already-active inquiry keeps contributing
-    // district heat but cannot recursively open another concurrent inquiry into the same
-    // racket; clean districts never draw one, so lying low or moving the book remain real
-    // counter-play.
-    let enforcement_chance_basis_points = u32::try_from(
-        (u64::from(
-            definition
-                .economics()
-                .enforcement_attention_basis_points_per_active_case(),
-        ) * u64::from(active_district_cases))
-        .min(10_000),
-    )
-    .expect("vice chance is explicitly capped to basis-point range");
-    let had_active_enterprise_inquiry = has_active_enterprise_inquiry(state, enterprise);
-    let enforcement_roll_hits = active_district_cases > 0
-        && !had_active_enterprise_inquiry
-        && u32::from(randomness.enforcement_attention_roll()) < enforcement_chance_basis_points;
-    let enforcement_authority =
-        enforcement_roll_hits.then(|| resolve_case_intake_authority_snapshot(state, district));
-    let enforcement_incident = enforcement_authority.and_then(|authority| {
-        authority.organization.map(|owner| {
-            build_enforcement_incident_draft(state, enterprise, record, owner, state.now())
-        })
-    });
-    // A visibility roll is only an actual enforcement event when an institution currently exists to
-    // own the case. Hot districts can retain pressure from old cases after jurisdiction moves
-    // away; in that state the roll is unspent rather than becoming a phantom notable event.
-    let draws_enforcement_attention = enforcement_incident.is_some();
-    let net_cash = gross_revenue
-        .checked_sub(operating_cost)
-        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
-    let variance_notable = i32::from(variance_basis_points).unsigned_abs()
-        >= u32::from(economics.notable_variance_basis_points());
-    // A losing night is always manager-report-worthy: chronic silent losses are exactly what
-    // the authority must see before the authored suspension threshold stops the bleeding.
-    // Street heat is report-worthy when it *appears or changes* — the first taxed cycle (and
-    // any later change in the surcharge) tells the organization why its racket got more
-    // expensive. A sustained identical surcharge is a known cost, not fresh news: repeating it
-    // every cycle would bury real exceptions in alert noise, so it settles as routine and
-    // stays visible through the financial summaries instead.
-    let previous_heat = latest_cycle_investigation_heat(state, enterprise);
-    let heat_reportable =
-        enterprise_heat_change_is_reportable(previous_heat, cost.investigation_heat);
-    let attention = if variance_notable
-        || net_cash < Money::ZERO
-        || draws_enforcement_attention
-        || heat_reportable
-    {
-        AttentionClass::Notable
-    } else {
-        AttentionClass::Routine
-    };
-    let trailing_losing_cycles = count_trailing_losing_cycles(
-        state,
-        enterprise,
-        economics.losing_cycles_before_suspension(),
-    );
-    // A losing settlement that reaches the authored consecutive-loss threshold suspends the
-    // racket: the domain owner acts on the negative result instead of scheduling another
-    // identical loss. Resumption is a manual canonical decision.
-    let suspends_after_settlement = net_cash < Money::ZERO
-        && trailing_losing_cycles + 1 >= u32::from(economics.losing_cycles_before_suspension());
-    let supporting_business_versions =
-        snapshot_supporting_business_versions(state, record.supporting_businesses())?;
-    let host_business_version = match record.location() {
-        EnterpriseLocation::Business(business_id) => {
-            let business = state
-                .world
-                .get_business(business_id)
-                .ok_or(EnterpriseError::InvalidLocation(record.location()))?;
-            Some((business_id, business.version()))
-        }
-        EnterpriseLocation::Neighborhood(_) => None,
-    };
-    // The current settlement is already due and executable. If only the *next* recurrence lies
-    // past the finite clock, preserve the present result and persist an exhausted recurrence
-    // instead of turning valid current work into a scheduling failure.
-    let next_cycle_at = state.now().checked_add(economics.cycle());
-    Ok(EnterpriseCyclePlan {
-        snapshot: EnterpriseCycleSnapshot {
-            enterprise,
-            expected_enterprise_version: record.version(),
-            authority,
-            occurred_at: state.now(),
-            // A detained manager leaves the enterprise overdue, but missed cycles are not
-            // retroactively paid out in a burst after release. Re-anchor the next cycle to the
-            // actual settlement instant so routine work resumes at its authored cadence.
-            next_cycle_at,
-            suspends_after_settlement,
-            supporting_business_versions,
-            host_business_version,
-            active_district_cases,
-            had_active_enterprise_inquiry,
-        },
-        economics: EnterpriseCycleEconomics {
-            gross_revenue,
-            operating_cost,
-            net_cash,
-            variance_basis_points,
-            investigation_heat: cost.investigation_heat,
-            previous_investigation_heat: previous_heat,
-            attention,
-        },
-        accounts: EnterpriseCycleAccounts {
-            cash_account: record.cash_account(),
-            settlement_account: record.settlement_account(),
-        },
-        enforcement_incident,
-        enforcement_authority,
-    })
-}
-
-/// The street-heat portion of the enterprise's most recently settled cycle, or `None` when the
-/// racket has never settled. Delegates to the owner's O(log n) latest-cycle lookup.
-fn latest_cycle_investigation_heat(state: &AppState, enterprise: EnterpriseId) -> Option<Money> {
-    state
-        .enterprises
-        .latest_cycle(enterprise)
-        .map(|cycle| cycle.investigation_heat())
-}
-
 fn validate_enforcement_intake_authority_snapshot(
     state: &AppState,
     enterprise: EnterpriseId,
@@ -572,40 +377,6 @@ fn validate_enforcement_intake_authority_snapshot(
             found_version,
         },
     })
-}
-
-/// One owner for whether a heat transition deserves a fresh manager report. The first positive
-/// surcharge is new information, any change between positive levels is new information, and a
-/// drop from positive heat to zero is recovery worth surfacing. A never-hot zero cycle and an
-/// unchanged surcharge stay routine.
-pub(crate) fn enterprise_heat_change_is_reportable(
-    previous_heat: Option<Money>,
-    current_heat: Money,
-) -> bool {
-    previous_heat != Some(current_heat)
-        && (current_heat > Money::ZERO || previous_heat.is_some_and(|heat| heat > Money::ZERO))
-}
-
-/// Consecutive most-recent settled cycles whose net cash was negative, capped at `limit` so
-/// the scan stays bounded regardless of how much history a long-lived racket accumulates.
-/// Cycles settled before the enterprise's loss-streak anchor predate its current grace window
-/// (a resumed racket starts counting fresh) and do not extend the streak.
-fn count_trailing_losing_cycles(state: &AppState, enterprise: EnterpriseId, limit: u8) -> u32 {
-    let anchor = state
-        .enterprises
-        .get_enterprise(enterprise)
-        .and_then(|record| record.loss_streak_anchor());
-    crate::finance::helpers::count_trailing_losing_cycles(
-        state
-            .enterprises
-            .cycles_for(enterprise)
-            .rev()
-            .take(usize::from(limit)),
-        |cycle| cycle.occurred_at(),
-        |cycle| cycle.net_cash(),
-        anchor,
-        limit,
-    )
 }
 
 pub struct ValidatedEnterpriseCycle {
@@ -788,7 +559,8 @@ impl ValidatedEnterpriseCycle {
         );
         if self.plan.snapshot.suspends_after_settlement {
             // Domain-owner consequence for chronic losses: suspend the racket instead of
-            // scheduling another identical loss. Resumption is a manual canonical decision.
+            // scheduling another identical loss. Any restart still uses the canonical resume
+            // token; eligible non-player rackets may exercise it during daily maintenance.
             state.enterprises.set_status(
                 self.plan.snapshot.enterprise,
                 EnterpriseStatus::Suspended,

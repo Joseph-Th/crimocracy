@@ -27,6 +27,8 @@ use crate::world::{
 use serde::Serialize;
 use std::collections::BTreeSet;
 
+mod cycle_boundaries;
+
 struct BusinessEconomyFixture {
     state: AppState,
     business: BusinessId,
@@ -1116,6 +1118,25 @@ fn make_business_economy_fixture() -> BusinessEconomyFixture {
 }
 
 fn make_business_economy_fixture_for_kind(kind: OrganizationKind) -> BusinessEconomyFixture {
+    make_business_economy_fixture_with_profile(
+        kind,
+        NeighborhoodProfile {
+            economy: NeighborhoodEconomyProfile {
+                wealth: rating(60),
+                commercial_activity: rating(70),
+                illicit_demand: rating(30),
+            },
+            institutions: NeighborhoodInstitutionProfile {
+                police_presence: rating(55),
+            },
+        },
+    )
+}
+
+fn make_business_economy_fixture_with_profile(
+    kind: OrganizationKind,
+    profile: NeighborhoodProfile,
+) -> BusinessEconomyFixture {
     let registry = build_registry();
     let mut state = AppState::new(0xB051_1932);
     let organization = insert_organization(
@@ -1131,16 +1152,7 @@ fn make_business_economy_fixture_for_kind(kind: OrganizationKind) -> BusinessEco
         &mut state,
         NeighborhoodDraft {
             name: "Commercial Ward".to_owned(),
-            profile: NeighborhoodProfile {
-                economy: NeighborhoodEconomyProfile {
-                    wealth: rating(60),
-                    commercial_activity: rating(70),
-                    illicit_demand: rating(30),
-                },
-                institutions: NeighborhoodInstitutionProfile {
-                    police_presence: rating(55),
-                },
-            },
+            profile,
         },
     )
     .expect("neighborhood fixture should validate");
@@ -2446,15 +2458,27 @@ fn chronic_losing_business_surfaces_losses_then_suspends_at_the_authored_thresho
         .expect("accountant information should persist");
     assert!(information.summary().contains("suspended"));
 
-    // No further cycles fire while suspended; resumption is the manual canonical path.
+    // A suspension caused on this exact daily boundary must survive at least one recovery
+    // interval rather than instantly resetting the loss streak.
+    let same_boundary = apply_due_autonomous_business_lifecycle(&registry, &mut state)
+        .expect("same-boundary autonomous maintenance should resolve");
+    assert!(same_boundary.is_empty());
+    assert_eq!(
+        state
+            .economy()
+            .get_business_economy(business)
+            .map(|economy| economy.status()),
+        Some(crate::economy::BusinessOperatingStatus::Suspended)
+    );
+
+    // No further cycle fires while suspended. On the next day boundary the business's
+    // zero-variance economics are positive again, so its non-player owner reopens it through
+    // the same canonical resume path available to direct commands.
     state.advance_clock(SimDuration::from_minutes(1_440));
     assert!(state.economy().due_at_or_before(state.now()).is_empty());
-    crate::economy::business_economy_system::validate_resume_business_economy(
-        &registry, &state, business,
-    )
-    .expect("suspended economy should resume")
-    .commit(&mut state)
-    .expect("resumed economy should commit");
+    let resumed = apply_due_autonomous_business_lifecycle(&registry, &mut state)
+        .expect("later autonomous maintenance should resolve");
+    assert_eq!(resumed, vec![business]);
     assert_eq!(
         state
             .economy()
@@ -2493,6 +2517,64 @@ fn chronic_losing_business_surfaces_losses_then_suspends_at_the_authored_thresho
         }
     }
     crate::core::invariants::validate_invariants(&state);
+}
+
+#[test]
+fn autonomous_business_recovery_never_overrides_player_owned_suspension() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    crate::world::world_system::designate_player_organization(
+        &mut fixture.state,
+        fixture.organization,
+    )
+    .expect("criminal fixture organization should be player-designatable");
+    establish_business_economy(&registry, &mut fixture);
+    validate_suspend_business_economy(&fixture.state, fixture.business)
+        .expect("player-owned business should suspend")
+        .commit(&mut fixture.state)
+        .expect("player-owned suspension should commit");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let resumed = apply_due_autonomous_business_lifecycle(&registry, &mut fixture.state)
+        .expect("autonomous maintenance should ignore player-owned businesses cleanly");
+    assert!(resumed.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .map(|economy| economy.status()),
+        Some(crate::economy::BusinessOperatingStatus::Suspended)
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn tick_surfaces_autonomous_business_recovery() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    validate_suspend_business_economy(&fixture.state, fixture.business)
+        .expect("non-player business should suspend")
+        .commit(&mut fixture.state)
+        .expect("non-player suspension should commit");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_439));
+
+    let outcome = run_tick(&registry, &mut fixture.state);
+    assert_eq!(outcome.resumed_businesses, vec![fixture.business]);
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .map(|economy| economy.status()),
+        Some(crate::economy::BusinessOperatingStatus::Active)
+    );
+    validate_invariants(&fixture.state);
 }
 
 #[test]

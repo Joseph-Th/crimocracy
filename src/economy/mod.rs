@@ -1,4 +1,4 @@
-//! Independent business operating state and durable economic cycle history; `business_economy_system` owns lifecycle and settlement, `business_acquisition` composes purchase, `business_reporting` is read-only aggregation.
+//! Independent business operating state and durable economic cycle history; `business_economy_system` owns lifecycle, settlement, and daily non-player recovery, `business_acquisition` composes purchase, `business_reporting` is read-only aggregation.
 
 pub mod business_acquisition;
 pub mod business_economy_system;
@@ -197,6 +197,8 @@ pub struct EconomyState {
     #[serde(skip)]
     active_by_next_cycle: BTreeMap<SimTime, BTreeSet<BusinessId>>,
     #[serde(skip)]
+    suspended: BTreeSet<BusinessId>,
+    #[serde(skip)]
     by_settlement_account: BTreeMap<FinancialAccountId, BusinessId>,
     #[serde(skip)]
     cycles_by_business: BTreeMap<BusinessId, BTreeSet<BusinessCycleId>>,
@@ -209,6 +211,7 @@ impl EconomyState {
 
     pub(crate) fn rebuild_derived_indexes(&mut self) {
         self.active_by_next_cycle.clear();
+        self.suspended.clear();
         self.by_settlement_account.clear();
         self.cycles_by_business.clear();
         for record in self.businesses.values() {
@@ -221,6 +224,8 @@ impl EconomyState {
                     .entry(next_cycle_at)
                     .or_default()
                     .insert(record.business());
+            } else if record.status() == BusinessOperatingStatus::Suspended {
+                self.suspended.insert(record.business());
             }
         }
         for cycle in self.cycles.values() {
@@ -282,6 +287,18 @@ impl EconomyState {
 
     pub(crate) fn business_economies(&self) -> impl Iterator<Item = &BusinessEconomyRecord> {
         self.businesses.values()
+    }
+
+    /// Current suspended economies in stable business-ID order. Daily autonomous recovery uses
+    /// this live-work projection instead of rescanning every active and historical business book.
+    pub(crate) fn suspended_business_economies(
+        &self,
+    ) -> impl Iterator<Item = &BusinessEconomyRecord> {
+        self.suspended.iter().map(|business| {
+            self.businesses
+                .get(business)
+                .expect("suspended-business index must reference a persisted economy")
+        })
     }
 
     pub(crate) fn cycles(&self) -> impl Iterator<Item = &BusinessCycleRecord> {
@@ -361,17 +378,19 @@ impl EconomyState {
         reset_laundering_window: bool,
         capital_floor: Option<OperatingCapitalFloor>,
     ) {
-        let (was_active, old_next_cycle_at) = {
+        let (was_active, was_suspended, old_next_cycle_at) = {
             let record = self
                 .businesses
                 .get(&business)
                 .expect("validated business economy disappeared before status commit");
             (
                 record.status() == BusinessOperatingStatus::Active,
+                record.status() == BusinessOperatingStatus::Suspended,
                 record.next_cycle_at(),
             )
         };
         let will_be_active = status == BusinessOperatingStatus::Active;
+        let will_be_suspended = status == BusinessOperatingStatus::Suspended;
         if was_active && let Some(old_next_cycle_at) = old_next_cycle_at {
             Self::remove_schedule_index(
                 &mut self.active_by_next_cycle,
@@ -384,6 +403,16 @@ impl EconomyState {
                 .entry(next_cycle_at)
                 .or_default()
                 .insert(business);
+        }
+        if was_suspended && !will_be_suspended {
+            let removed = self.suspended.remove(&business);
+            debug_assert!(removed, "suspended economy must appear in suspended index");
+        } else if !was_suspended && will_be_suspended {
+            let inserted = self.suspended.insert(business);
+            debug_assert!(
+                inserted,
+                "active economy must not already be suspended-indexed"
+            );
         }
         let record = self
             .businesses
@@ -465,6 +494,7 @@ impl EconomyState {
         self.business_records_have_consistent_indexes()
             && self.settlement_account_index_is_consistent()
             && self.active_schedule_index_is_consistent()
+            && self.suspended_index_is_consistent()
             && self.cycle_indexes_are_consistent()
     }
 
@@ -536,6 +566,20 @@ impl EconomyState {
             .map(BTreeSet::len)
             .sum::<usize>()
             == expected_schedule_entries
+    }
+
+    fn suspended_index_is_consistent(&self) -> bool {
+        let expected = self
+            .businesses
+            .values()
+            .filter(|record| record.status() == BusinessOperatingStatus::Suspended)
+            .count();
+        self.suspended.len() == expected
+            && self.suspended.iter().all(|business| {
+                self.businesses
+                    .get(business)
+                    .is_some_and(|record| record.status() == BusinessOperatingStatus::Suspended)
+            })
     }
 
     fn cycle_indexes_are_consistent(&self) -> bool {

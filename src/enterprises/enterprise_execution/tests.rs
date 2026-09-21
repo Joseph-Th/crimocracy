@@ -56,6 +56,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod autonomous_expansion;
+mod cycle_boundaries;
 
 fn apply_due_autonomous_enterprises(
     registry: &Registry,
@@ -1844,6 +1845,29 @@ fn make_test_enterprise_fixture_for_kind_and_autonomy(
     kind: OrganizationKind,
     autonomy: AutonomyLevel,
 ) -> EnterpriseFixture {
+    make_test_enterprise_fixture_with_inputs(
+        kind,
+        autonomy,
+        NeighborhoodProfile {
+            economy: NeighborhoodEconomyProfile {
+                wealth: rating(60),
+                commercial_activity: rating(70),
+                illicit_demand: rating(50),
+            },
+            institutions: NeighborhoodInstitutionProfile {
+                police_presence: rating(40),
+            },
+        },
+        Some(rating(80)),
+    )
+}
+
+fn make_test_enterprise_fixture_with_inputs(
+    kind: OrganizationKind,
+    autonomy: AutonomyLevel,
+    profile: NeighborhoodProfile,
+    management: Option<Rating>,
+) -> EnterpriseFixture {
     let registry = build_registry();
     let mut state = AppState::new(0xE17E_1931);
     let organization = insert_organization(
@@ -1859,19 +1883,13 @@ fn make_test_enterprise_fixture_for_kind_and_autonomy(
         &mut state,
         NeighborhoodDraft {
             name: "Market Ward".to_owned(),
-            profile: NeighborhoodProfile {
-                economy: NeighborhoodEconomyProfile {
-                    wealth: rating(60),
-                    commercial_activity: rating(70),
-                    illicit_demand: rating(50),
-                },
-                institutions: NeighborhoodInstitutionProfile {
-                    police_presence: rating(40),
-                },
-            },
+            profile,
         },
     )
     .expect("neighborhood fixture should validate");
+    let capabilities = management
+        .map(|management| BTreeMap::from([(CapabilityKind::Management, management)]))
+        .unwrap_or_default();
     let manager = insert_character(
         &mut state,
         CharacterDraft {
@@ -1879,7 +1897,7 @@ fn make_test_enterprise_fixture_for_kind_and_autonomy(
             organization: Some(organization),
             supervisor: None,
             autonomy,
-            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
+            capabilities,
             traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
@@ -4405,8 +4423,8 @@ fn establishment_rejects_a_duplicate_kind_at_an_occupied_location_even_when_susp
         .expect("active enterprise should suspend")
         .commit(&mut fixture.state)
         .expect("enterprise suspension should commit");
-    // A suspended racket still occupies its spot until manually resumed; a fresh identical
-    // racket must not resurrect the losses the chronic-loss threshold already shut down.
+    // A suspended racket still occupies its spot until resumed or retired; a fresh identical
+    // racket must not bypass the lifecycle consequence the chronic-loss threshold already imposed.
     assert!(matches!(
         validate_establish_enterprise(&registry, &fixture.state, duplicate_draft()),
         Err(EnterpriseError::DuplicateEnterpriseAtLocation { .. })

@@ -1,8 +1,11 @@
-//! Business economy establishment, deterministic cycle planning, and atomic ledger settlement.
+//! Business economy establishment, deterministic cycle planning, autonomous non-player recovery,
+//! and atomic ledger settlement.
 
+mod autonomous_lifecycle;
 mod lifecycle;
 mod profit_sweep;
 
+pub(crate) use autonomous_lifecycle::apply_due_autonomous_business_lifecycle;
 pub(crate) use lifecycle::validate_acquisition_restart;
 pub use lifecycle::{
     ValidatedBusinessEconomyStatusChange, validate_resume_business_economy,
@@ -616,7 +619,8 @@ impl ValidatedBusinessCycle {
         );
         if self.plan.snapshot.suspends_after_settlement {
             // Domain-owner consequence for chronic losses: suspend instead of scheduling
-            // another identical loss. Resumption is a manual canonical decision.
+            // another identical loss. Any later restart still uses the canonical resume token;
+            // non-player books may exercise that token through daily autonomous maintenance.
             state.economy.set_status(
                 self.plan.snapshot.business,
                 BusinessOperatingStatus::Suspended,
@@ -729,7 +733,7 @@ pub fn validate_business_cycle_plan(
                         plan.economics.variance_basis_points
                     ),
                     if plan.snapshot.suspends_after_settlement {
-                        " Repeated losses have suspended operations pending a manual resumption."
+                        " Repeated losses have suspended operations until the business is resumed."
                             .to_owned()
                     } else {
                         String::new()

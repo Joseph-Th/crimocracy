@@ -672,10 +672,9 @@ fn foreign_owned_targets_are_not_purchasable() {
     validate_invariants(&fixture.state);
 }
 
-/// A chronic-loss suspension is automatic and resumption an owner decision — but an
-/// independent business has no owner to decide. The acquisition path must therefore be
-/// able to buy suspended books and reopen them, or sabotaged capital would stay dead
-/// and unpurchasable forever.
+/// A chronic-loss suspension can outlive the owner or conditions that produced it. Acquisition
+/// must therefore be able to buy suspended books and reopen them under the new ownership without
+/// requiring the old books to recover autonomously first.
 #[test]
 fn acquisition_buys_suspended_books_and_reopens_them_under_new_ownership() {
     use crate::economy::BusinessOperatingStatus;

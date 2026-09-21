@@ -1,4 +1,8 @@
-//! Persistent delegated criminal enterprises and cycle history; `enterprise_execution` owns lifecycle and routine settlement, `autonomous_planning` owns shared read-only NPC planning projections, `autonomous_lifecycle` owns suspended-racket maintenance, `autonomous_expansion` owns new delegated growth, and `enterprise_reporting` is read-only aggregation.
+//! Persistent delegated criminal enterprises and cycle history; `enterprise_execution` is the
+//! lifecycle/settlement facade, its `cycle_planning` sibling owns read-only cycle decisions,
+//! `autonomous_planning` owns shared read-only NPC projections, `autonomous_lifecycle` owns
+//! suspended-racket maintenance, `autonomous_expansion` owns new delegated growth, and
+//! `enterprise_reporting` is read-only aggregation.
 
 pub(crate) mod autonomous_expansion;
 pub(crate) mod autonomous_lifecycle;

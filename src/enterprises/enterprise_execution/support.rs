@@ -369,7 +369,7 @@ pub(super) fn build_cycle_report_summary(
         crate::finance::helpers::format_money_cents(economics.net_cash.cents()),
         crate::finance::helpers::describe_gross_variance(economics.variance_basis_points),
         if plan_suspends {
-            " Repeated losses have suspended the racket pending a manual resumption.".to_owned()
+            " Repeated losses have suspended the racket until it is resumed.".to_owned()
         } else {
             String::new()
         },

@@ -301,3 +301,94 @@ pub(crate) fn candidate_pressure_information_ids(
         .map(InformationRecord::id)
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_registry;
+
+    fn factors(
+        incumbent_resentment: u8,
+        perceived_legal_pressure: u8,
+        trait_adjustment: i16,
+    ) -> RecruitmentFactors {
+        build_recruitment_factors(RecruitmentFactorComponents {
+            recruiter_influence: 0,
+            drive_alignment: 0,
+            relationship_support: 0,
+            incumbent_attachment: 0,
+            incumbent_resentment,
+            perceived_legal_pressure,
+            membership_resistance: 0,
+            organization_competence: 0,
+            trait_adjustment,
+        })
+    }
+
+    #[test]
+    fn margin_applies_incumbent_resentment_and_trait_adjustment_with_positive_signs() {
+        let registry = build_registry();
+        let definition = registry.recruitment();
+        let baseline = resolve_recruitment_margin(
+            definition,
+            factors(0, 0, 0),
+            RecruitmentApproach::FinancialOpportunity,
+        );
+        let resentful = resolve_recruitment_margin(
+            definition,
+            factors(100, 0, 0),
+            RecruitmentApproach::FinancialOpportunity,
+        );
+        assert_eq!(
+            resentful - baseline,
+            i16::from(definition.weights().incumbent_resentment),
+            "resentment toward the incumbent must make defection easier, not harder"
+        );
+
+        let adjusted = resolve_recruitment_margin(
+            definition,
+            factors(0, 0, 7),
+            RecruitmentApproach::FinancialOpportunity,
+        );
+        assert_eq!(
+            adjusted - baseline,
+            7,
+            "authored trait adjustments are signed additions to willingness"
+        );
+    }
+
+    #[test]
+    fn legal_pressure_only_strengthens_a_protection_pitch() {
+        let registry = build_registry();
+        let definition = registry.recruitment();
+        let pressure = factors(0, 100, 0);
+        let no_pressure = factors(0, 0, 0);
+
+        let protection_delta =
+            resolve_recruitment_margin(definition, pressure, RecruitmentApproach::Protection)
+                - resolve_recruitment_margin(
+                    definition,
+                    no_pressure,
+                    RecruitmentApproach::Protection,
+                );
+        assert_eq!(
+            protection_delta,
+            i16::from(definition.weights().perceived_legal_pressure),
+            "legal exposure must increase the value of an actual protection offer"
+        );
+
+        let financial_delta = resolve_recruitment_margin(
+            definition,
+            pressure,
+            RecruitmentApproach::FinancialOpportunity,
+        ) - resolve_recruitment_margin(
+            definition,
+            no_pressure,
+            RecruitmentApproach::FinancialOpportunity,
+        );
+        assert_eq!(
+            financial_delta, 0,
+            "being under police pressure must not make a cash-only pitch more persuasive"
+        );
+    }
+}
