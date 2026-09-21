@@ -402,6 +402,46 @@ fn add_evidence(
     .expect("fixture evidence should commit")
 }
 
+fn detain_character(fixture: &mut Fixture, character: CharacterId, label: &str) -> ArrestId {
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: format!("{label} custody case"),
+            subjects: BTreeSet::from([EntityRef::Character(character)]),
+        },
+    )
+    .expect("custody source investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("custody source investigation should commit");
+    let first = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        investigation,
+        character,
+        EvidenceKind::Document,
+    );
+    let second = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        investigation,
+        character,
+        EvidenceKind::KnownAssociation,
+    );
+    validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character,
+            investigation,
+            evidence: BTreeSet::from([first, second]),
+        },
+    )
+    .expect("canonical detention should validate")
+    .commit(&mut fixture.state)
+    .expect("canonical detention should commit")
+}
+
 fn fixture() -> Fixture {
     let registry = build_registry();
     let mut state = AppState::new(0xCA5E_1931);
@@ -898,10 +938,7 @@ fn prosecution_staffing_and_autonomy_skip_source_case_witnesses() {
     .commit(&mut fixture.state)
     .expect("case opening should commit");
 
-    fixture
-        .state
-        .legal
-        .release_prosecution_case_prosecutor_for_detention(case, opening_prosecutor);
+    detain_character(&mut fixture, opening_prosecutor, "Opening prosecutor");
     assert_eq!(
         validate_assign_prosecutor(&fixture.state, case, fixture.lead)
             .expect_err("direct staffing must reject the source-case witness"),
@@ -916,15 +953,13 @@ fn prosecution_staffing_and_autonomy_skip_source_case_witnesses() {
     validate_state(&fixture.state).expect("restaffed witness-conflict state should validate");
     validate_invariants(&fixture.state);
 }
-
 #[test]
-fn autonomous_prosecution_staffing_prefers_lower_active_caseload_before_skill() {
+fn autonomous_prosecution_staffing_updates_cached_workload_between_same_pass_cases() {
     let mut fixture = fixture();
-    let case = open_case(&mut fixture);
     let backup = insert_character(
         &mut fixture.state,
         CharacterDraft {
-            name: "Available Prosecutor".to_owned(),
+            name: "Second Available Prosecutor".to_owned(),
             organization: Some(fixture.office),
             supervisor: None,
             autonomy: AutonomyLevel::Broad,
@@ -934,17 +969,105 @@ fn autonomous_prosecution_staffing_prefers_lower_active_caseload_before_skill() 
         },
     )
     .expect("backup prosecutor should validate");
-    let record = fixture
+    let criminal = fixture
         .state
-        .legal()
-        .get_prosecution_case(case)
-        .expect("staffed prosecution case should persist");
+        .world()
+        .get_character(fixture.defendant)
+        .expect("fixture defendant should persist")
+        .organization()
+        .expect("fixture defendant should belong to the criminal organization");
 
+    let mut make_unstaffed_case = |name: &str| {
+        let defendant = insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: format!("{name} Defendant"),
+                organization: Some(criminal),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("additional defendant should validate");
+        let investigation = validate_open_investigation(
+            &fixture.state,
+            InvestigationDraft {
+                owner: fixture.police,
+                title: format!("{name} investigation"),
+                subjects: BTreeSet::from([EntityRef::Character(defendant)]),
+            },
+        )
+        .expect("additional source investigation should validate")
+        .commit(&mut fixture.state)
+        .expect("additional source investigation should commit");
+        let first = add_evidence(
+            &mut fixture.state,
+            fixture.police,
+            investigation,
+            defendant,
+            EvidenceKind::Document,
+        );
+        let second = add_evidence(
+            &mut fixture.state,
+            fixture.police,
+            investigation,
+            defendant,
+            EvidenceKind::KnownAssociation,
+        );
+        let evidence = BTreeSet::from([first, second]);
+        let arrest = validate_arrest(
+            &fixture.registry,
+            &fixture.state,
+            ArrestDraft {
+                character: defendant,
+                investigation,
+                evidence: evidence.clone(),
+            },
+        )
+        .expect("additional arrest should validate")
+        .commit(&mut fixture.state)
+        .expect("additional arrest should commit");
+        let opening_prosecutor = insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: format!("{name} Opening Prosecutor"),
+                organization: Some(fixture.office),
+                supervisor: None,
+                autonomy: AutonomyLevel::Broad,
+                capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(55))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("temporary opening prosecutor should validate");
+        let case = validate_open_prosecution_case(
+            &fixture.state,
+            ProsecutionCaseDraft {
+                arrest,
+                prosecutor_office: fixture.office,
+                prosecutor: opening_prosecutor,
+                evidence,
+            },
+        )
+        .expect("additional prosecution case should validate")
+        .commit(&mut fixture.state)
+        .expect("additional prosecution case should commit");
+        detain_character(&mut fixture, opening_prosecutor, name);
+        case
+    };
+
+    let first = make_unstaffed_case("First cached-load");
+    let second = make_unstaffed_case("Second cached-load");
+    let staffed = apply_autonomous_prosecution_staffing(&mut fixture.state)
+        .expect("same-pass prosecution staffing should resolve");
     assert_eq!(
-        find_autonomous_prosecutor(&fixture.state, record),
-        Some(backup),
-        "an idle qualified prosecutor should be preferred over a stronger attorney already carrying review work"
+        staffed,
+        vec![(first, fixture.lead), (second, backup)],
+        "the first assignment must increment the cached lead workload before the second case is ranked"
     );
+    validate_state(&fixture.state).expect("cached prosecution staffing state should validate");
     validate_invariants(&fixture.state);
 }
 

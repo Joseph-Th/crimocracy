@@ -109,6 +109,14 @@ pub(super) fn build_after_action_summary(
     if factors.approach_adjustment() > 0 {
         parts.push("The selected approach increased execution difficulty.".to_owned());
     }
+    match factors.business_fear_adjustment().cmp(&0) {
+        std::cmp::Ordering::Less => {
+            parts.push("Business owners' fear of the organization reduced resistance.".to_owned())
+        }
+        std::cmp::Ordering::Greater => parts
+            .push("Business owners were unusually willing to resist the organization.".to_owned()),
+        std::cmp::Ordering::Equal => {}
+    }
     if factors.time_pressure() > 0 {
         parts.push("The completion deadline compressed the execution window.".to_owned());
     }

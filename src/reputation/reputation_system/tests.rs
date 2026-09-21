@@ -3,11 +3,75 @@
 use super::*;
 use crate::build_registry;
 use crate::core::invariants::validate_invariants;
-use crate::core::time::SimDuration;
+use crate::core::time::{SimDuration, SimTime};
 use crate::social::RelationshipLevel;
 use crate::world::world_system::{insert_character, insert_organization};
 use crate::world::{OrganizationDraft, OrganizationKind};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Clone, Copy, Serialize)]
+struct ReputationScoreWire {
+    value: u8,
+    changed_at: SimTime,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct ReputationRecordWire {
+    organization: OrganizationId,
+    audience: AudienceKind,
+    fear: ReputationScoreWire,
+    reliability: ReputationScoreWire,
+    competence: ReputationScoreWire,
+    treachery: ReputationScoreWire,
+}
+
+fn reputation_record_wire(record: &ReputationRecord) -> ReputationRecordWire {
+    let score = |dimension| ReputationScoreWire {
+        value: record.score(dimension),
+        changed_at: record.changed_at(dimension),
+    };
+    ReputationRecordWire {
+        organization: record.organization(),
+        audience: record.audience(),
+        fear: score(ReputationDimension::Fear),
+        reliability: score(ReputationDimension::Reliability),
+        competence: score(ReputationDimension::Competence),
+        treachery: score(ReputationDimension::Treachery),
+    }
+}
+
+fn replace_serialized_reputation_record(
+    state: &AppState,
+    original: &ReputationRecord,
+    replacement: &ReputationRecordWire,
+) -> AppState {
+    let original_bytes = bincode::serialize(original).expect("reputation record should serialize");
+    assert_eq!(
+        bincode::serialize(&reputation_record_wire(original))
+            .expect("reputation mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement reputation should serialize");
+    assert_eq!(replacement_bytes.len(), original_bytes.len());
+    let mut state_bytes = bincode::serialize(state).expect("application state should serialize");
+    let matches: Vec<_> = state_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized reputation must occur exactly once"
+    );
+    let start = matches[0];
+    state_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&state_bytes)
+        .expect("same-layout reputation corruption must remain decodable")
+}
 
 fn level(value: u8) -> RelationshipLevel {
     RelationshipLevel::try_new(value).expect("fixture level should validate")
@@ -516,16 +580,13 @@ fn save_rejects_future_dated_reputation_movement() {
         .now()
         .checked_add(SimDuration::ONE_MINUTE)
         .expect("fixture clock has room");
-    let score = state
+    let original = *state
         .reputation()
         .get_record(organization, AudienceKind::Police)
-        .expect("fixture reputation should persist")
-        .score(ReputationDimension::Fear);
-    state
-        .reputation
-        .record_mut((organization, AudienceKind::Police))
-        .expect("fixture reputation should remain mutable inside its owner test")
-        .set_score(ReputationDimension::Fear, score, future);
+        .expect("fixture reputation should persist");
+    let mut replacement = reputation_record_wire(&original);
+    replacement.fear.changed_at = future;
+    state = replace_serialized_reputation_record(&state, &original, &replacement);
 
     let error = build_save(&registry, &state)
         .expect_err("future-dated reputation freshness must fail the real save boundary");
@@ -544,14 +605,26 @@ fn save_rejects_persisted_neutral_reputation_record() {
     use crate::core::persistence::{SaveError, build_save};
 
     let (registry, mut state, organization) = make_state();
-    state
-        .reputation
-        .insert_record(ReputationRecord::at_baseline(
-            organization,
-            AudienceKind::Residents,
-            registry.reputation().baseline(),
-            state.now(),
-        ));
+    apply_reputation_delta(
+        &registry,
+        &mut state,
+        organization,
+        AudienceKind::Residents,
+        ReputationDimension::Fear,
+        1,
+    )
+    .expect("valid non-neutral reputation should exist before corruption");
+    let original = *state
+        .reputation()
+        .get_record(organization, AudienceKind::Residents)
+        .expect("fixture reputation should persist");
+    let mut replacement = reputation_record_wire(&original);
+    let baseline = registry.reputation().baseline();
+    replacement.fear.value = baseline;
+    replacement.reliability.value = baseline;
+    replacement.competence.value = baseline;
+    replacement.treachery.value = baseline;
+    state = replace_serialized_reputation_record(&state, &original, &replacement);
 
     let error = build_save(&registry, &state)
         .expect_err("neutral sparse reputation must fail the registry-relative save boundary");

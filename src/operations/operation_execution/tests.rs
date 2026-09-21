@@ -44,6 +44,8 @@ use crate::operations::{
     OperationContingency, OperationDraft, OperationKind, OperationObjective,
     OperationObjectiveBlocker, OperationObjectiveOutcome, OperationStatus, RoleKind,
 };
+use crate::reputation::reputation_system::apply_reputation_delta;
+use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_neighborhood,
     insert_organization, validate_reassign_character, validate_transfer_business_ownership,
@@ -2288,6 +2290,7 @@ fn after_action_summary_contextualizes_adverse_variance() {
         target_police_presence: None,
         police_response_arrived: false,
         approach_adjustment: 0,
+        business_fear_adjustment: 0,
         time_pressure: 0,
         variance: -1,
     };
@@ -2340,6 +2343,7 @@ fn practical_objective_failure_does_not_misattribute_tactical_success() {
         ),
         police_response_arrived: false,
         approach_adjustment: 0,
+        business_fear_adjustment: 0,
         time_pressure: 0,
         variance: -12,
     };
@@ -2414,6 +2418,129 @@ fn compressed_deadline_applies_proportional_time_pressure_to_resolution() {
 }
 
 #[test]
+fn business_fear_is_bounded_explainable_intimidation_leverage() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, false, Vec::new());
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let due_at = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution_due_at())
+        .expect("started intimidation must have a resolution deadline");
+    let remaining = due_at
+        .as_minutes()
+        .checked_sub(state.now().as_minutes())
+        .expect("resolution deadline must not precede current time");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(remaining).expect("fixture intimidation duration fits u32"),
+    ));
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .expect("intimidation fixture must persist")
+        .responsible_organization();
+
+    let neutral = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(0, 0),
+    )
+    .expect("neutral intimidation should resolve");
+    assert_eq!(neutral.outcome.factors.business_fear_adjustment(), 0);
+
+    let mut feared = state.clone();
+    apply_reputation_delta(
+        &registry,
+        &mut feared,
+        organization,
+        AudienceKind::Businesses,
+        ReputationDimension::Fear,
+        registry.reputation().violent_businesses_fear(),
+    )
+    .expect("one visible-violence fear step should apply");
+    let feared_plan = decide_operation_resolution(
+        &registry,
+        &feared,
+        operation,
+        OperationResolutionRandomness::new(0, 0),
+    )
+    .expect("feared intimidation should resolve");
+    assert_eq!(
+        feared_plan.outcome.factors.business_fear_adjustment(),
+        -1,
+        "one authored visible-violence consequence should help without becoming a dominant modifier"
+    );
+    assert_eq!(
+        feared_plan.outcome.execution_margin,
+        neutral.outcome.execution_margin + 1
+    );
+    assert!(
+        feared_plan
+            .narrative
+            .summary
+            .contains("Business owners' fear of the organization reduced resistance")
+    );
+
+    let mut feared_to_rail = state.clone();
+    apply_reputation_delta(
+        &registry,
+        &mut feared_to_rail,
+        organization,
+        AudienceKind::Businesses,
+        ReputationDimension::Fear,
+        100,
+    )
+    .expect("large test movement should clamp at the reputation rail");
+    let rail_plan = decide_operation_resolution(
+        &registry,
+        &feared_to_rail,
+        operation,
+        OperationResolutionRandomness::new(0, 0),
+    )
+    .expect("maximum-fear intimidation should resolve");
+    assert_eq!(
+        rail_plan.outcome.factors.business_fear_adjustment(),
+        -i8::try_from(
+            registry
+                .reputation()
+                .intimidation_business_fear_max_adjustment()
+        )
+        .expect("authored reputation adjustment fits i8")
+    );
+
+    let mut unafraid = state.clone();
+    apply_reputation_delta(
+        &registry,
+        &mut unafraid,
+        organization,
+        AudienceKind::Businesses,
+        ReputationDimension::Fear,
+        -3,
+    )
+    .expect("below-baseline test standing should apply");
+    let unafraid_plan = decide_operation_resolution(
+        &registry,
+        &unafraid,
+        operation,
+        OperationResolutionRandomness::new(0, 0),
+    )
+    .expect("low-fear intimidation should resolve");
+    assert_eq!(unafraid_plan.outcome.factors.business_fear_adjustment(), 1);
+    assert_eq!(
+        unafraid_plan.outcome.execution_margin,
+        neutral.outcome.execution_margin - 1
+    );
+    assert!(
+        unafraid_plan
+            .narrative
+            .summary
+            .contains("Business owners were unusually willing to resist the organization")
+    );
+}
+
+#[test]
 fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
     let neutral = OperationResolutionFactors {
         role_capability_average: Rating::try_new(80).expect("fixture rating should be valid"),
@@ -2425,6 +2552,7 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         target_police_presence: None,
         police_response_arrived: false,
         approach_adjustment: 0,
+        business_fear_adjustment: 0,
         time_pressure: 0,
         variance: 0,
     };

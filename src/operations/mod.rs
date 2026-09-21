@@ -626,6 +626,9 @@ pub struct OperationResolutionFactors {
     target_police_presence: Option<Rating>,
     police_response_arrived: bool,
     approach_adjustment: i8,
+    /// Difficulty shift contributed by the responsible organization's standing with business
+    /// owners. Nonzero only for Intimidation and bounded by authored reputation tuning.
+    business_fear_adjustment: i8,
     time_pressure: u8,
     variance: i8,
 }
@@ -665,6 +668,10 @@ impl OperationResolutionFactors {
 
     pub fn approach_adjustment(self) -> i8 {
         self.approach_adjustment
+    }
+
+    pub fn business_fear_adjustment(self) -> i8 {
+        self.business_fear_adjustment
     }
 
     pub fn time_pressure(self) -> u8 {

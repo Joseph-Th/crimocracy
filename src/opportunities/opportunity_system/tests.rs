@@ -1637,7 +1637,7 @@ fn expiry_batch_report_exhaustion_leaves_every_due_opportunity_open() {
 }
 
 #[test]
-fn exhausted_opportunity_version_rejects_lifecycle_change_without_mutation() {
+fn restore_rejects_open_opportunity_with_impossible_exhausted_version() {
     let mut fixture = make_fixture();
     let opportunity = validate_discover_operation_opportunity(
         &fixture.registry,
@@ -1647,26 +1647,29 @@ fn exhausted_opportunity_version_rejects_lifecycle_change_without_mutation() {
     .expect("opportunity should validate")
     .commit(&mut fixture.state)
     .expect("opportunity should commit");
-    fixture
-        .state
-        .opportunities
-        .records
-        .get_mut(&opportunity)
-        .expect("opportunity should persist")
-        .version = u32::MAX;
-
-    let error = match validate_dismiss_opportunity(&fixture.registry, &fixture.state, opportunity) {
-        Ok(_) => panic!("exhausted opportunity version must reject before creating a token"),
-        Err(error) => error,
-    };
-    assert!(matches!(error, OpportunityError::VersionCapacity(_)));
-    let record = fixture
+    let original = fixture
         .state
         .opportunities()
         .get_opportunity(opportunity)
-        .expect("rejected dismissal must preserve opportunity");
-    assert_eq!(record.status(), OpportunityStatus::Open);
-    assert_eq!(record.version(), u32::MAX);
+        .expect("opportunity should persist")
+        .clone();
+    let mut replacement = opportunity_record_wire(&original);
+    replacement.version = u32::MAX;
+    let envelope = replace_serialized_opportunity(
+        build_save(&fixture.registry, &fixture.state)
+            .expect("canonical opportunity state should save"),
+        &original,
+        &replacement,
+    );
+
+    let error = restore_save(&fixture.registry, envelope)
+        .expect_err("an open opportunity with a noncanonical lifecycle version must be rejected");
+    assert_eq!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidOpportunity { opportunity }
+        )
+    );
 }
 
 #[test]

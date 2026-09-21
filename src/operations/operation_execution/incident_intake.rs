@@ -47,9 +47,12 @@ fn resolve_incident_witness(
         return None;
     };
     let witness = state.world.get_character(character)?;
-    // The identified participant cannot witness their own crime, and an organization's own
+    // A business owner is only the modeled on-scene witness while physically available. Custody
+    // places the owner elsewhere, so ownership alone must not manufacture eyewitness testimony.
+    // The identified participant also cannot witness their own crime, and an organization's own
     // member is not treated as the case's named witness against it.
-    if Some(character) == exposure.identified_character
+    if state.legal.active_arrest_for_character(character).is_some()
+        || Some(character) == exposure.identified_character
         || witness.organization() == Some(operation.responsible_organization())
     {
         return None;
@@ -151,3 +154,6 @@ pub(super) fn validate_exposure_incident(
     )?;
     Ok((Some(incident), Some(authority_snapshot)))
 }
+
+#[cfg(test)]
+mod tests;

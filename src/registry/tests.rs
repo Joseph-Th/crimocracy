@@ -336,6 +336,8 @@ fn reputation_spec() -> ReputationConfigSpec {
         achieved_underworld_competence: definition.achieved_underworld_competence(),
         partial_underworld_competence: definition.partial_underworld_competence(),
         violent_businesses_fear: definition.violent_businesses_fear(),
+        intimidation_business_fear_max_adjustment: definition
+            .intimidation_business_fear_max_adjustment(),
     }
 }
 
@@ -391,6 +393,13 @@ fn reputation_authoring_rejects_neutral_throttle_and_inverted_consequences() {
 
     let mut spec = reputation_spec();
     spec.partial_underworld_competence = -1;
+    assert!(matches!(
+        RegistryBuilder::default().register_reputation(spec),
+        Err(RegistryBuildError::InvalidReputationConsequence)
+    ));
+
+    let mut spec = reputation_spec();
+    spec.intimidation_business_fear_max_adjustment = 0;
     assert!(matches!(
         RegistryBuilder::default().register_reputation(spec),
         Err(RegistryBuildError::InvalidReputationConsequence)

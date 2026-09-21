@@ -20,11 +20,11 @@ use crate::intelligence::intelligence_system::IntelligenceError;
 use crate::operations::operation_abort::validate_authority_abort_operation;
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_scheduling::{
-    authorized_booking_priority, checked_earliest_operation_start_from_authorization,
-    earliest_operation_start_from_authorization, has_overlapping_operation_window,
-    projected_authorized_operation_window, projected_operation_window,
-    resolve_deadline_without_execution_window, resolve_earliest_operation_deadline,
-    resolve_operation_earliest_start,
+    checked_earliest_operation_start_from_authorization,
+    earliest_operation_start_from_authorization, find_busy_participant,
+    find_busy_participant_for_begin, projected_authorized_operation_window,
+    projected_operation_window, resolve_deadline_without_execution_window,
+    resolve_earliest_operation_deadline, resolve_operation_earliest_start,
 };
 use crate::operations::operation_state::{checked_shift_past_pause, pause_duration_minutes};
 use crate::operations::police_response_integration::{
@@ -564,58 +564,6 @@ pub fn validate_authorize_operation<'registry>(
     })
 }
 
-/// Begin-time availability is stricter than authorization-time interval projection. A future
-/// follow-up may be authorized exactly at another operation's projected end because the earlier
-/// decision might be resolved before that boundary. Once the follow-up actually tries to begin,
-/// however, any still-pending operation decision remains an active personnel commitment even when
-/// its unshifted half-open window ends exactly at this minute.
-fn find_busy_participant_for_begin(
-    registry: &Registry,
-    state: &AppState,
-    participants: &BTreeSet<CharacterId>,
-    operation: OperationId,
-    requested_start: SimTime,
-    requested_end: SimTime,
-) -> Option<(CharacterId, OperationId)> {
-    let requested = state
-        .operations
-        .get_operation(operation)
-        .expect("begin-time operation must exist");
-    participants
-        .iter()
-        .find_map(|participant| {
-            state
-                .operations
-                .active_operations_for_participant(*participant)
-                .find(|other| {
-                    other.id() != operation
-                        && has_overlapping_operation_window(
-                            registry,
-                            other,
-                            state.now(),
-                            requested_start,
-                            requested_end,
-                        )
-                        && (other.status() != OperationStatus::Authorized
-                            || authorized_booking_priority(other)
-                                < authorized_booking_priority(requested))
-                })
-                .map(|other| (*participant, other.id()))
-        })
-        .or_else(|| {
-            participants.iter().find_map(|participant| {
-                state
-                    .operations
-                    .active_operations_for_participant(*participant)
-                    .find(|other| {
-                        other.id() != operation
-                            && other.status() == OperationStatus::AwaitingDecision
-                    })
-                    .map(|other| (*participant, other.id()))
-            })
-        })
-}
-
 /// Validates the operation's required seats and participant availability while collecting the
 /// version pins consumed by the authorization token. Keeping this as one concern prevents the
 /// public authorization path from interleaving roster validation with plan semantics.
@@ -784,57 +732,6 @@ fn validate_deadline_execution_window(
         return Err(OperationError::DeadlineLeavesNoExecutionWindow);
     }
     Ok(())
-}
-
-fn find_busy_participant(
-    registry: &Registry,
-    state: &AppState,
-    participants: &BTreeSet<CharacterId>,
-    requested_kind: OperationKind,
-    requested_start: SimTime,
-    constraints: &[crate::operations::OperationConstraint],
-) -> Option<(CharacterId, OperationId)> {
-    let (requested_start, requested_end) = projected_authorized_operation_window(
-        registry,
-        state.now(),
-        requested_kind,
-        requested_start,
-        constraints,
-    );
-    find_busy_participant_in_window(
-        registry,
-        state,
-        participants,
-        None,
-        requested_start,
-        requested_end,
-    )
-}
-
-fn find_busy_participant_in_window(
-    registry: &Registry,
-    state: &AppState,
-    participants: &BTreeSet<CharacterId>,
-    excluded_operation: Option<OperationId>,
-    requested_start: SimTime,
-    requested_end: SimTime,
-) -> Option<(CharacterId, OperationId)> {
-    participants.iter().find_map(|participant| {
-        state
-            .operations
-            .active_operations_for_participant(*participant)
-            .find(|operation| {
-                Some(operation.id()) != excluded_operation
-                    && has_overlapping_operation_window(
-                        registry,
-                        operation,
-                        state.now(),
-                        requested_start,
-                        requested_end,
-                    )
-            })
-            .map(|operation| (*participant, operation.id()))
-    })
 }
 
 /// Reject an extraction that cannot finish before the target's currently modeled custody ends.

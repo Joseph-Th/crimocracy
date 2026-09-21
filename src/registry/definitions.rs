@@ -965,6 +965,9 @@ pub struct ReputationConfigSpec {
     pub partial_underworld_competence: i8,
     /// Positive business-fear movement from publicly exposed violence.
     pub violent_businesses_fear: i8,
+    /// Maximum absolute intimidation-difficulty shift contributed by business fear. Standing
+    /// scales proportionally from the neutral baseline toward either reputation rail.
+    pub intimidation_business_fear_max_adjustment: u8,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct ReputationConfigDefinition {
@@ -977,6 +980,7 @@ pub struct ReputationConfigDefinition {
     pub(super) achieved_underworld_competence: i8,
     pub(super) partial_underworld_competence: i8,
     pub(super) violent_businesses_fear: i8,
+    pub(super) intimidation_business_fear_max_adjustment: u8,
 }
 impl ReputationConfigDefinition {
     pub fn baseline(self) -> u8 {
@@ -1005,5 +1009,8 @@ impl ReputationConfigDefinition {
     }
     pub fn violent_businesses_fear(self) -> i8 {
         self.violent_businesses_fear
+    }
+    pub fn intimidation_business_fear_max_adjustment(self) -> u8 {
+        self.intimidation_business_fear_max_adjustment
     }
 }

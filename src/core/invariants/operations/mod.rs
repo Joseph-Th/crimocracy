@@ -468,6 +468,12 @@ fn validate_authored_operation_resolution(
             != execution
                 .approach_difficulty_adjustment(operation.approach())
                 .expect("validated operation approach must have an execution adjustment")
+        || factors.business_fear_adjustment().unsigned_abs()
+            > registry
+                .reputation()
+                .intimidation_business_fear_max_adjustment()
+        || (operation.kind() != OperationKind::Intimidation
+            && factors.business_fear_adjustment() != 0)
         || factors.intelligence_quality() != expected_intelligence_quality
         || factors.intelligence_adjustment() != expected_intelligence_adjustment
         || factors.intelligence_topics_covered() != expected_intelligence_topics_covered

@@ -7,8 +7,6 @@ use artifacts::{
     ReferralArtifactContext, validate_referral_artifacts, validate_resolution_artifacts,
 };
 pub(crate) use artifacts::{prosecution_referral_summary, write_resolution_summary};
-#[cfg(test)]
-use staffing::find_autonomous_prosecutor;
 pub use staffing::{
     ProsecutionStaffingError, ValidatedProsecutorAssignment, validate_assign_prosecutor,
 };

@@ -1,6 +1,10 @@
 //! Operation property proceeds, disposition, depletion, and financial-reporting tests.
 
 use super::*;
+use crate::economy::BusinessEconomyDraft;
+use crate::economy::business_economy_system::{
+    validate_establish_business_economy, validate_suspend_business_economy,
+};
 use crate::reports::organization_financial_report::validate_organization_financial_report;
 
 fn insert_property_disposition_fixture(
@@ -982,4 +986,107 @@ fn same_minute_post_disposition_venue_transfer_preserves_save_restore() {
     assert_eq!(restored_disposition.venue(), venue);
     assert_eq!(restored_disposition.venue_version(), disposition_version);
     validate_invariants(&restored);
+}
+
+#[test]
+fn suspended_resale_venue_cannot_liquidate_property_or_honor_a_held_disposition() {
+    let (registry, mut state, _police, neighborhood, operation) =
+        make_exposed_business_operation_fixture(false);
+    let start = run_tick(&registry, &mut state);
+    assert_eq!(start.started_operations, vec![operation]);
+    state.advance_clock(SimDuration::from_minutes(45));
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("favorable property operation should resolve");
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("property operation should validate")
+        .commit(&mut state)
+        .expect("property operation should commit");
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .expect("completed property operation should persist")
+        .responsible_organization();
+    let (venue, cash_account, settlement_account) =
+        insert_property_disposition_fixture(&registry, &mut state, neighborhood, organization);
+
+    let operating = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(venue),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("venue operating account should validate");
+    let venue_settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(venue),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("venue settlement account should validate");
+    validate_establish_business_economy(
+        &registry,
+        &state,
+        BusinessEconomyDraft {
+            business: venue,
+            operating_account: operating,
+            settlement_account: venue_settlement,
+        },
+    )
+    .expect("resale venue economy should validate")
+    .commit(&mut state)
+    .expect("resale venue economy should commit");
+
+    let draft = PropertyDispositionDraft {
+        operation,
+        venue,
+        cash_account,
+        settlement_account,
+    };
+    let held = validate_dispose_property(&registry, &state, draft)
+        .expect("an active resale venue should accept held property");
+    validate_suspend_business_economy(&state, venue)
+        .expect("unused resale venue should be suspendable")
+        .commit(&mut state)
+        .expect("resale venue suspension should commit");
+
+    assert_eq!(
+        held.commit(&mut state).expect_err(
+            "a held disposition must recheck independently versioned venue availability"
+        ),
+        PropertyDispositionError::VenueSuspended(venue)
+    );
+    assert_eq!(
+        validate_dispose_property(&registry, &state, draft)
+            .err()
+            .expect("a suspended resale venue cannot liquidate stolen property"),
+        PropertyDispositionError::VenueSuspended(venue)
+    );
+    assert!(
+        state
+            .operations()
+            .get_operation(operation)
+            .expect("operation should persist")
+            .property_disposition()
+            .is_none(),
+        "rejected liquidation must leave held property undisposed"
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(cash_account)
+            .expect("cash account should persist")
+            .balance(),
+        Money::ZERO,
+        "rejected liquidation must not create cash"
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("suspended-venue rejection should remain registry-valid");
+    validate_invariants(&state);
 }

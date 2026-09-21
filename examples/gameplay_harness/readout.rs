@@ -1537,6 +1537,7 @@ pub fn print_experience_readout(
     recon: &RunMetrics,
     racket_demonstrated: bool,
     rival_leverage_demonstrated: bool,
+    reputation_leverage_demonstrated: bool,
 ) {
     println!("\n--- PLAYER LOOP READOUT ---");
     println!(
@@ -1786,6 +1787,11 @@ pub fn print_experience_readout(
         "rival leverage",
         rival_leverage_demonstrated,
         "player-held rival intelligence can identify an exact operating venue, focused surveillance can add local patrol knowledge, and a resulting sabotage can materially reduce that rival business's next-cycle economics without reading hidden rival state",
+    );
+    checkpoint(
+        "fear leverage",
+        reputation_leverage_demonstrated,
+        "publicly visible violence can make later intimidation easier through contextual business-owner fear, while the violent act still pays its own police and exposure costs and the advantage stays bounded",
     );
     if missing > 0 {
         println!(

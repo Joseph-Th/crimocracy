@@ -5,8 +5,8 @@ use crate::build_registry;
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
-use crate::core::persistence::{build_save, restore_save};
-use crate::core::time::SimDuration;
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
+use crate::core::time::{SimDuration, SimTime};
 use crate::legal::investigation_work_execution::{
     InvestigationWorkRandomness, decide_investigation_work_resolution,
     validate_investigation_work_resolution_plan, validate_schedule_investigation_work,
@@ -22,7 +22,75 @@ use crate::world::world_system::{
 use crate::world::{
     AutonomyLevel, CapabilityKind, CharacterDraft, OrganizationDraft, OrganizationKind, Rating,
 };
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Clone, Serialize)]
+struct InvestigationRecordWire {
+    id: InvestigationId,
+    owner: OrganizationId,
+    title: String,
+    status: InvestigationStatus,
+    lead_investigator: Option<CharacterId>,
+    declared_subjects: BTreeSet<EntityRef>,
+    subjects: BTreeSet<EntityRef>,
+    evidence: BTreeSet<EvidenceId>,
+    opened_at: SimTime,
+    origin: Option<EntityRef>,
+    last_activity_at: SimTime,
+    version: u32,
+}
+
+fn investigation_record_wire(
+    record: &crate::legal::InvestigationRecord,
+) -> InvestigationRecordWire {
+    InvestigationRecordWire {
+        id: record.id(),
+        owner: record.owner(),
+        title: record.title().to_owned(),
+        status: record.status(),
+        lead_investigator: record.lead_investigator(),
+        declared_subjects: record.declared_subjects().clone(),
+        subjects: record.subjects().clone(),
+        evidence: record.evidence().clone(),
+        opened_at: record.opened_at(),
+        origin: record.origin(),
+        last_activity_at: record.last_activity_at(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_investigation(
+    envelope: SaveEnvelope,
+    original: &crate::legal::InvestigationRecord,
+    replacement: &InvestigationRecordWire,
+) -> SaveEnvelope {
+    let original_bytes =
+        bincode::serialize(original).expect("investigation record should serialize");
+    assert_eq!(
+        bincode::serialize(&investigation_record_wire(original))
+            .expect("investigation mirror should serialize"),
+        original_bytes,
+        "wire mirror must match the production persistence layout exactly"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement investigation should serialize");
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized investigation must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes.splice(start..start + original_bytes.len(), replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout investigation corruption must remain decodable")
+}
 
 fn rating(value: u8) -> Rating {
     Rating::try_new(value).expect("test rating must be valid")
@@ -1927,31 +1995,31 @@ fn structural_validation_rejects_one_investigator_leading_two_active_cases() {
         .expect("second assignment should commit");
     validate_state(&state).expect("canonical distinct lead assignments should validate");
 
-    // Forge the record/index combination that deserialization can rebuild but no canonical
-    // assignment path can create. Use the owner mutations in two steps so every derived index
-    // remains internally consistent; the only defect is the cross-case capacity violation.
-    state
-        .legal
-        .release_lead_investigator_for_detention(second, second_detective);
-    state.legal.set_lead_investigator(second, first_detective);
-    assert!(
-        state
-            .legal()
-            .investigations_for_investigator(first_detective)
-            .filter(|case| case.status() == InvestigationStatus::Active)
-            .count()
-            == 2,
-        "fixture must contain two active cases led by the same investigator"
+    // Corrupt only the authoritative record in an otherwise valid save. Restore rebuilds the
+    // investigator index from records before structural validation, so this proves malformed
+    // persisted staffing cannot survive load without using a test-only mutation bypass.
+    let original = state
+        .legal()
+        .get_investigation(second)
+        .expect("second investigation should persist")
+        .clone();
+    let mut replacement = investigation_record_wire(&original);
+    replacement.lead_investigator = Some(first_detective);
+    let envelope = replace_serialized_investigation(
+        build_save(&registry, &state).expect("canonical staffing state should save"),
+        &original,
+        &replacement,
     );
-
+    let error = restore_save(&registry, envelope)
+        .expect_err("restore must reject one investigator leading two active cases");
     assert_eq!(
-        validate_state(&state),
-        Err(
+        error,
+        LoadError::InvalidState(
             crate::core::invariants::StateValidationError::InvalidInvestigationStaffing {
                 investigation: second,
             }
         ),
-        "structural validation must enforce the same one-active-case capacity as assignment"
+        "restore must enforce the same one-active-case capacity as assignment"
     );
 }
 
@@ -2008,12 +2076,25 @@ fn structural_validation_rejects_suspended_case_retaining_a_lead() {
     );
     validate_state(&state).expect("canonical suspended case should validate");
 
-    // Reintroduce the impossible persisted shape while keeping the derived investigator index
-    // synchronized. A restored suspended/closed case must never carry a live staffing seat.
-    state.legal.set_lead_investigator(investigation, detective);
+    // Corrupt the persisted authoritative record only; restore rebuilds the derived staffing
+    // index before validation. A suspended/closed case must never regain a live staffing seat.
+    let original = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("suspended investigation should persist")
+        .clone();
+    let mut replacement = investigation_record_wire(&original);
+    replacement.lead_investigator = Some(detective);
+    let envelope = replace_serialized_investigation(
+        build_save(&registry, &state).expect("canonical suspended case should save"),
+        &original,
+        &replacement,
+    );
+    let error = restore_save(&registry, envelope)
+        .expect_err("restore must reject a suspended case retaining a lead");
     assert_eq!(
-        validate_state(&state),
-        Err(
+        error,
+        LoadError::InvalidState(
             crate::core::invariants::StateValidationError::InvalidInvestigationStaffing {
                 investigation,
             }

@@ -21,7 +21,7 @@ use crate::legal::{
 };
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -803,15 +803,24 @@ pub(crate) fn apply_autonomous_investigator_staffing(
     investigations.sort_unstable_by_key(|investigation| {
         investigation_staffing_priority(state, *investigation)
     });
-    let mut staffed = Vec::new();
 
-    for investigation_id in investigations {
-        let investigation = state
-            .legal
-            .get_investigation(investigation_id)
-            .ok_or(InvestigationError::MissingInvestigation(investigation_id))?;
-        let owner = investigation.owner();
-        let investigator = state
+    // Availability and Investigation capability are authority-wide facts for this staffing pass.
+    // Build each authority's ranked pool once instead of rescanning every member for every
+    // unstaffed case. Case-specific subject/witness conflicts remain checked below, and the
+    // per-pass assignment set preserves one-active-case capacity as assignments commit.
+    let owners: BTreeSet<_> = investigations
+        .iter()
+        .map(|investigation| {
+            state
+                .legal
+                .get_investigation(*investigation)
+                .expect("unstaffed-investigation index must reference an investigation")
+                .owner()
+        })
+        .collect();
+    let mut candidates_by_owner = BTreeMap::new();
+    for owner in owners {
+        let mut candidates: Vec<_> = state
             .world
             .characters_in_organization(owner)
             .filter(|record| {
@@ -823,21 +832,48 @@ pub(crate) fn apply_autonomous_investigator_staffing(
                         .legal
                         .active_investigation_for_investigator(record.id())
                         .is_none()
-                    && !investigation
-                        .subjects()
-                        .contains(&EntityRef::Character(record.id()))
-                    && state
-                        .legal
-                        .case_witness_for(investigation_id, record.id())
-                        .is_none()
             })
             .filter_map(|record| {
                 record
                     .capability(CapabilityKind::Investigation)
                     .map(|capability| (record.id(), capability.value()))
             })
-            .min_by_key(|(investigator, capability)| (Reverse(*capability), *investigator))
-            .map(|(investigator, _)| investigator);
+            .collect();
+        candidates.sort_unstable_by_key(|(investigator, capability)| {
+            (Reverse(*capability), *investigator)
+        });
+        candidates_by_owner.insert(
+            owner,
+            candidates
+                .into_iter()
+                .map(|(investigator, _)| investigator)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    let mut staffed = Vec::new();
+    let mut assigned_this_pass = BTreeSet::new();
+    for investigation_id in investigations {
+        let investigation = state
+            .legal
+            .get_investigation(investigation_id)
+            .ok_or(InvestigationError::MissingInvestigation(investigation_id))?;
+        let owner = investigation.owner();
+        let investigator = candidates_by_owner
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .copied()
+            .find(|investigator| {
+                !assigned_this_pass.contains(investigator)
+                    && !investigation
+                        .subjects()
+                        .contains(&EntityRef::Character(*investigator))
+                    && state
+                        .legal
+                        .case_witness_for(investigation_id, *investigator)
+                        .is_none()
+            });
         let Some(investigator) = investigator else {
             continue;
         };
@@ -846,6 +882,7 @@ pub(crate) fn apply_autonomous_investigator_staffing(
         // validator. A rejection now is not a modeled "no investigator available" outcome; it
         // means state or allocator capacity is broken and must surface instead of disappearing.
         validate_assign_investigator(state, investigation_id, investigator)?.commit(state)?;
+        assigned_this_pass.insert(investigator);
         // The assignment commit records the new lead's personal case-activity knowledge, so
         // contact channels can disclose it without any case-graph read.
         staffed.push((investigation_id, investigator));

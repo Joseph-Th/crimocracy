@@ -27,6 +27,7 @@ mod retention;
 mod rival_intelligence;
 mod scenario;
 mod session;
+mod violence_leverage;
 
 pub use contracts::*;
 pub use model::*;
@@ -384,12 +385,23 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     }
 
     if detail {
+        println!("\n--- VIOLENCE / REPUTATION LEVERAGE PROBE ---");
+    }
+    let violence_probe =
+        violence_leverage::run_violence_leverage_probe(&registry, primary_seeds, detail)?;
+    if !detail {
+        println!("[PROBE PASS] violence/reputation leverage");
+    }
+
+    if detail {
         print_experience_readout(
             &rush,
             &press,
             &recon,
             true,
             rival_probe.actionable_intervention && rival_probe.material_economic_impact,
+            violence_probe.visible_violence_created_fear
+                && violence_probe.fear_changed_later_intimidation,
         );
     }
 

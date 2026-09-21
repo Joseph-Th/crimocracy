@@ -24,9 +24,9 @@ use crate::enterprises::enterprise_execution::{
 use crate::legal::investigation_system::apply_autonomous_investigator_staffing;
 use crate::legal::investigation_system::apply_cold_case_decay;
 use crate::legal::investigation_work_execution::{
-    InvestigationWorkRandomness, apply_evidence_review_scheduling,
-    decide_investigation_work_resolution, find_due_scheduled_investigation_work,
-    validate_investigation_work_resolution_plan,
+    InvestigationWorkRandomness, InvestigationWorkSchedulingOutcome,
+    apply_investigation_work_scheduling, decide_investigation_work_resolution,
+    find_due_scheduled_investigation_work, validate_investigation_work_resolution_plan,
 };
 use crate::operations::operation_abort::{
     validate_deadline_missed_operation, validate_expired_opportunity_operation,
@@ -141,19 +141,15 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     } = run_operations_phase(registry, state);
     let staffed_investigations = apply_autonomous_investigator_staffing(state)
         .expect("valid state should staff available investigators onto active cases");
-    // Evidence-review scheduling scans every active staffed case, not only cases staffed this
-    // minute: later reviewable evidence must enter institutional casework sequentially rather
-    // than becoming inert after the case's first forensic attempt.
-    let scheduled_investigation_work = apply_evidence_review_scheduling(registry, state)
-        .expect("valid state should schedule due reviewable evidence for active staffed cases");
-    // Witness interviews are scheduled after evidence reviews so a witness registered by an
-    // operation resolving earlier in this same minute is interviewable as soon as its case
-    // has an investigator.
-    let scheduled_witness_interviews =
-        crate::legal::investigation_work_execution::apply_witness_interview_scheduling(
-            registry, state,
-        )
-        .expect("valid state should schedule due witness interviews");
+    // Autonomous casework traverses the active-case index once per minute. Reviewable evidence
+    // keeps first claim on a free detective; when no review is due, the same pass may schedule a
+    // witness interview. Later evidence and witnesses therefore remain actionable without two
+    // duplicate active-case scans every canonical minute.
+    let InvestigationWorkSchedulingOutcome {
+        evidence_reviews: scheduled_investigation_work,
+        witness_interviews: scheduled_witness_interviews,
+    } = apply_investigation_work_scheduling(registry, state)
+        .expect("valid state should schedule due investigation work");
     let resolved_investigation_work = run_investigation_work_phase(registry, state);
     // The police institution converts accumulated case evidence into custody after detective
     // work resolves, so an interview or forensic analysis finishing this minute is visible to

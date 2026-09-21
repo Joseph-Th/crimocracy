@@ -698,7 +698,10 @@ fn validate_business_owner(state: &AppState, owner: BusinessOwner) -> Result<(),
     }
 }
 
-pub(crate) fn set_policy(
+/// World-owned policy storage hook for the delegation system's already-preflighted composite
+/// command. Cross-domain effects such as pending recruitment-approval cancellation must be
+/// validated before calling this function; adapters and tests use `delegation::validate_set_policy`.
+pub(crate) fn apply_policy_change_prevalidated(
     registry: &Registry,
     state: &mut AppState,
     organization: OrganizationId,

@@ -16,7 +16,8 @@ pub(crate) use resolution_factors::{
     resolve_operation_police_alert_context, resolve_time_pressure,
 };
 use resolution_factors::{
-    resolve_exposure_plan, resolve_operation_venue_entities, resolve_role_capability_average,
+    resolve_exposure_plan, resolve_intimidation_business_fear_adjustment,
+    resolve_operation_venue_entities, resolve_role_capability_average,
     resolve_target_police_interval_snapshot,
 };
 
@@ -349,6 +350,8 @@ pub(crate) fn decide_operation_resolution(
     let approach_adjustment = execution
         .approach_difficulty_adjustment(record.approach())
         .expect("validated operation approach must have an authored execution adjustment");
+    let business_fear_adjustment =
+        resolve_intimidation_business_fear_adjustment(registry, state, record);
     let time_pressure = resolve_time_pressure(
         started_at,
         due_at,
@@ -366,6 +369,7 @@ pub(crate) fn decide_operation_resolution(
         target_police_presence,
         police_response_arrived,
         approach_adjustment,
+        business_fear_adjustment,
         time_pressure,
         variance: randomness.execution_variance(),
     };

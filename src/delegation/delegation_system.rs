@@ -17,7 +17,7 @@ use crate::delegation::{
 };
 use crate::finance::FinancialOwner;
 use crate::registry::Registry;
-use crate::world::world_system::{WorldError, set_policy as set_world_policy};
+use crate::world::world_system::{WorldError, apply_policy_change_prevalidated};
 use crate::world::{PolicyKind, PolicySetting};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -190,7 +190,7 @@ impl ValidatedPolicyChange {
                 self.organization,
             ));
         }
-        set_world_policy(registry, state, self.organization, self.setting)?;
+        apply_policy_change_prevalidated(registry, state, self.organization, self.setting)?;
         if let Some(cancellations) = self.approval_cancellations {
             cancellations.commit_preflighted(state);
         }

@@ -25,6 +25,10 @@ pub(super) fn register_reputation(builder: &mut RegistryBuilder) {
             achieved_underworld_competence: 3,
             partial_underworld_competence: 1,
             violent_businesses_fear: 3,
+            // Fear is useful leverage, not an auto-win. At the extreme rail it can move an
+            // intimidation check by eight difficulty points; one visible violent success moves
+            // business fear only three points and therefore earns a one-point advantage.
+            intimidation_business_fear_max_adjustment: 8,
         })
         .unwrap_or_else(|error| panic!("invalid reputation registry: {error}"));
 }

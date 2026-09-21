@@ -70,6 +70,8 @@ pub enum PropertyDispositionError {
     },
     #[error("business {0} does not provide resale-market access")]
     VenueNotResaleMarket(BusinessId),
+    #[error("resale venue {0} has suspended operations")]
+    VenueSuspended(BusinessId),
     #[error("business {venue} is not owned by organization {organization}")]
     VenueOwnerMismatch {
         venue: BusinessId,
@@ -178,7 +180,7 @@ impl ValidatedPropertyDisposition {
                 found: venue.version(),
             });
         }
-        validate_venue(venue, organization)?;
+        validate_venue(state, venue, organization)?;
         validate_accounts(
             state,
             organization,
@@ -236,7 +238,7 @@ pub fn validate_dispose_property(
         .world
         .get_business(draft.venue)
         .ok_or(PropertyDispositionError::MissingVenue(draft.venue))?;
-    validate_venue(venue, organization)?;
+    validate_venue(state, venue, organization)?;
     validate_accounts(
         state,
         organization,
@@ -341,6 +343,7 @@ fn resolve_disposable_property(
 }
 
 fn validate_venue(
+    state: &AppState,
     venue: &crate::world::BusinessRecord,
     organization: crate::core::id::OrganizationId,
 ) -> Result<(), PropertyDispositionError> {
@@ -352,6 +355,18 @@ fn validate_venue(
     }
     if !venue.has_function(BusinessFunction::ResaleMarket) {
         return Err(PropertyDispositionError::VenueNotResaleMarket(venue.id()));
+    }
+    // A business does not need an economy record to represent a real resale establishment, but
+    // once its economy is modeled, an explicit suspension means the venue is not operating.
+    // This mirrors enterprise host/support availability and prevents a closed pawnshop from
+    // remaining a live fencing channel merely because business identity and economy lifecycle
+    // are independently versioned.
+    if state
+        .economy
+        .get_business_economy(venue.id())
+        .is_some_and(|economy| economy.status() != crate::economy::BusinessOperatingStatus::Active)
+    {
+        return Err(PropertyDispositionError::VenueSuspended(venue.id()));
     }
     Ok(())
 }

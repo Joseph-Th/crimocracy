@@ -389,6 +389,82 @@ fn autonomous_evidence_review_advances_to_each_reviewable_source_once() {
 }
 
 #[test]
+fn combined_autonomous_scheduler_handles_review_and_interview_cases_in_one_pass() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let interview_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Parallel witness inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.target)]),
+        },
+    )
+    .expect("parallel witness case should validate")
+    .commit(&mut fixture.state)
+    .expect("parallel witness case should commit");
+    validate_assign_investigator(&fixture.state, interview_case, fixture.second_investigator)
+        .expect("second detective assignment should validate")
+        .commit(&mut fixture.state)
+        .expect("second detective assignment should commit");
+    add_evidence(
+        &mut fixture.state,
+        TestEvidenceDraft {
+            investigation: interview_case,
+            police: fixture.police,
+            subject: EntityRef::Character(fixture.target),
+            origin: EntityRef::Character(fixture.middle),
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+        },
+    );
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: interview_case,
+            witness: fixture.witness,
+            subject: EntityRef::Character(fixture.target),
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("parallel case witness should validate")
+    .commit(&mut fixture.state)
+    .expect("parallel case witness should commit");
+
+    let outcome = apply_investigation_work_scheduling(&registry, &mut fixture.state)
+        .expect("combined autonomous scheduling should resolve");
+    assert_eq!(outcome.evidence_reviews.len(), 1);
+    assert_eq!(outcome.witness_interviews.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(outcome.evidence_reviews[0])
+            .expect("review should persist")
+            .focus(),
+        InvestigationWorkFocus::evidence(fixture.first_evidence)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(outcome.witness_interviews[0])
+            .expect("interview should persist")
+            .focus(),
+        InvestigationWorkFocus::witness(case_witness)
+    );
+    validate_state(&fixture.state).expect("combined scheduling state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn autonomous_evidence_review_uses_discovery_time_before_evidence_id() {
     let registry = build_registry();
     let mut fixture = make_fixture(

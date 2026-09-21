@@ -18,6 +18,8 @@ use crate::operations::{
     OperationObjectiveOutcome, OperationRecord, OperationResolutionFactors,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
+use crate::reputation::reputation_system::resolve_score;
+use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::world::{CapabilityKind, Rating};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,6 +53,46 @@ pub(super) fn resolve_role_capability_average(
     let average = total.checked_div(count).unwrap_or(0);
     Rating::try_new(u8::try_from(average).expect("rating average must fit u8"))
         .expect("rating average must remain within rating bounds")
+}
+
+/// Converts contextual business-owner fear into bounded leverage for collection/intimidation
+/// work. Standing is an organizational reputation, not target-specific knowledge: it changes how
+/// readily ordinary businesses resist a known outfit, while police pressure, crew ability, and
+/// attached intelligence remain independent factors.
+pub(crate) fn resolve_intimidation_business_fear_adjustment(
+    registry: &Registry,
+    state: &AppState,
+    record: &OperationRecord,
+) -> i8 {
+    if record.kind() != OperationKind::Intimidation
+        || !matches!(
+            record.objective(),
+            OperationObjective::ObtainCash {
+                target: EntityRef::Business(_)
+            }
+        )
+    {
+        return 0;
+    }
+    let reputation = registry.reputation();
+    let baseline = reputation.baseline();
+    let fear = resolve_score(
+        registry,
+        state.reputation(),
+        record.responsible_organization(),
+        AudienceKind::Businesses,
+        ReputationDimension::Fear,
+    );
+    let (distance, span, sign) = match fear.cmp(&baseline) {
+        std::cmp::Ordering::Greater => (fear - baseline, 100 - baseline, -1_i16),
+        std::cmp::Ordering::Less => (baseline - fear, baseline, 1_i16),
+        std::cmp::Ordering::Equal => return 0,
+    };
+    debug_assert!(span > 0);
+    let maximum = u16::from(reputation.intimidation_business_fear_max_adjustment());
+    let scaled = (u16::from(distance) * maximum).div_ceil(u16::from(span));
+    i8::try_from(sign * i16::try_from(scaled).expect("bounded reputation adjustment fits i16"))
+        .expect("authored intimidation reputation adjustment fits i8")
 }
 
 fn resolve_target_police_snapshot(
@@ -686,6 +728,7 @@ pub(crate) fn resolve_execution_margin(
         }
         + i16::from(factors.intelligence_adjustment())
         + i16::from(factors.approach_adjustment())
+        + i16::from(factors.business_fear_adjustment())
         + i16::from(factors.time_pressure());
     ability - difficulty + i16::from(factors.variance())
 }

@@ -1,12 +1,13 @@
 //! Prosecutor assignment, detention release, and deterministic autonomous staffing.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, ProsecutionCaseId};
+use crate::core::id::{CharacterId, OrganizationId, ProsecutionCaseId};
 use crate::core::state::AppState;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::legal::{ProsecutionCaseRecord, ProsecutionCaseStatus};
 use crate::world::CapabilityKind;
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -235,69 +236,83 @@ pub(crate) fn apply_autonomous_prosecution_staffing(
         .legal
         .reviewing_prosecution_cases_without_prosecutor()
         .collect();
+    let mut office_rosters: BTreeMap<OrganizationId, Vec<(CharacterId, u8)>> = BTreeMap::new();
+    let mut workloads: BTreeMap<CharacterId, usize> = BTreeMap::new();
     let mut staffed = Vec::new();
     for case in cases {
         let case_record = state
             .legal
             .get_prosecution_case(case)
             .ok_or(ProsecutionStaffingError::MissingCase(case))?;
-        let prosecutor = find_autonomous_prosecutor(state, case_record);
+        let office = case_record.prosecutor_office();
+        let roster = office_rosters.entry(office).or_insert_with(|| {
+            state
+                .world
+                .characters_in_organization(office)
+                .filter(|record| {
+                    state
+                        .legal
+                        .active_arrest_for_character(record.id())
+                        .is_none()
+                })
+                .filter_map(|record| {
+                    record
+                        .capability(CapabilityKind::LegalKnowledge)
+                        .map(|rating| {
+                            let workload = state
+                                .legal
+                                .reviewing_prosecution_cases_for_prosecutor(record.id())
+                                .count();
+                            workloads.insert(record.id(), workload);
+                            (record.id(), rating.value())
+                        })
+                })
+                .collect()
+        });
+        let prosecutor = roster
+            .iter()
+            .copied()
+            .filter(|(prosecutor, _)| {
+                !prosecutor_conflicts_with_case(state, case_record, *prosecutor)
+            })
+            .min_by_key(|(prosecutor, capability)| {
+                (
+                    workloads
+                        .get(prosecutor)
+                        .copied()
+                        .expect("cached prosecution roster must carry a workload"),
+                    Reverse(*capability),
+                    *prosecutor,
+                )
+            })
+            .map(|(prosecutor, _)| prosecutor);
         let Some(prosecutor) = prosecutor else {
             continue;
         };
         validate_assign_prosecutor(state, case, prosecutor)?.commit(state)?;
+        *workloads
+            .get_mut(&prosecutor)
+            .expect("assigned cached prosecutor must carry a workload") += 1;
         staffed.push((case, prosecutor));
     }
     Ok(staffed)
 }
-
-/// Deterministic office staffing prefers the least-loaded eligible prosecutor, then legal
-/// capability, then stable character identity. This keeps one highly skilled attorney from
-/// absorbing every reviewing case while equally available colleagues remain idle, without
-/// inventing an unsupported hard caseload cap.
-pub(super) fn find_autonomous_prosecutor(
+fn prosecutor_conflicts_with_case(
     state: &AppState,
     case: &ProsecutionCaseRecord,
-) -> Option<CharacterId> {
-    state
-        .world
-        .characters_in_organization(case.prosecutor_office())
-        .filter(|record| record.id() != case.defendant())
-        .filter(|record| {
-            state
-                .legal
-                .case_witness_for(case.source_investigation(), record.id())
-                .is_none()
-        })
-        .filter(|record| {
-            state
-                .legal
-                .get_investigation(case.source_investigation())
-                .is_some_and(|investigation| {
-                    !investigation
-                        .subjects()
-                        .contains(&EntityRef::Character(record.id()))
-                })
-        })
-        .filter(|record| {
-            state
-                .legal
-                .active_arrest_for_character(record.id())
-                .is_none()
-        })
-        .filter_map(|record| {
-            record
-                .capability(CapabilityKind::LegalKnowledge)
-                .map(|rating| {
-                    let workload = state
-                        .legal
-                        .reviewing_prosecution_cases_for_prosecutor(record.id())
-                        .count();
-                    (record.id(), rating.value(), workload)
-                })
-        })
-        .min_by_key(|(prosecutor, capability, workload)| {
-            (*workload, Reverse(*capability), *prosecutor)
-        })
-        .map(|(prosecutor, _, _)| prosecutor)
+    prosecutor: CharacterId,
+) -> bool {
+    prosecutor == case.defendant()
+        || state
+            .legal
+            .case_witness_for(case.source_investigation(), prosecutor)
+            .is_some()
+        || !state
+            .legal
+            .get_investigation(case.source_investigation())
+            .is_some_and(|investigation| {
+                !investigation
+                    .subjects()
+                    .contains(&EntityRef::Character(prosecutor))
+            })
 }

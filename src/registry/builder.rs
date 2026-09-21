@@ -615,6 +615,7 @@ impl RegistryBuilder {
             || spec.partial_underworld_competence <= 0
             || spec.partial_underworld_competence > spec.achieved_underworld_competence
             || spec.violent_businesses_fear <= 0
+            || !(1..=25).contains(&spec.intimidation_business_fear_max_adjustment)
         {
             return Err(RegistryBuildError::InvalidReputationConsequence);
         }
@@ -636,6 +637,8 @@ impl RegistryBuilder {
             achieved_underworld_competence: spec.achieved_underworld_competence,
             partial_underworld_competence: spec.partial_underworld_competence,
             violent_businesses_fear: spec.violent_businesses_fear,
+            intimidation_business_fear_max_adjustment: spec
+                .intimidation_business_fear_max_adjustment,
         });
         Ok(())
     }

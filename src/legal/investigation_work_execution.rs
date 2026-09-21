@@ -14,10 +14,9 @@ use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
     EvidenceRecord, EvidenceReliability, EvidenceStrength, InvestigationStatus,
     InvestigationWorkCancellation, InvestigationWorkCancellationReason, InvestigationWorkDraft,
-    InvestigationWorkFactors, InvestigationWorkFocus, InvestigationWorkIdentity,
-    InvestigationWorkKind, InvestigationWorkOutcome, InvestigationWorkRecord,
-    InvestigationWorkResolution, InvestigationWorkRuntime, InvestigationWorkStatus,
-    WitnessCooperation, WitnessStatementDraft,
+    InvestigationWorkFactors, InvestigationWorkIdentity, InvestigationWorkKind,
+    InvestigationWorkOutcome, InvestigationWorkRecord, InvestigationWorkResolution,
+    InvestigationWorkRuntime, InvestigationWorkStatus, WitnessCooperation, WitnessStatementDraft,
 };
 use crate::registry::{
     InvestigationSourceSupportDefinition, InvestigationWorkDefinition, Registry,
@@ -482,7 +481,7 @@ fn validate_no_duplicate_work(
     Ok(())
 }
 
-fn scheduled_work_for_investigator(
+pub(super) fn scheduled_work_for_investigator(
     state: &AppState,
     investigator: CharacterId,
 ) -> Option<InvestigationWorkId> {
@@ -969,184 +968,14 @@ fn resolve_interview_statement_draft(
     })
 }
 
-/// Schedules witness interviews for staffed active cases whose registered witnesses have not
-/// given a statement yet. Witnesses typically enter a case after the initial evidence review
-/// is already scheduled, so this runs every tick over the (small) set of active cases.
-pub fn apply_witness_interview_scheduling(
-    registry: &Registry,
-    state: &mut AppState,
-) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
-    let mut scheduled = Vec::new();
-    let candidates: Vec<InvestigationId> = state
-        .legal
-        .active_investigations()
-        .map(|investigation| investigation.id())
-        .collect();
-    for investigation_id in candidates {
-        let investigation = state
-            .legal
-            .get_investigation(investigation_id)
-            .expect("indexed active investigation must exist");
-        let investigator = available_case_investigator(state, investigation);
-        let Some(investigator) = investigator else {
-            continue;
-        };
-        // Investigation work has authored duration and occupies the case's single detective.
-        // A busy lead finishes that work before beginning another task on the case.
-        if scheduled_work_for_investigator(state, investigator).is_some() {
-            continue;
-        }
-        let mut witnesses: Vec<_> = state
-            .legal
-            .case_witnesses_for_investigation(investigation_id)
-            .filter(|witness| witness.statements().is_empty())
-            .filter(|witness| {
-                !crate::legal::witness_system::case_witness_is_case_subject(state, witness)
-            })
-            // A witness who has sat through the authored attempt limit without producing a
-            // statement stops consuming institutional work: further interviews are futile,
-            // and each one would otherwise keep the case's activity clock fresh forever.
-            .filter(|witness| {
-                witness.interview_attempts() < registry.legal().witness_interview_attempt_limit()
-            })
-            .map(|witness| (witness.interview_attempts(), witness.id()))
-            .collect();
-        // Spend institutional attention on fresh witnesses before retrying someone who already
-        // failed to produce a statement. Otherwise stable witness-ID order makes one early
-        // hostile witness consume their entire attempt budget while later untouched witnesses
-        // wait idle. Attempt count is the practical priority; ID remains the deterministic
-        // tie-breaker among equally attempted witnesses.
-        witnesses.sort_unstable();
-        for (_, case_witness) in witnesses {
-            let focus = InvestigationWorkFocus::witness(case_witness);
-            // A pending scheduled interview covers this witness; a completed interview was
-            // counted against the witness's attempt budget above, so only witnesses with
-            // remaining attempts reach this point.
-            if state
-                .legal
-                .scheduled_work_for_focus(
-                    investigation_id,
-                    InvestigationWorkKind::WitnessInterview,
-                    focus,
-                )
-                .is_some()
-            {
-                continue;
-            }
-            // The case, available investigator, witness attempt budget, and duplicate-focus
-            // predicate all came from current authoritative state. A canonical rejection now
-            // is a state/allocator failure, not an ordinary "try again later" outcome.
-            let work = validate_schedule_investigation_work(
-                registry,
-                state,
-                InvestigationWorkDraft {
-                    investigation: investigation_id,
-                    investigator,
-                    kind: InvestigationWorkKind::WitnessInterview,
-                    focus,
-                },
-            )?
-            .commit(state)?;
-            scheduled.push(work);
-            // The work just scheduled occupies this investigator. Remaining witnesses stay
-            // eligible and are considered again after it resolves, in stable witness-ID order.
-            break;
-        }
-    }
-    Ok(scheduled)
-}
-
-/// The investigator an autonomous casework scheduler may currently use. The lead is the single
-/// modeled case seat. Detention pauses work rather than silently assigning a different
-/// institution or character.
-fn available_case_investigator(
-    state: &AppState,
-    investigation: &crate::legal::InvestigationRecord,
-) -> Option<CharacterId> {
-    investigation
-        .lead_investigator()
-        .filter(|lead| state.legal.active_arrest_for_character(*lead).is_none())
-}
-
-pub(crate) fn apply_evidence_review_scheduling(
-    registry: &Registry,
-    state: &mut AppState,
-) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
-    // Evidence can enter a case long after staffing through incident intake, informants, or
-    // explicit evidence additions. Scan the active-case index every minute and schedule the
-    // next reviewable source that has not already received an actual review attempt. Scheduled
-    // and completed review work consume that source's autonomous attempt; custody-cancelled work
-    // does not, because no review occurred and a replacement detective must be able to resume it.
-    let investigations: Vec<InvestigationId> = state
-        .legal
-        .active_investigations()
-        .map(|investigation| investigation.id())
-        .collect();
-    let mut scheduled = Vec::new();
-    for investigation_id in investigations {
-        let investigation = state
-            .legal
-            .get_investigation(investigation_id)
-            .expect("indexed active investigation must exist");
-        let Some(investigator) = available_case_investigator(state, investigation) else {
-            continue;
-        };
-        // A case's single detective cannot perform overlapping authored-duration tasks. Since
-        // this phase runs before witness scheduling, a newly available case starts its evidence
-        // review first; evidence that arrives during an interview waits until that interview ends.
-        if scheduled_work_for_investigator(state, investigator).is_some() {
-            continue;
-        }
-        let Some(source) = next_unattempted_review_source(state, investigation)? else {
-            continue;
-        };
-        // Every dependency above came from current authoritative indexes. A canonical
-        // rejection here therefore signals broken state or allocator capacity and must surface
-        // rather than erasing the case's only route into evidence review.
-        let work = validate_schedule_investigation_work(
-            registry,
-            state,
-            InvestigationWorkDraft {
-                investigation: investigation_id,
-                investigator,
-                kind: InvestigationWorkKind::EvidenceReview,
-                focus: InvestigationWorkFocus::evidence(source),
-            },
-        )?
-        .commit(state)?;
-        scheduled.push(work);
-    }
-    Ok(scheduled)
-}
-
-/// Returns the oldest case-owned reviewable evidence that has not received a real autonomous
-/// review attempt. Scheduled and completed work consume the source; cancelled work does not.
-/// Discovery time is the substantive age of evidence; ID breaks only exact-time ties so a later
-/// import of an older fact does not wait behind newer evidence merely because it was recorded later.
-fn next_unattempted_review_source(
-    state: &AppState,
-    investigation: &crate::legal::InvestigationRecord,
-) -> Result<Option<EvidenceId>, InvestigationWorkError> {
-    let mut oldest = None;
-    for evidence_id in investigation.evidence() {
-        // The investigation owns this evidence reference. A missing backing record is a broken
-        // case graph, not "no reviewable evidence yet"; surface it at the autonomous consumer.
-        let evidence = state
-            .legal
-            .get_evidence(*evidence_id)
-            .ok_or(InvestigationWorkError::InvalidSourceEvidence(*evidence_id))?;
-        if !is_reviewable_evidence_kind(evidence.kind())
-            || state.legal.evidence_review_attempt(evidence.id()).is_some()
-        {
-            continue;
-        }
-        let candidate = (evidence.discovered_at(), evidence.id());
-        if oldest.is_none_or(|current| candidate < current) {
-            oldest = Some(candidate);
-        }
-    }
-    Ok(oldest.map(|(_, evidence)| evidence))
-}
+mod autonomous_scheduling;
+pub(crate) use autonomous_scheduling::{
+    InvestigationWorkSchedulingOutcome, apply_investigation_work_scheduling,
+};
+#[cfg(test)]
+pub(crate) use autonomous_scheduling::{
+    apply_evidence_review_scheduling, apply_witness_interview_scheduling,
+};
 
 pub(crate) fn is_reviewable_evidence_kind(kind: EvidenceKind) -> bool {
     matches!(

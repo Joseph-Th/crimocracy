@@ -7,7 +7,7 @@ use crate::core::invariants::{
 };
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::time::{SimDuration, SimTime};
-use crate::delegation::delegation_system::validate_assign_mandate;
+use crate::delegation::delegation_system::{validate_assign_mandate, validate_set_policy};
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::world::{
     ApprovalPolicy, AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner,
@@ -144,19 +144,23 @@ fn organization_policy_history_preserves_exact_revisions() {
         ))
     );
 
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut state,
+        &state,
         organization,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
     )
+    .expect("first real policy change should validate")
+    .commit(&registry, &mut state)
     .expect("first real policy change should establish version two");
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut state,
+        &state,
         organization,
         PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
     )
+    .expect("second real policy change should validate")
+    .commit(&registry, &mut state)
     .expect("second real policy change should establish version three");
 
     let record = state
@@ -194,19 +198,23 @@ fn organization_policy_history_preserves_exact_revisions() {
         None
     );
 
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut state,
+        &state,
         organization,
         PolicySetting::AssociateLegalSupport(LegalSupportPolicy::Automatic),
     )
+    .expect("legal-support policy change should validate")
+    .commit(&registry, &mut state)
     .expect("legal-support policy should accept its second authored state");
-    set_policy(
+    validate_set_policy(
         &registry,
-        &mut state,
+        &state,
         organization,
         PolicySetting::AssociateLegalSupport(LegalSupportPolicy::None),
     )
+    .expect("second legal-support policy change should validate")
+    .commit(&registry, &mut state)
     .expect("legal-support policy should accept its third authored state");
     let record = state
         .world()
