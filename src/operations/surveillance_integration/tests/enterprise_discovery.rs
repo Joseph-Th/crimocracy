@@ -355,7 +355,12 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
         );
         assert_eq!(information.reliability(), Reliability::GenerallyReliable);
         assert_eq!(information.specificity(), Specificity::Specific);
-        assert_eq!(information.signal(), None);
+        assert!(matches!(
+            information.signal(),
+            Some(InformationSignal::EnterpriseLocation(
+                EnterpriseLocationSignal::Neighborhood(_)
+            ))
+        ));
         assert_eq!(information.observed_at(), resolution.resolved_at());
         assert_eq!(information.recorded_at(), resolution.resolved_at());
         assert!(information.derived_from().is_empty());
@@ -650,6 +655,12 @@ fn colocated_rackets_remain_distinguishable_in_surveillance_and_after_action() {
             .zip(["protection", "bookmaking", "loan-sharking"])
     {
         assert_eq!(observation.subject(), EntityRef::Enterprise(enterprise));
+        assert_eq!(
+            observation.signal(),
+            Some(&InformationSignal::EnterpriseLocation(
+                EnterpriseLocationSignal::Business(business)
+            ))
+        );
         assert_eq!(
             observation.summary(),
             format!(

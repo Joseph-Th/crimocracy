@@ -662,7 +662,7 @@ pub fn choose_safe_start_from_patrol_signal(
     signal: &InformationSignal,
     operation_duration: SimDuration,
     uncertainty_buffer: SimDuration,
-    latest_start: SimTime,
+    latest_start_exclusive: SimTime,
 ) -> Result<SimTime, HarnessContractError> {
     let windows = patrol_intervals_from_signal(signal);
     if windows.is_empty() {
@@ -671,9 +671,9 @@ pub fn choose_safe_start_from_patrol_signal(
     let duration = u64::from(operation_duration.as_minutes());
     let buffer = u64::from(uncertainty_buffer.as_minutes());
     let earliest = now.as_minutes().saturating_add(1);
-    let latest = latest_start.as_minutes().saturating_sub(duration);
+    let latest_start_exclusive = latest_start_exclusive.as_minutes();
     let first_candidate = earliest.div_ceil(30).saturating_mul(30);
-    for candidate in (first_candidate..=latest)
+    for candidate in (first_candidate..latest_start_exclusive)
         .step_by(30)
         .take_while(|candidate| *candidate < first_candidate.saturating_add(2_880))
     {

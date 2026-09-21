@@ -12,9 +12,9 @@ use crate::intelligence::intelligence_system::{
     ValidatedInformation, validate_record_information, validate_record_information_with_signal,
 };
 use crate::intelligence::{
-    CaseActivitySignal, InformationDraft, InformationRecord, InformationSignal,
-    InformationSourceKind, InformationTopic, KnowledgeHolder, PatrolIntervalSignal, Reliability,
-    Specificity,
+    CaseActivitySignal, EnterpriseLocationSignal, InformationDraft, InformationRecord,
+    InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
+    PatrolIntervalSignal, Reliability, Specificity,
 };
 use crate::legal::{InvestigationStatus, PatrolWindow};
 use crate::operations::{
@@ -867,12 +867,18 @@ fn enterprise_observation(
     reliability: Reliability,
     specificity: Specificity,
 ) -> SurveillanceObservation {
+    let location_signal = match enterprise.location {
+        EnterpriseLocation::Business(business) => EnterpriseLocationSignal::Business(business),
+        EnterpriseLocation::Neighborhood(neighborhood) => {
+            EnterpriseLocationSignal::Neighborhood(neighborhood)
+        }
+    };
     SurveillanceObservation {
         topic: InformationTopic::Personnel,
         subject: EntityRef::Enterprise(enterprise.id),
         reliability,
         specificity,
-        signal: None,
+        signal: Some(InformationSignal::EnterpriseLocation(location_signal)),
         summary: enterprise_summary(
             enterprise.kind,
             &enterprise.organization_name,

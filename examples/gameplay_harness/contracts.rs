@@ -16,12 +16,34 @@ pub fn validate_run_metrics(
     let strategy = metrics
         .strategy
         .ok_or(HarnessContractError::MissingStrategy)?;
+    let opening_standdown_reason_is_consistent = match (
+        metrics.opening_standdown_reason,
+        metrics.opening_casing_assessment,
+    ) {
+        (Some(OpeningStanddownReason::CasingRisk), Some(assessment)) => {
+            !assessment.permits_burglary()
+        }
+        (Some(OpeningStanddownReason::OpportunityExpiredDuringCasing), Some(assessment)) => {
+            assessment.permits_burglary()
+                && metrics
+                    .opening_scout_terminal_minute
+                    .zip(metrics.opening_opportunity_valid_until_minute)
+                    .is_some_and(|(scout_terminal, valid_until)| scout_terminal >= valid_until)
+        }
+        (Some(OpeningStanddownReason::NoSafeWindowBeforeExpiry), Some(assessment)) => {
+            assessment.permits_burglary()
+                && metrics
+                    .opening_scout_terminal_minute
+                    .zip(metrics.opening_opportunity_valid_until_minute)
+                    .is_some_and(|(scout_terminal, valid_until)| scout_terminal < valid_until)
+        }
+        (None, _) => false,
+        (Some(_), None) => false,
+    };
     let opening_standdown = strategy == Strategy::Recon
         && metrics.opening_stood_down
         && metrics.opening_scout.is_some()
-        && metrics
-            .opening_casing_assessment
-            .is_some_and(|assessment| !assessment.permits_burglary());
+        && opening_standdown_reason_is_consistent;
     if metrics.opening_stood_down
         && (!opening_standdown
             || metrics.burglary.is_some()
@@ -36,7 +58,13 @@ pub fn validate_run_metrics(
     {
         return Err(HarnessContractError::MissingStrategyEvidence {
             strategy,
-            evidence: "opening standdown must retain its casing assessment without inventing a burglary or proceeds",
+            evidence: "opening standdown must retain a reason consistent with its casing assessment without inventing a burglary or proceeds",
+        });
+    }
+    if !metrics.opening_stood_down && metrics.opening_standdown_reason.is_some() {
+        return Err(HarnessContractError::MissingStrategyEvidence {
+            strategy,
+            evidence: "an opening standdown reason cannot exist when the branch actually proceeds",
         });
     }
     if metrics.burglary.is_none() && !opening_standdown {
@@ -102,6 +130,64 @@ pub fn validate_run_metrics(
             strategy,
             evidence: "liquidated proceeds must be laundered through an owned cash-intensive front before they count as spendable organizational money",
         });
+    }
+    Ok(())
+}
+
+/// Sensitivity profiles are named experiments, not decorative permutations. Once a batch spans
+/// all fixture variations, lock in the causal distinction each control is supposed to expose.
+/// This prevents a content or tuning change from silently turning a useful comparison into noise.
+pub fn validate_sensitivity_profile_coverage(
+    profile: ScenarioProfile,
+    samples: u64,
+    rush: &Aggregate,
+    press: &Aggregate,
+    recon: &Aggregate,
+) -> Result<(), HarnessContractError> {
+    if samples < MIN_SAMPLES_FOR_VARIATION_CONTRACT {
+        return Ok(());
+    }
+    match profile {
+        ScenarioProfile::LatePatrol => {
+            let outcome_mix = |aggregate: &Aggregate| {
+                (
+                    aggregate.achieved,
+                    aggregate.partial,
+                    aggregate.failed,
+                    aggregate.aborted,
+                    aggregate.opening_standdowns,
+                )
+            };
+            let converged = outcome_mix(rush) == outcome_mix(press)
+                && outcome_mix(press) == outcome_mix(recon)
+                && rush.police_arrived == 0
+                && press.police_arrived == 0
+                && recon.police_arrived == 0;
+            if !converged {
+                return Err(HarnessContractError::MissingBatchEvidence {
+                    profile,
+                    evidence: "the late-patrol control no longer converges on immediate outcomes without police arrivals, so it cannot isolate the intended outcome/patrol-timing comparison",
+                });
+            }
+        }
+        ScenarioProfile::FleetingWindow => {
+            let fast_branches_committed = rush.opening_standdowns == 0
+                && press.opening_standdowns == 0
+                && rush.unresolved == 0
+                && press.unresolved == 0;
+            let recon_paid_time_cost = recon.opening_standdowns == samples
+                && recon.opening_timing_standdowns == samples
+                && recon.opening_scout_findings_total > 0;
+            let no_police_confound =
+                rush.police_arrived == 0 && press.police_arrived == 0 && recon.police_arrived == 0;
+            if !(fast_branches_committed && recon_paid_time_cost && no_police_confound) {
+                return Err(HarnessContractError::MissingBatchEvidence {
+                    profile,
+                    evidence: "the fleeting-window treatment must show immediate branches committing while informed RECON loses the opportunity specifically to time, without police pressure confounding the comparison",
+                });
+            }
+        }
+        ScenarioProfile::NightTrap | ScenarioProfile::VeteranCrew | ScenarioProfile::ThinCrew => {}
     }
     Ok(())
 }
@@ -218,7 +304,11 @@ pub fn validate_batch_strategy_coverage(
     samples: u64,
     rush: &Aggregate,
 ) -> Result<(), HarnessContractError> {
-    if samples < MIN_SAMPLES_FOR_VARIATION_CONTRACT || profile == ScenarioProfile::LatePatrol {
+    let expects_night_trap_pressure = matches!(
+        profile,
+        ScenarioProfile::NightTrap | ScenarioProfile::VeteranCrew | ScenarioProfile::ThinCrew
+    );
+    if samples < MIN_SAMPLES_FOR_VARIATION_CONTRACT || !expects_night_trap_pressure {
         return Ok(());
     }
     if rush.standing_contingency_aborts == 0 {

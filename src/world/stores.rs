@@ -525,12 +525,16 @@ impl WorldState {
             .get_mut(&id)
             .expect("validated organization disappeared before policy commit");
         let kind = setting.kind();
-        let version = record
-            .policy_versions
+        let revisions = record
+            .policy_revisions
             .get_mut(&kind)
-            .expect("validated organization must retain every authored policy version");
-        *version = advance_version_preflighted(*version);
-        record.policies.insert(kind, setting);
+            .expect("validated organization must retain every authored policy history");
+        debug_assert_ne!(
+            revisions.last().copied(),
+            Some(setting),
+            "canonical policy mutation must not append a no-op revision"
+        );
+        revisions.push(setting);
     }
     pub(super) fn reassign_character(
         &mut self,

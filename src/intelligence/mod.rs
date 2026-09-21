@@ -4,7 +4,8 @@ pub mod intelligence_system;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    ArrestId, CharacterId, IdKeyedBounds, InformationId, InvestigationId, OrganizationId,
+    ArrestId, BusinessId, CharacterId, IdKeyedBounds, InformationId, InvestigationId,
+    NeighborhoodId, OrganizationId,
 };
 use crate::core::time::{DAY_MINUTES_U16, SimTime};
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,10 @@ pub enum InformationTopic {
 pub enum InformationSignal {
     CaseActivity(CaseActivitySignal),
     LegalPersonStatus(LegalPersonStatusSignal),
+    /// Exact operating location learned for an enterprise. The enterprise remains the subject;
+    /// the location is the actionable world entity a manager can use without parsing display
+    /// prose or consulting hidden enterprise state.
+    EnterpriseLocation(EnterpriseLocationSignal),
     PersonnelPresence {
         characters: BTreeSet<CharacterId>,
     },
@@ -88,6 +93,10 @@ impl InformationSignal {
                 matches!(topic, InformationTopic::LegalActivity)
                     && matches!(subject, EntityRef::Character(_))
             }
+            Self::EnterpriseLocation(_) => {
+                matches!(topic, InformationTopic::Personnel)
+                    && matches!(subject, EntityRef::Enterprise(_))
+            }
             Self::PersonnelPresence { characters } => {
                 !characters.is_empty()
                     && matches!(topic, InformationTopic::Personnel)
@@ -109,6 +118,12 @@ impl InformationSignal {
                 vec![EntityRef::Investigation(*investigation)]
             }
             Self::LegalPersonStatus(LegalPersonStatusSignal::Detained { .. }) => Vec::new(),
+            Self::EnterpriseLocation(EnterpriseLocationSignal::Business(business)) => {
+                vec![EntityRef::Business(*business)]
+            }
+            Self::EnterpriseLocation(EnterpriseLocationSignal::Neighborhood(neighborhood)) => {
+                vec![EntityRef::Neighborhood(*neighborhood)]
+            }
             Self::PersonnelPresence { characters } => characters
                 .iter()
                 .copied()
@@ -117,6 +132,12 @@ impl InformationSignal {
             Self::PatrolPattern { .. } => Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum EnterpriseLocationSignal {
+    Business(BusinessId),
+    Neighborhood(NeighborhoodId),
 }
 
 /// One non-wrapping interval from an approximate recurring patrol pattern disclosed by an

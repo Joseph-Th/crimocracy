@@ -179,14 +179,16 @@ pub fn insert_organization(
         return Err(WorldError::EmptyName);
     }
     let id = state.ids.next_organization()?;
-    let policies = registry.default_policies();
-    let policy_versions = policies.keys().copied().map(|kind| (kind, 1)).collect();
+    let policy_revisions = registry
+        .default_policies()
+        .into_iter()
+        .map(|(kind, setting)| (kind, vec![setting]))
+        .collect();
     state.world.insert_organization(OrganizationRecord {
         id,
         name: draft.name,
         kind: draft.kind,
-        policies,
-        policy_versions,
+        policy_revisions,
     });
     Ok(id)
 }

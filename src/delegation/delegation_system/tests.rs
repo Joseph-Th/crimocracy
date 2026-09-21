@@ -93,7 +93,7 @@ fn mandate_rejects_standing_order_outside_responsibility_scope() {
 }
 
 #[test]
-fn organization_policy_versions_advance_only_on_real_changes_and_survive_restore() {
+fn organization_policy_revisions_advance_only_on_real_changes_and_survive_restore() {
     let (registry, mut state, authority) = make_authority_fixture();
     let organization = state
         .delegation()

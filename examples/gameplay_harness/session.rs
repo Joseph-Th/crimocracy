@@ -410,9 +410,12 @@ fn prepare_initial_burglary_plan(
         let surveillance = authorize_surveillance(scenario)?;
         metrics.opening_scout = Some(surveillance);
         run_until_operation_terminal(scenario, surveillance, narrative, metrics)?;
+        metrics.opening_scout_terminal_minute = Some(scenario.state.now().as_minutes());
         let assessment = assess_casing(scenario, surveillance, narrative, metrics)?;
         metrics.opening_casing_assessment = Some(assessment);
         metrics.opening_stood_down = !assessment.permits_burglary();
+        metrics.opening_standdown_reason =
+            (!assessment.permits_burglary()).then_some(OpeningStanddownReason::CasingRisk);
         // Learning narration happens before any standdown return: what the scout gathered
         // stays organizational knowledge even when its legal consequence ends the score.
         let resolution = scenario
@@ -451,6 +454,24 @@ fn prepare_initial_burglary_plan(
         if metrics.opening_stood_down {
             return Ok(None);
         }
+        if scenario.state.now() >= scenario.timeline.initial_opportunity_valid_until {
+            metrics.opening_stood_down = true;
+            metrics.opening_standdown_reason =
+                Some(OpeningStanddownReason::OpportunityExpiredDuringCasing);
+            if narrative {
+                println!(
+                    "[DECIDE]  Casing finished at {}, after the opportunity closed at {}. Keep what the scout learned, but let this score go: the information arrived after the decision window.",
+                    stamp(scenario.state.now().as_minutes()),
+                    stamp(
+                        scenario
+                            .timeline
+                            .initial_opportunity_valid_until
+                            .as_minutes()
+                    ),
+                );
+            }
+            return Ok(None);
+        }
     }
 
     let scheduled_for = match strategy {
@@ -473,13 +494,33 @@ fn prepare_initial_burglary_plan(
                 .get_operation(OperationKind::Burglary)
                 .execution()
                 .duration();
-            let chosen = choose_safe_start_from_patrol_signal(
+            let chosen = match choose_safe_start_from_patrol_signal(
                 scenario.state.now(),
                 &patrol_signal,
                 duration,
                 SimDuration::from_minutes(60),
                 scenario.timeline.initial_opportunity_valid_until,
-            )?;
+            ) {
+                Ok(chosen) => chosen,
+                Err(HarnessContractError::NoSafeOperationWindow) => {
+                    metrics.opening_stood_down = true;
+                    metrics.opening_standdown_reason =
+                        Some(OpeningStanddownReason::NoSafeWindowBeforeExpiry);
+                    if narrative {
+                        println!(
+                            "[DECIDE]  The casing is usable, but no patrol-safe start remains before the opportunity closes at {}. Let the score go. Better information arrived too late to be actionable.",
+                            stamp(
+                                scenario
+                                    .timeline
+                                    .initial_opportunity_valid_until
+                                    .as_minutes()
+                            )
+                        );
+                    }
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            };
             if narrative {
                 let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
                 println!(
@@ -858,6 +899,12 @@ pub(crate) fn run_initial_burglary(
     metrics: &mut RunMetrics,
 ) -> Result<Option<OperationId>, Box<dyn Error>> {
     let opportunity = discover_initial_opportunity(scenario, narrative)?;
+    metrics.opening_opportunity_valid_until_minute = scenario
+        .state
+        .opportunities()
+        .get_opportunity(opportunity)
+        .and_then(|record| record.valid_until())
+        .map(|deadline| deadline.as_minutes());
     let Some(plan) = prepare_initial_burglary_plan(scenario, strategy, narrative, metrics)? else {
         return Ok(None);
     };
@@ -970,6 +1017,7 @@ fn run_post_burglary_campaign(
 }
 
 fn capture_final_session_summary(scenario: &Scenario, metrics: &mut RunMetrics) {
+    metrics.session_end_minute = Some(scenario.state.now().as_minutes());
     metrics.player_report_count = scenario
         .state
         .reports()

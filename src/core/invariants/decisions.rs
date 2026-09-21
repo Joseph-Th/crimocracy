@@ -482,8 +482,10 @@ fn validate_recruitment_approval_authority(
             version,
         } => {
             source == context.target_organization()
-                && organization.independent_recruitment_policy_at_version(version)
-                    == Some(ApprovalPolicy::RequireApproval)
+                && organization.policy_at_version(PolicyKind::IndependentRecruitment, version)
+                    == Some(PolicySetting::IndependentRecruitment(
+                        ApprovalPolicy::RequireApproval,
+                    ))
         }
         RecruitmentPolicySource::Mandate {
             mandate: source,

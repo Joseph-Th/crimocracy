@@ -264,6 +264,7 @@ pub enum HarnessContractError {
 pub enum ScenarioProfile {
     NightTrap,
     LatePatrol,
+    FleetingWindow,
     VeteranCrew,
     ThinCrew,
 }
@@ -417,9 +418,15 @@ impl FixtureVariation {
 
     pub fn patrol_windows(self, profile: ScenarioProfile) -> [(u16, u16, u8); 2] {
         match (profile, self) {
-            (ScenarioProfile::LatePatrol, Self::Clockwork) => [(180, 120, 90), (1_320, 120, 70)],
-            (ScenarioProfile::LatePatrol, Self::Crowded) => [(240, 120, 84), (1_260, 150, 76)],
-            (ScenarioProfile::LatePatrol, Self::Quiet) => [(300, 120, 76), (1_200, 150, 64)],
+            (ScenarioProfile::LatePatrol | ScenarioProfile::FleetingWindow, Self::Clockwork) => {
+                [(180, 120, 90), (1_320, 120, 70)]
+            }
+            (ScenarioProfile::LatePatrol | ScenarioProfile::FleetingWindow, Self::Crowded) => {
+                [(240, 120, 84), (1_260, 150, 76)]
+            }
+            (ScenarioProfile::LatePatrol | ScenarioProfile::FleetingWindow, Self::Quiet) => {
+                [(300, 120, 76), (1_200, 150, 64)]
+            }
             (
                 ScenarioProfile::NightTrap
                 | ScenarioProfile::VeteranCrew
@@ -443,12 +450,18 @@ impl FixtureVariation {
 }
 
 impl ScenarioProfile {
-    pub const SENSITIVITY_SET: [Self; 3] = [Self::LatePatrol, Self::VeteranCrew, Self::ThinCrew];
+    pub const SENSITIVITY_SET: [Self; 4] = [
+        Self::LatePatrol,
+        Self::FleetingWindow,
+        Self::VeteranCrew,
+        Self::ThinCrew,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::NightTrap => "NIGHT TRAP",
             Self::LatePatrol => "LATE PATROL",
+            Self::FleetingWindow => "FLEETING WINDOW",
             Self::VeteranCrew => "VETERAN CREW",
             Self::ThinCrew => "THIN CREW",
         }
@@ -458,7 +471,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 95,
             Self::ThinCrew => 60,
-            Self::NightTrap | Self::LatePatrol => 78,
+            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 78,
         }
     }
 
@@ -466,7 +479,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 96,
             Self::ThinCrew => 62,
-            Self::NightTrap | Self::LatePatrol => 82,
+            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 82,
         }
     }
 
@@ -474,7 +487,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 92,
             Self::ThinCrew => 58,
-            Self::NightTrap | Self::LatePatrol => 76,
+            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 76,
         }
     }
 
@@ -482,7 +495,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 94,
             Self::ThinCrew => 72,
-            Self::NightTrap | Self::LatePatrol => 90,
+            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 90,
         }
     }
 
@@ -490,7 +503,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 92,
             Self::ThinCrew => 66,
-            Self::NightTrap | Self::LatePatrol => 84,
+            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 84,
         }
     }
 }
@@ -511,6 +524,10 @@ pub struct ScenarioTimeline {
 
 impl ScenarioTimeline {
     pub fn for_policy(registry: &Registry, policy_seed: u64) -> Self {
+        Self::for_profile(registry, policy_seed, ScenarioProfile::NightTrap)
+    }
+
+    pub fn for_profile(registry: &Registry, policy_seed: u64, profile: ScenarioProfile) -> Self {
         let campaign_day_minutes = u64::from(
             registry
                 .recruitment()
@@ -525,9 +542,22 @@ impl ScenarioTimeline {
                 .as_minutes(),
         );
         let policy_variant = (policy_seed / 3) % 5;
-        let initial_burglary_at = 120 + 10 * (policy_seed % 5);
-        let initial_opportunity_window =
-            (campaign_day_minutes / 2).max(burglary_duration.saturating_add(60));
+        let (initial_burglary_at, initial_opportunity_window) =
+            if profile == ScenarioProfile::FleetingWindow {
+                // A genuinely time-sensitive score: acting policy has only enough time to move
+                // now. Full casing consumes the window, so information has a visible opportunity
+                // cost instead of being a dominant free precondition to every job.
+                let start = 10 + 5 * (policy_seed % 3);
+                (
+                    start,
+                    start.saturating_add(burglary_duration).saturating_add(15),
+                )
+            } else {
+                (
+                    120 + 10 * (policy_seed % 5),
+                    (campaign_day_minutes / 2).max(burglary_duration.saturating_add(60)),
+                )
+            };
         let second_opportunity_discovery_at = campaign_day_minutes
             .saturating_add(10)
             .saturating_add(policy_variant * 10);
@@ -553,6 +583,16 @@ impl ScenarioTimeline {
             ),
         }
     }
+}
+
+/// Why the cautious opening branch deliberately declined to authorize a burglary. Keeping the
+/// reason explicit prevents the harness from conflating "the casing itself looked dangerous"
+/// with "casing was useful but consumed the remaining opportunity window".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum OpeningStanddownReason {
+    CasingRisk,
+    OpportunityExpiredDuringCasing,
+    NoSafeWindowBeforeExpiry,
 }
 
 #[derive(Clone)]
@@ -635,8 +675,11 @@ pub struct RunMetrics {
     pub variation: Option<FixtureVariation>,
     pub burglary: Option<OperationId>,
     pub opening_scout: Option<OperationId>,
+    pub opening_scout_terminal_minute: Option<u64>,
+    pub opening_opportunity_valid_until_minute: Option<u64>,
     pub opening_casing_assessment: Option<CasingAssessment>,
     pub opening_stood_down: bool,
+    pub opening_standdown_reason: Option<OpeningStanddownReason>,
     pub second_scout: Option<OperationId>,
     pub second_casing_assessment: Option<CasingAssessment>,
     pub outcome: Option<OperationObjectiveOutcome>,
@@ -690,6 +733,9 @@ pub struct RunMetrics {
     pub matched_player_window: Option<crate::leverage::WindowEvidence>,
     pub discovered_surveillance_information: usize,
     pub player_legal_activity_information: usize,
+    /// End of this observed session arc. Attention/readout comparisons normalize by this rather
+    /// than comparing raw report totals across branches that intentionally wait different lengths.
+    pub session_end_minute: Option<u64>,
     pub player_report_count: usize,
     pub executive_brief_count: usize,
     /// Raw audit evidence of delegated rival growth: total active rackets non-player
@@ -827,6 +873,7 @@ pub struct Aggregate {
     pub aborted: u64,
     pub unresolved: u64,
     pub opening_standdowns: u64,
+    pub opening_timing_standdowns: u64,
     pub police_dispatched: u64,
     pub police_arrived: u64,
     pub decisions: u64,
@@ -837,6 +884,8 @@ pub struct Aggregate {
     pub exposure_samples: u64,
     pub intelligence_total: u64,
     pub intelligence_samples: u64,
+    pub opening_scout_findings_total: u64,
+    pub planning_information_total: u64,
     pub property_acquired_total_cents: i128,
     pub property_realized_total_cents: i128,
     pub burglary_terminal_minute_total: u128,
@@ -874,6 +923,13 @@ impl Aggregate {
         if let Some(variation) = metrics.variation {
             self.fixture_variations.insert(variation);
         }
+        self.opening_timing_standdowns += u64::from(matches!(
+            metrics.opening_standdown_reason,
+            Some(
+                OpeningStanddownReason::OpportunityExpiredDuringCasing
+                    | OpeningStanddownReason::NoSafeWindowBeforeExpiry
+            )
+        ));
         match metrics.outcome {
             Some(OperationObjectiveOutcome::Achieved) => self.achieved += 1,
             Some(OperationObjectiveOutcome::Partial) => self.partial += 1,
@@ -899,6 +955,8 @@ impl Aggregate {
             self.intelligence_total += u64::from(quality);
             self.intelligence_samples += 1;
         }
+        self.opening_scout_findings_total += metrics.discovered_surveillance_information as u64;
+        self.planning_information_total += metrics.planning_information_count as u64;
         if let Some(value) = metrics.property_acquired_value_cents {
             self.property_acquired_total_cents += i128::from(value);
         }
@@ -955,16 +1013,33 @@ impl Aggregate {
         }
     }
 
-    pub fn print(&self, label: &str) {
-        let avg_exposure = if self.exposure_samples == 0 {
+    fn per_run(&self, value: u64) -> f64 {
+        if self.samples == 0 {
             0.0
         } else {
-            self.exposure_total as f64 / self.exposure_samples as f64
+            value as f64 / self.samples as f64
+        }
+    }
+
+    pub fn print(&self, label: &str) {
+        let risk_standdowns = self
+            .opening_standdowns
+            .saturating_sub(self.opening_timing_standdowns);
+        let avg_exposure = if self.exposure_samples == 0 {
+            "-".to_owned()
+        } else {
+            format!(
+                "{:.1}",
+                self.exposure_total as f64 / self.exposure_samples as f64
+            )
         };
         let avg_intelligence = if self.intelligence_samples == 0 {
-            0.0
+            "-".to_owned()
         } else {
-            self.intelligence_total as f64 / self.intelligence_samples as f64
+            format!(
+                "{:.1}",
+                self.intelligence_total as f64 / self.intelligence_samples as f64
+            )
         };
         let avg_acquired_property = if self.samples == 0 {
             0.0
@@ -977,14 +1052,20 @@ impl Aggregate {
             self.property_realized_total_cents as f64 / self.samples as f64
         };
         let avg_terminal_minute = if self.burglary_terminal_samples == 0 {
-            0.0
+            "-".to_owned()
         } else {
-            self.burglary_terminal_minute_total as f64 / self.burglary_terminal_samples as f64
+            format!(
+                "{:.0}m",
+                self.burglary_terminal_minute_total as f64 / self.burglary_terminal_samples as f64
+            )
         };
         let avg_liquidation_minute = if self.liquidation_samples == 0 {
-            0.0
+            "-".to_owned()
         } else {
-            self.liquidation_minute_total as f64 / self.liquidation_samples as f64
+            format!(
+                "{:.0}m",
+                self.liquidation_minute_total as f64 / self.liquidation_samples as f64
+            )
         };
         // Block layout instead of one wide line: outcomes and legal pressure on the first band,
         // intelligence and economics on the second, so a strategy row stays scannable.
@@ -992,13 +1073,16 @@ impl Aggregate {
         // not the internal cent accounting.
         println!(
             "{label:<6} samples {:>2}  fixtures {:?}
-       outcomes: achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  opening standdown {:>5.1}%  unresolved {:>2}
-       pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  staffed cases {:>5.1}%  case work {}/{}
-                 surfaced decisions {}  legal intel {:>5.1}%  police intel {:>5.1}%  follow-up hot {:>5.1}%  case cold {:>5.1}%
-       economy:  avg exposure {:>5.1}  avg intel {:>5.1}  avg finish {:>5.0}m  avg property {} -> {} cash @ {:>5.0}m
-       rhythm:   reports {:>3}  briefs {:>3}  rival attempts {:>3}  poach warnings {:>3}  departures {:>3}  contact reads {:>3}  vice hits {:>3}
+       outcomes: achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  opening standdown {:>5.1}% (risk {:>5.1}%, timing {:>5.1}%)  unresolved {:>2}
+       information: opening scout findings/run {:>4.1}  committed plan facts/run {:>4.1}
+                    legal-intel sessions {:>5.1}%  police-intel sessions {:>5.1}%  follow-up hot {:>5.1}%  case cold {:>5.1}%
+       pressure: standing aborts {:>5.1}%  police arrivals {:>5.1}%  exception prompts/run {:>4.2}
+       operation: avg finish {:>6}  avg property {} -> {} cash @ {:>6}
+       attention: reports/run {:>4.1}  briefs/run {:>4.1}  poach warnings/run {:>4.1}  departures/run {:>4.1}  contact reads/run {:>4.1}  vice warnings/run {:>4.1}
                  payroll paid {}  unpaid {}
-       witness:  named cases {}  pressure runs {}  testimony sessions {}  member arrests {}  rival rackets {:>4.1}  acquisitions {}
+       interaction: witness-pressure/run {:>4.1}  member arrests/run {:>4.1}  rival rackets/run {:>4.1}  acquisitions/run {:>4.1}
+       audit: staffed cases {:>5.1}%  case work total {}/{}  named-witness cases/run {:>4.1}  testimony sessions/run {:>4.1}
+              avg exposure score {:>5}  committed-job info quality {:>5}  autonomous recruitment attempts/run {:>4.1}
        money:    laundered {} gross  accounted balance {}",
             self.samples,
             self.fixture_variations,
@@ -1007,38 +1091,42 @@ impl Aggregate {
             self.percent(self.failed),
             self.percent(self.aborted),
             self.percent(self.opening_standdowns),
+            self.percent(risk_standdowns),
+            self.percent(self.opening_timing_standdowns),
             self.unresolved,
-            self.percent(self.standing_contingency_aborts),
-            self.percent(self.police_arrived),
-            self.percent(self.investigations),
-            self.investigation_work_scheduled,
-            self.investigation_work_resolved,
-            self.decisions,
+            self.per_run(self.opening_scout_findings_total),
+            self.per_run(self.planning_information_total),
             self.percent(self.legal_activity_information_sessions),
             self.percent(self.police_activity_information_sessions),
             self.percent(self.followup_case_active_sessions),
             self.percent(self.cold_case_confirmed_sessions),
-            avg_exposure,
-            avg_intelligence,
+            self.percent(self.standing_contingency_aborts),
+            self.percent(self.police_arrived),
+            self.per_run(self.decisions),
             avg_terminal_minute,
             format_avg_dollars(avg_acquired_property),
             format_avg_dollars(avg_realized_property),
             avg_liquidation_minute,
-            self.player_report_total,
-            self.executive_brief_total,
-            self.autonomous_recruitment_attempts,
-            self.player_poach_warnings,
-            self.player_personnel_departures,
-            self.contact_reads,
-            self.racket_inquiries,
+            self.per_run(self.player_report_total),
+            self.per_run(self.executive_brief_total),
+            self.per_run(self.player_poach_warnings),
+            self.per_run(self.player_personnel_departures),
+            self.per_run(self.contact_reads),
+            self.per_run(self.racket_inquiries),
             format_avg_dollars(self.payroll_paid_total_cents as f64 / self.samples as f64),
             format_avg_dollars(self.payroll_short_total_cents as f64 / self.samples as f64),
-            self.witness_cases,
-            self.witness_pressure_attempts,
-            self.witness_testimony_sessions,
-            self.player_member_arrests,
-            self.rival_home_enterprises_total as f64 / self.samples as f64,
-            self.front_acquisitions,
+            self.per_run(self.witness_pressure_attempts),
+            self.per_run(self.player_member_arrests),
+            self.per_run(self.rival_home_enterprises_total),
+            self.per_run(self.front_acquisitions),
+            self.percent(self.investigations),
+            self.investigation_work_scheduled,
+            self.investigation_work_resolved,
+            self.per_run(self.witness_cases),
+            self.per_run(self.witness_testimony_sessions),
+            avg_exposure,
+            avg_intelligence,
+            self.per_run(self.autonomous_recruitment_attempts),
             format_avg_dollars(self.laundered_gross_total_cents as f64 / self.samples as f64),
             format_avg_dollars(if self.accounted_balance_samples == 0 {
                 0.0
@@ -1049,18 +1137,11 @@ impl Aggregate {
     }
 
     pub fn print_compact(&self, label: &str) {
-        let avg_exposure = if self.exposure_samples == 0 {
-            0.0
-        } else {
-            self.exposure_total as f64 / self.exposure_samples as f64
-        };
-        let avg_intelligence = if self.intelligence_samples == 0 {
-            0.0
-        } else {
-            self.intelligence_total as f64 / self.intelligence_samples as f64
-        };
+        let risk_standdowns = self
+            .opening_standdowns
+            .saturating_sub(self.opening_timing_standdowns);
         println!(
-            "{label:<5} n={} fixtures={} | achieved {} partial {} failed {} aborted {} standdown {} | police {} cases {} decisions {} | avg exposure {:.1} intel {:.1} | departures {}",
+            "{label:<5} n={} fixtures={} | achieved {} partial {} failed {} aborted {} standdown {} (risk {}, timing {}) | police {} cases {} | exception prompts/run {:.2} | scout findings/run {:.1} plan facts/run {:.1} | poach warnings/run {:.1} departures/run {:.1}",
             self.samples,
             self.fixture_variations.len(),
             self.achieved,
@@ -1068,12 +1149,15 @@ impl Aggregate {
             self.failed,
             self.aborted,
             self.opening_standdowns,
+            risk_standdowns,
+            self.opening_timing_standdowns,
             self.police_arrived,
             self.investigations,
-            self.decisions,
-            avg_exposure,
-            avg_intelligence,
-            self.player_personnel_departures,
+            self.per_run(self.decisions),
+            self.per_run(self.opening_scout_findings_total),
+            self.per_run(self.planning_information_total),
+            self.per_run(self.player_poach_warnings),
+            self.per_run(self.player_personnel_departures),
         );
     }
 }

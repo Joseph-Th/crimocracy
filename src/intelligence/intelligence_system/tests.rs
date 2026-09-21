@@ -3,9 +3,13 @@
 use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;
+use crate::core::id::{BusinessId, EnterpriseId, InvestigationId, NeighborhoodId};
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
-use crate::intelligence::{CaseActivitySignal, LegalPersonStatusSignal, Reliability, Specificity};
+use crate::intelligence::{
+    CaseActivitySignal, EnterpriseLocationSignal, LegalPersonStatusSignal, PatrolIntervalSignal,
+    Reliability, Specificity,
+};
 use crate::reports::report_system::{ReportError, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::world_system::{
@@ -44,6 +48,148 @@ fn make_transfer_fixture() -> (
     )
     .expect("character fixture should validate");
     (registry, state, organization, character)
+}
+
+#[test]
+fn typed_signal_compatibility_requires_every_semantic_axis() {
+    let organization = OrganizationId::from_raw(1);
+    let character = CharacterId::from_raw(2);
+    let enterprise = EnterpriseId::from_raw(3);
+    let business = BusinessId::from_raw(4);
+    let neighborhood = NeighborhoodId::from_raw(5);
+
+    let legal_person = InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::Detained {
+        arrest: ArrestId::from_raw(6),
+    });
+    assert!(legal_person.is_compatible(
+        InformationTopic::LegalActivity,
+        EntityRef::Character(character)
+    ));
+    assert!(
+        !legal_person.is_compatible(InformationTopic::Personnel, EntityRef::Character(character))
+    );
+    assert!(!legal_person.is_compatible(
+        InformationTopic::LegalActivity,
+        EntityRef::Organization(organization)
+    ));
+
+    let enterprise_location =
+        InformationSignal::EnterpriseLocation(EnterpriseLocationSignal::Business(business));
+    assert!(enterprise_location.is_compatible(
+        InformationTopic::Personnel,
+        EntityRef::Enterprise(enterprise)
+    ));
+    assert!(!enterprise_location.is_compatible(
+        InformationTopic::TargetSecurity,
+        EntityRef::Enterprise(enterprise)
+    ));
+    assert!(
+        !enterprise_location
+            .is_compatible(InformationTopic::Personnel, EntityRef::Business(business))
+    );
+
+    let personnel = InformationSignal::PersonnelPresence {
+        characters: BTreeSet::from([character]),
+    };
+    assert!(personnel.is_compatible(
+        InformationTopic::Personnel,
+        EntityRef::Organization(organization)
+    ));
+    assert!(
+        !InformationSignal::PersonnelPresence {
+            characters: BTreeSet::new(),
+        }
+        .is_compatible(
+            InformationTopic::Personnel,
+            EntityRef::Organization(organization)
+        )
+    );
+    assert!(!personnel.is_compatible(
+        InformationTopic::PoliceActivity,
+        EntityRef::Organization(organization)
+    ));
+    assert!(!personnel.is_compatible(
+        InformationTopic::Personnel,
+        EntityRef::Enterprise(enterprise)
+    ));
+
+    let patrol = InformationSignal::PatrolPattern {
+        intervals: BTreeSet::from([
+            PatrolIntervalSignal::try_new(120, 180).expect("test patrol interval must be valid")
+        ]),
+    };
+    assert!(patrol.is_compatible(
+        InformationTopic::PoliceActivity,
+        EntityRef::Neighborhood(neighborhood)
+    ));
+    assert!(
+        !InformationSignal::PatrolPattern {
+            intervals: BTreeSet::new(),
+        }
+        .is_compatible(
+            InformationTopic::PoliceActivity,
+            EntityRef::Neighborhood(neighborhood)
+        )
+    );
+    assert!(!patrol.is_compatible(
+        InformationTopic::Schedule,
+        EntityRef::Neighborhood(neighborhood)
+    ));
+    assert!(!patrol.is_compatible(
+        InformationTopic::PoliceActivity,
+        EntityRef::Organization(organization)
+    ));
+}
+
+#[test]
+fn typed_signal_referenced_entities_are_complete_and_exact() {
+    let character_a = CharacterId::from_raw(11);
+    let character_b = CharacterId::from_raw(12);
+    let investigation = InvestigationId::from_raw(13);
+    let business = BusinessId::from_raw(14);
+    let neighborhood = NeighborhoodId::from_raw(15);
+
+    assert_eq!(
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+            investigation,
+        })
+        .referenced_entities(),
+        vec![EntityRef::Investigation(investigation)]
+    );
+    assert_eq!(
+        InformationSignal::EnterpriseLocation(EnterpriseLocationSignal::Business(business))
+            .referenced_entities(),
+        vec![EntityRef::Business(business)]
+    );
+    assert_eq!(
+        InformationSignal::EnterpriseLocation(EnterpriseLocationSignal::Neighborhood(neighborhood))
+            .referenced_entities(),
+        vec![EntityRef::Neighborhood(neighborhood)]
+    );
+    assert_eq!(
+        InformationSignal::PersonnelPresence {
+            characters: BTreeSet::from([character_b, character_a]),
+        }
+        .referenced_entities(),
+        vec![
+            EntityRef::Character(character_a),
+            EntityRef::Character(character_b)
+        ]
+    );
+    assert!(
+        InformationSignal::CaseActivity(CaseActivitySignal::Active)
+            .referenced_entities()
+            .is_empty()
+    );
+    assert!(
+        InformationSignal::PatrolPattern {
+            intervals: BTreeSet::from([
+                PatrolIntervalSignal::try_new(60, 90).expect("test patrol interval must be valid")
+            ]),
+        }
+        .referenced_entities()
+        .is_empty()
+    );
 }
 
 #[test]

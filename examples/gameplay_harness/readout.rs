@@ -24,6 +24,9 @@ use crate::*;
 pub struct KnownRacketObservation {
     pub information: crimocracy::core::id::InformationId,
     pub subject: EntityRef,
+    /// Actionable location carried by the persisted observation itself. This is not recovered
+    /// from the rival enterprise's live record.
+    pub location: Option<EntityRef>,
     pub source_operation: OperationId,
     pub observed_minute: u64,
     pub reliability: crimocracy::intelligence::Reliability,
@@ -62,6 +65,15 @@ pub fn known_racket_observations(scenario: &Scenario) -> Vec<KnownRacketObservat
         let observation = KnownRacketObservation {
             information: information.id(),
             subject: information.subject(),
+            location: match information.signal() {
+                Some(crimocracy::intelligence::InformationSignal::EnterpriseLocation(
+                    crimocracy::intelligence::EnterpriseLocationSignal::Business(business),
+                )) => Some(EntityRef::Business(*business)),
+                Some(crimocracy::intelligence::InformationSignal::EnterpriseLocation(
+                    crimocracy::intelligence::EnterpriseLocationSignal::Neighborhood(neighborhood),
+                )) => Some(EntityRef::Neighborhood(*neighborhood)),
+                _ => None,
+            },
             source_operation: source,
             observed_minute: information.observed_at().as_minutes(),
             reliability: information.reliability(),
@@ -638,16 +650,48 @@ pub fn print_organization_closing_view(
                 "  - Observed rival footprint (historical sightings, not a complete or current portfolio):"
             );
             for observation in &metrics.known_rackets {
-                println!(
-                    "      {} [{:?}/{:?}]: {}",
-                    format_day_minute(observation.observed_minute),
-                    observation.reliability,
-                    observation.specificity,
-                    observation.summary,
-                );
+                let actionable_location =
+                    observation.location.and_then(|location| match location {
+                        EntityRef::Business(business) => scenario
+                            .state
+                            .world()
+                            .get_business(business)
+                            .map(|record| format!("actionable venue: {}", record.name())),
+                        EntityRef::Neighborhood(neighborhood) => scenario
+                            .state
+                            .world()
+                            .get_neighborhood(neighborhood)
+                            .map(|record| format!("actionable district: {}", record.name())),
+                        EntityRef::Organization(_)
+                        | EntityRef::Character(_)
+                        | EntityRef::Operation(_)
+                        | EntityRef::Investigation(_)
+                        | EntityRef::Evidence(_)
+                        | EntityRef::FinancialAccount(_)
+                        | EntityRef::DecisionRequest(_)
+                        | EntityRef::Mandate(_)
+                        | EntityRef::Enterprise(_) => None,
+                    });
+                if let Some(location) = actionable_location {
+                    println!(
+                        "      {} [{:?}/{:?}] ({location}): {}",
+                        format_day_minute(observation.observed_minute),
+                        observation.reliability,
+                        observation.specificity,
+                        observation.summary,
+                    );
+                } else {
+                    println!(
+                        "      {} [{:?}/{:?}]: {}",
+                        format_day_minute(observation.observed_minute),
+                        observation.reliability,
+                        observation.specificity,
+                        observation.summary,
+                    );
+                }
             }
             println!(
-                "    These named activities can be watched directly using their source reports; no rival revenue or case contents were disclosed."
+                "    Typed locations above can seed later field action without consulting the rival's hidden enterprise record. No rival revenue or case contents were disclosed."
             );
         }
     }
@@ -1435,6 +1479,18 @@ pub fn print_convergence_observation(
     press: &Aggregate,
     recon: &Aggregate,
 ) {
+    if profile == ScenarioProfile::FleetingWindow {
+        println!(
+            "[OBSERVATION] {}: the immediate branches committed before the short-lived opportunity closed, while RECON stood down for timing in {}/{} runs after learning the target. Staffed cases were RUSH {}, PRESS {}, RECON {}. This is the information opportunity-cost control: moving now preserves the score but can still carry exposure risk; scouting improves certainty but can consume the decision window.",
+            profile.label(),
+            recon.opening_timing_standdowns,
+            recon.samples,
+            rush.investigations,
+            press.investigations,
+            recon.investigations,
+        );
+        return;
+    }
     let outcome_mix = |aggregate: &Aggregate| {
         (
             aggregate.achieved,
@@ -1447,13 +1503,26 @@ pub fn print_convergence_observation(
         && outcome_mix(press) == outcome_mix(recon)
         && rush.police_arrived == press.police_arrived
         && press.police_arrived == recon.police_arrived;
-    if converged {
+    if converged && profile == ScenarioProfile::LatePatrol {
+        let avg_finish = |aggregate: &Aggregate| {
+            if aggregate.burglary_terminal_samples == 0 {
+                0.0
+            } else {
+                aggregate.burglary_terminal_minute_total as f64
+                    / aggregate.burglary_terminal_samples as f64
+            }
+        };
         println!(
-            "[OBSERVATION] {}: all strategies converged ({}/{} achieved, {} police arrivals). Under this scenario the patrol timing removes the information decision, so policy choice carries no leverage here; treat this block as a control, not a contrast.",
+            "[OBSERVATION] {}: all strategies converged on the immediate objective ({}/{} achieved, {} police arrivals), but RECON finished around {:.0}m versus RUSH {:.0}m. Staffed cases were RUSH {}, PRESS {}, RECON {}. This is an outcome/patrol-timing control, not a claim that information has zero residual value: extra scouting costs time and may still trim exposure or later case risk even when it does not change the score's immediate result.",
             profile.label(),
             rush.achieved,
             rush.samples,
             rush.police_arrived,
+            avg_finish(recon),
+            avg_finish(rush),
+            rush.investigations,
+            press.investigations,
+            recon.investigations,
         );
     }
 }
@@ -1467,6 +1536,7 @@ pub fn print_experience_readout(
     press: &RunMetrics,
     recon: &RunMetrics,
     racket_demonstrated: bool,
+    rival_leverage_demonstrated: bool,
 ) {
     println!("\n--- PLAYER LOOP READOUT ---");
     println!(
@@ -1712,6 +1782,11 @@ pub fn print_experience_readout(
         any_enforcement,
         "sustained district casework can convert into a dedicated racket inquiry on a racket itself: the manager reports that new pressure, while lying low or diversifying districts remain available counters",
     );
+    checkpoint(
+        "rival leverage",
+        rival_leverage_demonstrated,
+        "player-held rival intelligence can identify an exact operating venue, focused surveillance can add local patrol knowledge, and a resulting sabotage can materially reduce that rival business's next-cycle economics without reading hidden rival state",
+    );
     if missing > 0 {
         println!(
             "[NOTE] {missing} checkpoint(s) absent in this comparison. Check rotated runs and explicit probes; absence here is neither a failure nor proof of coverage elsewhere."
@@ -1820,17 +1895,37 @@ pub fn print_experience_readout(
         "  - Visibility leverage: the branches drew {} vice inquiries this comparison, and the vice-heat probe demonstrates the full chain deterministically every run - clean districts never roll attention; sustained casework compounds a per-case street surcharge onto every cycle and can convert into a dedicated inquiry on the racket itself, taxing every book in that district (including rivals') until it shelves. Suspending a racket stops its future cycles; moving districts avoids unrelated-case surcharges. PRESS instead keeps its home racket open while stopping new street jobs, so its remaining vice risk is deliberate.",
         rush.racket_inquiries_drawn + press.racket_inquiries_drawn + recon.racket_inquiries_drawn,
     );
+    let observed_days = |run: &RunMetrics| {
+        run.session_end_minute
+            .map(|minute| minute as f64 / 1_440.0)
+            .unwrap_or(0.0)
+    };
+    let per_day = |count: usize, run: &RunMetrics| {
+        let days = observed_days(run);
+        if days > 0.0 { count as f64 / days } else { 0.0 }
+    };
+    let decision_per_day = |run: &RunMetrics| {
+        let days = observed_days(run);
+        if days > 0.0 {
+            f64::from(run.decision_requests) / days
+        } else {
+            0.0
+        }
+    };
     println!(
-        "Player attention load: RUSH {} surfaced decision(s), PRESS {}, RECON {}; player reports {}/{}/{}, executive briefs {}/{}/{}.",
-        rush.decision_requests,
-        press.decision_requests,
-        recon.decision_requests,
-        rush.player_report_count,
-        press.player_report_count,
-        recon.player_report_count,
-        rush.executive_brief_count,
-        press.executive_brief_count,
-        recon.executive_brief_count,
+        "Player attention density over observed arcs (RUSH {:.1}d, PRESS {:.1}d, RECON {:.1}d): production exception prompts/day {:.2}/{:.2}/{:.2}; reports/day {:.1}/{:.1}/{:.1}; executive briefs/day {:.1}/{:.1}/{:.1}. Planned [DECIDE] choices are strategic actions, not interruption counts.",
+        observed_days(rush),
+        observed_days(press),
+        observed_days(recon),
+        decision_per_day(rush),
+        decision_per_day(press),
+        decision_per_day(recon),
+        per_day(rush.player_report_count, rush),
+        per_day(press.player_report_count, press),
+        per_day(recon.player_report_count, recon),
+        per_day(rush.executive_brief_count, rush),
+        per_day(press.executive_brief_count, press),
+        per_day(recon.executive_brief_count, recon),
     );
 }
 
@@ -1847,8 +1942,8 @@ pub fn print_loop_checkpoint(label: &str, present: bool, evidence: &str) -> bool
 pub fn terminal_label(metrics: &RunMetrics) -> String {
     if metrics.opening_stood_down {
         return format!(
-            "opening stood down ({:?}); no burglary authorized",
-            metrics.opening_casing_assessment
+            "opening stood down ({:?}, {:?}); no burglary authorized",
+            metrics.opening_standdown_reason, metrics.opening_casing_assessment
         );
     }
     if metrics.aborted {

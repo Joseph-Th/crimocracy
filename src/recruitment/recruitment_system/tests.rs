@@ -47,11 +47,9 @@ use crate::world::world_system::{
     validate_reassign_character,
 };
 use crate::world::{
-    ALL_POLICY_KINDS, ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, DriveKind,
-    OrganizationDraft, OrganizationKind, OrganizationRecord, PolicyKind, PolicySetting, Rating,
-    TraitKind,
+    ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, DriveKind, OrganizationDraft,
+    OrganizationKind, PolicyKind, PolicySetting, Rating, TraitKind,
 };
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Fixture {
@@ -62,77 +60,6 @@ struct Fixture {
     incumbent: CharacterId,
     recruiter: CharacterId,
     candidate: CharacterId,
-}
-
-#[derive(Clone, Serialize)]
-struct OrganizationRecordWire {
-    id: OrganizationId,
-    name: String,
-    kind: OrganizationKind,
-    policies: BTreeMap<PolicyKind, PolicySetting>,
-    policy_versions: BTreeMap<PolicyKind, u32>,
-}
-
-fn organization_wire(record: &OrganizationRecord) -> OrganizationRecordWire {
-    OrganizationRecordWire {
-        id: record.id(),
-        name: record.name().to_owned(),
-        kind: record.kind(),
-        policies: ALL_POLICY_KINDS
-            .into_iter()
-            .map(|kind| {
-                (
-                    kind,
-                    record
-                        .policy(kind)
-                        .expect("fixture organization must retain every policy"),
-                )
-            })
-            .collect(),
-        policy_versions: ALL_POLICY_KINDS
-            .into_iter()
-            .map(|kind| {
-                (
-                    kind,
-                    record
-                        .policy_version(kind)
-                        .expect("fixture organization must retain every policy version"),
-                )
-            })
-            .collect(),
-    }
-}
-
-fn replace_serialized_organization(
-    envelope: SaveEnvelope,
-    original: &OrganizationRecord,
-    replacement: &OrganizationRecordWire,
-) -> SaveEnvelope {
-    let original_bytes = bincode::serialize(original).expect("organization should serialize");
-    assert_eq!(
-        bincode::serialize(&organization_wire(original))
-            .expect("organization mirror should serialize"),
-        original_bytes,
-        "wire mirror must match the production organization layout exactly"
-    );
-    let replacement_bytes =
-        bincode::serialize(replacement).expect("replacement organization should serialize");
-    assert_eq!(replacement_bytes.len(), original_bytes.len());
-    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
-    let matches: Vec<_> = envelope_bytes
-        .windows(original_bytes.len())
-        .enumerate()
-        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
-        .collect();
-    assert_eq!(
-        matches.len(),
-        1,
-        "target organization record should occur once in the save envelope"
-    );
-    let start = matches[0];
-    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
-    bincode::deserialize(&envelope_bytes)
-        .expect("same-layout organization corruption must remain decodable")
 }
 
 #[test]
@@ -1471,7 +1398,7 @@ fn resolved_organization_sourced_approval_remains_valid_history_after_policy_aba
     assert_eq!(decision.status(), DecisionStatus::Resolved);
     assert!(decision.cancellation().is_none());
     validate_state(&fixture.state)
-        .expect("historical version-one approval source should reconstruct under version three");
+        .expect("historical version-one approval source should remain exact under version three");
     validate_invariants(&fixture.state);
 }
 
@@ -1672,86 +1599,6 @@ fn noop_or_unrelated_policy_write_preserves_organization_sourced_recruitment_app
     .commit(&mut fixture.state)
     .expect("still-current approval should resolve normally");
     validate_state(&fixture.state).expect("unrelated policy change should preserve decision state");
-    validate_invariants(&fixture.state);
-}
-
-#[test]
-fn organization_policy_version_exhaustion_preserves_pending_approval_atomically() {
-    let registry = build_registry();
-    let mut fixture = fixture();
-    let original = fixture
-        .state
-        .world()
-        .get_organization(fixture.target)
-        .expect("target organization should persist");
-    let mut replacement = organization_wire(original);
-    replacement
-        .policy_versions
-        .insert(PolicyKind::IndependentRecruitment, u32::MAX);
-    let envelope = build_save(&registry, &fixture.state)
-        .expect("ordinary fixture should save before boundary-state injection");
-    let boundary_envelope = replace_serialized_organization(envelope, original, &replacement);
-    fixture.state = restore_save(&registry, boundary_envelope)
-        .expect("maximum representable organization-policy version is structurally valid");
-    let mandate = assign_personnel_mandate(&mut fixture, None);
-    let request = validate_request_recruitment_approval(
-        &fixture.registry,
-        &fixture.state,
-        RecruitmentApprovalRequestDraft {
-            authority: personnel_authority(&fixture, mandate),
-            target_organization: fixture.target,
-            recruiter: fixture.recruiter,
-            candidate: fixture.candidate,
-            approach: RecruitmentApproach::Protection,
-            attention: crate::core::attention::AttentionClass::Exception,
-            summary: "Personnel manager requests approval at the policy-version boundary."
-                .to_owned(),
-        },
-    )
-    .expect("maximum representable policy version remains a valid current authority")
-    .commit(&mut fixture.state)
-    .expect("approval request at maximum policy version should commit");
-
-    let error = validate_set_policy(
-        &registry,
-        &fixture.state,
-        fixture.target,
-        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
-    )
-    .expect_err("exhausted policy version must reject before cancelling the approval");
-    assert!(matches!(
-        error,
-        crate::delegation::delegation_system::DelegationError::VersionCapacity(_)
-    ));
-    let resolved = resolve_policy_for_manager(
-        &fixture.state,
-        fixture.recruiter,
-        PolicyKind::IndependentRecruitment,
-    )
-    .expect("failed policy mutation must preserve the old current policy");
-    assert_eq!(
-        resolved.setting,
-        PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval)
-    );
-    assert_eq!(resolved.source_version, u32::MAX);
-    assert_eq!(
-        fixture
-            .state
-            .decisions()
-            .pending_for_recruitment_approval(fixture.target, fixture.candidate),
-        Some(request.decision),
-        "failed policy mutation must not retire the still-current approval"
-    );
-    assert_eq!(
-        fixture
-            .state
-            .decisions()
-            .get_decision(request.decision)
-            .expect("approval must remain durable")
-            .status(),
-        DecisionStatus::Pending
-    );
-    validate_state(&fixture.state).expect("failed policy mutation must leave valid state");
     validate_invariants(&fixture.state);
 }
 

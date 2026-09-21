@@ -31,8 +31,10 @@ pub struct OrganizationRecord {
     id: OrganizationId,
     name: String,
     kind: OrganizationKind,
-    policies: BTreeMap<PolicyKind, PolicySetting>,
-    policy_versions: BTreeMap<PolicyKind, u32>,
+    /// Exact organization-level policy history. Version one is the authored default and every
+    /// later entry is a real setting change. Persisting the journal makes historical authority
+    /// validation independent of how many variants a policy enum happens to have.
+    policy_revisions: BTreeMap<PolicyKind, Vec<PolicySetting>>,
 }
 
 impl OrganizationRecord {
@@ -49,42 +51,30 @@ impl OrganizationRecord {
     }
 
     pub fn policy(&self, kind: PolicyKind) -> Option<PolicySetting> {
-        self.policies.get(&kind).copied()
+        self.policy_revisions
+            .get(&kind)
+            .and_then(|revisions| revisions.last())
+            .copied()
     }
 
     pub(crate) fn policy_version(&self, kind: PolicyKind) -> Option<u32> {
-        self.policy_versions.get(&kind).copied()
+        u32::try_from(self.policy_revisions.get(&kind)?.len()).ok()
     }
 
-    /// Reconstructs an older organization-level recruitment setting from the current value and
-    /// its monotone version. `ApprovalPolicy` is binary and policy versions advance only on real
-    /// changes, so every increment is necessarily a toggle. Keeping this derivation with the
-    /// organization record gives every historical authority validator the same rule.
-    /// A third `ApprovalPolicy` variant would silently break the parity inference below: it
-    /// must replace this derivation with a version-to-value journal instead.
-    pub(crate) fn independent_recruitment_policy_at_version(
+    pub(crate) fn policy_revisions(&self, kind: PolicyKind) -> Option<&[PolicySetting]> {
+        self.policy_revisions.get(&kind).map(Vec::as_slice)
+    }
+
+    pub(crate) fn policy_at_version(
         &self,
+        kind: PolicyKind,
         historical_version: u32,
-    ) -> Option<ApprovalPolicy> {
-        let current_version = self.policy_version(PolicyKind::IndependentRecruitment)?;
-        let PolicySetting::IndependentRecruitment(current_policy) =
-            self.policy(PolicyKind::IndependentRecruitment)?
-        else {
-            return None;
-        };
-        if historical_version == 0 || historical_version > current_version {
-            return None;
-        }
-        Some(
-            if (current_version - historical_version).is_multiple_of(2) {
-                current_policy
-            } else {
-                match current_policy {
-                    ApprovalPolicy::RequireApproval => ApprovalPolicy::Delegated,
-                    ApprovalPolicy::Delegated => ApprovalPolicy::RequireApproval,
-                }
-            },
-        )
+    ) -> Option<PolicySetting> {
+        let index = historical_version.checked_sub(1)?;
+        self.policy_revisions
+            .get(&kind)?
+            .get(usize::try_from(index).ok()?)
+            .copied()
     }
 }
 

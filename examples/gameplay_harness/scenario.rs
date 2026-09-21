@@ -64,7 +64,7 @@ pub fn build_scenario(
 ) -> Result<Scenario<'_>, Box<dyn Error>> {
     let mut state = AppState::new(seeds.world);
     let variation = FixtureVariation::from_seed(seeds.world);
-    let timeline = ScenarioTimeline::for_policy(registry, seeds.policy);
+    let timeline = ScenarioTimeline::for_profile(registry, seeds.policy, profile);
 
     let player = insert_organization(
         registry,
@@ -947,6 +947,7 @@ pub fn observe_case_activity_information(record: &InformationRecord) -> Option<b
             CaseActivitySignal::Shelved | CaseActivitySignal::Closed,
         )) => Some(false),
         Some(InformationSignal::LegalPersonStatus(_))
+        | Some(InformationSignal::EnterpriseLocation(_))
         | Some(InformationSignal::PersonnelPresence { .. })
         | Some(InformationSignal::PatrolPattern { .. })
         | None => None,

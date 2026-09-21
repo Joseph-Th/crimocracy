@@ -926,6 +926,13 @@ pub fn run_strategy_batch(
         }
     }
     validate_batch_strategy_coverage(profile, samples, &rush_aggregate)?;
+    validate_sensitivity_profile_coverage(
+        profile,
+        samples,
+        &rush_aggregate,
+        &press_aggregate,
+        &recon_aggregate,
+    )?;
     Ok((rush_aggregate, press_aggregate, recon_aggregate))
 }
 
@@ -1051,8 +1058,11 @@ pub fn persist_run_artifact(
     let operation = serde_json::json!({
         "burglary": metrics.burglary.map(|id| format!("{id:?}")),
         "opening_scout": metrics.opening_scout.map(|id| format!("{id:?}")),
+        "opening_scout_terminal_minute": metrics.opening_scout_terminal_minute,
+        "opening_opportunity_valid_until_minute": metrics.opening_opportunity_valid_until_minute,
         "opening_casing_assessment": metrics.opening_casing_assessment,
         "opening_stood_down": metrics.opening_stood_down,
+        "opening_standdown_reason": metrics.opening_standdown_reason,
         "outcome": metrics.outcome.map(|o| format!("{o:?}")),
         "aborted": metrics.aborted,
         "abort_phase": metrics.abort_phase.map(|p| format!("{p:?}")),
@@ -1067,6 +1077,7 @@ pub fn persist_run_artifact(
         "liquidation_minute": metrics.liquidation_minute,
     });
     let information_and_legal = serde_json::json!({
+        "opening_surveillance_information_count": metrics.discovered_surveillance_information,
         "planning_information_count": metrics.planning_information_count,
         "planning_information_topics": metrics.planning_information_topics.iter().map(|topic| format!("{topic:?}")).collect::<Vec<_>>(),
         "player_police_activity_information": metrics.player_police_activity_information,
@@ -1136,6 +1147,7 @@ pub fn persist_run_artifact(
         "self_heat_case_active": metrics.self_heat_case_active,
     });
     let feedback = serde_json::json!({
+        "session_end_minute": metrics.session_end_minute,
         "player_report_count": metrics.player_report_count,
         "executive_brief_count": metrics.executive_brief_count,
         "racket_inquiries_drawn": metrics.racket_inquiries_drawn,

@@ -71,8 +71,8 @@ pub enum StateValidationError {
         expected: PolicyKind,
         actual: PolicyKind,
     },
-    #[error("organization {organization} policy {policy:?} has invalid persisted version/history")]
-    InvalidOrganizationPolicyVersion {
+    #[error("organization {organization} policy {policy:?} has invalid persisted history")]
+    InvalidOrganizationPolicyHistory {
         organization: OrganizationId,
         policy: PolicyKind,
     },

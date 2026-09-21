@@ -1,22 +1,31 @@
 //! Full-mode rival discovery and follow-up through player-held surveillance observations only.
 
 use crimocracy::core::entity::EntityRef;
-use crimocracy::core::id::{InformationId, OperationId};
+use crimocracy::core::id::{BusinessId, InformationId, OperationId};
 use crimocracy::core::time::{SimDuration, SimTime};
+use crimocracy::economy::BusinessEconomyDraft;
+use crimocracy::economy::business_economy_system::validate_establish_business_economy;
+use crimocracy::finance::finance_system::insert_account;
+use crimocracy::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
 use crimocracy::intelligence::{
-    InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    EnterpriseLocationSignal, InformationSignal, InformationSourceKind, InformationTopic,
+    KnowledgeHolder, Reliability, Specificity,
 };
-use crimocracy::operations::{OperationExposureLevel, OperationObjectiveOutcome, OperationStatus};
+use crimocracy::operations::operation_system::validate_authorize_operation;
+use crimocracy::operations::{
+    OperationApproach, OperationDraft, OperationExposureLevel, OperationKind, OperationObjective,
+    OperationObjectiveOutcome, OperationStatus, RoleKind,
+};
 use crimocracy::registry::Registry;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use crate::{
     EvaluationSeeds, RunMetrics, Scenario, ScenarioProfile, authorize_surveillance_target,
-    build_scenario, run_until, run_until_operation_terminal, stamp, validate_harness_state,
+    build_scenario, format_cents, run_until, run_until_operation_terminal, stamp,
+    validate_harness_state,
 };
 
 #[derive(Debug, Serialize)]
@@ -51,10 +60,47 @@ struct WatchEvidence {
 }
 
 #[derive(Debug, Serialize)]
+struct BusinessCycleEvidence {
+    occurred_minute: u64,
+    disrupted: bool,
+    gross_revenue_cents: i64,
+    net_cash_cents: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct InterventionEvidence {
+    /// The player-held enterprise observation whose typed location chose this venue. It is
+    /// decision provenance, not attached operation intelligence because its subject is the
+    /// enterprise rather than the business objective.
+    location_source: InformationId,
+    target: BusinessId,
+    operation: OperationId,
+    scheduled_minute: u64,
+    terminal_minute: u64,
+    status: OperationStatus,
+    outcome: Option<OperationObjectiveOutcome>,
+    exposure: Option<OperationExposureLevel>,
+    planning_information: BTreeSet<InformationId>,
+    after_action: Option<Observation>,
+}
+
+#[derive(Debug, Serialize)]
+struct InterventionEvaluation {
+    /// Structural verification only. These rival books are not automatically visible to the
+    /// player and must never drive the acting policy above.
+    disruption_active_after_operation: bool,
+    actual_next_cycle: Option<BusinessCycleEvidence>,
+    matched_no_intervention_cycle: Option<BusinessCycleEvidence>,
+    gross_reduction_cents: Option<i64>,
+    net_reduction_cents: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
 struct PlayerVisibleEvidence {
     discovery: WatchEvidence,
     selected_source: Option<InformationId>,
     followup: Option<WatchEvidence>,
+    intervention: Option<InterventionEvidence>,
     absence: Option<&'static str>,
 }
 
@@ -65,6 +111,13 @@ struct ProbeEvidence {
     expansion_boundary_minute: u64,
     timing_policy: &'static str,
     player_visible: PlayerVisibleEvidence,
+    evaluation: Option<InterventionEvaluation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RivalProbeSummary {
+    pub actionable_intervention: bool,
+    pub material_economic_impact: bool,
 }
 
 /// One organization watch, then at most one exact-subject enterprise watch. Failed or partial
@@ -74,8 +127,19 @@ pub fn run_rival_intelligence_probe(
     seeds: EvaluationSeeds,
     detail: bool,
     artifact_dir: Option<&Path>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<RivalProbeSummary, Box<dyn Error>> {
     let evidence = collect_probe(registry, seeds)?;
+    let summary = RivalProbeSummary {
+        actionable_intervention: evidence.player_visible.intervention.is_some(),
+        material_economic_impact: evidence.evaluation.as_ref().is_some_and(|evaluation| {
+            evaluation
+                .gross_reduction_cents
+                .is_some_and(|reduction| reduction > 0)
+                && evaluation
+                    .net_reduction_cents
+                    .is_some_and(|reduction| reduction > 0)
+        }),
+    };
     if detail {
         println!(
             "[RIVAL INTELLIGENCE] world {:#x}, policy {:#x}; canonical NightTrap fixture, one daily expansion boundary. {}",
@@ -89,6 +153,50 @@ pub fn run_rival_intelligence_probe(
             );
             print_watch("FOLLOW-UP", followup);
         }
+        if let Some(intervention) = &evidence.player_visible.intervention {
+            println!(
+                "[DECIDE] Typed enterprise-location fact {:?} identifies business {:?}. Use only focused player-held local intelligence {:?} to plan sabotage.",
+                intervention.location_source,
+                intervention.target,
+                intervention.planning_information,
+            );
+            println!(
+                "[INTERVENE] {:?} -> Business({:?}), {:?}, outcome {:?}, exposure {:?}; scheduled {}, terminal {}.",
+                intervention.operation,
+                intervention.target,
+                intervention.status,
+                intervention.outcome,
+                intervention.exposure,
+                stamp(intervention.scheduled_minute),
+                stamp(intervention.terminal_minute),
+            );
+            if let Some(after_action) = &intervention.after_action {
+                println!(
+                    "[LEARN] {:?}: {}",
+                    after_action.information, after_action.summary
+                );
+            }
+        }
+        if let Some(evaluation) = &evidence.evaluation
+            && let (Some(actual), Some(control), Some(gross_reduction), Some(net_reduction)) = (
+                &evaluation.actual_next_cycle,
+                &evaluation.matched_no_intervention_cycle,
+                evaluation.gross_reduction_cents,
+                evaluation.net_reduction_cents,
+            )
+        {
+            println!(
+                "[EVALUATE] Matched no-intervention rival cycle at {}: gross {}, net {}. After intervention: gross {}, net {}, disrupted={}. Economic impact: gross {}, net {}. This counterfactual is harness-only evaluation and did not inform player policy.",
+                stamp(control.occurred_minute),
+                format_cents(control.gross_revenue_cents),
+                format_cents(control.net_cash_cents),
+                format_cents(actual.gross_revenue_cents),
+                format_cents(actual.net_cash_cents),
+                actual.disrupted,
+                format_cents(-gross_reduction),
+                format_cents(-net_reduction),
+            );
+        }
         if let Some(absence) = evidence.player_visible.absence {
             println!("[OBSERVED ABSENCE] {absence}");
         }
@@ -99,7 +207,7 @@ pub fn run_rival_intelligence_probe(
             println!("[ARTIFACT] wrote {}", path.display());
         }
     }
-    Ok(())
+    Ok(summary)
 }
 
 fn collect_probe(
@@ -108,6 +216,7 @@ fn collect_probe(
 ) -> Result<ProbeEvidence, Box<dyn Error>> {
     let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let mut metrics = RunMetrics::default();
+    establish_rival_venue_economy(registry, &mut scenario)?;
     let boundary = u64::from(
         registry
             .recruitment()
@@ -146,6 +255,34 @@ fn collect_probe(
         )?),
         None => None,
     };
+    let intervention_target = selected.and_then(|(_, source)| {
+        select_observed_business_location(&scenario, source).map(|target| (target, source))
+    });
+    let matched_no_intervention_cycle = intervention_target
+        .map(|(target, _)| matched_next_business_cycle_without_intervention(&scenario, target))
+        .transpose()?
+        .flatten();
+    let intervention = match (intervention_target, followup.as_ref()) {
+        (Some((target, location_source)), Some(followup)) => Some(run_intervention(
+            &mut scenario,
+            target,
+            location_source,
+            followup,
+            &mut metrics,
+        )?),
+        _ => None,
+    };
+    let evaluation = intervention
+        .as_ref()
+        .map(|intervention| {
+            evaluate_intervention(
+                &mut scenario,
+                intervention.target,
+                matched_no_intervention_cycle,
+                &mut metrics,
+            )
+        })
+        .transpose()?;
     validate_harness_state(registry, &scenario.state)?;
     Ok(ProbeEvidence {
         world_seed: seeds.world,
@@ -156,11 +293,44 @@ fn collect_probe(
             discovery,
             selected_source: selected.map(|(_, source)| source),
             followup,
+            intervention,
             absence: selected.is_none().then_some(
                 "The organization watch produced no player-held Personnel observation with an Enterprise subject. No follow-up was authorized; this does not establish that the rival has no rackets.",
             ),
         },
+        evaluation,
     })
+}
+
+fn establish_rival_venue_economy(
+    registry: &Registry,
+    scenario: &mut Scenario,
+) -> Result<(), Box<dyn Error>> {
+    let operating_account = insert_account(
+        &mut scenario.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(scenario.rival_venue),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )?;
+    let settlement_account = insert_account(
+        &mut scenario.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(scenario.rival_venue),
+            kind: AccountKind::Settlement,
+        },
+    )?;
+    validate_establish_business_economy(
+        registry,
+        &scenario.state,
+        BusinessEconomyDraft {
+            business: scenario.rival_venue,
+            operating_account,
+            settlement_account,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    Ok(())
 }
 
 /// Stable first information ID among this watch's discoveries, never among hidden enterprises.
@@ -179,6 +349,25 @@ fn select_observed_enterprise(
             && matches!(information.subject(), EntityRef::Enterprise(_)))
         .then_some((information.subject(), *id))
     })
+}
+
+fn select_observed_business_location(
+    scenario: &Scenario,
+    source: InformationId,
+) -> Option<BusinessId> {
+    let information = scenario.state.intelligence().get_information(source)?;
+    if information.holder() != KnowledgeHolder::Organization(scenario.player)
+        || information.topic() != InformationTopic::Personnel
+        || !matches!(information.subject(), EntityRef::Enterprise(_))
+    {
+        return None;
+    }
+    match information.signal() {
+        Some(InformationSignal::EnterpriseLocation(EnterpriseLocationSignal::Business(
+            business,
+        ))) => Some(*business),
+        _ => None,
+    }
 }
 
 fn observe_information(
@@ -209,6 +398,149 @@ fn observe_information(
         // Quote the persisted observation exactly. Do not supplement a missing racket kind,
         // location, manager, or financial detail from the foreign enterprise's hidden record.
         summary: information.summary().to_owned(),
+    })
+}
+
+fn matched_next_business_cycle_without_intervention(
+    scenario: &Scenario,
+    target: BusinessId,
+) -> Result<Option<BusinessCycleEvidence>, Box<dyn Error>> {
+    let mut control = scenario.clone();
+    let Some(next_cycle_at) = control
+        .state
+        .economy()
+        .get_business_economy(target)
+        .and_then(|economy| economy.next_cycle_at())
+    else {
+        return Ok(None);
+    };
+    let mut metrics = RunMetrics::default();
+    run_until(&mut control, next_cycle_at, false, &mut metrics)?;
+    Ok(control
+        .state
+        .economy()
+        .latest_cycle(target)
+        .map(business_cycle_evidence))
+}
+
+fn business_cycle_evidence(
+    cycle: &crimocracy::economy::BusinessCycleRecord,
+) -> BusinessCycleEvidence {
+    BusinessCycleEvidence {
+        occurred_minute: cycle.occurred_at().as_minutes(),
+        disrupted: cycle.disrupted(),
+        gross_revenue_cents: cycle.gross_revenue().cents(),
+        net_cash_cents: cycle.net_cash().cents(),
+    }
+}
+
+fn run_intervention(
+    scenario: &mut Scenario,
+    target: BusinessId,
+    location_source: InformationId,
+    followup: &WatchEvidence,
+    metrics: &mut RunMetrics,
+) -> Result<InterventionEvidence, Box<dyn Error>> {
+    let planning_information = followup
+        .observations
+        .iter()
+        .filter(|observation| observation.topic == InformationTopic::PoliceActivity)
+        .map(|observation| observation.information)
+        .collect::<BTreeSet<_>>();
+    let scheduled_for = scenario.state.now() + SimDuration::from_minutes(30);
+    let operation = validate_authorize_operation(
+        scenario.registry,
+        &scenario.state,
+        OperationDraft {
+            title: "Disrupt observed rival venue".to_owned(),
+            kind: OperationKind::Sabotage,
+            responsible_organization: scenario.player,
+            leader: scenario.lieutenant,
+            objective: OperationObjective::DisruptBusiness {
+                target: EntityRef::Business(target),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, scenario.lieutenant),
+                (RoleKind::EntrySpecialist, scenario.burglar),
+            ]),
+            intelligence: planning_information.clone(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    run_until_operation_terminal(scenario, operation, false, metrics)?;
+
+    let record = scenario
+        .state
+        .operations()
+        .get_operation(operation)
+        .ok_or("authorized intervention did not persist")?;
+    let resolution = record.resolution();
+    let after_action = resolution
+        .map(|result| observe_information(scenario, result.after_action_information()))
+        .transpose()?;
+    let status = record.status();
+    let outcome = resolution.map(|result| result.objective_outcome());
+    let exposure = resolution.map(|result| result.exposure().level());
+    let terminal_minute = scenario.state.now().as_minutes();
+
+    Ok(InterventionEvidence {
+        location_source,
+        target,
+        operation,
+        scheduled_minute: scheduled_for.as_minutes(),
+        terminal_minute,
+        status,
+        outcome,
+        exposure,
+        planning_information,
+        after_action,
+    })
+}
+
+fn evaluate_intervention(
+    scenario: &mut Scenario,
+    target: BusinessId,
+    matched_no_intervention_cycle: Option<BusinessCycleEvidence>,
+    metrics: &mut RunMetrics,
+) -> Result<InterventionEvaluation, Box<dyn Error>> {
+    let disruption_active_after_operation = scenario
+        .state
+        .economy()
+        .get_business_economy(target)
+        .is_some_and(|economy| economy.is_disrupted(scenario.state.now()));
+    let next_cycle_at = scenario
+        .state
+        .economy()
+        .get_business_economy(target)
+        .and_then(|economy| economy.next_cycle_at());
+    let actual_next_cycle = if let Some(next_cycle_at) = next_cycle_at {
+        run_until(scenario, next_cycle_at, false, metrics)?;
+        scenario
+            .state
+            .economy()
+            .latest_cycle(target)
+            .map(business_cycle_evidence)
+    } else {
+        None
+    };
+    let gross_reduction_cents = actual_next_cycle
+        .as_ref()
+        .zip(matched_no_intervention_cycle.as_ref())
+        .map(|(actual, control)| control.gross_revenue_cents - actual.gross_revenue_cents);
+    let net_reduction_cents = actual_next_cycle
+        .as_ref()
+        .zip(matched_no_intervention_cycle.as_ref())
+        .map(|(actual, control)| control.net_cash_cents - actual.net_cash_cents);
+    Ok(InterventionEvaluation {
+        disruption_active_after_operation,
+        actual_next_cycle,
+        matched_no_intervention_cycle,
+        gross_reduction_cents,
+        net_reduction_cents,
     })
 }
 
@@ -364,6 +696,67 @@ mod tests {
             "broad discovery must not disclose patrols at every rival location"
         );
         assert!(first.observed_minute <= followup.scheduled_minute);
+        let learned_business = match first.signal {
+            Some(InformationSignal::EnterpriseLocation(EnterpriseLocationSignal::Business(
+                business,
+            ))) => business,
+            ref other => {
+                panic!("rival racket must carry an actionable business location: {other:?}")
+            }
+        };
+        let intervention = visible
+            .intervention
+            .as_ref()
+            .expect("typed rival location plus focused patrol intelligence enables intervention");
+        assert_eq!(intervention.target, learned_business);
+        assert_eq!(intervention.location_source, first.information);
+        assert!(
+            !intervention
+                .planning_information
+                .contains(&first.information),
+            "enterprise-location knowledge chooses the venue but must not be smuggled into business-target operation scoring"
+        );
+        assert_eq!(
+            intervention.planning_information,
+            BTreeSet::from([patrol.information]),
+            "focused local police intelligence is the only attached sabotage planning fact"
+        );
+        assert_eq!(intervention.status, OperationStatus::Completed);
+        assert_ne!(
+            intervention.outcome,
+            Some(OperationObjectiveOutcome::Failed)
+        );
+        let evaluation = evidence
+            .evaluation
+            .as_ref()
+            .expect("a successful intervention must be evaluated against a matched continuation");
+        assert!(evaluation.disruption_active_after_operation);
+        let disrupted_cycle = evaluation
+            .actual_next_cycle
+            .as_ref()
+            .expect("intervention branch must reach the rival venue's next operating cycle");
+        assert!(disrupted_cycle.disrupted);
+        let control_cycle = evaluation
+            .matched_no_intervention_cycle
+            .as_ref()
+            .expect("matched no-intervention continuation must reach the same business cycle");
+        assert!(!control_cycle.disrupted);
+        assert_eq!(
+            disrupted_cycle.occurred_minute,
+            control_cycle.occurred_minute
+        );
+        assert!(
+            evaluation
+                .gross_reduction_cents
+                .is_some_and(|reduction| reduction > 0),
+            "sabotage must materially reduce the rival venue's next-cycle gross"
+        );
+        assert!(
+            evaluation
+                .net_reduction_cents
+                .is_some_and(|reduction| reduction > 0),
+            "sabotage must materially reduce the rival venue's next-cycle net"
+        );
         assert_eq!(visible.absence, None);
 
         // The artifact's semantic projection retains the actual discovery/source chain.
@@ -377,6 +770,20 @@ mod tests {
         assert_eq!(
             json["player_visible"]["followup"]["source_information"],
             serde_json::to_value(&followup.source_information).unwrap()
+        );
+        assert_eq!(
+            json["player_visible"]["intervention"]["target"],
+            serde_json::to_value(intervention.target).unwrap()
+        );
+        assert!(
+            json["player_visible"]["intervention"]
+                .get("next_business_cycle")
+                .is_none(),
+            "hidden rival books must not be serialized under player-visible evidence"
+        );
+        assert!(
+            json["evaluation"]["matched_no_intervention_cycle"].is_object(),
+            "counterfactual economics belong in explicit harness evaluation"
         );
         assert_eq!(
             json["player_visible"]["discovery"]["observations"],

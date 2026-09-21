@@ -26,7 +26,10 @@ use crate::recruitment::{
 };
 use crate::registry::Registry;
 use crate::reports::ReportKind;
-use crate::world::{ApprovalPolicy, CharacterRecord, OrganizationKind, OrganizationRecord};
+use crate::world::{
+    ApprovalPolicy, CharacterRecord, OrganizationKind, OrganizationRecord, PolicyKind,
+    PolicySetting,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
@@ -519,8 +522,8 @@ fn recruitment_authority_snapshot_is_valid(
                     .world
                     .get_organization(organization)
                     .is_some_and(|record| {
-                        record.independent_recruitment_policy_at_version(version)
-                            == Some(expected_policy)
+                        record.policy_at_version(PolicyKind::IndependentRecruitment, version)
+                            == Some(PolicySetting::IndependentRecruitment(expected_policy))
                     })
         }
         RecruitmentPolicySource::Mandate {

@@ -325,9 +325,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         println!("\n--- VICE HEAT PROBE ---");
     }
     run_enforcement_attention_probe(&registry, primary_seeds, detail)?;
-    if detail {
-        print_experience_readout(&rush, &press, &recon, true);
-    } else {
+    if !detail {
         println!("[PROBE PASS] enforcement attention");
     }
 
@@ -375,7 +373,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     if detail {
         println!("\n--- RIVAL INTELLIGENCE PROBE ---");
     }
-    rival_intelligence::run_rival_intelligence_probe(
+    let rival_probe = rival_intelligence::run_rival_intelligence_probe(
         &registry,
         primary_seeds,
         detail,
@@ -383,6 +381,16 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     )?;
     if !detail {
         println!("[PROBE PASS] rival intelligence");
+    }
+
+    if detail {
+        print_experience_readout(
+            &rush,
+            &press,
+            &recon,
+            true,
+            rival_probe.actionable_intervention && rival_probe.material_economic_impact,
+        );
     }
 
     if detail {
@@ -426,10 +434,10 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     }
     if detail {
         println!(
-            "Decisions surfaced: rush {}, press {}, recon {}. Police arrivals: rush {}, press {}, recon {}.",
-            rush_aggregate.decisions,
-            press_aggregate.decisions,
-            recon_aggregate.decisions,
+            "Production exception prompts/run: rush {:.2}, press {:.2}, recon {:.2}. Police arrivals: rush {}, press {}, recon {}.",
+            rush_aggregate.decisions as f64 / rush_aggregate.samples as f64,
+            press_aggregate.decisions as f64 / press_aggregate.samples as f64,
+            recon_aggregate.decisions as f64 / recon_aggregate.samples as f64,
             rush_aggregate.police_arrived,
             press_aggregate.police_arrived,
             recon_aggregate.police_arrived,
@@ -526,13 +534,15 @@ mod tests {
     use super::{
         CasingAssessment, DEFAULT_POLICY_SEED, DEFAULT_WORLD_SEED, EvaluationSeeds,
         FixtureVariation, HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions,
-        NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline, SessionRunMode,
-        Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, format_avg_dollars,
-        format_day_minute, format_patrol_windows, parse_options, patrol_intervals_from_signal,
-        play_session, run_enforcement_attention_probe, run_opportunity_portfolio_probe,
+        NARRATIVE_SEED_ROTATION, OpeningStanddownReason, RunMetrics, ScenarioProfile,
+        ScenarioTimeline, SessionRunMode, Strategy, bounded_policy_choice,
+        choose_safe_start_from_patrol_signal, format_avg_dollars, format_day_minute,
+        format_patrol_windows, parse_options, patrol_intervals_from_signal, play_session,
+        run_enforcement_attention_probe, run_opportunity_portfolio_probe,
         run_organizational_capacity_probe, stamp, validate_batch_strategy_coverage,
         validate_branch_financial_isolation, validate_press_witness_counterplay,
-        validate_run_metrics, validate_second_act_evidence, validate_strategy_evidence,
+        validate_run_metrics, validate_second_act_evidence, validate_sensitivity_profile_coverage,
+        validate_strategy_evidence,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
@@ -548,6 +558,71 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn fleeting_window_makes_reconnaissance_pay_a_real_opportunity_cost() {
+        let registry = crimocracy::build_registry();
+        let seeds = EvaluationSeeds::defaults();
+        let timeline =
+            ScenarioTimeline::for_profile(&registry, seeds.policy, ScenarioProfile::FleetingWindow);
+        let burglary_duration = registry
+            .get_operation(crimocracy::operations::OperationKind::Burglary)
+            .execution()
+            .duration();
+        let surveillance_duration = registry
+            .get_operation(crimocracy::operations::OperationKind::Surveillance)
+            .execution()
+            .duration();
+
+        assert!(
+            timeline.initial_burglary_at + burglary_duration
+                < timeline.initial_opportunity_valid_until,
+            "moving immediately must fit inside the fleeting score"
+        );
+        assert!(
+            SimTime::from_minutes(1) + surveillance_duration
+                > timeline.initial_opportunity_valid_until,
+            "full casing must consume the fleeting score's actionable window"
+        );
+
+        let rush = play_session(
+            &registry,
+            Strategy::Rush,
+            ScenarioProfile::FleetingWindow,
+            seeds,
+            SessionRunMode::Batch,
+        )
+        .expect("the fast branch should execute the fleeting score");
+        let recon = play_session(
+            &registry,
+            Strategy::Recon,
+            ScenarioProfile::FleetingWindow,
+            seeds,
+            SessionRunMode::Batch,
+        )
+        .expect("the cautious branch should resolve its information/time tradeoff cleanly");
+
+        assert!(
+            rush.burglary.is_some(),
+            "speed must preserve the opportunity"
+        );
+        assert!(
+            rush.outcome.is_some(),
+            "the fast branch must reach a real production resolution"
+        );
+        assert_eq!(recon.burglary, None);
+        assert!(recon.discovered_surveillance_information >= 2);
+        assert_eq!(
+            recon.opening_standdown_reason,
+            Some(OpeningStanddownReason::OpportunityExpiredDuringCasing)
+        );
+        assert!(
+            recon.opening_scout_terminal_minute >= recon.opening_opportunity_valid_until_minute,
+            "the artifact must show that scouting actually crossed the opportunity deadline"
+        );
+        validate_run_metrics(&recon, true)
+            .expect("timing-driven standdown must remain a valid player outcome");
     }
 
     #[test]
@@ -1000,6 +1075,80 @@ mod tests {
     }
 
     #[test]
+    fn allows_a_safe_start_before_expiry_even_when_completion_is_later() {
+        let signal = patrol_signal(&[(0, 90)]);
+        let chosen = choose_safe_start_from_patrol_signal(
+            SimTime::from_minutes(100),
+            &signal,
+            SimDuration::from_minutes(45),
+            SimDuration::from_minutes(0),
+            SimTime::from_minutes(130),
+        )
+        .expect("production opportunity semantics require start-before-expiry, not finish-before-expiry");
+
+        assert_eq!(chosen, SimTime::from_minutes(120));
+        assert!(
+            chosen + SimDuration::from_minutes(45) > SimTime::from_minutes(130),
+            "the regression must prove the operation is allowed to finish after the opportunity closes"
+        );
+    }
+
+    #[test]
+    fn named_sensitivity_profiles_keep_their_causal_contrast() {
+        let samples = super::MIN_SAMPLES_FOR_VARIATION_CONTRACT;
+        let converged = super::Aggregate {
+            samples,
+            achieved: samples,
+            ..super::Aggregate::default()
+        };
+        validate_sensitivity_profile_coverage(
+            ScenarioProfile::LatePatrol,
+            samples,
+            &converged,
+            &converged,
+            &converged,
+        )
+        .expect("late patrol is a no-pressure convergence control");
+
+        let fast = super::Aggregate {
+            samples,
+            achieved: samples,
+            ..super::Aggregate::default()
+        };
+        let informed_but_late = super::Aggregate {
+            samples,
+            opening_standdowns: samples,
+            opening_timing_standdowns: samples,
+            opening_scout_findings_total: samples * 2,
+            ..super::Aggregate::default()
+        };
+        validate_sensitivity_profile_coverage(
+            ScenarioProfile::FleetingWindow,
+            samples,
+            &fast,
+            &fast,
+            &informed_but_late,
+        )
+        .expect("fleeting window must isolate information's opportunity cost");
+
+        let broken = super::Aggregate {
+            opening_scout_findings_total: 0,
+            ..informed_but_late
+        };
+        assert!(
+            validate_sensitivity_profile_coverage(
+                ScenarioProfile::FleetingWindow,
+                samples,
+                &fast,
+                &fast,
+                &broken,
+            )
+            .is_err(),
+            "timing standdown without actually learning anything must not satisfy the experiment"
+        );
+    }
+
+    #[test]
     fn repeat_take_probe_accepts_production_cent_rounding() {
         super::run_repeat_take_probe(
             &crimocracy::build_registry(),
@@ -1346,6 +1495,7 @@ mod tests {
         opening_abort.opening_scout = Some(persisted_operation_id(90));
         opening_abort.opening_casing_assessment = Some(CasingAssessment::Aborted);
         opening_abort.opening_stood_down = true;
+        opening_abort.opening_standdown_reason = Some(OpeningStanddownReason::CasingRisk);
         opening_abort.second_opportunity_discovered = true;
         opening_abort.second_opportunity_expired = true;
         validate_run_metrics(&opening_abort, false)
@@ -1359,6 +1509,7 @@ mod tests {
         opening_unknown.opening_scout = Some(persisted_operation_id(91));
         opening_unknown.opening_casing_assessment = Some(CasingAssessment::Unknown);
         opening_unknown.opening_stood_down = true;
+        opening_unknown.opening_standdown_reason = Some(OpeningStanddownReason::CasingRisk);
         opening_unknown.second_opportunity_discovered = true;
         opening_unknown.second_opportunity_expired = true;
         validate_run_metrics(&opening_unknown, false)
