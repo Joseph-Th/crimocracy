@@ -65,6 +65,34 @@ fn make_authority_fixture() -> (crate::Registry, AppState, MandateAuthority) {
 }
 
 #[test]
+fn mandate_rejects_standing_order_outside_responsibility_scope() {
+    let (_registry, state, authority) = make_authority_fixture();
+    let error = validate_revise_mandate(
+        &state,
+        authority.mandate,
+        MandateRevisionDraft {
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Finance,
+            )]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::IndependentRecruitment,
+                PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+            )]),
+            budget: None,
+        },
+    )
+    .expect_err("a Finance mandate must not govern Personnel recruitment policy");
+    assert_eq!(
+        error,
+        DelegationError::StandingOrderOutsideScope {
+            policy: PolicyKind::IndependentRecruitment,
+            required_scope: ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
+        }
+    );
+    validate_invariants(&state);
+}
+
+#[test]
 fn organization_policy_versions_advance_only_on_real_changes_and_survive_restore() {
     let (registry, mut state, authority) = make_authority_fixture();
     let organization = state

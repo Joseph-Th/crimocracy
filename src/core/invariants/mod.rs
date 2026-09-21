@@ -250,6 +250,14 @@ pub enum StateValidationError {
         expected: PolicyKind,
         actual: PolicyKind,
     },
+    #[error(
+        "mandate {mandate} standing order {policy:?} requires responsibility scope {required_scope:?}"
+    )]
+    MandatePolicyOutsideScope {
+        mandate: crate::core::id::MandateId,
+        policy: PolicyKind,
+        required_scope: crate::delegation::ResponsibilityScope,
+    },
     #[error("mandate {mandate} has a negative budget limit")]
     NegativeMandateBudget { mandate: MandateId },
     #[error("mandate {mandate} budget account {account} is not owned by its organization")]
@@ -373,6 +381,7 @@ pub enum StateValidationError {
 mod business;
 mod contacts;
 mod decisions;
+mod delegation;
 mod enterprise;
 mod finance;
 mod history;
@@ -389,7 +398,8 @@ mod world;
 
 use self::business::{validate_business_economies, validate_businesses_against_registry};
 use self::contacts::validate_contacts;
-use self::decisions::{validate_decisions, validate_delegation};
+use self::decisions::validate_decisions;
+use self::delegation::validate_delegation;
 use self::enterprise::{validate_enterprises, validate_enterprises_against_registry};
 use self::history::validate_history;
 use self::id_allocators::validate_id_allocators;

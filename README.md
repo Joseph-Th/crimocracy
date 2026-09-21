@@ -47,7 +47,7 @@ Optional Rust diagnostics are deliberately outside the completion lanes:
 .\scripts\rust-diagnostics.cmd Orphans
 .\scripts\rust-diagnostics.cmd MutantsList -File src/enterprises/enterprise_execution/support.rs -Filter validate_enterprise_business_dependencies
 .\scripts\rust-diagnostics.cmd Mutants -File src/core/simulation.rs -Filter draw_index -TestFilter draw_index -Name draw-index
-.\scripts\rust-diagnostics.cmd Expand -Item enterprises
+.\scripts\rust-diagnostics.cmd Expand -Item core::id -Filter OrganizationId -Context 3 -MaxLines 120
 ```
 
 [`TESTING.md`](TESTING.md) owns which lane completes each class of change and what each harness mode proves. [`scripts/verify.ps1`](scripts/verify.ps1) owns the verification gate; [`scripts/verify.cmd`](scripts/verify.cmd) is its wrapper. Verification is local and does not depend on hosted CI.

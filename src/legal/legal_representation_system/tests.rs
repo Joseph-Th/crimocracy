@@ -1247,21 +1247,32 @@ fn mandate_automatic_legal_support_cannot_spend_without_legal_budget_authority()
         .expect("unused mandate revocation should commit");
 
     let payer = fx.payer;
-    assign(
-        &mut fx,
-        BTreeSet::from([ResponsibilityScope::Function(
-            ResponsibilityFunction::Personnel,
-        )]),
-        Some(BudgetAuthority {
-            funding_account: payer,
-            limit: Money::from_cents(50_000),
-            period: BudgetPeriod::Weekly,
-        }),
-    );
-    assert!(
-        apply_automatic_legal_support(&fx.registry, &mut fx.state)
-            .expect("non-Legal mandate scope is not legal spending authority")
-            .is_empty()
+    let error = validate_assign_mandate(
+        &fx.state,
+        MandateDraft {
+            organization: fx.sponsor,
+            manager: supervisor,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            )]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::AssociateLegalSupport,
+                PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+            )]),
+            budget: Some(BudgetAuthority {
+                funding_account: payer,
+                limit: Money::from_cents(50_000),
+                period: BudgetPeriod::Weekly,
+            }),
+        },
+    )
+    .expect_err("a Personnel mandate must not carry Legal standing orders");
+    assert_eq!(
+        error,
+        DelegationError::StandingOrderOutsideScope {
+            policy: PolicyKind::AssociateLegalSupport,
+            required_scope: ResponsibilityScope::Function(ResponsibilityFunction::Legal),
+        }
     );
     assert!(
         fx.state

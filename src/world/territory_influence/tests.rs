@@ -33,6 +33,41 @@ struct InfluenceFixture {
     manager: crate::core::id::CharacterId,
 }
 
+fn assign_district_authority(
+    state: &mut AppState,
+    organization: OrganizationId,
+    neighborhood: NeighborhoodId,
+    manager_name: &str,
+) -> (crate::core::id::CharacterId, MandateId) {
+    let manager = insert_character(
+        state,
+        CharacterDraft {
+            name: manager_name.to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("district manager should validate");
+    let mandate = validate_assign_mandate(
+        state,
+        MandateDraft {
+            organization,
+            manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(neighborhood)]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("district mandate should validate")
+    .commit(state)
+    .expect("district mandate should commit");
+    (manager, mandate)
+}
+
 fn rating(value: u8) -> Rating {
     Rating::try_new(value).expect("fixture rating must be valid")
 }
@@ -258,32 +293,12 @@ fn contested_districts_have_no_economic_leader() {
     let mut fixture = make_influence_fixture();
 
     // A second district-scoped mandate lets the challenger operate here too.
-    let challenger_manager = insert_character(
+    let (challenger_manager, challenger_mandate) = assign_district_authority(
         &mut fixture.state,
-        CharacterDraft {
-            name: "Challenger Lieutenant".to_owned(),
-            organization: Some(fixture.challenger),
-            supervisor: None,
-            autonomy: AutonomyLevel::Delegated,
-            capabilities: BTreeMap::new(),
-            traits: BTreeSet::new(),
-            drives: BTreeMap::new(),
-        },
-    )
-    .expect("challenger manager should validate");
-    let challenger_mandate = validate_assign_mandate(
-        &fixture.state,
-        MandateDraft {
-            organization: fixture.challenger,
-            manager: challenger_manager,
-            scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(fixture.neighborhood)]),
-            standing_orders: BTreeMap::new(),
-            budget: None,
-        },
-    )
-    .expect("challenger mandate should validate")
-    .commit(&mut fixture.state)
-    .expect("challenger mandate should commit");
+        fixture.challenger,
+        fixture.neighborhood,
+        "Challenger Lieutenant",
+    );
 
     for (organization, mandate, manager, name) in [
         (
@@ -330,6 +345,95 @@ fn contested_districts_have_no_economic_leader() {
             "both sides hold exactly one district racket"
         );
     }
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn strict_higher_enterprise_count_replaces_earlier_leader() {
+    let registry = build_registry();
+    let mut fixture = make_influence_fixture();
+    let trailing = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Trailing Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("trailing organization should validate");
+    let (challenger_manager, challenger_mandate) = assign_district_authority(
+        &mut fixture.state,
+        fixture.challenger,
+        fixture.neighborhood,
+        "Challenger Lieutenant",
+    );
+    let (trailing_manager, trailing_mandate) = assign_district_authority(
+        &mut fixture.state,
+        trailing,
+        fixture.neighborhood,
+        "Trailing Lieutenant",
+    );
+
+    for (organization, mandate, manager, venue_names) in [
+        (
+            fixture.dominant,
+            fixture.mandate,
+            fixture.manager,
+            &["Dominant Hall"][..],
+        ),
+        (
+            fixture.challenger,
+            challenger_mandate,
+            challenger_manager,
+            &["Challenger Hall", "Challenger Annex"][..],
+        ),
+        (
+            trailing,
+            trailing_mandate,
+            trailing_manager,
+            &["Trailing Hall"][..],
+        ),
+    ] {
+        for name in venue_names {
+            let venue = insert_venue(
+                &registry,
+                &mut fixture.state,
+                name,
+                fixture.neighborhood,
+                BusinessOwner::Organization(organization),
+                hospitality_functions(),
+            );
+            establish_gambling_at_venue(
+                &registry,
+                &mut fixture.state,
+                organization,
+                mandate,
+                manager,
+                venue,
+            );
+        }
+    }
+
+    let summary = resolve_neighborhood_influence(&fixture.state, fixture.neighborhood)
+        .expect("influence should resolve");
+    assert_eq!(
+        summary
+            .standings
+            .iter()
+            .map(|standing| (standing.organization, standing.active_enterprises))
+            .collect::<Vec<_>>(),
+        vec![
+            (fixture.dominant, 1),
+            (fixture.challenger, 2),
+            (trailing, 1),
+        ],
+        "fixture must exercise a later strict leader followed by a lower trailing standing"
+    );
+    assert_eq!(
+        summary.economic_leader(),
+        Some(fixture.challenger),
+        "the unique highest enterprise count must replace an earlier lower-count leader"
+    );
     validate_invariants(&fixture.state);
 }
 

@@ -572,6 +572,7 @@ fn make_test_scenario() -> TestScenario {
             scopes: BTreeSet::from([
                 ResponsibilityScope::Neighborhood(south_ward),
                 ResponsibilityScope::Function(ResponsibilityFunction::Operations),
+                ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
             ]),
             standing_orders: BTreeMap::from([(
                 PolicyKind::IndependentRecruitment,

@@ -42,31 +42,20 @@ impl NeighborhoodInfluenceSummary {
     /// ties between two or more organizations — have no leader, because territory is
     /// contested rather than shared by default.
     pub fn economic_leader(&self) -> Option<OrganizationId> {
-        let mut leader: Option<(u32, OrganizationId)> = None;
-        let mut tied = false;
+        let mut best_count = 0;
+        let mut leader = None;
         for standing in &self.standings {
             let count = standing.active_enterprises;
-            if count == 0 {
-                continue;
-            }
-            match leader {
-                None => {
-                    leader = Some((count, standing.organization));
-                    tied = false;
+            match count.cmp(&best_count) {
+                std::cmp::Ordering::Greater => {
+                    best_count = count;
+                    leader = Some(standing.organization);
                 }
-                Some((best_count, _)) if best_count < count => {
-                    leader = Some((count, standing.organization));
-                    tied = false;
-                }
-                Some((best_count, _)) if best_count == count => tied = true,
-                Some(_) => {}
+                std::cmp::Ordering::Equal => leader = None,
+                std::cmp::Ordering::Less => {}
             }
         }
-        if tied {
-            None
-        } else {
-            leader.map(|(_, organization)| organization)
-        }
+        leader
     }
 }
 

@@ -107,9 +107,14 @@ No bypasses. If you are constructing a `*Record` literal, stop — use the owner
 ## 4. Change recipe — 7 concrete steps
 
 1. **Locate the owner.** Find the `AppState` field (`src/core/state.rs`) and the
-   `ARCHITECTURE.md` source map. Read the `//!` header of that `src/*/mod.rs`.
+   `ARCHITECTURE.md` source map. Read the `//!` header of that `src/*/mod.rs`. If the
+   route is still ambiguous inside a large domain, use bounded `rust-diagnostics Modules`
+   with a crate-qualified `-Focus` before widening source search.
 2. **Read the focused tests.** Open `src/<owner>/tests.rs` first, falling back to `#[cfg(test)]`
-   in the owning `*_system.rs`. They are the executable contract.
+   in the owning `*_system.rs`. They are the executable contract. For a consequential branch
+   whose assertions may not distinguish nearby wrong behavior, use `MutantsList` and then a
+   narrow `Mutants` selection to decide whether a regression test is actually missing; do not
+   sweep unrelated code or optimize a mutation score.
 3. **Name the canonical operation.** Search for `validate_*` or `decide_*` in the
    owner's `*_system.rs`. Do not invent `create_*`/`make_*`/`execute_*`.
 4. **Implement through the owner.** Validate before mutation; commit atomically;
@@ -121,7 +126,9 @@ No bypasses. If you are constructing a `*Record` literal, stop — use the owner
    `enterprise_rng_mut()` via `draw_index`. Do not add randomness merely to break ties.
 6. **Preserve persistence.** Every future-affecting value must survive `build_save` →
    `restore_save` (`src/core/persistence.rs`). Add `#[derive(Serialize,Deserialize)]`
-   and a round-trip test if you add state.
+   and a round-trip test if you add state. When correctness depends on a macro or derive you
+   cannot verify from source syntax alone, use bounded `rust-diagnostics Expand` on the
+   containing module with `-Filter` rather than guessing what was generated.
 7. **Prove it with the narrowest lane** in [`TESTING.md`](TESTING.md), then run the
    completion lane required for the changed surface.
    Update the single authority document whose contract you changed.

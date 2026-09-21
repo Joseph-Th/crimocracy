@@ -430,6 +430,173 @@ fn restore_rejects_historical_budget_usage_with_non_authored_window() {
 }
 
 #[test]
+fn restore_rejects_historical_budget_usage_whose_funding_account_could_not_authorize_it() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+    let transaction = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Historical funding-account persistence fixture".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-500),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(500),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("budgeted transaction should validate")
+    .commit(&mut state)
+    .expect("budgeted transaction should commit");
+
+    let mandate_record = state
+        .delegation()
+        .get_mandate(mandate)
+        .expect("mandate should exist");
+    let organization = mandate_record.organization();
+    let scopes = mandate_record.scopes().clone();
+    let standing_orders = mandate_record.standing_orders().clone();
+    let current_budget = mandate_record.budget().expect("mandate should have budget");
+    let replacement_funding = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("replacement funding account should validate");
+    validate_revise_mandate(
+        &state,
+        mandate,
+        MandateRevisionDraft {
+            scopes,
+            standing_orders,
+            budget: Some(BudgetAuthority {
+                funding_account: replacement_funding,
+                limit: current_budget.limit,
+                period: current_budget.period,
+            }),
+        },
+    )
+    .expect("funding revision should make the transaction historical")
+    .commit(&mut state)
+    .expect("funding revision should commit");
+
+    let account = state
+        .finance()
+        .get_account(funding)
+        .expect("historical funding account should persist");
+    let mut corrupted = account_wire(account);
+    corrupted.kind = AccountKind::StreetCash;
+
+    let registry = build_registry();
+    let error = restore_save(
+        &registry,
+        replace_serialized_account(
+            build_save(&registry, &state)
+                .expect("valid revised state should save before corruption"),
+            account,
+            &corrupted,
+        ),
+    )
+    .expect_err("historical delegated spending cannot originate from street cash");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBudgetUsage {
+                transaction: invalid
+            }
+        ) if invalid == transaction
+    ));
+}
+
+#[test]
+fn restore_rejects_historical_budget_usage_with_missing_scope_entity() {
+    let (mut state, authorization, funding, destination) = make_test_budget();
+    let mandate = authorization.mandate;
+    let transaction = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Historical scope persistence fixture".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-500),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(500),
+                },
+            ],
+            authorization: Some(authorization),
+        },
+    )
+    .expect("budgeted transaction should validate")
+    .commit(&mut state)
+    .expect("budgeted transaction should commit");
+
+    let mandate_record = state
+        .delegation()
+        .get_mandate(mandate)
+        .expect("mandate should exist");
+    let current_budget = mandate_record.budget().expect("mandate should have budget");
+    validate_revise_mandate(
+        &state,
+        mandate,
+        MandateRevisionDraft {
+            scopes: mandate_record.scopes().clone(),
+            standing_orders: mandate_record.standing_orders().clone(),
+            budget: Some(BudgetAuthority {
+                funding_account: current_budget.funding_account,
+                limit: current_budget.limit,
+                period: BudgetPeriod::Daily,
+            }),
+        },
+    )
+    .expect("cadence revision should make the transaction historical")
+    .commit(&mut state)
+    .expect("cadence revision should commit");
+
+    let record = state
+        .finance()
+        .get_transaction(transaction)
+        .expect("historical transaction should persist");
+    let mut corrupted = transaction_wire(record);
+    corrupted
+        .budget_usage
+        .as_mut()
+        .expect("delegated transaction should carry budget usage")
+        .scope = ResponsibilityScope::Business(crate::core::id::BusinessId::from_raw(900_000));
+
+    let registry = build_registry();
+    let error = restore_save(
+        &registry,
+        replace_serialized_transaction(
+            build_save(&registry, &state)
+                .expect("valid revised state should save before corruption"),
+            record,
+            &corrupted,
+        ),
+    )
+    .expect_err("historical delegated spending cannot reference a nonexistent scope entity");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidBudgetUsage {
+                transaction: invalid
+            }
+        ) if invalid == transaction
+    ));
+}
+
+#[test]
 fn restore_rejects_backdated_ledger_transaction() {
     let registry = build_registry();
     let (mut state, _, funding, destination) = make_test_budget();

@@ -6,6 +6,9 @@ use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::delegation::BudgetPeriod;
+use crate::delegation::delegation_system::{
+    validate_budget_funding_account, validate_responsibility_scope_liveness,
+};
 use crate::finance::{BudgetUsageRecord, FinancialAccountRecord, LedgerTransactionRecord, Money};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -216,6 +219,14 @@ fn validate_budget_usage(
             entity: EntityRef::FinancialAccount(usage.funding_account()),
         });
     }
+    // These facts do not change when a mandate is revised: a historical delegated spend still
+    // had to use an organization-owned accounted-funds account and a live responsibility scope.
+    // Reuse delegation's canonical rules rather than weakening old-version records merely
+    // because their exact limit/cadence configuration is no longer retained.
+    let historical_authority_references_are_valid =
+        validate_budget_funding_account(state, mandate.organization(), usage.funding_account())
+            .is_ok()
+            && validate_responsibility_scope_liveness(state, usage.scope()).is_ok();
     let expected_outflow = usage.amount().cents().checked_neg();
     let matching_posting = expected_outflow.is_some_and(|expected| {
         transaction.postings().iter().any(|posting| {
@@ -252,6 +263,7 @@ fn validate_budget_usage(
         || usage.mandate_version() > mandate.version()
         || (usage.mandate_version() == mandate.version()
             && !mandate.scopes().contains(&usage.scope()))
+        || !historical_authority_references_are_valid
         || !current_budget_matches
         || usage.period_start() >= usage.period_end()
         || !is_authored_budget_window(

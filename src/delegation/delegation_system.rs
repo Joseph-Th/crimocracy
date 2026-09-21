@@ -1,8 +1,8 @@
 //! Mandate validation, lifecycle transactions, and policy resolution; sibling delegation state owns synchronized indexes.
 
 use crate::core::id::{
-    ArrestId, BusinessId, CharacterId, EnterpriseId, IdExhaustionError, MandateId, NeighborhoodId,
-    OrganizationId,
+    ArrestId, BusinessId, CharacterId, EnterpriseId, FinancialAccountId, IdExhaustionError,
+    MandateId, NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
@@ -13,7 +13,7 @@ use crate::decisions::decision_system::{
 };
 use crate::delegation::{
     BudgetAuthority, MandateAuthority, MandateDraft, MandateRecord, MandateStatus,
-    ResolvedMandateAuthority, ResponsibilityScope, build_mandate_record,
+    ResolvedMandateAuthority, ResponsibilityFunction, ResponsibilityScope, build_mandate_record,
 };
 use crate::finance::FinancialOwner;
 use crate::registry::Registry;
@@ -53,6 +53,11 @@ pub enum DelegationError {
     PolicyKindMismatch {
         expected: PolicyKind,
         actual: PolicyKind,
+    },
+    #[error("standing order {policy:?} requires mandate scope {required_scope:?}")]
+    StandingOrderOutsideScope {
+        policy: PolicyKind,
+        required_scope: ResponsibilityScope,
     },
     #[error("budget limit must not be negative")]
     NegativeBudgetLimit,
@@ -344,7 +349,7 @@ impl ValidatedMandateRevision {
         // Revalidate budget and scope liveness that could have changed between validation
         // and commit, sharing the exact validation-phase rules.
         validate_scope_liveness(state, &self.draft.scopes)?;
-        validate_standing_orders(&self.draft.standing_orders)?;
+        validate_standing_orders(&self.draft.scopes, &self.draft.standing_orders)?;
         validate_budget_authority(state, self.organization, self.draft.budget)?;
         if !self.approval_cancellations.is_current(state) {
             return Err(DelegationError::RecruitmentApprovalSetChanged(self.mandate));
@@ -694,31 +699,71 @@ fn validate_manager_snapshot(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResponsibilityScopeLivenessError {
+    MissingNeighborhood(NeighborhoodId),
+    MissingBusiness(BusinessId),
+}
+
+impl From<ResponsibilityScopeLivenessError> for DelegationError {
+    fn from(error: ResponsibilityScopeLivenessError) -> Self {
+        match error {
+            ResponsibilityScopeLivenessError::MissingNeighborhood(id) => {
+                Self::MissingNeighborhood(id)
+            }
+            ResponsibilityScopeLivenessError::MissingBusiness(id) => Self::MissingBusiness(id),
+        }
+    }
+}
+
 fn validate_scope_liveness(
     state: &AppState,
     scopes: &BTreeSet<ResponsibilityScope>,
 ) -> Result<(), DelegationError> {
     for scope in scopes {
-        match scope {
-            ResponsibilityScope::Neighborhood(id) => {
-                let _ = state
-                    .world
-                    .get_neighborhood(*id)
-                    .ok_or(DelegationError::MissingNeighborhood(*id))?;
-            }
-            ResponsibilityScope::Business(id) => {
-                let _ = state
-                    .world
-                    .get_business(*id)
-                    .ok_or(DelegationError::MissingBusiness(*id))?;
-            }
-            ResponsibilityScope::Function(_) => {}
-        }
+        validate_responsibility_scope_liveness(state, *scope)?;
     }
     Ok(())
 }
 
+/// Canonical liveness rule for one delegated responsibility scope. Historical authority
+/// records may outlive later mandate revisions, but they may never point at a world entity that
+/// does not exist in the current-version state.
+pub(crate) fn validate_responsibility_scope_liveness(
+    state: &AppState,
+    scope: ResponsibilityScope,
+) -> Result<(), ResponsibilityScopeLivenessError> {
+    match scope {
+        ResponsibilityScope::Neighborhood(id) => {
+            let _ = state
+                .world
+                .get_neighborhood(id)
+                .ok_or(ResponsibilityScopeLivenessError::MissingNeighborhood(id))?;
+        }
+        ResponsibilityScope::Business(id) => {
+            let _ = state
+                .world
+                .get_business(id)
+                .ok_or(ResponsibilityScopeLivenessError::MissingBusiness(id))?;
+        }
+        ResponsibilityScope::Function(_) => {}
+    }
+    Ok(())
+}
+
+pub(crate) const fn required_scope_for_policy(kind: PolicyKind) -> ResponsibilityScope {
+    match kind {
+        PolicyKind::IndependentRecruitment => {
+            ResponsibilityScope::Function(ResponsibilityFunction::Personnel)
+        }
+        PolicyKind::AssociateLegalSupport => {
+            ResponsibilityScope::Function(ResponsibilityFunction::Legal)
+        }
+    }
+}
+
 fn validate_standing_orders(
+    scopes: &BTreeSet<ResponsibilityScope>,
     standing_orders: &BTreeMap<PolicyKind, PolicySetting>,
 ) -> Result<(), DelegationError> {
     for (kind, setting) in standing_orders {
@@ -728,8 +773,22 @@ fn validate_standing_orders(
                 actual: setting.kind(),
             });
         }
+        let required_scope = required_scope_for_policy(*kind);
+        if !scopes.contains(&required_scope) {
+            return Err(DelegationError::StandingOrderOutsideScope {
+                policy: *kind,
+                required_scope,
+            });
+        }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BudgetFundingAccountError {
+    Missing(FinancialAccountId),
+    OwnerMismatch(FinancialAccountId),
+    InvalidKind(FinancialAccountId),
 }
 
 fn validate_budget_authority(
@@ -741,22 +800,45 @@ fn validate_budget_authority(
         if budget.limit.cents() < 0 {
             return Err(DelegationError::NegativeBudgetLimit);
         }
-        let account = state.finance.get_account(budget.funding_account).ok_or(
-            DelegationError::MissingBudgetAccount(budget.funding_account),
+        validate_budget_funding_account(state, organization, budget.funding_account).map_err(
+            |error| match error {
+                BudgetFundingAccountError::Missing(account) => {
+                    DelegationError::MissingBudgetAccount(account)
+                }
+                BudgetFundingAccountError::OwnerMismatch(account) => {
+                    DelegationError::BudgetAccountOwnerMismatch {
+                        account,
+                        organization,
+                    }
+                }
+                BudgetFundingAccountError::InvalidKind(account) => {
+                    DelegationError::InvalidBudgetAccountKind(account)
+                }
+            },
         )?;
-        if account.owner() != FinancialOwner::Organization(organization) {
-            return Err(DelegationError::BudgetAccountOwnerMismatch {
-                account: budget.funding_account,
-                organization,
-            });
-        }
-        // Mandate budgets are accounted-wealth budgets: street or concealed cash cannot
-        // fund delegated authority directly; it must be laundered first.
-        if account.kind() != crate::finance::AccountKind::AccountedFunds {
-            return Err(DelegationError::InvalidBudgetAccountKind(
-                budget.funding_account,
-            ));
-        }
+    }
+    Ok(())
+}
+
+/// Canonical funding-account rule shared by live mandate validation and persistence invariants.
+/// Budget history remains meaningful after mandate revisions only if its immutable account still
+/// has the ownership and money type that could have authorized the spend originally.
+pub(crate) fn validate_budget_funding_account(
+    state: &AppState,
+    organization: OrganizationId,
+    funding_account: FinancialAccountId,
+) -> Result<(), BudgetFundingAccountError> {
+    let account = state
+        .finance
+        .get_account(funding_account)
+        .ok_or(BudgetFundingAccountError::Missing(funding_account))?;
+    if account.owner() != FinancialOwner::Organization(organization) {
+        return Err(BudgetFundingAccountError::OwnerMismatch(funding_account));
+    }
+    // Mandate budgets are accounted-wealth budgets: street or concealed cash cannot
+    // fund delegated authority directly; it must be laundered first.
+    if account.kind() != crate::finance::AccountKind::AccountedFunds {
+        return Err(BudgetFundingAccountError::InvalidKind(funding_account));
     }
     Ok(())
 }
@@ -772,7 +854,7 @@ fn validate_mandate_content(
         return Err(DelegationError::NoScopes);
     }
     validate_scope_liveness(state, scopes)?;
-    validate_standing_orders(standing_orders)?;
+    validate_standing_orders(scopes, standing_orders)?;
     validate_budget_authority(state, organization, budget)
 }
 

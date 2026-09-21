@@ -21,7 +21,11 @@ param(
     [ValidateRange(1, 8)]
     [int]$Jobs = 2,
 
-    [string]$Item = ""
+    [string]$Item = "",
+    [ValidateRange(0, 20)]
+    [int]$Context = 4,
+    [ValidateRange(20, 500)]
+    [int]$MaxLines = 200
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +36,74 @@ function Invoke-CargoDiagnostic {
     & cargo @Arguments
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
+    }
+}
+
+function Get-CargoDiagnosticOutput {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    $output = @(& cargo @Arguments)
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    return $output
+}
+
+function Write-BoundedExpandedOutput {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Lines,
+        [string]$Pattern = "",
+        [int]$SurroundingLines = 4,
+        [int]$LineLimit = 200
+    )
+
+    if (-not $Pattern) {
+        $count = [Math]::Min($Lines.Count, $LineLimit)
+        for ($index = 0; $index -lt $count; $index++) {
+            Write-Output $Lines[$index]
+        }
+        if ($Lines.Count -gt $LineLimit) {
+            Write-Host "... expansion truncated at $LineLimit lines; pass -Filter <regex> or call cargo expand directly for an intentional full dump." -ForegroundColor DarkGray
+        }
+        return
+    }
+
+    $selected = @{}
+    for ($index = 0; $index -lt $Lines.Count; $index++) {
+        if ([string]$Lines[$index] -notmatch $Pattern) {
+            continue
+        }
+        $start = [Math]::Max(0, $index - $SurroundingLines)
+        $end = [Math]::Min($Lines.Count - 1, $index + $SurroundingLines)
+        for ($contextIndex = $start; $contextIndex -le $end; $contextIndex++) {
+            $selected[$contextIndex] = $true
+        }
+    }
+    if ($selected.Count -eq 0) {
+        throw "Expand filter '$Pattern' matched no generated lines."
+    }
+
+    $indices = @($selected.Keys | Sort-Object)
+    $printed = 0
+    $emittedIndices = 0
+    $previous = -2
+    foreach ($index in $indices) {
+        if ($printed -ge $LineLimit) {
+            break
+        }
+        if ($index -gt ($previous + 1)) {
+            Write-Output "..."
+            $printed += 1
+            if ($printed -ge $LineLimit) {
+                break
+            }
+        }
+        Write-Output $Lines[$index]
+        $printed += 1
+        $emittedIndices += 1
+        $previous = $index
+    }
+    if ($emittedIndices -lt $indices.Count) {
+        Write-Host "... filtered expansion truncated at $LineLimit lines; narrow -Filter or increase -MaxLines deliberately." -ForegroundColor DarkGray
     }
 }
 
@@ -94,6 +166,7 @@ switch ($Mode) {
         if (-not $Item) {
             throw "Expand requires -Item <module::item>."
         }
-        Invoke-CargoDiagnostic @("expand", "--lib", $Item)
+        $expanded = @(Get-CargoDiagnosticOutput @("expand", "--lib", $Item))
+        Write-BoundedExpandedOutput -Lines $expanded -Pattern $Filter -SurroundingLines $Context -LineLimit $MaxLines
     }
 }

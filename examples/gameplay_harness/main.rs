@@ -452,10 +452,10 @@ mod tests {
         NARRATIVE_SEED_ROTATION, RunMetrics, ScenarioProfile, ScenarioTimeline, SessionRunMode,
         Strategy, bounded_policy_choice, choose_safe_start_from_patrol_signal, format_avg_dollars,
         format_day_minute, format_patrol_windows, parse_options, patrol_intervals_from_signal,
-        play_session, run_enforcement_attention_probe, run_opportunity_portfolio_probe, run_smoke,
-        stamp, validate_batch_strategy_coverage, validate_branch_financial_isolation,
-        validate_press_witness_counterplay, validate_run_metrics, validate_second_act_evidence,
-        validate_strategy_evidence,
+        play_session, run_enforcement_attention_probe, run_opportunity_portfolio_probe,
+        run_organizational_capacity_probe, run_smoke, stamp, validate_batch_strategy_coverage,
+        validate_branch_financial_isolation, validate_press_witness_counterplay,
+        validate_run_metrics, validate_second_act_evidence, validate_strategy_evidence,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
@@ -909,6 +909,15 @@ mod tests {
     fn portfolio_probe_requires_explicit_opportunity_prioritization() {
         run_opportunity_portfolio_probe(&crimocracy::build_registry(), EvaluationSeeds::defaults())
             .expect("portfolio probe should preserve selected and expired opportunities");
+    }
+
+    #[test]
+    fn organizational_capacity_probe_keeps_recruitment_order_within_mandate_scope() {
+        run_organizational_capacity_probe(
+            &crimocracy::build_registry(),
+            EvaluationSeeds::defaults(),
+        )
+        .expect("capacity probe mandate revision must keep standing orders inside its authority");
     }
 
     #[test]

@@ -7,6 +7,7 @@ use crimocracy::core::state::AppState;
 use crimocracy::core::time::{SimDuration, SimTime};
 use crimocracy::delegation::delegation_system::MandateRevisionDraft;
 use crimocracy::delegation::delegation_system::validate_revise_mandate;
+use crimocracy::delegation::{ResponsibilityFunction, ResponsibilityScope};
 use crimocracy::finance::finance_system::{insert_account, validate_record_transaction};
 use crimocracy::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
@@ -1446,9 +1447,10 @@ pub fn run_organizational_capacity_probe(
         released_start.as_minutes(),
         terminal_label(&second_metrics),
     );
-    // Prove delegation lifecycle is not stale: revise the player's mandate to add a standing
-    // order, verify the version advances, then ensure state remains valid. This exercises
-    // the canonical revise path that earlier harness iterations never touched.
+    // Prove delegation lifecycle is not stale: extend the player's mandate with Personnel
+    // authority and its matching recruitment standing order, verify the version advances, then
+    // ensure state remains valid. Standing orders are scoped authority, so the probe must not
+    // manufacture an order the mandate is structurally unable to exercise.
     let player_mandate = scenario
         .state
         .delegation()
@@ -1461,6 +1463,10 @@ pub fn run_organizational_capacity_probe(
         .get_mandate(player_mandate)
         .expect("mandate record must persist");
     let prior_version = mandate_record.version();
+    let mut revised_scopes = mandate_record.scopes().clone();
+    revised_scopes.insert(ResponsibilityScope::Function(
+        ResponsibilityFunction::Personnel,
+    ));
     let mut revised_orders = mandate_record.standing_orders().clone();
     revised_orders.insert(
         PolicyKind::IndependentRecruitment,
@@ -1470,7 +1476,7 @@ pub fn run_organizational_capacity_probe(
         &scenario.state,
         player_mandate,
         MandateRevisionDraft {
-            scopes: mandate_record.scopes().clone(),
+            scopes: revised_scopes,
             standing_orders: revised_orders,
             budget: mandate_record.budget(),
         },

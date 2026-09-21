@@ -1150,12 +1150,10 @@ fn resolve_automatic_legal_support_authority(
         .delegation
         .get_mandate(mandate)
         .expect("resolved mandate policy must reference a live mandate");
-    // A mandate standing order can decide only inside authority the mandate actually grants.
-    // Legal retention also spends money, so a mandate with no Legal scope or no budget cannot
-    // turn an organization-level CaseByCase policy into unrestricted spending.
-    if !mandate_record.scopes().contains(&legal_scope) || mandate_record.budget().is_none() {
-        return None;
-    }
+    // Delegation already guarantees that an AssociateLegalSupport standing order carries
+    // Legal scope. Legal retention adds the distinct spending prerequisite: a mandate-sourced
+    // automatic policy still needs an explicit budget.
+    mandate_record.budget()?;
     Some(MandateAuthority {
         mandate,
         manager: supervisor,

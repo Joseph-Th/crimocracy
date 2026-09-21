@@ -27,6 +27,12 @@ use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
+use crate::legal::arrest_system::validate_arrest;
+use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+use crate::legal::{
+    Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
+    InvestigationDraft,
+};
 use crate::recruitment::autonomous_recruitment::{
     AutonomousRecruitmentError, apply_due_autonomous_recruitment,
 };
@@ -595,6 +601,166 @@ fn delegated_broad_manager_attempts_recruitment_on_authored_cadence() {
             .is_empty()
     );
     validate_state(&fixture.state).expect("autonomous recruitment state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn detained_delegated_manager_does_not_attempt_autonomous_recruitment() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+    let police = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Recruitment Custody Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("custody authority should validate");
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Recruiter custody test".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.recruiter)]),
+        },
+    )
+    .expect("recruiter investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("recruiter investigation should commit");
+    let mut evidence = BTreeSet::new();
+    for kind in [EvidenceKind::Document, EvidenceKind::Fingerprint] {
+        let id = validate_add_evidence(
+            &fixture.state,
+            EvidenceDraft {
+                investigation,
+                custodian: police,
+                subject: EntityRef::Character(fixture.recruiter),
+                origin: None,
+                kind,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: fixture.state.now(),
+            },
+        )
+        .expect("recruiter custody evidence should validate")
+        .commit(&mut fixture.state)
+        .expect("recruiter custody evidence should commit");
+        evidence.insert(id);
+    }
+    validate_arrest(
+        &registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.recruiter,
+            investigation,
+            evidence,
+        },
+    )
+    .expect("delegated recruiter arrest should validate")
+    .commit(&mut fixture.state)
+    .expect("delegated recruiter arrest should commit");
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.recruiter)
+            .is_some(),
+        "fixture must prove custody independently of autonomy"
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("custody should make the manager ineligible rather than fail the pass");
+    assert!(outcome.attempts.is_empty());
+    assert!(outcome.approval_requests.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .organization(),
+        Some(fixture.source)
+    );
+    validate_state(&fixture.state).expect("detained-manager recruitment state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn guided_manager_with_personnel_mandate_does_not_attempt_autonomous_recruitment() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let guided_manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Guided Personnel Manager".to_owned(),
+            organization: Some(fixture.target),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(CapabilityKind::Negotiation, rating(90))]),
+            traits: BTreeSet::from([TraitKind::Charismatic]),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("guided manager should validate");
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        guided_manager,
+        relationship(95, 95, 0, 80, 15, 0, 50),
+    )
+    .expect("guided manager relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("guided manager relationship should commit");
+    validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: fixture.target,
+            manager: guided_manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            )]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::IndependentRecruitment,
+                PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+            )]),
+            budget: None,
+        },
+    )
+    .expect("guided manager personnel mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("guided manager personnel mandate should commit");
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(guided_manager)
+            .is_none(),
+        "fixture must prove autonomy independently of custody"
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("guided managers should be skipped without failing the pass");
+    assert!(outcome.attempts.is_empty());
+    assert!(outcome.approval_requests.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .organization(),
+        Some(fixture.source)
+    );
+    validate_state(&fixture.state).expect("guided-manager recruitment state should validate");
     validate_invariants(&fixture.state);
 }
 
