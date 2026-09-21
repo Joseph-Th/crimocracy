@@ -13,8 +13,9 @@ use crimocracy::intelligence::{
 };
 use crimocracy::operations::operation_system::validate_authorize_operation;
 use crimocracy::operations::{
-    OperationApproach, OperationDraft, OperationExposureLevel, OperationKind, OperationObjective,
-    OperationObjectiveOutcome, OperationStatus, RoleKind,
+    OperationApproach, OperationConstraint, OperationContingency, OperationDraft,
+    OperationExposureLevel, OperationKind, OperationObjective, OperationObjectiveOutcome,
+    OperationStatus, RoleKind,
 };
 use crimocracy::registry::Registry;
 use serde::Serialize;
@@ -81,6 +82,8 @@ struct InterventionEvidence {
     outcome: Option<OperationObjectiveOutcome>,
     exposure: Option<OperationExposureLevel>,
     planning_information: BTreeSet<InformationId>,
+    constraints: Vec<OperationConstraint>,
+    contingencies: Vec<OperationContingency>,
     after_action: Option<Observation>,
 }
 
@@ -161,7 +164,7 @@ pub fn run_rival_intelligence_probe(
                 intervention.planning_information,
             );
             println!(
-                "[INTERVENE] {:?} -> Business({:?}), {:?}, outcome {:?}, exposure {:?}; scheduled {}, terminal {}.",
+                "[INTERVENE] {:?} -> Business({:?}), {:?}, outcome {:?}, exposure {:?}; scheduled {}, terminal {}; plan requires local police intelligence and aborts on a pre-entry police arrival.",
                 intervention.operation,
                 intervention.target,
                 intervention.status,
@@ -465,8 +468,10 @@ fn run_intervention(
                 (RoleKind::EntrySpecialist, scenario.burglar),
             ]),
             intelligence: planning_information.clone(),
-            constraints: Vec::new(),
-            contingencies: Vec::new(),
+            constraints: vec![OperationConstraint::RequireIntelligenceTopic(
+                InformationTopic::PoliceActivity,
+            )],
+            contingencies: vec![OperationContingency::AbortOnPoliceArrivalBeforeEntry],
             scheduled_for,
         },
     )?
@@ -486,6 +491,8 @@ fn run_intervention(
     let outcome = resolution.map(|result| result.objective_outcome());
     let exposure = resolution.map(|result| result.exposure().level());
     let terminal_minute = scenario.state.now().as_minutes();
+    let constraints = record.constraints().to_vec();
+    let contingencies = record.contingencies().to_vec();
 
     Ok(InterventionEvidence {
         location_source,
@@ -497,6 +504,8 @@ fn run_intervention(
         outcome,
         exposure,
         planning_information,
+        constraints,
+        contingencies,
         after_action,
     })
 }
@@ -720,6 +729,18 @@ mod tests {
             intervention.planning_information,
             BTreeSet::from([patrol.information]),
             "focused local police intelligence is the only attached sabotage planning fact"
+        );
+        assert_eq!(
+            intervention.constraints,
+            vec![OperationConstraint::RequireIntelligenceTopic(
+                InformationTopic::PoliceActivity
+            )],
+            "the demonstration must make the observed local police pattern a real authorization prerequisite"
+        );
+        assert_eq!(
+            intervention.contingencies,
+            vec![OperationContingency::AbortOnPoliceArrivalBeforeEntry],
+            "the intervention must preserve a standing safety reaction rather than silently absorbing a pre-entry police arrival"
         );
         assert_eq!(intervention.status, OperationStatus::Completed);
         assert_ne!(
