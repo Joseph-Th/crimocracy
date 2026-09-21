@@ -13,7 +13,7 @@ mod recruitment;
 use crate::registry::{InformationQualityDefinition, Registry, RegistryBuilder};
 use crate::world::{ALL_CAPABILITY_KINDS, ALL_DRIVE_KINDS, ALL_TRAIT_KINDS};
 
-pub const CURRENT_CONTENT_REVISION: u32 = 53;
+pub const CURRENT_CONTENT_REVISION: u32 = 54;
 
 const INFORMATION_QUALITY: InformationQualityDefinition = InformationQualityDefinition {
     unknown_reliability: 20,

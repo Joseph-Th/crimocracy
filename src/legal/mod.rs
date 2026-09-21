@@ -8,7 +8,7 @@
 //! re-exports the exact public surface used by `crate::legal::*` consumers.
 
 pub mod arrest_system;
-pub mod case_knowledge;
+pub(crate) mod case_knowledge;
 pub mod informant_system;
 pub mod investigation_system;
 pub mod investigation_work_execution;

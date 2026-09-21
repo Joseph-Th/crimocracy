@@ -161,7 +161,9 @@ pub(super) fn validate_enterprise_business_dependencies(
         return Ok(());
     }
     let mut available = BTreeSet::new();
-    if let EnterpriseLocation::Business(business_id) = location {
+    if definition.network_mode() == crate::registry::EnterpriseNetworkMode::HostMayContribute
+        && let EnterpriseLocation::Business(business_id) = location
+    {
         let business = state
             .world
             .get_business(business_id)

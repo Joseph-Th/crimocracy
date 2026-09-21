@@ -22,8 +22,95 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+struct SequenceRng {
+    draws: std::collections::VecDeque<u64>,
+}
+
+impl SequenceRng {
+    fn new(draws: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            draws: draws.into_iter().collect(),
+        }
+    }
+}
+
+impl rand_core::RngCore for SequenceRng {
+    fn next_u32(&mut self) -> u32 {
+        u32::try_from(self.next_u64() & u64::from(u32::MAX))
+            .expect("masked deterministic draw must fit u32")
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.draws
+            .pop_front()
+            .expect("deterministic RNG fixture exhausted")
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        rand_core::impls::fill_bytes_via_next(self, dest);
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
 fn test_rating(value: u8) -> Rating {
     Rating::try_new(value).expect("simulation test rating must be valid")
+}
+
+#[test]
+fn draw_index_maps_the_accepted_domain_in_stable_modulo_order() {
+    let mut rng = SequenceRng::new([0, 1, 2, 3, 4, 5]);
+    let actual = (0..6)
+        .map(|_| draw_index(&mut rng, 3).expect("nonempty choice set should draw"))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, vec![0, 1, 2, 0, 1, 2]);
+}
+
+#[test]
+fn draw_index_accepts_high_power_of_two_domain_values_without_redraw() {
+    // A two-choice range uses a rejection zone of u64::MAX - 1. This high odd value is still
+    // inside the accepted domain and therefore maps to choice one without consuming the next
+    // RNG value. It directly constrains the rejection-zone subtraction instead of relying on
+    // unrelated simulation behavior to notice arithmetic drift.
+    let mut rng = SequenceRng::new([u64::MAX - 2, 0]);
+    assert_eq!(
+        draw_index(&mut rng, 2).expect("high two-choice draw should be accepted"),
+        1
+    );
+    assert_eq!(
+        rng.next_u64(),
+        0,
+        "accepted power-of-two draw must not consume the following RNG value"
+    );
+}
+
+#[test]
+fn draw_index_rejects_the_exclusive_boundary_before_mapping() {
+    // For three choices, u64::MAX is the first rejected value because the accepted domain
+    // contains exactly u64::MAX values, which is divisible by three. A non-strict comparison
+    // would incorrectly map that boundary to choice zero instead of consuming the next draw.
+    let mut rng = SequenceRng::new([u64::MAX, 2]);
+    assert_eq!(
+        draw_index(&mut rng, 3).expect("second deterministic draw should be accepted"),
+        2
+    );
+}
+
+#[test]
+fn draw_index_rejects_empty_choice_set_without_consuming_rng() {
+    let mut rng = SequenceRng::new([7]);
+    assert_eq!(
+        draw_index(&mut rng, 0),
+        Err(RandomDecisionError::EmptyChoiceSet)
+    );
+    assert_eq!(
+        rng.next_u64(),
+        7,
+        "rejected draw must not consume RNG state"
+    );
 }
 
 #[test]

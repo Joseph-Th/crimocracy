@@ -124,6 +124,157 @@ fn autonomous_arrest_prefers_stronger_case_over_earlier_investigation_id() {
 }
 
 #[test]
+fn autonomous_arrest_ignores_custody_grade_evidence_for_another_subject() {
+    let mut fixture = fixture();
+    let criminal = fixture
+        .state
+        .world()
+        .get_character(fixture.suspect)
+        .and_then(|record| record.organization());
+    let other = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Unrelated Case Subject".to_owned(),
+            organization: criminal,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("unrelated subject fixture should validate");
+    let _wrong_subject = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        other,
+    );
+
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("autonomous arrest pass should resolve");
+    assert!(
+        arrests.is_empty(),
+        "custody-grade evidence about another character must not corroborate this suspect"
+    );
+    validate_state(&fixture.state).expect("subject-filtered arrest state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_arrest_cites_strongest_record_from_one_named_source() {
+    let mut fixture = fixture();
+    let criminal = fixture
+        .state
+        .world()
+        .get_character(fixture.suspect)
+        .and_then(|record| record.organization())
+        .expect("suspect fixture should belong to a criminal organization");
+    let source = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Ranked Confidential Source".to_owned(),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("ranked confidential source should validate");
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: source,
+            handler: fixture.police,
+        },
+    )
+    .expect("ranked informant relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("ranked informant relationship should commit");
+
+    let mut statements = Vec::new();
+    for (specificity, summary) in [
+        (
+            Specificity::General,
+            "The source gives a general account of the suspect.",
+        ),
+        (
+            Specificity::Precise,
+            "The source gives a precise account of the suspect.",
+        ),
+    ] {
+        let information = validate_record_information(
+            &fixture.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Character(source),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::Personnel,
+                source_entity: None,
+                subject: EntityRef::Character(fixture.suspect),
+                observed_at: fixture.state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity,
+                summary: summary.to_owned(),
+            },
+        )
+        .expect("ranked source information should validate")
+        .commit(&mut fixture.state)
+        .expect("ranked source information should commit");
+        let disclosure = validate_record_informant_disclosure(
+            &fixture.state,
+            InformantDisclosureDraft {
+                informant,
+                investigation: fixture.investigation,
+                source_information: information,
+            },
+        )
+        .expect("ranked source disclosure should validate")
+        .commit(&mut fixture.state)
+        .expect("ranked source disclosure should commit");
+        let evidence = fixture
+            .state
+            .legal()
+            .informant_disclosures()
+            .find(|record| record.id() == disclosure)
+            .expect("ranked source disclosure should persist")
+            .evidence();
+        statements.push(evidence);
+    }
+    let weaker = statements[0];
+    let stronger = statements[1];
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_evidence(stronger)
+            .expect("stronger source evidence should persist")
+            .strength()
+            > fixture
+                .state
+                .legal()
+                .get_evidence(weaker)
+                .expect("weaker source evidence should persist")
+                .strength()
+    );
+
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("ranked named-source custody should resolve");
+    assert_eq!(arrests.len(), 1);
+    let arrest = fixture
+        .state
+        .legal()
+        .get_arrest(arrests[0])
+        .expect("ranked named-source arrest should persist");
+    assert!(arrest.evidence().contains(&fixture.evidence));
+    assert!(arrest.evidence().contains(&stronger));
+    assert!(!arrest.evidence().contains(&weaker));
+    validate_state(&fixture.state).expect("ranked named-source arrest state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn autonomous_arrest_can_cite_developed_evidence_when_primary_source_is_not_custody_grade() {
     use crate::legal::investigation_system::validate_assign_investigator;
     use crate::legal::investigation_work_execution::validate_schedule_investigation_work;
@@ -1561,6 +1712,72 @@ fn repeat_custody_requires_new_post_release_evidence_for_direct_and_autonomous_p
         3
     );
     validate_state(&fixture.state).expect("repeat custody state should remain structurally valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn repeat_custody_rejects_held_back_pre_release_evidence() {
+    let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let held_back = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let first = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence, corroborating]),
+        },
+    )
+    .expect("initial custody should validate without every known exhibit")
+    .commit(&mut fixture.state)
+    .expect("initial custody should commit");
+
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    validate_release_arrest(&fixture.state, first)
+        .expect("initial custody should be releasable")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+    let released_at = fixture.state.now();
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+
+    assert_eq!(
+        validate_arrest(
+            &fixture.registry,
+            &fixture.state,
+            ArrestDraft {
+                character: fixture.suspect,
+                investigation: fixture.investigation,
+                evidence: BTreeSet::from([fixture.evidence, held_back]),
+            },
+        )
+        .expect_err("a pre-release exhibit held back from the first arrest is not new evidence"),
+        ArrestError::RepeatCustodyWithoutNewEvidence {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            prior_arrest: first,
+            released_at,
+        }
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none(),
+        "rejected repeat custody must leave the character released"
+    );
+    validate_state(&fixture.state).expect("held-back evidence rejection must preserve valid state");
     validate_invariants(&fixture.state);
 }
 

@@ -468,6 +468,100 @@ fn internal_transfer_rejects_unrelated_organization() {
 }
 
 #[test]
+fn peer_transfer_allows_members_of_the_same_organization() {
+    let (_registry, mut state, organization, source_character) = make_transfer_fixture();
+    let recipient = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Information Peer".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("same-organization peer should validate");
+    let source = record_character_information(&mut state, source_character, organization);
+
+    let transferred = validate_information_transfer(
+        &state,
+        InformationTransferDraft {
+            source,
+            recipient: KnowledgeHolder::Character(recipient),
+        },
+    )
+    .expect("same-organization peers should be allowed to transfer information")
+    .commit(&mut state)
+    .expect("validated peer transfer should commit");
+
+    let record = state
+        .intelligence()
+        .get_information(transferred)
+        .expect("peer transfer should persist");
+    assert_eq!(record.holder(), KnowledgeHolder::Character(recipient));
+    assert_eq!(record.derived_from(), &BTreeSet::from([source]));
+    validate_state(&state).expect("same-organization peer transfer should remain valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn peer_transfer_rejects_characters_in_different_organizations() {
+    let (registry, mut state, organization, source_character) = make_transfer_fixture();
+    let other = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Outside Information Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("outside organization should validate");
+    let outsider = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Outside Information Recipient".to_owned(),
+            organization: Some(other),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("outside character should validate");
+    let source = record_character_information(&mut state, source_character, organization);
+
+    let error = validate_information_transfer(
+        &state,
+        InformationTransferDraft {
+            source,
+            recipient: KnowledgeHolder::Character(outsider),
+        },
+    )
+    .err()
+    .expect("cross-organization peer transfer must be rejected");
+    assert_eq!(
+        error,
+        IntelligenceError::TransferNotPermitted {
+            source_holder: KnowledgeHolder::Character(source_character),
+            recipient: KnowledgeHolder::Character(outsider),
+        }
+    );
+    assert_eq!(
+        state
+            .intelligence()
+            .information_derived_from(source)
+            .count(),
+        0,
+        "rejected peer transfer must not create derived information"
+    );
+    validate_state(&state).expect("rejected cross-organization transfer must preserve state");
+    validate_invariants(&state);
+}
+
+#[test]
 fn generic_information_recording_cannot_forge_internal_transfer() {
     let (_registry, mut state, organization, character) = make_transfer_fixture();
     record_character_information(&mut state, character, organization);

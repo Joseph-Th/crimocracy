@@ -148,6 +148,7 @@ fn bookmaking_requires_a_racing_wire_beyond_the_betting_front() {
         BTreeSet::from([
             BusinessFunction::CashIntensive,
             BusinessFunction::CustomerAccess,
+            BusinessFunction::RacingWire,
         ]),
         BusinessOwner::Organization(organization),
     );
@@ -164,7 +165,7 @@ fn bookmaking_requires_a_racing_wire_beyond_the_betting_front() {
             settlement_account: fixture.settlement,
         },
     ) {
-        Ok(_) => panic!("cash and customers alone must not provide live race information"),
+        Ok(_) => panic!("the betting front must not substitute for a separate racing-wire service"),
         Err(error) => error,
     };
     assert_eq!(
@@ -264,16 +265,6 @@ fn fraud_requires_a_financial_records_front_and_customer_channel() {
         BTreeSet::from([
             BusinessFunction::FinancialServices,
             BusinessFunction::ProfessionalRecords,
-        ]),
-        BusinessOwner::Organization(organization),
-    );
-    let customer_front = insert_support_business(
-        &registry,
-        &mut fixture,
-        "Ward Department Counter",
-        BusinessKind::Retail,
-        BTreeSet::from([
-            BusinessFunction::CashIntensive,
             BusinessFunction::CustomerAccess,
         ]),
         BusinessOwner::Organization(organization),
@@ -286,12 +277,12 @@ fn fraud_requires_a_financial_records_front_and_customer_channel() {
             organization,
             authority: fixture.authority,
             location: EnterpriseLocation::Business(finance_office),
-            supporting_businesses: BTreeSet::from([customer_front]),
+            supporting_businesses: BTreeSet::new(),
             cash_account: fixture.cash,
             settlement_account: fixture.settlement,
         },
     )
-    .expect("financial records front plus customer channel should support commercial fraud")
+    .expect("a financial front may supply its own customer channel for commercial fraud")
     .commit(&mut fixture.state)
     .expect("validated fraud enterprise should commit");
     let record = fixture
@@ -304,10 +295,7 @@ fn fraud_requires_a_financial_records_front_and_customer_channel() {
         record.location(),
         EnterpriseLocation::Business(finance_office)
     );
-    assert_eq!(
-        record.supporting_businesses(),
-        &BTreeSet::from([customer_front])
-    );
+    assert!(record.supporting_businesses().is_empty());
     validate_state_against_registry(&registry, &fixture.state)
         .expect("fraud network should remain registry-valid");
     validate_invariants(&fixture.state);
@@ -554,8 +542,32 @@ fn counterfeiting_requires_a_real_press_and_a_separate_passing_network() {
         BTreeSet::from([
             BusinessFunction::PrintingPress,
             BusinessFunction::ProfessionalRecords,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::DistributionInfrastructure,
         ]),
         BusinessOwner::Organization(organization),
+    );
+    let error = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Counterfeiting,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(printer),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("the print shop must not substitute for a separate passing network"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::MissingNetworkFunction {
+            function: BusinessFunction::CustomerAccess,
+        }
     );
     let distributor = insert_support_business(
         &registry,

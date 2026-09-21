@@ -4,7 +4,7 @@
 pub(crate) mod artifacts;
 pub(crate) mod autonomous_recruitment;
 pub mod recruitment_system;
-pub mod scoring;
+pub(crate) mod scoring;
 
 use crate::core::id::IdKeyedBounds;
 use crate::core::id::{

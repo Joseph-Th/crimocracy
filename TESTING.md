@@ -47,11 +47,16 @@ fast lane "for reassurance".
 
 Optional Rust diagnostics may be used before selecting or strengthening the normal proof:
 
-- `cargo modules structure --lib --no-fns --no-traits --no-types --max-depth 4` is a bounded ownership map when the cockpit/architecture route still leaves the responsible module unclear. Prefer `--focus-on <module>`; do not gate on global cycle or orphan counts.
-- `cargo mutants --list --file <owner.rs>` is the cheap first step when a consequential state transition, invariant, or persistence test may not actually distinguish wrong behavior. Execute only a narrow file/selection when the result can change the test design. Mutation score is not a completion target.
-- `cargo expand --lib <module::item>` is an inspection aid for a derive/proc macro whose generated code is material to the task.
+[`scripts/rust-diagnostics.ps1`](scripts/rust-diagnostics.ps1) (or its `.cmd` wrapper) is the
+preferred entry point for repeated agent use because it pins the bounded project defaults below
+and gives each mutation execution a unique ignored output directory. The underlying Cargo
+commands remain useful when a task needs a flag the wrapper intentionally does not generalize.
 
-None of these replaces `.\scripts\verify.cmd` or a focused behavioral proof. Mutation execution stays in its isolated copy; do not use `--in-place` on a dirty/concurrent repository to bypass scratch-copy problems.
+- `cargo modules structure --lib --no-fns --no-traits --no-types --max-depth 4` is a bounded ownership map when the cockpit/architecture route still leaves the responsible module unclear. Prefer a crate-qualified focus such as `--focus-on crimocracy::<module>`. For unlinked-file checks use `cargo modules orphans --lib --cfg-test`; this repository keeps many tests in split `tests.rs` modules, so omitting `--cfg-test` produces false orphan reports. Do not gate on global cycle or orphan counts.
+- `cargo mutants --list --file <owner.rs>` is the cheap first step when a consequential state transition, invariant, or persistence test may not actually distinguish wrong behavior. Execute only a narrow file/function/line selection when the result can change the test design. Prefer passing the owning test substring after `--` when one exists; that makes hangs and misses attributable to the contract under review instead of unrelated suites. The wrapper enforces a narrow regex, defaults to two jobs, and creates a unique `target/agent-output/mutants/<task>/mutants.out`; checked-in [`.cargo/mutants.toml`](.cargo/mutants.toml) keeps Cargo locked. Investigate missed or timed-out mutants individually. If a missed mutation is unreachable for every valid `AppState` because canonical construction and release-safe invariants already make the altered branch equivalent, record that reasoning instead of manufacturing invalid private state solely to kill it. Mutation score is not a completion target.
+- `cargo expand --lib <module::item>` is an inspection aid for a derive/proc macro whose generated code is material to the task. If selecting a type shows only its declaration, expand the containing module and inspect the generated impl there. Expanded text is debugging evidence, not source or a compilation contract.
+
+None of these replaces `.\scripts\verify.cmd` or a focused behavioral proof. Mutation execution stays in its isolated copy; do not use `--in-place` on a dirty/concurrent repository to bypass scratch-copy problems, and do not reuse another run's output directory.
 
 ## Test rules
 

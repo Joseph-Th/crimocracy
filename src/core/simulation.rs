@@ -637,6 +637,10 @@ pub(crate) fn draw_index(
         return Err(RandomDecisionError::EmptyChoiceSet);
     }
     let bound = u64::try_from(choice_count).expect("usize choice count must fit into u64");
+    // `rejection_zone` is an exact multiple of `bound`. The comparison must stay strict:
+    // accepting the boundary itself would give remainder zero one extra representation and
+    // bias the choice. This formulation may reject a tiny full block when `bound` divides
+    // 2^64 exactly, but keeps the accepted domain trivially auditable and unbiased.
     let rejection_zone = u64::MAX - (u64::MAX % bound);
     loop {
         let draw = rng.next_u64();

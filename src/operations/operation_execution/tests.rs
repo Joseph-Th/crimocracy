@@ -2361,6 +2361,59 @@ fn practical_objective_failure_does_not_misattribute_tactical_success() {
 }
 
 #[test]
+fn compressed_deadline_applies_proportional_time_pressure_to_resolution() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture_with_constraints(
+            OperationKind::Intimidation,
+            false,
+            Vec::new(),
+            vec![OperationConstraint::CompleteBy(SimTime::from_minutes(11))],
+        );
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.now, SimTime::from_minutes(1));
+    assert_eq!(started.started_operations, vec![operation]);
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operation)
+            .expect("compressed operation should persist after start")
+            .resolution_due_at(),
+        Some(SimTime::from_minutes(11))
+    );
+
+    // Intimidation is authored as a 20-minute job. A deadline ten minutes after actual start
+    // therefore removes exactly half the normal execution window, which should contribute half
+    // of the authored maximum time-pressure penalty: ceil(10 * 30 / 20) = 15.
+    state.advance_clock(SimDuration::from_minutes(10));
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(0, 0),
+    )
+    .expect("deadline-compressed operation should resolve when its deadline arrives");
+    assert_eq!(plan.outcome.factors.time_pressure(), 15);
+    assert!(
+        plan.narrative
+            .summary
+            .contains("compressed the execution window")
+    );
+
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("deadline-compressed resolution should validate")
+        .commit(&mut state)
+        .expect("deadline-compressed resolution should commit");
+    let resolution = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("committed compressed operation should retain its resolution");
+    assert_eq!(resolution.factors().time_pressure(), 15);
+    validate_state(&state).expect("deadline-compressed resolved state should validate");
+    validate_invariants(&state);
+}
+
+#[test]
 fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
     let neutral = OperationResolutionFactors {
         role_capability_average: Rating::try_new(80).expect("fixture rating should be valid"),

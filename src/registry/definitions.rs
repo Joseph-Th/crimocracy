@@ -659,11 +659,18 @@ impl EnterpriseEconomicsDefinition {
         self.losing_cycles_before_suspension
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnterpriseNetworkMode {
+    HostMayContribute,
+    SupportingBusinessesOnly,
+}
+
 #[derive(Clone, Debug)]
 pub struct EnterpriseDefinition {
     pub(super) economics: EnterpriseEconomicsDefinition,
     pub(super) required_business_functions: BTreeSet<BusinessFunction>,
     pub(super) required_network_functions: BTreeSet<BusinessFunction>,
+    pub(super) network_mode: EnterpriseNetworkMode,
 }
 impl EnterpriseDefinition {
     pub fn economics(&self) -> &EnterpriseEconomicsDefinition {
@@ -674,6 +681,9 @@ impl EnterpriseDefinition {
     }
     pub fn required_network_functions(&self) -> &BTreeSet<BusinessFunction> {
         &self.required_network_functions
+    }
+    pub fn network_mode(&self) -> EnterpriseNetworkMode {
+        self.network_mode
     }
 }
 #[derive(Clone, Debug)]

@@ -13,7 +13,7 @@ use crate::intelligence::{
     InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability, Specificity,
 };
 use crate::legal::{Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength};
-use crate::registry::Registry;
+use crate::registry::{EnterpriseNetworkMode, Registry};
 use crate::world::{BusinessOwner, BusinessRecord, CharacterRecord, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -560,7 +560,9 @@ fn validate_enterprise_definition(
                 });
             }
         }
-        network_functions.extend(business.functions().iter().copied());
+        if definition.network_mode() == EnterpriseNetworkMode::HostMayContribute {
+            network_functions.extend(business.functions().iter().copied());
+        }
     } else if !definition.required_business_functions().is_empty() {
         return Err(StateValidationError::InvalidEnterpriseLocation {
             enterprise: enterprise.id(),

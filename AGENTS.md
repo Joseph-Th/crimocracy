@@ -2,7 +2,7 @@
 
 **BCA policy:** advisory
 
-**Rust agent diagnostics:** advisory. Use bounded cargo-modules structure views when the architecture map still leaves an owner ambiguous, targeted cargo-mutants selection/execution when focused tests may not constrain a consequential state/tick policy, and cargo-expand only when macro/derive output is material. These diagnostics are review evidence, not completion gates or quality scores. [TESTING.md](TESTING.md) remains the verification authority.
+**Rust agent diagnostics:** advisory. Use [`scripts/rust-diagnostics.ps1`](scripts/rust-diagnostics.ps1) for bounded cargo-modules structure views when the architecture map still leaves an owner ambiguous, targeted cargo-mutants selection/execution when focused tests may not constrain a consequential state/tick policy, and cargo-expand only when macro/derive output is material. The wrapper gives mutation runs task-unique ignored output by construction. These diagnostics are review evidence, not completion gates or quality scores. [TESTING.md](TESTING.md) remains the verification authority.
 
 This is the execution card for agents changing this system. It keeps high-risk
 guardrails local and routes detailed contracts to their single owners. Ownership is in

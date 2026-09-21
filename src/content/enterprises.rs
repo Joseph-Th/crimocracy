@@ -3,7 +3,7 @@
 use crate::core::time::DAY_DURATION;
 use crate::enterprises::EnterpriseKind;
 use crate::finance::Money;
-use crate::registry::{EnterpriseEconomicsDefinition, RegistryBuilder};
+use crate::registry::{EnterpriseEconomicsDefinition, EnterpriseNetworkMode, RegistryBuilder};
 use crate::world::BusinessFunction;
 use std::collections::BTreeSet;
 
@@ -455,12 +455,35 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
         ),
     ];
     for (kind, economics, required_business_functions, required_network_functions) in definitions {
+        let network_mode = match kind {
+            // These rackets explicitly depend on infrastructure distinct from the physical host:
+            // the betting room consumes an outside racing wire, while the print shop needs a
+            // separate commercial channel to pass counterfeit notes.
+            EnterpriseKind::Bookmaking | EnterpriseKind::Counterfeiting => {
+                EnterpriseNetworkMode::SupportingBusinessesOnly
+            }
+            EnterpriseKind::Protection
+            | EnterpriseKind::Gambling
+            | EnterpriseKind::AlcoholDistribution
+            | EnterpriseKind::LoanSharking
+            | EnterpriseKind::Fencing
+            | EnterpriseKind::Speakeasy
+            | EnterpriseKind::LaborRacketeering
+            | EnterpriseKind::NumbersRacket
+            | EnterpriseKind::SlotMachineRoute
+            | EnterpriseKind::Brothel
+            | EnterpriseKind::PrizeFighting
+            | EnterpriseKind::Fraud
+            | EnterpriseKind::AutoTheftRing
+            | EnterpriseKind::Smuggling => EnterpriseNetworkMode::HostMayContribute,
+        };
         builder
             .register_enterprise(
                 kind,
                 economics,
                 required_business_functions,
                 required_network_functions,
+                network_mode,
             )
             .unwrap_or_else(|error| panic!("invalid enterprise registry: {error}"));
     }

@@ -309,6 +309,10 @@ pub(crate) enum RegistryBuildError {
     EnterpriseSuspensionThresholdOutOfRange(EnterpriseKind),
     #[error("enterprise {0:?} enforcement-attention basis points must be in 0..=10000")]
     EnterpriseEnforcementAttentionOutOfRange(EnterpriseKind),
+    #[error(
+        "enterprise {0:?} requires separate supporting businesses but defines no network functions"
+    )]
+    SeparateEnterpriseNetworkWithoutRequirements(EnterpriseKind),
 }
 
 /// Registry-time proof that a nonnegative gross composition remains representable after its
@@ -870,6 +874,7 @@ impl RegistryBuilder {
         economics: EnterpriseEconomicsDefinition,
         required_business_functions: BTreeSet<BusinessFunction>,
         required_network_functions: BTreeSet<BusinessFunction>,
+        network_mode: EnterpriseNetworkMode,
     ) -> Result<(), RegistryBuildError> {
         if economics.cycle.as_minutes() == 0 {
             return Err(RegistryBuildError::InvalidEnterpriseCycle(kind));
@@ -913,6 +918,11 @@ impl RegistryBuilder {
         if economics.enforcement_attention_basis_points_per_active_case > 10_000 {
             return Err(RegistryBuildError::EnterpriseEnforcementAttentionOutOfRange(kind));
         }
+        if network_mode == EnterpriseNetworkMode::SupportingBusinessesOnly
+            && required_network_functions.is_empty()
+        {
+            return Err(RegistryBuildError::SeparateEnterpriseNetworkWithoutRequirements(kind));
+        }
         if self
             .enterprises
             .insert(
@@ -921,6 +931,7 @@ impl RegistryBuilder {
                     economics,
                     required_business_functions,
                     required_network_functions,
+                    network_mode,
                 },
             )
             .is_some()

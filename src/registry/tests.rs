@@ -38,6 +38,10 @@ fn authored_bookmaking_requires_cash_customers_and_a_racing_wire() {
         definition.required_network_functions(),
         &BTreeSet::from([BusinessFunction::RacingWire])
     );
+    assert_eq!(
+        definition.network_mode(),
+        EnterpriseNetworkMode::SupportingBusinessesOnly
+    );
     let economics = definition.economics();
     assert_eq!(economics.demand_revenue_per_point(), Money::from_cents(190));
     assert_eq!(
@@ -162,6 +166,10 @@ fn authored_fraud_requires_financial_records_and_customer_access() {
     assert_eq!(
         definition.required_network_functions(),
         &BTreeSet::from([BusinessFunction::CustomerAccess])
+    );
+    assert_eq!(
+        definition.network_mode(),
+        EnterpriseNetworkMode::HostMayContribute
     );
     let economics = definition.economics();
     assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(110));
@@ -612,9 +620,113 @@ fn economic_definitions_reject_values_that_can_overflow_normal_settlement() {
             enterprise,
             definition.required_business_functions().clone(),
             definition.required_network_functions().clone(),
+            definition.network_mode(),
         ),
         Err(RegistryBuildError::EnterpriseEconomicArithmeticOutOfRange(kind))
             if kind == enterprise_kind
+    ));
+}
+
+#[test]
+fn enterprise_economic_validation_preserves_inclusive_authored_boundaries() {
+    let registry = build_registry();
+    let kind = EnterpriseKind::Protection;
+    let definition = registry.get_enterprise(kind);
+    let register = |economics: EnterpriseEconomicsDefinition| {
+        RegistryBuilder::default().register_enterprise(
+            kind,
+            economics,
+            definition.required_business_functions().clone(),
+            definition.required_network_functions().clone(),
+            definition.network_mode(),
+        )
+    };
+
+    let mut zero_cost = definition.economics().clone();
+    zero_cost.support_surcharge_per_business = Money::ZERO;
+    register(zero_cost).expect("zero-valued enterprise economic inputs are valid");
+
+    let mut negative_cost = definition.economics().clone();
+    negative_cost.support_surcharge_per_business = Money::from_cents(-1);
+    assert!(matches!(
+        register(negative_cost),
+        Err(RegistryBuildError::NegativeEnterpriseEconomicValue(error_kind))
+            if error_kind == kind
+    ));
+
+    let mut maximum_variance = definition.economics().clone();
+    maximum_variance.gross_variance_basis_points = 5_000;
+    maximum_variance.notable_variance_basis_points = 5_000;
+    register(maximum_variance).expect("the 5000 basis-point variance ceiling is inclusive");
+
+    let mut excessive_variance = definition.economics().clone();
+    excessive_variance.gross_variance_basis_points = 5_001;
+    assert!(matches!(
+        register(excessive_variance),
+        Err(RegistryBuildError::EnterpriseVarianceOutOfRange(error_kind))
+            if error_kind == kind
+    ));
+
+    let mut equal_notable_variance = definition.economics().clone();
+    equal_notable_variance.notable_variance_basis_points =
+        equal_notable_variance.gross_variance_basis_points;
+    register(equal_notable_variance).expect("notable variance may equal the gross variance range");
+
+    let mut excessive_notable_variance = definition.economics().clone();
+    excessive_notable_variance.notable_variance_basis_points =
+        excessive_notable_variance.gross_variance_basis_points + 1;
+    assert!(matches!(
+        register(excessive_notable_variance),
+        Err(RegistryBuildError::EnterpriseNotableVarianceOutOfRange(error_kind))
+            if error_kind == kind
+    ));
+
+    let mut certain_attention = definition.economics().clone();
+    certain_attention.enforcement_attention_basis_points_per_active_case = 10_000;
+    register(certain_attention).expect("10000 basis points is a valid certain-attention chance");
+
+    let mut invalid_attention = definition.economics().clone();
+    invalid_attention.enforcement_attention_basis_points_per_active_case = 10_001;
+    assert!(matches!(
+        register(invalid_attention),
+        Err(RegistryBuildError::EnterpriseEnforcementAttentionOutOfRange(error_kind))
+            if error_kind == kind
+    ));
+}
+
+#[test]
+fn business_economic_validation_preserves_inclusive_variance_boundary() {
+    let registry = build_registry();
+    let kind = crate::world::BusinessKind::Retail;
+    let definition = registry.get_business(kind);
+    let register = |economics: BusinessEconomicsDefinition| {
+        RegistryBuilder::default().register_business(kind, economics)
+    };
+
+    let mut zero_cost = definition.economics().clone();
+    zero_cost.base_operating_cost = Money::ZERO;
+    register(zero_cost).expect("zero-valued business operating cost is valid");
+
+    let mut negative_cost = definition.economics().clone();
+    negative_cost.base_operating_cost = Money::from_cents(-1);
+    assert!(matches!(
+        register(negative_cost),
+        Err(RegistryBuildError::NegativeBusinessEconomicValue(error_kind))
+            if error_kind == kind
+    ));
+
+    let mut maximum_variance = definition.economics().clone();
+    maximum_variance.gross_variance_basis_points = 5_000;
+    maximum_variance.notable_variance_basis_points = 5_000;
+    register(maximum_variance)
+        .expect("the 5000 basis-point business variance ceiling is inclusive");
+
+    let mut excessive_variance = definition.economics().clone();
+    excessive_variance.gross_variance_basis_points = 5_001;
+    assert!(matches!(
+        register(excessive_variance),
+        Err(RegistryBuildError::BusinessVarianceOutOfRange(error_kind))
+            if error_kind == kind
     ));
 }
 
@@ -783,6 +895,10 @@ fn authored_counterfeiting_requires_a_press_and_commercial_passing_network() {
             BusinessFunction::DistributionInfrastructure,
         ])
     );
+    assert_eq!(
+        definition.network_mode(),
+        EnterpriseNetworkMode::SupportingBusinessesOnly
+    );
     let economics = definition.economics();
     assert_eq!(
         economics.commerce_revenue_per_point(),
@@ -797,6 +913,27 @@ fn authored_counterfeiting_requires_a_press_and_commercial_passing_network() {
         economics.enforcement_attention_basis_points_per_active_case(),
         550
     );
+}
+
+#[test]
+fn separate_enterprise_network_mode_requires_a_real_network_dependency() {
+    let registry = build_registry();
+    let definition = registry.get_enterprise(EnterpriseKind::Protection);
+    let mut builder = RegistryBuilder::default();
+    assert!(matches!(
+        builder.register_enterprise(
+            EnterpriseKind::Protection,
+            definition.economics().clone(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            EnterpriseNetworkMode::SupportingBusinessesOnly,
+        ),
+        Err(
+            RegistryBuildError::SeparateEnterpriseNetworkWithoutRequirements(
+                EnterpriseKind::Protection
+            )
+        )
+    ));
 }
 
 #[test]

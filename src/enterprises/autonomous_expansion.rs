@@ -23,7 +23,7 @@ use crate::enterprises::{
 };
 use crate::finance::finance_system::validate_open_accounts;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
-use crate::registry::{EnterpriseDefinition, Registry};
+use crate::registry::{EnterpriseDefinition, EnterpriseNetworkMode, Registry};
 use crate::world::territory_influence::resolve_neighborhood_influence;
 use crate::world::{AutonomyLevel, CapabilityKind, Rating};
 use std::collections::{BTreeMap, BTreeSet};
@@ -726,7 +726,8 @@ fn resolve_support_network(
     scope: ResponsibilityScope,
 ) -> Option<BTreeSet<BusinessId>> {
     let mut required = definition.required_network_functions().clone();
-    if let Some(host) = host
+    if definition.network_mode() == EnterpriseNetworkMode::HostMayContribute
+        && let Some(host) = host
         && let Some(business) = owned_businesses.get(&host)
     {
         required.retain(|function| !business.has_function(*function));

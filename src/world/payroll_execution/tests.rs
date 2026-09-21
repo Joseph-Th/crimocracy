@@ -618,6 +618,69 @@ fn one_cent_shortfall_rotates_rounding_priority_across_payroll_days() {
 }
 
 #[test]
+fn three_member_rounding_rotation_advances_in_stable_member_order() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let third = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Third Payroll Member".to_owned(),
+            organization: Some(fixture.organization),
+            supervisor: Some(fixture.boss),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("third payroll member should validate");
+    assert!(
+        fixture.boss < fixture.member && fixture.member < third,
+        "fixture creation order must match the stable member-ID order"
+    );
+
+    let per_member = registry.upkeep().per_member_daily();
+    let owed = per_member
+        .checked_mul(3)
+        .expect("three wages must fit money");
+    for _ in 0..2 {
+        credit_account(
+            &mut fixture.state,
+            fixture.boss,
+            fixture.treasury,
+            owed.cents() - 1,
+        );
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+        apply_daily_payroll(&registry, &mut fixture.state)
+            .expect("one-cent-short three-member payroll should settle");
+    }
+
+    let balance = |character| {
+        fixture
+            .state
+            .finance()
+            .accounts_for(FinancialOwner::Character(character))
+            .find(|account| account.kind() == AccountKind::StreetCash)
+            .expect("each member should retain a wage account")
+            .balance()
+    };
+    let two_full_wages = per_member
+        .checked_mul(2)
+        .expect("two full wages must fit money");
+    let one_cent_short = Money::from_cents(two_full_wages.cents() - 1);
+
+    // Day one awards the two remainder cents to the first two stable members. Day two advances
+    // that two-member remainder window by one slot, so the middle member is paid in full twice.
+    // With three members, advancing backward instead of forward is observably different.
+    assert_eq!(balance(fixture.boss), one_cent_short);
+    assert_eq!(balance(fixture.member), two_full_wages);
+    assert_eq!(balance(third), one_cent_short);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn half_paid_wage_causes_half_of_full_shortfall_resentment() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();

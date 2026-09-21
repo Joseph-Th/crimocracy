@@ -1,0 +1,4 @@
+# cargo-mutants is diagnostic evidence, not a completion gate. Keep its Cargo invocations
+# reproducible. Callers choose a task-unique --output under target/agent-output/mutants/ so
+# concurrent agents cannot overwrite each other's evidence.
+additional_cargo_args = ["--locked"]
