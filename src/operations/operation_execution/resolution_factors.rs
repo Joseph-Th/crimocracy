@@ -9,7 +9,7 @@ use crate::enterprises::EnterpriseLocation;
 use crate::intelligence::InformationTopic;
 use crate::legal::patrol_system::{
     PatrolPresenceSnapshot, resolve_patrol_presence_interval_snapshot,
-    resolve_patrol_presence_snapshot,
+    resolve_patrol_presence_interval_snapshot_with_percent, resolve_patrol_presence_snapshot,
 };
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::pressureable_witness_targets;
@@ -96,12 +96,13 @@ pub(crate) fn resolve_intimidation_business_fear_adjustment(
 }
 
 fn resolve_target_police_snapshot(
+    registry: &Registry,
     state: &AppState,
     entities: Vec<EntityRef>,
     at: SimTime,
 ) -> TargetPoliceSnapshot {
     resolve_target_police_snapshot_from(state, entities, |state, neighborhood| {
-        resolve_patrol_presence_snapshot(state, neighborhood, at)
+        resolve_patrol_presence_snapshot(registry, state, neighborhood, at)
     })
 }
 
@@ -186,13 +187,32 @@ pub(super) fn resolve_operation_venue_entities(
 }
 
 pub(super) fn resolve_target_police_interval_snapshot(
+    registry: &Registry,
     state: &AppState,
     entities: Vec<EntityRef>,
     start: SimTime,
     end: SimTime,
 ) -> TargetPoliceSnapshot {
     resolve_target_police_snapshot_from(state, entities, |state, neighborhood| {
-        resolve_patrol_presence_interval_snapshot(state, neighborhood, start, end)
+        resolve_patrol_presence_interval_snapshot(registry, state, neighborhood, start, end)
+    })
+}
+
+pub(super) fn resolve_target_police_interval_snapshot_with_percent(
+    state: &AppState,
+    entities: Vec<EntityRef>,
+    start: SimTime,
+    end: SimTime,
+    off_window_patrol_presence_percent: u8,
+) -> TargetPoliceSnapshot {
+    resolve_target_police_snapshot_from(state, entities, |state, neighborhood| {
+        resolve_patrol_presence_interval_snapshot_with_percent(
+            state,
+            neighborhood,
+            start,
+            end,
+            off_window_patrol_presence_percent,
+        )
     })
 }
 
@@ -534,8 +554,12 @@ pub(crate) fn resolve_operation_police_alert_context(
         .get_operation(operation)
         .expect("police alert planning must reference an existing operation");
     let execution = registry.get_operation(record.kind()).execution();
-    let police_snapshot =
-        resolve_target_police_snapshot(state, resolve_operation_venue_entities(state, record), at);
+    let police_snapshot = resolve_target_police_snapshot(
+        registry,
+        state,
+        resolve_operation_venue_entities(state, record),
+        at,
+    );
     let stealth_average = resolve_stealth_average(state, record);
     let (intelligence_quality, _, _, _) = resolve_intelligence_factors(registry, state, operation);
     let intelligence_mitigation = u16::from(intelligence_quality.value())

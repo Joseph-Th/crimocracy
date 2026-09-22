@@ -11,6 +11,10 @@ use crate::registry::{
 pub(super) fn register_legal(builder: &mut RegistryBuilder) {
     builder
         .register_legal(LegalConfigSpec {
+            // Patrol schedules describe concentrations, not literal absence. Half of the
+            // district's ambient institutional presence remains between named windows so learned
+            // timing is useful without becoming certainty that the streets are unpoliced.
+            off_window_patrol_presence_percent: 50,
             // Seven campaign days (one week) of institutional inactivity before an
             // origin-linked street case is deterministically shelved.
             cold_case_window: SimDuration::from_minutes(10_080),

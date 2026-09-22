@@ -4,7 +4,7 @@ use super::*;
 
 /// Executes the act-2 beat per branch. RUSH rebuilds the crew and moves the second score away
 /// from the overnight hour its own debrief identified as hot; RECON re-invests in planning and
-/// works inside a fresh patrol-safe window; PRESS deliberately takes nothing and lets the
+/// works inside a fresh lower-risk window outside known patrol concentrations; PRESS deliberately takes nothing and lets the
 /// discovered opportunity lapse.
 pub(super) fn run_second_act(
     scenario: &mut Scenario,
@@ -153,7 +153,7 @@ fn run_recon_second_act(
         .state
         .now()
         .max(scenario.timeline.recon_second_act_surveillance_at);
-    let scout_at = choose_safe_start_from_patrol_signal(
+    let scout_at = choose_lower_risk_start_from_patrol_signal(
         ready_at,
         patrol
             .signal()
@@ -256,7 +256,7 @@ fn run_recon_second_act(
         return Ok(());
     }
     let patrol_information = learned_patrol_information.ok_or(
-        "second-score recon did not produce a patrol-pattern observation; the harness will not infer a safe time from hidden state",
+        "second-score recon did not produce a patrol-pattern observation; the harness will not infer lower-risk timing from hidden state",
     )?;
     let patrol_record = scenario
         .state
@@ -272,7 +272,7 @@ fn run_recon_second_act(
         .get_operation(OperationKind::Burglary)
         .execution()
         .duration();
-    let scheduled_for = choose_safe_start_from_patrol_signal(
+    let scheduled_for = choose_lower_risk_start_from_patrol_signal(
         scenario.state.now(),
         &patrol_signal,
         duration,
@@ -282,7 +282,7 @@ fn run_recon_second_act(
     if narrative {
         let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
         println!(
-            "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {}, window stays outside heavy presence.",
+            "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {}, the window avoids the known concentrations, but ambient district policing still remains.",
             patrol_record.summary(),
             crate::readout::format_patrol_windows(&windows),
             duration.as_minutes(),

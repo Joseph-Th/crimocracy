@@ -806,6 +806,10 @@ impl WitnessTestimonyDefinition {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct LegalConfigSpec {
+    /// Percentage of a neighborhood's ambient institutional police presence retained between
+    /// explicit active patrol windows. Must be strictly between zero and full ambient presence:
+    /// patrol intelligence should reveal a safer interval without proving the district is empty.
+    pub off_window_patrol_presence_percent: u8,
     /// How long an origin-linked investigation remains institutionally active after
     /// its last evidence/work activity before deterministic shelving.
     pub cold_case_window: SimDuration,
@@ -833,6 +837,7 @@ pub struct LegalConfigSpec {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct LegalConfigDefinition {
+    pub(super) off_window_patrol_presence_percent: u8,
     pub(super) cold_case_window: SimDuration,
     pub(super) witness_interview_attempt_limit: u8,
     pub(super) witness_testimony: WitnessTestimonyDefinition,
@@ -845,6 +850,9 @@ pub struct LegalConfigDefinition {
     pub(super) maximum_detention: SimDuration,
 }
 impl LegalConfigDefinition {
+    pub fn off_window_patrol_presence_percent(self) -> u8 {
+        self.off_window_patrol_presence_percent
+    }
     pub fn cold_case_window(self) -> SimDuration {
         self.cold_case_window
     }

@@ -326,6 +326,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         println!("\n--- VICE HEAT PROBE ---");
     }
     run_enforcement_attention_probe(&registry, primary_seeds, detail)?;
+    let enforcement_attention_observed = true;
     if !detail {
         println!("[PROBE PASS] enforcement attention");
     }
@@ -334,6 +335,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         println!("\n--- OPPORTUNITY PORTFOLIO PROBE ---");
     }
     run_opportunity_portfolio_probe(&registry, primary_seeds, detail)?;
+    let opportunity_portfolio_observed = true;
     if !detail {
         println!("[PROBE PASS] opportunity portfolio");
     }
@@ -342,14 +344,25 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         println!("\n--- ORGANIZATIONAL CAPACITY PROBE ---");
     }
     run_organizational_capacity_probe(&registry, primary_seeds, detail)?;
+    let organizational_capacity_observed = true;
     if !detail {
         println!("[PROBE PASS] organizational capacity");
+    }
+
+    if detail {
+        println!("\n--- DELEGATION CONTROL PROBE ---");
+    }
+    run_delegation_control_probe(&registry, primary_seeds, detail)?;
+    let delegation_control_observed = true;
+    if !detail {
+        println!("[PROBE PASS] delegation control");
     }
 
     if detail {
         println!("\n--- REPEAT-TAKE PROBE ---");
     }
     run_repeat_take_probe(&registry, primary_seeds, detail)?;
+    let repeat_take_observed = true;
     if !detail {
         println!("[PROBE PASS] repeat-take depletion/recovery");
     }
@@ -456,6 +469,16 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         );
     }
 
+    let night_trap_summary = serde_json::json!({
+        "profile": ScenarioProfile::NightTrap.label(),
+        "purpose": ScenarioProfile::NightTrap.harness_purpose(),
+        "strategies": {
+            "rush": &rush_aggregate,
+            "press": &press_aggregate,
+            "recon": &recon_aggregate,
+        }
+    });
+    let mut sensitivity_summaries = Vec::new();
     println!(
         "\n--- SCENARIO SENSITIVITY ({samples} world seeds per strategy/profile, fixed policy {policy_seed:#x}) ---"
     );
@@ -486,6 +509,15 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             "[BATCH PASS] {} matched-world checks passed.",
             profile.label()
         );
+        sensitivity_summaries.push(serde_json::json!({
+            "profile": profile.label(),
+            "purpose": profile.harness_purpose(),
+            "strategies": {
+                "rush": &rush,
+                "press": &press,
+                "recon": &recon,
+            }
+        }));
     }
 
     // Persist per-run seeds and raw metrics beneath aggregate diagnostics.
@@ -503,7 +535,29 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             "policy_seed_dec": policy_seed,
             "samples": samples,
             "elapsed_secs": wall_start.elapsed().as_secs_f64(),
-            "note": "scenario-sensitivity samples vary world/simulation seed while the evaluation-policy seed remains fixed; per-run JSON retains both"
+            "core_fantasy": "Learn what the city reveals, turn it into an organizational plan, delegate execution, then stay powerful enough to absorb the consequences.",
+            "evidence_boundary": "Aggregate and probe evidence describes the controlled harness experience. Acting policy uses player-visible information only; audit-only diagnostic fields remain separated in per-run artifacts.",
+            "night_trap": night_trap_summary,
+            "sensitivity": sensitivity_summaries,
+            "probes": {
+                "enforcement_attention": enforcement_attention_observed,
+                "opportunity_portfolio": opportunity_portfolio_observed,
+                "organizational_capacity": organizational_capacity_observed,
+                "delegation_control": delegation_control_observed,
+                "repeat_take_depletion_recovery": repeat_take_observed,
+                "enterprise_posture": posture_observed,
+                "rival_intelligence": {
+                    "actionable_intervention": rival_probe.actionable_intervention,
+                    "material_economic_impact": rival_probe.material_economic_impact,
+                },
+                "violence_reputation": {
+                    "visible_violence_created_fear": violence_probe.visible_violence_created_fear,
+                    "fear_changed_later_intimidation": violence_probe.fear_changed_later_intimidation,
+                },
+                "personnel_retention": retention_observed,
+                "legal_foundation": true,
+            },
+            "note": "Scenario-sensitivity samples vary world/simulation seed while the evaluation-policy seed remains fixed; per-run JSON retains both."
         });
         let path = artifact_dir.join(format!(
             "summary-w{world_seed:016x}-p{policy_seed:016x}.json"
@@ -548,7 +602,7 @@ mod tests {
         FixtureVariation, HarnessCliError, HarnessContractError, HarnessMode, HarnessOptions,
         NARRATIVE_SEED_ROTATION, OpeningStanddownReason, RunMetrics, ScenarioProfile,
         ScenarioTimeline, SessionRunMode, Strategy, bounded_policy_choice,
-        choose_safe_start_from_patrol_signal, format_avg_dollars, format_day_minute,
+        choose_lower_risk_start_from_patrol_signal, format_avg_dollars, format_day_minute,
         format_patrol_windows, parse_options, patrol_intervals_from_signal, play_session,
         run_enforcement_attention_probe, run_opportunity_portfolio_probe,
         run_organizational_capacity_probe, stamp, validate_batch_strategy_coverage,
@@ -1041,7 +1095,7 @@ mod tests {
     #[test]
     fn chooses_a_buffered_window_from_player_visible_patrol_signal() {
         let signal = patrol_signal(&[(120, 240), (1_320, 1_440)]);
-        let chosen = choose_safe_start_from_patrol_signal(
+        let chosen = choose_lower_risk_start_from_patrol_signal(
             SimTime::from_minutes(1),
             &signal,
             SimDuration::from_minutes(45),
@@ -1056,14 +1110,14 @@ mod tests {
     #[test]
     fn rejects_information_without_actionable_patrol_semantics() {
         let signal = InformationSignal::CaseActivity(CaseActivitySignal::Active);
-        let error = choose_safe_start_from_patrol_signal(
+        let error = choose_lower_risk_start_from_patrol_signal(
             SimTime::ZERO,
             &signal,
             SimDuration::from_minutes(45),
             SimDuration::from_minutes(60),
             SimTime::from_minutes(720),
         )
-        .expect_err("the harness must not infer a safe time from vague surveillance");
+        .expect_err("the harness must not infer lower-risk timing from vague surveillance");
 
         assert!(matches!(
             error,
@@ -1072,9 +1126,9 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_patrol_safe_start_after_opportunity_expiry() {
+    fn refuses_a_lower_risk_start_after_opportunity_expiry() {
         let signal = patrol_signal(&[(120, 240), (1_320, 1_440)]);
-        let error = choose_safe_start_from_patrol_signal(
+        let error = choose_lower_risk_start_from_patrol_signal(
             SimTime::from_minutes(1),
             &signal,
             SimDuration::from_minutes(45),
@@ -1083,13 +1137,16 @@ mod tests {
         )
         .expect_err("planning must respect the player-visible opportunity deadline");
 
-        assert!(matches!(error, HarnessContractError::NoSafeOperationWindow));
+        assert!(matches!(
+            error,
+            HarnessContractError::NoLowerRiskOperationWindow
+        ));
     }
 
     #[test]
-    fn allows_a_safe_start_before_expiry_even_when_completion_is_later() {
+    fn allows_a_lower_risk_start_before_expiry_even_when_completion_is_later() {
         let signal = patrol_signal(&[(0, 90)]);
-        let chosen = choose_safe_start_from_patrol_signal(
+        let chosen = choose_lower_risk_start_from_patrol_signal(
             SimTime::from_minutes(100),
             &signal,
             SimDuration::from_minutes(45),
@@ -1108,7 +1165,21 @@ mod tests {
     #[test]
     fn named_sensitivity_profiles_keep_their_causal_contrast() {
         let samples = super::MIN_SAMPLES_FOR_VARIATION_CONTRACT;
-        let converged = super::Aggregate {
+        let rush_late = super::Aggregate {
+            samples,
+            achieved: samples - 1,
+            aborted: 1,
+            police_arrived: 1,
+            ..super::Aggregate::default()
+        };
+        let press_late = super::Aggregate {
+            samples,
+            achieved: samples - 1,
+            partial: 1,
+            police_arrived: 1,
+            ..super::Aggregate::default()
+        };
+        let recon_late = super::Aggregate {
             samples,
             achieved: samples,
             ..super::Aggregate::default()
@@ -1116,11 +1187,19 @@ mod tests {
         validate_sensitivity_profile_coverage(
             ScenarioProfile::LatePatrol,
             samples,
-            &converged,
-            &converged,
-            &converged,
+            &rush_late,
+            &press_late,
+            &recon_late,
         )
-        .expect("late patrol is a no-pressure convergence control");
+        .expect("late patrol must tolerate residual risk while rewarding learned timing");
+        validate_sensitivity_profile_coverage(
+            ScenarioProfile::LatePatrol,
+            samples,
+            &recon_late,
+            &recon_late,
+            &recon_late,
+        )
+        .expect("a bounded late-patrol batch may legitimately observe no residual police arrival");
 
         let fast = super::Aggregate {
             samples,
@@ -1541,7 +1620,7 @@ mod tests {
         second_clean.second_burglary_outcome = Some(OperationObjectiveOutcome::Achieved);
         second_clean.second_burglary_terminal_minute = Some(2_095);
         validate_second_act_evidence(&second_clean)
-            .expect("a clean second assessment must still permit the patrol-safe second burglary");
+            .expect("a clean second assessment must still permit the lower-risk second burglary");
 
         // An aborted second scout records its standdown instead of panicking on a missing
         // resolution and never fabricates a second burglary.

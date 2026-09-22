@@ -81,6 +81,7 @@ fn information_quality_spec() -> InformationQualityDefinition {
 
 fn legal_spec() -> LegalConfigSpec {
     LegalConfigSpec {
+        off_window_patrol_presence_percent: 50,
         cold_case_window: SimDuration::from_minutes(1_440),
         witness_interview_attempt_limit: 2,
         witness_testimony: WitnessTestimonyDefinition {
@@ -100,6 +101,26 @@ fn legal_spec() -> LegalConfigSpec {
         represented_informant_reduction_percent: 25,
         automatic_support_retainer: Money::from_cents(5_000),
         maximum_detention: SimDuration::from_minutes(2_880),
+    }
+}
+
+#[test]
+fn legal_registry_authors_a_bounded_off_window_patrol_floor() {
+    assert_eq!(
+        build_registry()
+            .legal()
+            .off_window_patrol_presence_percent(),
+        50
+    );
+
+    for invalid in [0, 100] {
+        let mut builder = RegistryBuilder::default();
+        let mut spec = legal_spec();
+        spec.off_window_patrol_presence_percent = invalid;
+        assert!(matches!(
+            builder.register_legal(spec),
+            Err(RegistryBuildError::InvalidLegalOffWindowPatrolPresencePercent)
+        ));
     }
 }
 

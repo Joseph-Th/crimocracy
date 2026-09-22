@@ -13,7 +13,7 @@ use crimocracy::operations::{
     OperationObjectiveOutcome,
 };
 use crimocracy::reports::{ReportKind, ReportRecord};
-use crimocracy::world::{CapabilityKind, OrganizationKind, Rating};
+use crimocracy::world::{CapabilityKind, OrganizationKind, QualitativeBand, Rating};
 use std::collections::BTreeMap;
 use std::error::Error;
 
@@ -165,7 +165,7 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
                 }
             } else {
                 println!(
-                    "[ACT 2] Re-plan evidence: fresh surveillance produced {} information item(s); no uncleared exposure check blocked the burglary, which used a patrol-safe window.",
+                    "[ACT 2] Re-plan evidence: fresh surveillance produced {} information item(s); no uncleared exposure check blocked the burglary, which used a lower-risk window outside the known patrol concentrations.",
                     metrics.second_act_recon_information
                 );
             }
@@ -187,7 +187,7 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
 pub fn print_starting_player_view(scenario: &Scenario) {
     println!("[ORGANIZATION] Marrow Organization");
     println!(
-        "  (Capabilities show as values; traits and drives below are internal personnel knowledge about the organization's own people. A personal contact does not reveal a prospect's latent motives.)"
+        "  (Capabilities and drives are shown in broad bands, matching what leadership can practically know about its own people. A personal contact does not reveal a prospect's latent motives.)"
     );
     for character in [
         scenario.boss,
@@ -209,28 +209,23 @@ pub fn print_starting_player_view(scenario: &Scenario) {
         let drives = crimocracy::world::ALL_DRIVE_KINDS
             .iter()
             .filter_map(|kind| {
-                record
-                    .drive(*kind)
-                    .map(|rating| format!("{kind:?} {}", rating.value()))
+                record.drive(*kind).map(|rating| {
+                    format!(
+                        "{kind:?} {}",
+                        qualitative_band_label(rating.qualitative_band())
+                    )
+                })
             })
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "  - {:<14} autonomy {:?}; management {:?}; burglary {:?}; surveillance {:?}; stealth {:?}",
+            "  - {:<14} autonomy {:?}; management {}; burglary {}; surveillance {}; stealth {}",
             record.name(),
             record.autonomy(),
-            record
-                .capability(CapabilityKind::Management)
-                .map(Rating::value),
-            record
-                .capability(CapabilityKind::Burglary)
-                .map(Rating::value),
-            record
-                .capability(CapabilityKind::Surveillance)
-                .map(Rating::value),
-            record
-                .capability(CapabilityKind::Stealth)
-                .map(Rating::value),
+            capability_band(record.capability(CapabilityKind::Management)),
+            capability_band(record.capability(CapabilityKind::Burglary)),
+            capability_band(record.capability(CapabilityKind::Surveillance)),
+            capability_band(record.capability(CapabilityKind::Stealth)),
         );
         println!(
             "      traits [{}]; drives [{}]",
@@ -380,6 +375,22 @@ pub fn print_starting_player_view(scenario: &Scenario) {
     println!(
         "[STATE] If police exposure ever makes {burglar_name} a poaching target, leadership can rely on the established Marrow relationship for one personal appeal without pretending that relationship reveals fresh private motive information."
     );
+}
+
+fn capability_band(rating: Option<Rating>) -> &'static str {
+    rating
+        .map(|rating| qualitative_band_label(rating.qualitative_band()))
+        .unwrap_or("not demonstrated")
+}
+
+fn qualitative_band_label(band: QualitativeBand) -> &'static str {
+    match band {
+        QualitativeBand::Poor => "poor",
+        QualitativeBand::Competent => "competent",
+        QualitativeBand::Skilled => "skilled",
+        QualitativeBand::Excellent => "excellent",
+        QualitativeBand::Exceptional => "exceptional",
+    }
 }
 
 pub fn print_planning_inputs(scenario: &Scenario, operation: OperationId) {
@@ -1516,47 +1527,26 @@ pub fn print_convergence_observation(
     press: &Aggregate,
     recon: &Aggregate,
 ) {
+    if profile == ScenarioProfile::LatePatrol {
+        println!(
+            "[OBSERVATION] {}: the named patrol concentrations sit later than the immediate score. RUSH saw {}/{} police arrivals, PRESS {}/{}, while RECON achieved {}/{} with {} arrivals after learning the rhythm. Off-window policing is residual risk, not a guaranteed event in a bounded sample; this control checks that immediate action remains viable and learned timing remains useful without calling any gap perfectly safe.",
+            profile.label(),
+            rush.police_arrived,
+            rush.samples,
+            press.police_arrived,
+            press.samples,
+            recon.achieved,
+            recon.samples,
+            recon.police_arrived,
+        );
+        return;
+    }
     if profile == ScenarioProfile::FleetingWindow {
         println!(
             "[OBSERVATION] {}: the immediate branches committed before the short-lived opportunity closed, while RECON stood down for timing in {}/{} runs after learning the target. Staffed cases were RUSH {}, PRESS {}, RECON {}. This is the information opportunity-cost control: moving now preserves the score but can still carry exposure risk; scouting improves certainty but can consume the decision window.",
             profile.label(),
             recon.opening_timing_standdowns,
             recon.samples,
-            rush.investigations,
-            press.investigations,
-            recon.investigations,
-        );
-        return;
-    }
-    let outcome_mix = |aggregate: &Aggregate| {
-        (
-            aggregate.achieved,
-            aggregate.partial,
-            aggregate.failed,
-            aggregate.aborted,
-        )
-    };
-    let converged = outcome_mix(rush) == outcome_mix(press)
-        && outcome_mix(press) == outcome_mix(recon)
-        && rush.police_arrived == press.police_arrived
-        && press.police_arrived == recon.police_arrived;
-    if converged && profile == ScenarioProfile::LatePatrol {
-        let avg_finish = |aggregate: &Aggregate| {
-            if aggregate.burglary_terminal_samples == 0 {
-                0.0
-            } else {
-                aggregate.burglary_terminal_minute_total as f64
-                    / aggregate.burglary_terminal_samples as f64
-            }
-        };
-        println!(
-            "[OBSERVATION] {}: all strategies converged on the immediate objective ({}/{} achieved, {} police arrivals), but RECON finished around {:.0}m versus RUSH {:.0}m. Staffed cases were RUSH {}, PRESS {}, RECON {}. This is an outcome/patrol-timing control, not a claim that information has zero residual value: extra scouting costs time and may still trim exposure or later case risk even when it does not change the score's immediate result.",
-            profile.label(),
-            rush.achieved,
-            rush.samples,
-            rush.police_arrived,
-            avg_finish(recon),
-            avg_finish(rush),
             rush.investigations,
             press.investigations,
             recon.investigations,

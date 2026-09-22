@@ -32,10 +32,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub(crate) enum PoliceResponseIntegrationError {
-    #[error("operation {0} does not exist")]
-    MissingOperation(OperationId),
-    #[error("operation response timing exceeds the representable simulation clock")]
-    SimulationTimeOverflow,
     #[error(transparent)]
     PoliceResponse(#[from] PoliceResponseError),
     #[error(transparent)]
@@ -44,6 +40,16 @@ pub(crate) enum PoliceResponseIntegrationError {
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum PoliceResponseStartError {
+    #[error("operation {0} does not exist")]
+    MissingOperation(OperationId),
+    #[error("operation response timing exceeds the representable simulation clock")]
+    SimulationTimeOverflow,
+    #[error(transparent)]
+    PoliceResponse(#[from] PoliceResponseError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,11 +99,11 @@ pub(crate) fn decide_operation_police_response_start(
     registry: &Registry,
     state: &AppState,
     operation: OperationId,
-) -> Result<OperationPoliceResponseStartPlan, PoliceResponseIntegrationError> {
+) -> Result<OperationPoliceResponseStartPlan, PoliceResponseStartError> {
     let record = state
         .operations
         .get_operation(operation)
-        .ok_or(PoliceResponseIntegrationError::MissingOperation(operation))?;
+        .ok_or(PoliceResponseStartError::MissingOperation(operation))?;
     let execution = registry.get_operation(record.kind()).execution();
     let entry_at = execution
         .operation_entry_offset()
@@ -105,7 +111,7 @@ pub(crate) fn decide_operation_police_response_start(
             state
                 .now()
                 .checked_add(offset)
-                .ok_or(PoliceResponseIntegrationError::SimulationTimeOverflow)
+                .ok_or(PoliceResponseStartError::SimulationTimeOverflow)
         })
         .transpose()?;
     let alert = resolve_operation_police_alert_context(registry, state, operation, state.now());
@@ -127,14 +133,20 @@ pub(crate) fn decide_operation_police_response_start(
             dispatch: None,
         });
     };
-    let patrol =
-        resolve_authority_patrol_presence_snapshot(state, authority, neighborhood, state.now());
+    let patrol = resolve_authority_patrol_presence_snapshot(
+        registry,
+        state,
+        authority,
+        neighborhood,
+        state.now(),
+    );
     let delay = resolve_police_arrival_delay(execution, patrol.presence.value());
     let arrival_due_at = state
         .now()
         .checked_add(SimDuration::from_minutes(delay))
-        .ok_or(PoliceResponseIntegrationError::SimulationTimeOverflow)?;
+        .ok_or(PoliceResponseStartError::SimulationTimeOverflow)?;
     let dispatch = validate_dispatch_police_response(
+        registry,
         state,
         PoliceResponseDispatchDraft {
             authority,

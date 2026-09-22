@@ -366,6 +366,11 @@ pub enum StateValidationError {
         enterprise: EnterpriseId,
         business: BusinessId,
     },
+    #[error("enterprise {enterprise} has redundant supporting business {business}")]
+    RedundantEnterpriseSupportingBusiness {
+        enterprise: EnterpriseId,
+        business: BusinessId,
+    },
     #[error("enterprise {enterprise} support network lacks required function {function:?}")]
     EnterpriseNetworkRequirementMissing {
         enterprise: EnterpriseId,

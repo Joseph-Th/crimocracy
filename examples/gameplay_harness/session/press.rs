@@ -248,11 +248,11 @@ fn schedule_witness_pressure(
                 .execution()
                 .duration();
             // Witness interviews typically land 2-3h after intake. When the organization has a
-            // typed patrol pattern, that evidence is binding: if no safe window exists before the
+            // typed patrol pattern, that evidence is binding: if no lower-risk window exists before the
             // interview horizon, fail the treatment instead of discarding known risk and inventing
             // a convenient fallback time.
             let latest_start = SimTime::from_minutes(case_open_minute + 180);
-            choose_safe_start_from_patrol_signal(
+            choose_lower_risk_start_from_patrol_signal(
                 SimTime::from_minutes(case_open_minute),
                 &patrol_signal,
                 duration,
@@ -271,7 +271,7 @@ fn schedule_witness_pressure(
                 );
             } else {
                 println!(
-                    "[INTERPRET] No patrol pattern is held, so the quiet-word time at {} is a blind guess inside a watched district, not a patrol-safe plan. If a response arrives, the abort is the lesson: blind counter-play in a hot district gambles.",
+                    "[INTERPRET] No patrol pattern is held, so the quiet-word time at {} is a blind guess inside a watched district, not an information-reduced plan. If a response arrives, the abort is the lesson: blind counter-play in a hot district gambles.",
                     format_day_minute(pressure_at.as_minutes())
                 );
             }

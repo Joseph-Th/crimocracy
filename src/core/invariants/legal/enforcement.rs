@@ -7,10 +7,12 @@ use crate::core::time::SimTime;
 use crate::legal::jurisdiction_system::police_response_jurisdiction_snapshot_is_possible;
 use crate::legal::patrol_system::{
     is_canonical_patrol_schedule, police_response_patrol_snapshot_is_possible,
+    police_response_patrol_snapshot_reference_is_possible,
 };
 use crate::legal::{
     PatrolDeploymentRecord, PatrolDeploymentStatus, PoliceResponseRecord, PoliceResponseStatus,
 };
+use crate::registry::Registry;
 use crate::world::OrganizationKind;
 use std::collections::BTreeMap;
 
@@ -295,16 +297,35 @@ fn validate_police_response_patrol(
     if response
         .patrol()
         .is_some_and(|patrol| patrol.version() == 0)
-        || !police_response_patrol_snapshot_is_possible(
+        || !police_response_patrol_snapshot_reference_is_possible(
+            state,
+            response.authority(),
+            response.neighborhood(),
+            response.dispatched_at(),
+            response.patrol(),
+        )
+    {
+        return Err(invalid_police_response(response));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_police_responses_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    for response in state.legal.police_responses() {
+        if !police_response_patrol_snapshot_is_possible(
+            registry,
             state,
             response.authority(),
             response.neighborhood(),
             response.dispatched_at(),
             response.patrol(),
             response.response_presence(),
-        )
-    {
-        return Err(invalid_police_response(response));
+        ) {
+            return Err(invalid_police_response(response));
+        }
     }
     Ok(())
 }

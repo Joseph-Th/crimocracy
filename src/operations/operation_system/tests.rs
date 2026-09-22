@@ -181,6 +181,55 @@ fn operation_rejects_character_objective_target_as_crew_participant() {
 }
 
 #[test]
+fn surveillance_authorization_reports_request_shape_errors_without_runtime_error_branches() {
+    let (registry, state, organization, leader, target) = make_test_operation_state();
+    let invalid_objective = OperationDraft {
+        title: "Wrong surveillance objective".to_owned(),
+        kind: OperationKind::Surveillance,
+        responsible_organization: organization,
+        leader,
+        objective: OperationObjective::ObtainCash { target },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: SimTime::ZERO,
+    };
+    assert_eq!(
+        validate_authorize_operation(&registry, &state, invalid_objective).expect_err(
+            "surveillance request shape must reject before general objective validation"
+        ),
+        OperationError::InvalidSurveillanceObjective
+    );
+
+    let unsupported_target = OperationDraft {
+        title: "Administrative surveillance target".to_owned(),
+        kind: OperationKind::Surveillance,
+        responsible_organization: organization,
+        leader,
+        objective: OperationObjective::GatherInformation {
+            target: EntityRef::Mandate(MandateId::from_raw(1)),
+        },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: SimTime::ZERO,
+    };
+    assert_eq!(
+        validate_authorize_operation(&registry, &state, unsupported_target)
+            .expect_err("administrative entities are not direct surveillance targets"),
+        OperationError::UnsupportedSurveillanceTarget(EntityRef::Mandate(MandateId::from_raw(1)))
+    );
+    assert_eq!(state.operations().operations().count(), 0);
+    validate_state_against_registry(&registry, &state)
+        .expect("rejected surveillance requests must preserve canonical state");
+    validate_invariants(&state);
+}
+
+#[test]
 fn operation_rejects_non_criminal_responsible_organization() {
     let (registry, mut state, _, _, target) = make_test_operation_state();
     let authority = insert_organization(

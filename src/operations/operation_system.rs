@@ -1,11 +1,21 @@
 //! Operation authorization and lifecycle mutation; read-only timing/booking policy lives in `operation_scheduling`, while objective actionability lives in the child validator.
 
+mod authorization_validation;
 mod objective_validation;
+mod start;
 
+use authorization_validation::{
+    resolve_current_extraction_arrest, validate_authorization_constraints,
+    validate_authorization_contingencies, validate_authorization_intelligence,
+    validate_authorization_participants, validate_deadline_execution_window,
+    validate_extraction_custody_current, validate_extraction_custody_window,
+    validate_representable_operation_window,
+};
 use objective_validation::validate_operation_objective;
 pub(crate) use objective_validation::{
     is_actionable_opportunity_target, is_information_subject_relevant, is_valid_operation_objective,
 };
+pub(crate) use start::validate_begin_operation;
 
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
@@ -13,31 +23,23 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
+use crate::core::version::VersionCapacityError;
 use crate::history::history_system::HistoryError;
 use crate::intelligence::KnowledgeHolder;
 use crate::intelligence::intelligence_system::IntelligenceError;
 use crate::operations::operation_abort::validate_authority_abort_operation;
-use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_scheduling::{
-    checked_earliest_operation_start_from_authorization,
-    earliest_operation_start_from_authorization, find_busy_participant,
-    find_busy_participant_for_begin, projected_authorized_operation_window,
-    projected_operation_window, resolve_deadline_without_execution_window,
-    resolve_operation_earliest_start,
+    find_busy_participant, projected_operation_window, resolve_operation_earliest_start,
 };
 use crate::operations::operation_state::{checked_shift_past_pause, pause_duration_minutes};
-use crate::operations::police_response_integration::{
-    OperationPoliceResponseStartPlan, PoliceResponseIntegrationError,
-    decide_operation_police_response_start,
+use crate::operations::surveillance_integration::{
+    SurveillanceRequestError, validate_surveillance_request,
 };
-use crate::operations::surveillance_integration::validate_surveillance_request;
 use crate::operations::{
     OperationAbortCause, OperationCommand, OperationDraft, OperationIdentity, OperationKind,
-    OperationObjective, OperationObjectiveKind, OperationRecord, OperationRuntime, OperationStatus,
-    RoleKind,
+    OperationObjectiveKind, OperationRecord, OperationRuntime, OperationStatus, RoleKind,
 };
-use crate::registry::{OperationDefinition, Registry};
+use crate::registry::Registry;
 use crate::reports::report_system::ReportError;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -485,15 +487,9 @@ pub fn validate_authorize_operation<'registry>(
         return Err(OperationError::ScheduledInPast);
     }
     validate_surveillance_request(draft.kind, &draft.objective).map_err(|error| match error {
-        crate::operations::surveillance_integration::SurveillanceError::InvalidObjective => {
-            OperationError::InvalidSurveillanceObjective
-        }
-        crate::operations::surveillance_integration::SurveillanceError::UnsupportedTarget(
-            target,
-        ) => OperationError::UnsupportedSurveillanceTarget(target),
-        crate::operations::surveillance_integration::SurveillanceError::MissingTarget(_)
-        | crate::operations::surveillance_integration::SurveillanceError::StaleTarget(_) => {
-            unreachable!("authorization validates target existence through the operation objective")
+        SurveillanceRequestError::InvalidObjective => OperationError::InvalidSurveillanceObjective,
+        SurveillanceRequestError::UnsupportedTarget(target) => {
+            OperationError::UnsupportedSurveillanceTarget(target)
         }
     })?;
     validate_operation_objective(
@@ -562,261 +558,6 @@ pub fn validate_authorize_operation<'registry>(
         extraction_arrest,
         registry,
     })
-}
-
-/// Validates the operation's required seats and participant availability while collecting the
-/// version pins consumed by the authorization token. Keeping this as one concern prevents the
-/// public authorization path from interleaving roster validation with plan semantics.
-fn validate_authorization_participants(
-    state: &AppState,
-    definition: &OperationDefinition,
-    draft: &OperationDraft,
-    expected_participant_versions: &mut BTreeMap<CharacterId, u32>,
-) -> Result<BTreeSet<CharacterId>, OperationError> {
-    for role in definition.required_roles() {
-        if !draft.roles.contains_key(role) {
-            return Err(OperationError::MissingRequiredRole(*role));
-        }
-    }
-    let mut role_participants = BTreeMap::new();
-    for (role, participant) in &draft.roles {
-        if let Some(first_role) = role_participants.insert(*participant, *role) {
-            return Err(OperationError::DuplicateRoleParticipant {
-                character: *participant,
-                first_role,
-                second_role: *role,
-            });
-        }
-        if definition.execution().capability_for_role(*role).is_none() {
-            return Err(OperationError::UnsupportedRole(*role));
-        }
-        let record = state
-            .world
-            .get_character(*participant)
-            .ok_or(OperationError::MissingCharacter(*participant))?;
-        if record.organization() != Some(draft.responsible_organization) {
-            return Err(OperationError::ForeignParticipant {
-                character: *participant,
-                expected: draft.responsible_organization,
-                actual: record.organization(),
-            });
-        }
-        if let Some(arrest) = state.legal.active_arrest_for_character(*participant) {
-            return Err(OperationError::DetainedParticipant {
-                character: *participant,
-                arrest: arrest.id(),
-            });
-        }
-        expected_participant_versions.insert(*participant, record.version());
-    }
-    let mut participants = BTreeSet::from([draft.leader]);
-    participants.extend(role_participants.keys().copied());
-    Ok(participants)
-}
-
-fn validate_authorization_intelligence(
-    state: &AppState,
-    definition: &OperationDefinition,
-    draft: &OperationDraft,
-) -> Result<(), OperationError> {
-    for information in &draft.intelligence {
-        let record = state
-            .intelligence
-            .get_information(*information)
-            .ok_or(OperationError::MissingInformation(*information))?;
-        if record.holder() != KnowledgeHolder::Organization(draft.responsible_organization) {
-            return Err(OperationError::InformationUnavailable {
-                information: *information,
-                organization: draft.responsible_organization,
-            });
-        }
-        if !definition
-            .execution()
-            .relevant_intelligence_topics()
-            .contains(&record.topic())
-            || !is_information_subject_relevant(state, &draft.objective, record.subject())
-        {
-            return Err(OperationError::IrrelevantInformation(*information));
-        }
-    }
-    Ok(())
-}
-
-fn validate_authorization_constraints(
-    registry: &Registry,
-    state: &AppState,
-    definition: &OperationDefinition,
-    draft: &OperationDraft,
-) -> Result<(), OperationError> {
-    let planning_at = earliest_operation_start_from_authorization(state.now(), draft.scheduled_for);
-    let max_age = u64::from(definition.execution().max_intelligence_age().as_minutes());
-    for constraint in &draft.constraints {
-        match constraint {
-            crate::operations::OperationConstraint::CompleteBy(_) => {}
-            crate::operations::OperationConstraint::RequireIntelligenceTopic(topic) => {
-                // Reconnaissance prerequisite: organization-held intelligence of exactly this
-                // topic, already validated for objective relevance, must still have nonzero
-                // canonical planning value when the operation can first begin. A stale record
-                // must not satisfy the constraint after the execution model has already reduced
-                // that same information to zero usefulness.
-                let covered = draft.intelligence.iter().any(|information| {
-                    state
-                        .intelligence
-                        .get_information(*information)
-                        .is_some_and(|record| {
-                            record.topic() == *topic
-                                && resolve_information_score(
-                                    registry.information_quality(),
-                                    record,
-                                    planning_at,
-                                    max_age,
-                                ) > 0
-                        })
-                });
-                if !covered {
-                    return Err(OperationError::MissingRequiredIntelligenceTopic(*topic));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_authorization_contingencies(
-    definition: &OperationDefinition,
-    draft: &OperationDraft,
-) -> Result<(), OperationError> {
-    for contingency in &draft.contingencies {
-        match contingency {
-            crate::operations::OperationContingency::AbortOnPoliceArrivalBeforeEntry
-                if definition.execution().operation_entry_offset().is_none() =>
-            {
-                return Err(OperationError::UnsupportedPoliceEntryContingency(
-                    draft.kind,
-                ));
-            }
-            crate::operations::OperationContingency::AbortOnPoliceArrivalBeforeEntry
-            | crate::operations::OperationContingency::RequestDecisionOnPoliceArrival => {}
-        }
-    }
-    Ok(())
-}
-
-/// A completion deadline must leave at least one executable minute after the earliest legal
-/// begin/entry boundary. Authorization tokens may be committed later than they were validated,
-/// so this rule is deliberately shared by validation and commit using the actual authorization
-/// instant each path owns.
-fn validate_representable_operation_window(
-    execution: &crate::registry::OperationExecutionDefinition,
-    authorized_at: SimTime,
-    scheduled_for: SimTime,
-) -> Result<SimTime, OperationError> {
-    let start = checked_earliest_operation_start_from_authorization(authorized_at, scheduled_for)
-        .ok_or(OperationError::SimulationTimeOverflow)?;
-    start
-        .as_minutes()
-        .checked_add(u64::from(execution.duration().as_minutes()))
-        .ok_or(OperationError::SimulationTimeOverflow)?;
-    Ok(start)
-}
-
-fn validate_deadline_execution_window(
-    execution: &crate::registry::OperationExecutionDefinition,
-    authorized_at: SimTime,
-    scheduled_for: SimTime,
-    constraints: &[crate::operations::OperationConstraint],
-) -> Result<(), OperationError> {
-    let begin_at =
-        validate_representable_operation_window(execution, authorized_at, scheduled_for)?;
-    if resolve_deadline_without_execution_window(execution, begin_at, constraints).is_some() {
-        return Err(OperationError::DeadlineLeavesNoExecutionWindow);
-    }
-    Ok(())
-}
-
-/// Reject an extraction that cannot finish before the target's currently modeled custody ends.
-/// This is a planning gate only: later release, delay, or re-arrest remains mutable simulation
-/// state and is handled again by resolution-time custody snapshots.
-fn validate_extraction_custody_window(
-    registry: &Registry,
-    state: &AppState,
-    draft: &OperationDraft,
-    extraction_arrest: Option<ArrestId>,
-    authorized_at: SimTime,
-) -> Result<(), OperationError> {
-    let OperationObjective::FreeDetainee { target } = draft.objective else {
-        debug_assert!(extraction_arrest.is_none());
-        return Ok(());
-    };
-    let arrest_id = extraction_arrest.expect("validated extraction must retain its custody link");
-    let arrest = state
-        .legal
-        .get_arrest(arrest_id)
-        .expect("validated extraction custody must remain persisted");
-    debug_assert_eq!(arrest.character(), target);
-    let (_, planned_end) = projected_authorized_operation_window(
-        registry,
-        authorized_at,
-        draft.kind,
-        draft.scheduled_for,
-        &draft.constraints,
-    );
-    let custody_ends_at = crate::legal::arrest_system::custody_release_at(
-        arrest.arrested_at(),
-        registry.legal().maximum_detention(),
-    );
-    if planned_end >= custody_ends_at {
-        return Err(OperationError::ExtractionMissesCustodyWindow {
-            character: target,
-            planned_end,
-            custody_ends_at,
-        });
-    }
-    Ok(())
-}
-
-/// The custody relationship an extraction is being planned against. The ID, not merely the
-/// detainee, is part of the plan because release followed by re-arrest creates a different legal
-/// situation that an already-authorized operation must not silently adopt.
-fn resolve_current_extraction_arrest(
-    state: &AppState,
-    objective: &OperationObjective,
-) -> Result<Option<ArrestId>, OperationError> {
-    let OperationObjective::FreeDetainee { target } = objective else {
-        return Ok(None);
-    };
-    state
-        .legal
-        .active_arrest_for_character(*target)
-        .map(|arrest| Some(arrest.id()))
-        .ok_or(OperationError::TargetNotDetained(*target))
-}
-
-/// Authorization tokens pin an extraction to one custody event. Commit must reject if that
-/// detainee was released or re-arrested between validation and commit rather than retargeting the
-/// operation to whatever arrest happens to be active later.
-fn validate_extraction_custody_current(
-    state: &AppState,
-    objective: &OperationObjective,
-    expected: Option<ArrestId>,
-) -> Result<(), OperationError> {
-    let OperationObjective::FreeDetainee { target } = objective else {
-        debug_assert!(expected.is_none());
-        return Ok(());
-    };
-    let expected = expected.expect("validated extraction must retain its custody link");
-    let found = state
-        .legal
-        .active_arrest_for_character(*target)
-        .map(|arrest| arrest.id());
-    if found != Some(expected) {
-        return Err(OperationError::StaleExtractionCustody {
-            character: *target,
-            expected,
-            found,
-        });
-    }
-    Ok(())
 }
 
 /// Validates that resuming a decision-blocked operation at `resumed_at` does not double-book any
@@ -938,181 +679,6 @@ pub fn apply_transition(
             Err(OperationError::InvalidTransition { status, transition })
         }
     }
-}
-
-pub(crate) struct ValidatedOperationStart {
-    operation: OperationId,
-    expected_version: u32,
-    started_at: SimTime,
-    resolution_due_at: SimTime,
-    police_response: OperationPoliceResponseStartPlan,
-}
-
-impl ValidatedOperationStart {
-    pub(crate) fn commit(self, state: &mut AppState) -> Result<(), OperationError> {
-        let record = state
-            .operations
-            .get_operation(self.operation)
-            .ok_or(OperationError::MissingOperation(self.operation))?;
-        if record.version() != self.expected_version {
-            return Err(OperationError::StaleBeginOperation {
-                operation: self.operation,
-                expected: self.expected_version,
-                found: record.version(),
-            });
-        }
-        ensure_version_can_advance(record.version(), "operation")?;
-        if record.status() != OperationStatus::Authorized {
-            return Err(OperationError::InvalidTransition {
-                status: record.status(),
-                transition: OperationTransition::Begin,
-            });
-        }
-        crate::core::time::ensure_time_current(state.now(), self.started_at)
-            .map_err(|(expected, found)| OperationError::StaleBeginTime { expected, found })?;
-        let entry_at = self.police_response.entry_at();
-        let response = self.police_response.commit_dispatch(state)?;
-        state.operations.begin(
-            self.operation,
-            self.started_at,
-            self.resolution_due_at,
-            entry_at,
-            response,
-        );
-        Ok(())
-    }
-}
-
-/// Start planning resolves only the operation record and dispatch validation; its decision
-/// and intelligence failure modes belong exclusively to the response-arrival pass.
-fn map_police_start_planning_error(error: PoliceResponseIntegrationError) -> OperationError {
-    match error {
-        PoliceResponseIntegrationError::MissingOperation(operation) => {
-            OperationError::MissingOperation(operation)
-        }
-        PoliceResponseIntegrationError::SimulationTimeOverflow => {
-            OperationError::SimulationTimeOverflow
-        }
-        PoliceResponseIntegrationError::PoliceResponse(dispatch) => dispatch.into(),
-        PoliceResponseIntegrationError::Decision(_)
-        | PoliceResponseIntegrationError::Intelligence(_)
-        | PoliceResponseIntegrationError::IdExhaustion(_) => {
-            unreachable!(
-                "police response start planning does not allocate IDs or validate arrival-only decisions or intelligence"
-            )
-        }
-    }
-}
-
-pub(crate) fn validate_begin_operation(
-    registry: &Registry,
-    state: &AppState,
-    operation: OperationId,
-) -> Result<ValidatedOperationStart, OperationError> {
-    let record = state
-        .operations
-        .get_operation(operation)
-        .ok_or(OperationError::MissingOperation(operation))?;
-    if record.status() != OperationStatus::Authorized {
-        return Err(OperationError::InvalidTransition {
-            status: record.status(),
-            transition: OperationTransition::Begin,
-        });
-    }
-    ensure_version_can_advance(record.version(), "operation")?;
-    let earliest_start = resolve_operation_earliest_start(record);
-    if state.now() < earliest_start {
-        return Err(OperationError::StartBeforeEarliestStart {
-            operation,
-            earliest_start,
-        });
-    }
-    if let Some(deadline) = record.completion_deadline()
-        && state.now() >= deadline
-    {
-        return Err(OperationError::DeadlineMissed {
-            operation,
-            deadline,
-            now: state.now(),
-        });
-    }
-    if let Some((opportunity, valid_until)) = state
-        .opportunities()
-        .expired_window_for_operation(operation, state.now())
-    {
-        return Err(OperationError::OpportunityWindowExpired {
-            operation,
-            opportunity: opportunity.id(),
-            valid_until,
-            now: state.now(),
-        });
-    }
-    if let Some(blocker) =
-        crate::operations::operation_objective::resolve_objective_blocker(state, record)
-    {
-        return Err(OperationError::ObjectiveUnavailable { operation, blocker });
-    }
-    let execution = registry.get_operation(record.kind()).execution();
-    if let Some(deadline) =
-        resolve_deadline_without_execution_window(execution, state.now(), record.constraints())
-    {
-        return Err(OperationError::DeadlineMissed {
-            operation,
-            deadline,
-            now: state.now(),
-        });
-    }
-    let duration = execution.duration();
-    // A binding deadline compresses the modeled window: the operation resolves on the deadline
-    // minute under time pressure (`resolve_time_pressure`), and only a deadline that passes
-    // without resolution — a decision-paused operation — is hard-aborted afterwards.
-    let mut resolution_due_at = state
-        .now()
-        .checked_add(duration)
-        .ok_or(OperationError::SimulationTimeOverflow)?;
-    for constraint in record.constraints() {
-        let crate::operations::OperationConstraint::CompleteBy(deadline) = constraint else {
-            continue;
-        };
-        if *deadline < resolution_due_at {
-            resolution_due_at = *deadline;
-        }
-    }
-    // Begin-time re-check of the authorization rule that a deadline must leave room for the
-    // crew to reach the entry milestone: a begin issued later than `scheduled_for` shrinks
-    // the approach window, and an entry milestone at or after resolution would resolve the
-    // operation before its modeled approach begins.
-    let participants = record.participants();
-    for character in &participants {
-        if let Some(arrest) = state.legal.active_arrest_for_character(*character) {
-            return Err(OperationError::DetainedParticipant {
-                character: *character,
-                arrest: arrest.id(),
-            });
-        }
-    }
-    if let Some((character, conflicting_operation)) = find_busy_participant_for_begin(
-        registry,
-        state,
-        &participants,
-        operation,
-        state.now(),
-        resolution_due_at,
-    ) {
-        return Err(OperationError::ParticipantBusy {
-            character,
-            operation: conflicting_operation,
-        });
-    }
-    let police_response = decide_operation_police_response_start(registry, state, operation)
-        .map_err(map_police_start_planning_error)?;
-    Ok(ValidatedOperationStart {
-        operation,
-        expected_version: record.version(),
-        started_at: state.now(),
-        resolution_due_at,
-        police_response,
-    })
 }
 
 #[cfg(test)]

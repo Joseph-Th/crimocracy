@@ -8,6 +8,7 @@ use crate::legal::{
     DayMinute, PatrolDeploymentDraft, PatrolDeploymentRecord, PatrolDeploymentRevision,
     PatrolDeploymentStatus, PatrolWindow, PoliceResponsePatrolSnapshot,
 };
+use crate::registry::Registry;
 use crate::world::{OrganizationKind, Rating};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -342,27 +343,50 @@ pub fn validate_patrol_transition(
 }
 
 pub fn resolve_patrol_presence(
+    registry: &Registry,
     state: &AppState,
     neighborhood: NeighborhoodId,
     at: SimTime,
 ) -> Option<Rating> {
-    resolve_patrol_presence_snapshot(state, neighborhood, at).presence()
+    resolve_patrol_presence_snapshot(registry, state, neighborhood, at).presence()
 }
 
 pub(crate) fn resolve_patrol_presence_snapshot(
+    registry: &Registry,
     state: &AppState,
     neighborhood: NeighborhoodId,
     at: SimTime,
 ) -> PatrolPresenceSnapshot {
+    resolve_patrol_presence_snapshot_with_percent(
+        state,
+        neighborhood,
+        at,
+        registry.legal().off_window_patrol_presence_percent(),
+    )
+}
+
+pub(crate) fn resolve_patrol_presence_snapshot_with_percent(
+    state: &AppState,
+    neighborhood: NeighborhoodId,
+    at: SimTime,
+    off_window_patrol_presence_percent: u8,
+) -> PatrolPresenceSnapshot {
     let minute = u16::try_from(at.as_minutes() % u64::from(DAY_MINUTES_U16))
         .expect("minute-of-day remainder must fit u16");
-    // An explicit patrol schedule is authoritative: once an authority models deployments in a
-    // neighborhood, its windows define street presence there and a coverage gap means no one is
-    // on beat (presence zero). The neighborhood's ambient `police_presence` profile is only the
-    // estimate for districts with no modeled schedule at all — consumers fall back to it when
-    // this snapshot reports None. Crews exploit exactly this by scheduling work inside gaps.
+    let ambient_presence = state
+        .world
+        .get_neighborhood(neighborhood)
+        .map(|record| record.profile().institutions.police_presence)
+        .unwrap_or_else(zero_rating);
+    let off_window_presence =
+        reduced_off_window_presence(ambient_presence, off_window_patrol_presence_percent);
+    // Explicit patrol windows are authoritative while they are active. Between them, the district
+    // retains reduced residual police visibility rather than becoming literally unpoliced or
+    // remaining as dangerous as its all-hours ambient profile. This gives patrol intelligence
+    // real strategic value while preserving uncertainty and unscheduled enforcement risk.
     let mut deployment_versions = BTreeMap::new();
-    let mut presence: Option<Rating> = None;
+    let mut has_active_deployment = false;
+    let mut window_presence: Option<Rating> = None;
     for deployment in state
         .legal
         .patrol_deployments_for_neighborhood(neighborhood)
@@ -373,6 +397,7 @@ pub(crate) fn resolve_patrol_presence_snapshot(
         else {
             continue;
         };
+        has_active_deployment = true;
         deployment_versions.insert(deployment.id(), revision.version());
         let deployment_presence = revision
             .windows()
@@ -380,27 +405,50 @@ pub(crate) fn resolve_patrol_presence_snapshot(
             .copied()
             .filter(|window| is_minute_within_patrol_window(*window, minute))
             .map(|window| window.presence())
-            .max_by_key(|rating| rating.value())
-            .unwrap_or_else(zero_rating);
-        presence = Some(match presence {
-            Some(current) if current.value() >= deployment_presence.value() => current,
-            Some(_) | None => deployment_presence,
-        });
+            .max_by_key(|rating| rating.value());
+        if let Some(deployment_presence) = deployment_presence {
+            window_presence = Some(match window_presence {
+                Some(current) if current.value() >= deployment_presence.value() => current,
+                Some(_) | None => deployment_presence,
+            });
+        }
     }
     PatrolPresenceSnapshot {
         deployment_versions,
-        presence,
+        presence: has_active_deployment.then_some(window_presence.unwrap_or(off_window_presence)),
     }
 }
 
 pub(crate) fn resolve_patrol_presence_interval_snapshot(
+    registry: &Registry,
     state: &AppState,
     neighborhood: NeighborhoodId,
     start: SimTime,
     end: SimTime,
 ) -> PatrolPresenceSnapshot {
+    resolve_patrol_presence_interval_snapshot_with_percent(
+        state,
+        neighborhood,
+        start,
+        end,
+        registry.legal().off_window_patrol_presence_percent(),
+    )
+}
+
+pub(crate) fn resolve_patrol_presence_interval_snapshot_with_percent(
+    state: &AppState,
+    neighborhood: NeighborhoodId,
+    start: SimTime,
+    end: SimTime,
+    off_window_patrol_presence_percent: u8,
+) -> PatrolPresenceSnapshot {
     if end <= start {
-        return resolve_patrol_presence_snapshot(state, neighborhood, end);
+        return resolve_patrol_presence_snapshot_with_percent(
+            state,
+            neighborhood,
+            end,
+            off_window_patrol_presence_percent,
+        );
     }
 
     let deployments: Vec<_> = state
@@ -425,6 +473,8 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot(
         .get_neighborhood(neighborhood)
         .map(|record| record.profile().institutions.police_presence.value())
         .unwrap_or(0);
+    let off_window_presence =
+        reduced_off_window_presence_value(ambient_presence, off_window_patrol_presence_percent);
     let mut deployment_versions = BTreeMap::new();
     let mut has_modeled_patrol = false;
     let mut total_presence = 0_u128;
@@ -432,6 +482,7 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot(
         let segment_start = segment[0];
         let segment_end = segment[1];
         let mut daily_presence = [0_u8; DAY_MINUTES_U16 as usize];
+        let mut daily_covered = [false; DAY_MINUTES_U16 as usize];
         let mut segment_has_patrol = false;
         for deployment in &deployments {
             let Some(revision) = deployment
@@ -448,7 +499,19 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot(
                 let presence = window.presence().value();
                 for offset in 0..usize::from(window.duration_minutes()) {
                     let minute = (start_minute + offset) % usize::from(DAY_MINUTES_U16);
-                    daily_presence[minute] = daily_presence[minute].max(presence);
+                    if daily_covered[minute] {
+                        daily_presence[minute] = daily_presence[minute].max(presence);
+                    } else {
+                        daily_presence[minute] = presence;
+                        daily_covered[minute] = true;
+                    }
+                }
+            }
+        }
+        if segment_has_patrol {
+            for (presence, covered) in daily_presence.iter_mut().zip(daily_covered) {
+                if !covered {
+                    *presence = off_window_presence;
                 }
             }
         }
@@ -483,10 +546,27 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot(
 }
 
 pub(crate) fn resolve_authority_patrol_presence_snapshot(
+    registry: &Registry,
     state: &AppState,
     organization: OrganizationId,
     neighborhood: NeighborhoodId,
     at: SimTime,
+) -> AuthorityPatrolPresenceSnapshot {
+    resolve_authority_patrol_presence_snapshot_with_percent(
+        state,
+        organization,
+        neighborhood,
+        at,
+        registry.legal().off_window_patrol_presence_percent(),
+    )
+}
+
+pub(crate) fn resolve_authority_patrol_presence_snapshot_with_percent(
+    state: &AppState,
+    organization: OrganizationId,
+    neighborhood: NeighborhoodId,
+    at: SimTime,
+    off_window_patrol_presence_percent: u8,
 ) -> AuthorityPatrolPresenceSnapshot {
     let fallback = state
         .world
@@ -495,6 +575,8 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
         .profile()
         .institutions
         .police_presence;
+    let off_window_presence =
+        reduced_off_window_presence(fallback, off_window_patrol_presence_percent);
     let Some((deployment, revision)) = state
         .legal
         .patrol_deployments_for_neighborhood(neighborhood)
@@ -514,9 +596,8 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
     };
     let minute = u16::try_from(at.as_minutes() % u64::from(DAY_MINUTES_U16))
         .expect("minute-of-day remainder must fit u16");
-    // Same authoritative-schedule contract as `resolve_patrol_presence_snapshot`: an off-window
-    // minute inside a modeled deployment is a real coverage gap (zero presence, slowest allowed
-    // response), not a reason to fall back to the ambient estimate.
+    // Same schedule contract as the neighborhood snapshot: explicit windows override the district
+    // estimate, while an off-window minute retains reduced residual police presence.
     let presence = revision
         .windows()
         .iter()
@@ -524,7 +605,7 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
         .filter(|window| is_minute_within_patrol_window(*window, minute))
         .map(PatrolWindow::presence)
         .max_by_key(|rating| rating.value())
-        .unwrap_or_else(zero_rating);
+        .unwrap_or(off_window_presence);
     AuthorityPatrolPresenceSnapshot {
         deployment: Some((deployment.id(), revision.version())),
         presence,
@@ -542,6 +623,7 @@ pub(crate) fn resolve_authority_patrol_presence_snapshot(
 /// before the minute, or when that active deployment has a same-minute suspension/retirement that
 /// could have happened before dispatch.
 pub(crate) fn police_response_patrol_snapshot_is_possible(
+    registry: &Registry,
     state: &AppState,
     organization: OrganizationId,
     neighborhood: NeighborhoodId,
@@ -549,10 +631,23 @@ pub(crate) fn police_response_patrol_snapshot_is_possible(
     snapshot: Option<PoliceResponsePatrolSnapshot>,
     presence: Rating,
 ) -> bool {
+    if !police_response_patrol_snapshot_reference_is_possible(
+        state,
+        organization,
+        neighborhood,
+        at,
+        snapshot,
+    ) {
+        return false;
+    }
     let fallback = match state.world.get_neighborhood(neighborhood) {
         Some(record) => record.profile().institutions.police_presence,
         None => return false,
     };
+    let off_window_presence = reduced_off_window_presence(
+        fallback,
+        registry.legal().off_window_patrol_presence_percent(),
+    );
     let deployments: Vec<_> = state
         .legal
         .patrol_deployments_for_neighborhood(neighborhood)
@@ -575,13 +670,45 @@ pub(crate) fn police_response_patrol_snapshot_is_possible(
                                 .filter(|later| later.version() > revision.version())
                                 .all(|later| later.changed_at() >= at))
             });
-            candidate.is_some_and(|revision| patrol_revision_presence(revision, at) == presence)
+            candidate.is_some_and(|revision| {
+                patrol_revision_presence(revision, at, off_window_presence) == presence
+            })
         });
     }
 
-    if presence != fallback {
-        return false;
+    presence == fallback
+}
+
+pub(crate) fn police_response_patrol_snapshot_reference_is_possible(
+    state: &AppState,
+    organization: OrganizationId,
+    neighborhood: NeighborhoodId,
+    at: SimTime,
+    snapshot: Option<PoliceResponsePatrolSnapshot>,
+) -> bool {
+    let deployments: Vec<_> = state
+        .legal
+        .patrol_deployments_for_neighborhood(neighborhood)
+        .filter(|deployment| deployment.organization() == organization)
+        .collect();
+
+    if let Some(snapshot) = snapshot {
+        return deployments.iter().any(|deployment| {
+            deployment.id() == snapshot.deployment()
+                && deployment.revisions().iter().any(|revision| {
+                    revision.version() == snapshot.version()
+                        && revision.status() == PatrolDeploymentStatus::Active
+                        && (revision.changed_at() == at
+                            || revision.changed_at() < at
+                                && deployment
+                                    .revisions()
+                                    .iter()
+                                    .filter(|later| later.version() > revision.version())
+                                    .all(|later| later.changed_at() >= at))
+                })
+        });
     }
+
     let active_before = deployments.iter().find_map(|deployment| {
         deployment
             .revisions()
@@ -604,7 +731,11 @@ pub(crate) fn police_response_patrol_snapshot_is_possible(
     })
 }
 
-fn patrol_revision_presence(revision: &PatrolDeploymentRevision, at: SimTime) -> Rating {
+fn patrol_revision_presence(
+    revision: &PatrolDeploymentRevision,
+    at: SimTime,
+    off_window_presence: Rating,
+) -> Rating {
     let minute = u16::try_from(at.as_minutes() % u64::from(DAY_MINUTES_U16))
         .expect("minute-of-day remainder must fit u16");
     revision
@@ -614,7 +745,22 @@ fn patrol_revision_presence(revision: &PatrolDeploymentRevision, at: SimTime) ->
         .filter(|window| is_minute_within_patrol_window(*window, minute))
         .map(PatrolWindow::presence)
         .max_by_key(|rating| rating.value())
-        .unwrap_or_else(zero_rating)
+        .unwrap_or(off_window_presence)
+}
+
+fn reduced_off_window_presence(ambient: Rating, off_window_patrol_presence_percent: u8) -> Rating {
+    Rating::try_new(reduced_off_window_presence_value(
+        ambient.value(),
+        off_window_patrol_presence_percent,
+    ))
+    .expect("reduced police presence must remain within rating bounds")
+}
+
+fn reduced_off_window_presence_value(ambient: u8, off_window_patrol_presence_percent: u8) -> u8 {
+    debug_assert!((1..100).contains(&off_window_patrol_presence_percent));
+    let scaled = u16::from(ambient) * u16::from(off_window_patrol_presence_percent);
+    u8::try_from(scaled.div_ceil(100))
+        .expect("bounded ambient police presence percentage must fit u8")
 }
 
 fn scheduled_presence_sum(

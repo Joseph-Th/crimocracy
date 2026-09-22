@@ -14,7 +14,7 @@ use support::{
 };
 pub(crate) use support::{
     business_is_available_for_enterprise, can_authority_cover_location,
-    resolve_location_neighborhood,
+    redundant_supporting_business, resolve_location_neighborhood,
 };
 
 pub use cycle_planning::decide_enterprise_cycle;
@@ -135,6 +135,8 @@ pub enum EnterpriseError {
     SupportingBusinessSuspended { business: BusinessId },
     #[error("supporting business {business} duplicates the enterprise's hosted business location")]
     DuplicateSupportingLocation { business: BusinessId },
+    #[error("supporting business {business} is redundant in the enterprise support network")]
+    RedundantSupportingBusiness { business: BusinessId },
     #[error("enterprise support network lacks required function {function:?}")]
     MissingNetworkFunction { function: BusinessFunction },
     #[error(

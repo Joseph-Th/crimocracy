@@ -137,7 +137,7 @@ pub fn build_scenario(
                 },
                 institutions: NeighborhoodInstitutionProfile {
                     police_presence: rating(jitter_rating_u8(
-                        variation.neighborhood_police_presence(),
+                        profile.neighborhood_police_presence(variation),
                         jitter_rating,
                     )),
                 },
@@ -330,16 +330,22 @@ pub fn build_scenario(
     )?
     .commit(&mut state)?;
 
-    // The burglar also carries an older personal bond to the boss himself: Carlo vouched for
-    // him, but Marrow is the one who pulled him out of trouble years ago. Act-1 rival poaching
-    // never reads this edge (its factors use only candidate-to-recruiter and
-    // candidate-to-incumbent), so it exists solely so a player-authored win-back re-approach
-    // has a real recruiter relationship to stand on.
-    validate_set_relationship(
-        &state,
-        burglar,
-        boss,
-        RelationshipDimensions {
+    // The burglar also carries an older personal bond to the boss himself. Its strength varies
+    // across authored worlds: sometimes that history is enough to win him back, and in the
+    // crowded fixture it has cooled enough that leadership must live with a refusal and rebuild.
+    // Act-1 rival poaching never reads this edge (its factors use only candidate-to-recruiter and
+    // candidate-to-incumbent), so the variation changes recovery rather than causing the exit.
+    let boss_burglar_relationship = match variation {
+        FixtureVariation::Crowded => RelationshipDimensions {
+            trust: level(60),
+            respect: level(55),
+            fear: level(15),
+            affection: level(45),
+            dependence: level(0),
+            resentment: level(0),
+            debt: level(20),
+        },
+        FixtureVariation::Clockwork | FixtureVariation::Quiet => RelationshipDimensions {
             trust: level(85),
             respect: level(75),
             fear: level(10),
@@ -348,8 +354,9 @@ pub fn build_scenario(
             resentment: level(0),
             debt: level(50),
         },
-    )?
-    .commit(&mut state)?;
+    };
+    validate_set_relationship(&state, burglar, boss, boss_burglar_relationship)?
+        .commit(&mut state)?;
 
     // Danny's pitch has a long-standing personal relationship to Marrow to stand on, so the
     // relationship edge runs from candidate to recruiter and executive recruitment stays

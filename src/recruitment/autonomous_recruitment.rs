@@ -330,3 +330,38 @@ fn manager_recruitment_preference(manager: &crate::world::CharacterRecord) -> Re
         RecruitmentApproach::PersonalAppeal
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::CharacterDraft;
+    use crate::world::world_system::insert_character;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn autonomous_proud_manager_prefers_advancement_without_ambition() {
+        let mut state = AppState::new(17);
+        let manager = insert_character(
+            &mut state,
+            CharacterDraft {
+                name: "Proud Manager".to_owned(),
+                organization: None,
+                supervisor: None,
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::from([TraitKind::Proud]),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("standalone manager fixture should insert");
+        let manager = state
+            .world()
+            .get_character(manager)
+            .expect("inserted manager should persist");
+
+        assert_eq!(
+            manager_recruitment_preference(manager),
+            RecruitmentApproach::Advancement
+        );
+    }
+}

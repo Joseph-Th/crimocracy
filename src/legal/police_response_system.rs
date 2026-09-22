@@ -6,9 +6,13 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
-use crate::legal::patrol_system::resolve_authority_patrol_presence_snapshot;
+use crate::legal::patrol_system::{
+    resolve_authority_patrol_presence_snapshot,
+    resolve_authority_patrol_presence_snapshot_with_percent,
+};
 use crate::legal::{PoliceResponsePatrolSnapshot, PoliceResponseRecord, PoliceResponseStatus};
 use crate::operations::OperationStatus;
+use crate::registry::Registry;
 use crate::world::{OrganizationKind, Rating};
 use thiserror::Error;
 
@@ -81,6 +85,7 @@ pub(crate) struct ValidatedPoliceResponseDispatch {
     draft: PoliceResponseDispatchDraft,
     expected_operation_version: u32,
     response_presence: Rating,
+    off_window_patrol_presence_percent: u8,
     jurisdiction_version: u32,
     patrol: Option<PoliceResponsePatrolSnapshot>,
     validated_at: SimTime,
@@ -119,6 +124,7 @@ impl ValidatedPoliceResponseDispatch {
 }
 
 pub(crate) fn validate_dispatch_police_response(
+    registry: &Registry,
     state: &AppState,
     draft: PoliceResponseDispatchDraft,
 ) -> Result<ValidatedPoliceResponseDispatch, PoliceResponseError> {
@@ -135,6 +141,7 @@ pub(crate) fn validate_dispatch_police_response(
         .expect("validated response authority must have jurisdiction")
         .version();
     let patrol = resolve_authority_patrol_presence_snapshot(
+        registry,
         state,
         draft.authority,
         draft.neighborhood,
@@ -144,6 +151,7 @@ pub(crate) fn validate_dispatch_police_response(
         draft,
         expected_operation_version: operation.version(),
         response_presence: patrol.presence,
+        off_window_patrol_presence_percent: registry.legal().off_window_patrol_presence_percent(),
         jurisdiction_version,
         patrol: patrol
             .deployment
@@ -218,11 +226,12 @@ fn validate_dispatch_snapshot(
         .legal
         .get_jurisdiction(token.draft.authority)
         .expect("validated response authority must retain jurisdiction");
-    let patrol = resolve_authority_patrol_presence_snapshot(
+    let patrol = resolve_authority_patrol_presence_snapshot_with_percent(
         state,
         token.draft.authority,
         token.draft.neighborhood,
         token.validated_at,
+        token.off_window_patrol_presence_percent,
     );
     let patrol_snapshot = patrol
         .deployment

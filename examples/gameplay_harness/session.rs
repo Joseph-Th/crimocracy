@@ -478,7 +478,7 @@ fn prepare_initial_burglary_plan(
         Strategy::Rush | Strategy::Press => scenario.timeline.initial_burglary_at,
         Strategy::Recon => {
             let patrol_information = learned_patrol_information.ok_or(
-                "recon did not produce a patrol-pattern observation; the harness will not infer a safe time from hidden state",
+                "recon did not produce a patrol-pattern observation; the harness will not infer lower-risk timing from hidden state",
             )?;
             let patrol_record = scenario
                 .state
@@ -494,7 +494,7 @@ fn prepare_initial_burglary_plan(
                 .get_operation(OperationKind::Burglary)
                 .execution()
                 .duration();
-            let chosen = match choose_safe_start_from_patrol_signal(
+            let chosen = match choose_lower_risk_start_from_patrol_signal(
                 scenario.state.now(),
                 &patrol_signal,
                 duration,
@@ -502,13 +502,13 @@ fn prepare_initial_burglary_plan(
                 scenario.timeline.initial_opportunity_valid_until,
             ) {
                 Ok(chosen) => chosen,
-                Err(HarnessContractError::NoSafeOperationWindow) => {
+                Err(HarnessContractError::NoLowerRiskOperationWindow) => {
                     metrics.opening_stood_down = true;
                     metrics.opening_standdown_reason =
-                        Some(OpeningStanddownReason::NoSafeWindowBeforeExpiry);
+                        Some(OpeningStanddownReason::NoLowerRiskWindowBeforeExpiry);
                     if narrative {
                         println!(
-                            "[DECIDE]  The casing is usable, but no patrol-safe start remains before the opportunity closes at {}. Let the score go. Better information arrived too late to be actionable.",
+                            "[DECIDE]  The casing is usable, but no lower-risk start outside the known patrol concentrations remains before the opportunity closes at {}. Let the score go. Better information arrived too late to be actionable.",
                             stamp(
                                 scenario
                                     .timeline
@@ -524,7 +524,7 @@ fn prepare_initial_burglary_plan(
             if narrative {
                 let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
                 println!(
-                    "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {}, window stays outside heavy presence.",
+                    "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {}, the window avoids the known concentrations, but ambient district policing still remains.",
                     patrol_record.summary(),
                     crate::readout::format_patrol_windows(&windows),
                     duration.as_minutes(),

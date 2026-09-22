@@ -22,6 +22,20 @@ pub(super) fn build_after_action_summary(
     missing_intelligence_topics: &[InformationTopic],
 ) -> String {
     let mut parts = vec![format!("Objective {}.", outcome_label(outcome))];
+    push_execution_quality(&mut parts, tactical_outcome, &factors);
+    push_police_context(&mut parts, &factors, high_police_presence_threshold);
+    push_intelligence_context(&mut parts, &factors, missing_intelligence_topics);
+    push_execution_modifiers(&mut parts, &factors);
+    push_variance_context(&mut parts, tactical_outcome, &factors);
+    push_exposure_context(&mut parts, exposure);
+    parts.join(" ")
+}
+
+fn push_execution_quality(
+    parts: &mut Vec<String>,
+    tactical_outcome: OperationObjectiveOutcome,
+    factors: &OperationResolutionFactors,
+) {
     // Practical blockers can turn a tactically successful execution into an objective failure.
     // Crew-quality and luck commentary therefore keys off the tactical result rather than
     // falsely implying that strong execution caused a target-availability failure.
@@ -54,6 +68,13 @@ pub(super) fn build_after_action_summary(
             parts.push("Leadership had no demonstrated capability for the execution.".to_owned())
         }
     }
+}
+
+fn push_police_context(
+    parts: &mut Vec<String>,
+    factors: &OperationResolutionFactors,
+    high_police_presence_threshold: u8,
+) {
     // Police pressure is reported when it materially shaped the job or when the organization
     // could not establish it at all; light presence was not worth the crew's attention.
     match (
@@ -80,6 +101,13 @@ pub(super) fn build_after_action_summary(
         ),
         (Some(_), false) => {}
     }
+}
+
+fn push_intelligence_context(
+    parts: &mut Vec<String>,
+    factors: &OperationResolutionFactors,
+    missing_intelligence_topics: &[InformationTopic],
+) {
     if factors.intelligence_topics_relevant() > 0 {
         let covered = factors.intelligence_topics_covered();
         let relevant = factors.intelligence_topics_relevant();
@@ -104,6 +132,9 @@ pub(super) fn build_after_action_summary(
             parts.push(format!("Missing usable planning intelligence: {missing}."));
         }
     }
+}
+
+fn push_execution_modifiers(parts: &mut Vec<String>, factors: &OperationResolutionFactors) {
     // A chosen approach that reduced difficulty is the expected case, not news; only an
     // approach that hurt execution earns a sentence.
     if factors.approach_adjustment() > 0 {
@@ -120,6 +151,13 @@ pub(super) fn build_after_action_summary(
     if factors.time_pressure() > 0 {
         parts.push("The completion deadline compressed the execution window.".to_owned());
     }
+}
+
+fn push_variance_context(
+    parts: &mut Vec<String>,
+    tactical_outcome: OperationObjectiveOutcome,
+    factors: &OperationResolutionFactors,
+) {
     if tactical_outcome != OperationObjectiveOutcome::Achieved {
         match factors.variance() {
             value if value < 0 => parts.push(match tactical_outcome {
@@ -135,6 +173,9 @@ pub(super) fn build_after_action_summary(
             _ => parts.push("Favorable unplanned circumstances improved the result.".to_owned()),
         }
     }
+}
+
+fn push_exposure_context(parts: &mut Vec<String>, exposure: OperationExposureLevel) {
     match exposure {
         OperationExposureLevel::None => {}
         OperationExposureLevel::Trace => {
@@ -148,7 +189,6 @@ pub(super) fn build_after_action_summary(
             "The crew believes at least one participant may have been identifiable.".to_owned(),
         ),
     }
-    parts.join(" ")
 }
 
 pub(super) fn outcome_label(outcome: OperationObjectiveOutcome) -> &'static str {

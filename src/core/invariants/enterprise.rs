@@ -611,6 +611,19 @@ fn validate_enterprise_definition(
             });
         }
     }
+    if let Some(business) = crate::enterprises::enterprise_execution::redundant_supporting_business(
+        definition,
+        state,
+        enterprise.location(),
+        enterprise.supporting_businesses(),
+    ) {
+        return Err(
+            StateValidationError::RedundantEnterpriseSupportingBusiness {
+                enterprise: enterprise.id(),
+                business,
+            },
+        );
+    }
     Ok(())
 }
 

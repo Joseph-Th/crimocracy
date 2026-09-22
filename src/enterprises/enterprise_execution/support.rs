@@ -169,9 +169,6 @@ pub(super) fn validate_enterprise_business_dependencies(
     validate_business_location_requirements(definition, state, organization, location)?;
     validate_supporting_businesses(state, organization, location, supporting_businesses)?;
 
-    if definition.required_network_functions().is_empty() {
-        return Ok(());
-    }
     let mut available = BTreeSet::new();
     if definition.network_mode() == crate::registry::EnterpriseNetworkMode::HostMayContribute
         && let EnterpriseLocation::Business(business_id) = location
@@ -196,7 +193,56 @@ pub(super) fn validate_enterprise_business_dependencies(
             });
         }
     }
+    if let Some(business) =
+        redundant_supporting_business(definition, state, location, supporting_businesses)
+    {
+        return Err(EnterpriseError::RedundantSupportingBusiness { business });
+    }
     Ok(())
+}
+
+/// Returns the first support asset that can be removed without losing any authored network
+/// requirement. The caller must first validate that the host/support IDs exist and that the full
+/// network covers every required function. Keeping this rule in the enterprise owner prevents
+/// manual establishment, autonomous planning, and registry-relative validation from disagreeing
+/// about whether a business is actually part of the racket's infrastructure.
+pub(crate) fn redundant_supporting_business(
+    definition: &EnterpriseDefinition,
+    state: &AppState,
+    location: EnterpriseLocation,
+    supporting_businesses: &BTreeSet<BusinessId>,
+) -> Option<BusinessId> {
+    let host =
+        if definition.network_mode() == crate::registry::EnterpriseNetworkMode::HostMayContribute {
+            match location {
+                EnterpriseLocation::Business(business) => Some(
+                    state
+                        .world
+                        .get_business(business)
+                        .expect("validated enterprise host must exist"),
+                ),
+                EnterpriseLocation::Neighborhood(_) => None,
+            }
+        } else {
+            None
+        };
+
+    supporting_businesses.iter().copied().find(|candidate| {
+        definition
+            .required_network_functions()
+            .iter()
+            .all(|function| {
+                host.is_some_and(|business| business.has_function(*function))
+                    || supporting_businesses.iter().any(|business_id| {
+                        business_id != candidate
+                            && state
+                                .world
+                                .get_business(*business_id)
+                                .expect("validated supporting business must exist")
+                                .has_function(*function)
+                    })
+            })
+    })
 }
 
 pub(super) fn validate_supporting_businesses(

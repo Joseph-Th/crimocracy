@@ -3971,6 +3971,119 @@ fn alcohol_distribution_rejects_incomplete_or_foreign_support_networks() {
 }
 
 #[test]
+fn establishment_rejects_support_that_serves_no_authored_network_requirement() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let unnecessary = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Unneeded Back Office",
+        BusinessKind::ProfessionalServices,
+        BTreeSet::from([BusinessFunction::ProfessionalRecords]),
+        BusinessOwner::Organization(organization),
+    );
+
+    let error = match validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization,
+            authority: fixture.authority,
+            location: fixture.location,
+            supporting_businesses: BTreeSet::from([unnecessary]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    ) {
+        Ok(_) => panic!("a racket with no network requirement must not lock or surcharge support"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EnterpriseError::RedundantSupportingBusiness {
+            business: unnecessary,
+        }
+    );
+    assert_eq!(fixture.state.enterprises().enterprises().count(), 0);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn establishment_rejects_redundant_support_inside_a_complete_network() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let (transport, retail) = alcohol_support_network(&registry, &mut fixture);
+    let organization = fixture.organization;
+    let unnecessary = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Unneeded Meeting Hall",
+        BusinessKind::Hospitality,
+        BTreeSet::from([BusinessFunction::MeetingSpace]),
+        BusinessOwner::Organization(organization),
+    );
+
+    let error = establish_alcohol_distribution(
+        &registry,
+        &mut fixture,
+        BTreeSet::from([transport, retail, unnecessary]),
+    )
+    .expect_err(
+        "complete networks must reject surcharge-producing support that contributes nothing",
+    );
+    assert_eq!(
+        error,
+        EnterpriseError::RedundantSupportingBusiness {
+            business: unnecessary,
+        }
+    );
+    assert_eq!(fixture.state.enterprises().enterprises().count(), 0);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn restore_rejects_persisted_enterprise_with_redundant_support_network() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let (transport, retail) = alcohol_support_network(&registry, &mut fixture);
+    let enterprise = establish_alcohol_distribution(
+        &registry,
+        &mut fixture,
+        BTreeSet::from([transport, retail]),
+    )
+    .expect("complete distribution network should establish");
+    let original = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("distribution enterprise should persist")
+        .clone();
+    let mut corrupted = enterprise_wire(&original);
+    // Protection has no authored support-network requirement. Rewriting only the fixed-width kind
+    // discriminator preserves a decodable save while making both persisted support links
+    // semantically redundant, a state canonical establishment can never create.
+    corrupted.identity.kind = EnterpriseKind::Protection;
+    let envelope = replace_serialized_enterprise(
+        build_save(&registry, &fixture.state).expect("valid distribution network should save"),
+        &original,
+        &corrupted,
+    );
+    let error = restore_save(&registry, envelope)
+        .expect_err("registry-relative restore validation must reject redundant persisted support");
+    assert!(matches!(
+        error,
+        LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::RedundantEnterpriseSupportingBusiness {
+                enterprise: invalid,
+                business,
+            }
+        ) if invalid == enterprise && business == transport
+    ));
+}
+
+#[test]
 fn neighborhood_authority_cannot_bind_support_business_in_another_district() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();

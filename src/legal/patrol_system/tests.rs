@@ -128,7 +128,7 @@ fn make_fixture() -> (crate::Registry, AppState, OrganizationId, NeighborhoodId)
 
 #[test]
 fn interval_presence_stays_exact_across_the_full_clock_range() {
-    let (_registry, mut state, police, neighborhood) = make_fixture();
+    let (registry, mut state, police, neighborhood) = make_fixture();
     validate_establish_patrol_deployment(
         &state,
         PatrolDeploymentDraft {
@@ -142,6 +142,7 @@ fn interval_presence_stays_exact_across_the_full_clock_range() {
     .expect("full-day patrol deployment should commit");
 
     let snapshot = resolve_patrol_presence_interval_snapshot(
+        &registry,
         &state,
         neighborhood,
         SimTime::from_minutes(0),
@@ -152,6 +153,93 @@ fn interval_presence_stays_exact_across_the_full_clock_range() {
         Some(80),
         "interval averaging must not distort presence when u64 accumulation would overflow"
     );
+    validate_invariants(&state);
+}
+
+#[test]
+fn interval_presence_uses_reduced_ambient_pressure_between_patrol_windows() {
+    let (registry, mut state, police, neighborhood) = make_fixture();
+    validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![window(0, 1, 1)],
+        },
+    )
+    .expect("sparse patrol deployment should validate")
+    .commit(&mut state)
+    .expect("sparse patrol deployment should commit");
+
+    let snapshot = resolve_patrol_presence_interval_snapshot(
+        &registry,
+        &state,
+        neighborhood,
+        SimTime::ZERO,
+        SimTime::from_minutes(2),
+    );
+    assert_eq!(
+        snapshot.presence().map(Rating::value),
+        Some(16),
+        "one explicit minute at presence 1 followed by one reduced-ambient minute at presence 30 must average to 16"
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn interval_presence_preserves_daily_remainder_across_multiple_days() {
+    let (registry, mut state, police, neighborhood) = make_fixture();
+    validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![window(0, 720, 100)],
+        },
+    )
+    .expect("half-day patrol deployment should validate")
+    .commit(&mut state)
+    .expect("half-day patrol deployment should commit");
+
+    let snapshot = resolve_patrol_presence_interval_snapshot(
+        &registry,
+        &state,
+        neighborhood,
+        SimTime::ZERO,
+        SimTime::from_minutes(u64::from(DAY_MINUTES_U16) + 1),
+    );
+    assert_eq!(
+        snapshot.presence().map(Rating::value),
+        Some(65),
+        "a half-day at presence 100 plus reduced ambient presence 30 for the remaining half-day must preserve the exact daily average and remainder"
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn authority_presence_wraps_minute_of_day_after_long_campaigns() {
+    let (registry, mut state, police, neighborhood) = make_fixture();
+    let deployment = validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![window(0, 60, 75)],
+        },
+    )
+    .expect("daily patrol deployment should validate")
+    .commit(&mut state)
+    .expect("daily patrol deployment should commit");
+
+    let at = SimTime::from_minutes(u64::from(DAY_MINUTES_U16) * 100 + 30);
+    let snapshot =
+        resolve_authority_patrol_presence_snapshot(&registry, &state, police, neighborhood, at);
+    assert_eq!(
+        snapshot.deployment,
+        Some((deployment, 1)),
+        "authority snapshot must retain the active deployment at a far-future daily recurrence"
+    );
+    assert_eq!(snapshot.presence.value(), 75);
     validate_invariants(&state);
 }
 
@@ -181,19 +269,23 @@ fn patrol_queries_and_restore_preserve_revision_chronology() {
         .expect("historical patrol suspension should commit");
 
     assert_eq!(
-        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(5)).map(Rating::value),
+        resolve_patrol_presence(&registry, &state, neighborhood, SimTime::from_minutes(5))
+            .map(Rating::value),
         Some(70)
     );
     assert_eq!(
-        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(15)).map(Rating::value),
-        Some(0)
+        resolve_patrol_presence(&registry, &state, neighborhood, SimTime::from_minutes(15))
+            .map(Rating::value),
+        Some(30),
+        "an off-window minute retains reduced residual district police presence"
     );
     assert_eq!(
-        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(20)),
+        resolve_patrol_presence(&registry, &state, neighborhood, SimTime::from_minutes(20)),
         None,
         "suspended deployments no longer replace ambient presence with an explicit patrol schedule"
     );
     let interval = resolve_patrol_presence_interval_snapshot(
+        &registry,
         &state,
         neighborhood,
         SimTime::ZERO,
@@ -201,8 +293,8 @@ fn patrol_queries_and_restore_preserve_revision_chronology() {
     );
     assert_eq!(
         interval.presence().map(Rating::value),
-        Some(43),
-        "10 minutes at 70, 10 minutes in an explicit gap, then 10 minutes of ambient 60 must average to 43"
+        Some(53),
+        "10 minutes at 70, 10 minutes at reduced ambient 30, then 10 minutes of ambient 60 must average to 53"
     );
 
     let restored = restore_save(
@@ -211,14 +303,19 @@ fn patrol_queries_and_restore_preserve_revision_chronology() {
     )
     .expect("patrol history should restore");
     assert_eq!(
-        resolve_patrol_presence(&restored, neighborhood, SimTime::from_minutes(5))
+        resolve_patrol_presence(&registry, &restored, neighborhood, SimTime::from_minutes(5))
             .map(Rating::value),
         Some(70)
     );
     assert_eq!(
-        resolve_patrol_presence(&restored, neighborhood, SimTime::from_minutes(15))
-            .map(Rating::value),
-        Some(0)
+        resolve_patrol_presence(
+            &registry,
+            &restored,
+            neighborhood,
+            SimTime::from_minutes(15)
+        )
+        .map(Rating::value),
+        Some(30)
     );
     assert_eq!(
         restored
@@ -301,8 +398,8 @@ fn window(start: u16, duration: u16, presence: u8) -> PatrolWindow {
 }
 
 #[test]
-fn patrol_windows_wrap_midnight_and_leave_real_coverage_gaps() {
-    let (_registry, mut state, police, neighborhood) = make_fixture();
+fn patrol_windows_wrap_midnight_and_retain_reduced_presence_between_windows() {
+    let (registry, mut state, police, neighborhood) = make_fixture();
     validate_establish_patrol_deployment(
         &state,
         PatrolDeploymentDraft {
@@ -316,21 +413,27 @@ fn patrol_windows_wrap_midnight_and_leave_real_coverage_gaps() {
     .expect("patrol deployment should commit");
 
     assert_eq!(
-        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(1_380))
+        resolve_patrol_presence(
+            &registry,
+            &state,
+            neighborhood,
+            SimTime::from_minutes(1_380)
+        )
+        .map(Rating::value),
+        Some(80)
+    );
+    assert_eq!(
+        resolve_patrol_presence(&registry, &state, neighborhood, SimTime::from_minutes(60))
             .map(Rating::value),
         Some(80)
     );
     assert_eq!(
-        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(60)).map(Rating::value),
-        Some(80)
-    );
-    assert_eq!(
-        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(300))
+        resolve_patrol_presence(&registry, &state, neighborhood, SimTime::from_minutes(300))
             .map(Rating::value),
-        Some(0)
+        Some(30)
     );
     assert_eq!(
-        resolve_patrol_presence(&state, neighborhood, SimTime::from_minutes(540))
+        resolve_patrol_presence(&registry, &state, neighborhood, SimTime::from_minutes(540))
             .map(Rating::value),
         Some(40)
     );
@@ -506,8 +609,13 @@ fn patrol_deployment_survives_save_round_trip_with_active_index() {
         1
     );
     assert_eq!(
-        resolve_patrol_presence(&restored, neighborhood, SimTime::from_minutes(660))
-            .map(Rating::value),
+        resolve_patrol_presence(
+            &registry,
+            &restored,
+            neighborhood,
+            SimTime::from_minutes(660)
+        )
+        .map(Rating::value),
         Some(75)
     );
     validate_state(&restored).expect("restored patrol state should validate");

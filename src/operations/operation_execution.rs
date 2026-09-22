@@ -2,12 +2,12 @@
 
 mod incident_intake;
 mod narrative;
+mod resolution_commit;
 mod resolution_effects;
 mod resolution_factors;
 
-use incident_intake::validate_exposure_incident;
 use narrative::{build_after_action_summary, outcome_label};
-use resolution_effects::validate_resolution_effects;
+pub(crate) use resolution_commit::validate_operation_resolution_plan;
 
 pub(crate) use resolution_factors::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
@@ -21,29 +21,18 @@ use resolution_factors::{
     resolve_target_police_interval_snapshot,
 };
 
-use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    ArrestId, CharacterId, IdExhaustionError, IdKind, NeighborhoodId, OperationId, PoliceResponseId,
+    ArrestId, CharacterId, IdExhaustionError, NeighborhoodId, OperationId, PoliceResponseId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
-use crate::economy::business_economy_system::{BusinessEconomyError, ValidatedBusinessDisruption};
-use crate::history::history_system::{HistoryError, ValidatedHistoryEvent, validate_record_event};
-use crate::history::{HistoryEventDraft, HistoryEventKind};
-use crate::intelligence::intelligence_system::{
-    IntelligenceError, ValidatedInformation, validate_record_information,
-};
-use crate::intelligence::{
-    InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
-};
+use crate::core::version::VersionCapacityError;
+use crate::economy::business_economy_system::BusinessEconomyError;
+use crate::history::history_system::HistoryError;
+use crate::intelligence::intelligence_system::IntelligenceError;
 use crate::legal::WitnessCooperation;
-use crate::legal::investigation_system::{InvestigationError, ValidatedIncidentIntake};
-use crate::legal::jurisdiction_system::{
-    CaseIntakeAuthoritySnapshot, CaseIntakeAuthoritySnapshotError,
-    validate_case_intake_authority_snapshot,
-};
+use crate::legal::investigation_system::InvestigationError;
 use crate::legal::patrol_system::PatrolPresenceSnapshot;
 use crate::operations::operation_economics::{
     CashProceedsPlan, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE, depleted_take_clause,
@@ -57,16 +46,15 @@ use crate::operations::operation_objective::{
 use crate::operations::surveillance_integration::{
     SurveillanceError, SurveillanceIntelligencePlan, decide_surveillance_intelligence,
     persisted_surveillance_after_action_clause, surveillance_after_action_clause,
-    validate_surveillance_information, validate_surveillance_plan_snapshot,
+    validate_surveillance_plan_snapshot,
 };
 use crate::operations::{
-    OperationExposureFactors, OperationExposureLevel, OperationExposureRecord, OperationKind,
-    OperationObjective, OperationObjectiveBlocker, OperationObjectiveOutcome, OperationRecord,
+    OperationExposureFactors, OperationExposureLevel, OperationKind, OperationObjective,
+    OperationObjectiveBlocker, OperationObjectiveOutcome, OperationRecord,
     OperationResolutionFactors, OperationResolutionRecord, OperationStatus,
 };
 use crate::registry::Registry;
-use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
-use crate::reports::{ReportDraft, ReportEntry, ReportKind};
+use crate::reports::report_system::ReportError;
 use crate::world::Rating;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -329,6 +317,7 @@ pub(crate) fn decide_operation_resolution(
         .started_at()
         .expect("in-progress operation must have a start time");
     let police_snapshot = resolve_target_police_interval_snapshot(
+        registry,
         state,
         resolve_operation_venue_entities(state, record),
         started_at,
@@ -640,329 +629,6 @@ pub(crate) fn participant_after_action_summary(
     )
 }
 
-pub(crate) struct ValidatedOperationResolution {
-    plan: OperationResolutionPlan,
-    incident: Option<ValidatedIncidentIntake>,
-    incident_authority: Option<CaseIntakeAuthoritySnapshot>,
-    surveillance_information: Vec<ValidatedInformation>,
-    information: ValidatedInformation,
-    history: ValidatedHistoryEvent,
-    report: ValidatedReport,
-    detainee_release: Option<crate::legal::arrest_system::ValidatedRelease>,
-    witness_intimidation: Vec<crate::legal::witness_system::ValidatedWitnessCooperation>,
-    business_disruption: Option<ValidatedBusinessDisruption>,
-    participant_information: Vec<ValidatedInformation>,
-}
-
-impl ValidatedOperationResolution {
-    /// Commits the whole resolution atomically. Every fallible effect (custody release,
-    /// witness intimidation, sabotage disruption) is validated inside
-    /// [`validate_operation_resolution_plan`] and re-checks only its version token at commit;
-    /// canonical callers validate and commit within the same tick minute, so no intervening
-    /// mutation can invalidate those tokens. A tail-effect failure after the terminal record
-    /// would therefore signal caller misuse (holding a validated plan across ticks), not a
-    /// reachable pipeline state.
-    pub(crate) fn commit(
-        self,
-        state: &mut AppState,
-    ) -> Result<OperationId, OperationResolutionError> {
-        let surveillance_information_count = u32::try_from(self.surveillance_information.len())
-            .expect("surveillance information count must fit u32");
-        let mut budget = vec![
-            (IdKind::Information, 1 + surveillance_information_count),
-            (IdKind::HistoryEvent, 1),
-            (IdKind::Report, 1),
-        ];
-        // Every participant personally knows how the job they were part of ended; that
-        // private knowledge is what an arrested participant can later trade as an informant.
-        let operation = state
-            .operations
-            .get_operation(self.plan.snapshot.operation)
-            .expect("resolution plan operation must exist");
-        let participant_count =
-            u32::try_from(operation.participants().len()).expect("participant count must fit u32");
-        budget.push((IdKind::Information, participant_count));
-        if let Some(incident) = self.incident.as_ref() {
-            budget.extend(incident.id_budget()?);
-        }
-        state.ids.reserve_many(&budget)?;
-        validate_plan_snapshot(state, &self.plan)?;
-        let operation = state
-            .operations
-            .get_operation(self.plan.snapshot.operation)
-            .expect("validated resolution operation must still exist");
-        ensure_version_can_advance(operation.version(), "operation")?;
-        if let Some(snapshot) = self.incident_authority {
-            validate_case_intake_authority_snapshot(state, snapshot).map_err(
-                |error| match error {
-                    CaseIntakeAuthoritySnapshotError::Routing {
-                        neighborhood,
-                        expected,
-                        found,
-                    } => OperationResolutionError::StaleIncidentRouting {
-                        neighborhood,
-                        expected,
-                        found,
-                    },
-                    CaseIntakeAuthoritySnapshotError::JurisdictionVersion {
-                        neighborhood,
-                        organization,
-                        expected_version,
-                        found_version,
-                    } => OperationResolutionError::StaleIncidentJurisdictionVersion {
-                        neighborhood,
-                        organization,
-                        expected_version,
-                        found_version,
-                    },
-                },
-            )?;
-        }
-        // Tail effects own other domains and can stale independently of the operation record.
-        // Re-check all of them before the incident or any artifact can mutate state. Nothing
-        // between this preflight and the tail commits mutates arrests, existing active witness
-        // cases, or business economies, so successful checks remain current for this commit.
-        if let Some(release) = &self.detainee_release {
-            let character = match state
-                .operations
-                .get_operation(self.plan.snapshot.operation)
-                .expect("revalidated resolution operation must still exist")
-                .objective()
-            {
-                OperationObjective::FreeDetainee { target } => *target,
-                OperationObjective::AcquireProperty { .. }
-                | OperationObjective::ObtainCash { .. }
-                | OperationObjective::Frighten { .. }
-                | OperationObjective::GatherInformation { .. }
-                | OperationObjective::DisruptBusiness { .. } => {
-                    unreachable!("only extraction resolutions carry a detainee release")
-                }
-            };
-            release.ensure_current(state).map_err(|error| {
-                OperationResolutionError::DetaineeRelease {
-                    operation: self.plan.snapshot.operation,
-                    character,
-                    error,
-                }
-            })?;
-        }
-        for intimidation in &self.witness_intimidation {
-            intimidation.ensure_current(state)?;
-        }
-        if let Some(disruption) = &self.business_disruption {
-            disruption.ensure_current(state)?;
-        }
-        let incident = self
-            .incident
-            .map(|validated| validated.commit(state))
-            .transpose()?;
-        let investigation = incident.as_ref().map(|outcome| outcome.investigation);
-        let evidence = incident
-            .map(|outcome| outcome.evidence.into_iter().collect())
-            .unwrap_or_default();
-        let exposure = OperationExposureRecord {
-            level: self.plan.outcome.exposure.level,
-            score: self.plan.outcome.exposure.score,
-            factors: self.plan.outcome.exposure.factors,
-            neighborhood: self.plan.outcome.exposure.neighborhood,
-            identified_character: self.plan.outcome.exposure.identified_character,
-            investigation,
-            evidence,
-        };
-        let discovered_information = self
-            .surveillance_information
-            .into_iter()
-            .map(|information| {
-                information
-                    .commit(state)
-                    .expect("resolution information IDs were preflighted before mutation")
-            })
-            .collect::<BTreeSet<_>>();
-        // The signature set is frozen from the validated plan's observations: what this
-        // operation actually saw is authoritative for later validation, not a re-derivation
-        // that later notification changes could silently contradict.
-        let surveillance_signatures = self
-            .plan
-            .outcome
-            .surveillance
-            .as_ref()
-            .map(SurveillanceIntelligencePlan::surveillance_signatures)
-            .unwrap_or_default();
-        let after_action_information = self
-            .information
-            .commit(state)
-            .expect("resolution information IDs were preflighted before mutation");
-        let history_event = self
-            .history
-            .commit(state)
-            .expect("resolution history ID was preflighted before mutation");
-        let after_action_report = self
-            .report
-            .commit(state)
-            .expect("resolution report ID was preflighted before mutation");
-        let extraction_arrest = self.plan.outcome.extraction_arrest;
-        state.operations.complete(
-            self.plan.snapshot.operation,
-            OperationResolutionRecord {
-                resolved_at: self.plan.snapshot.resolved_at,
-                objective_outcome: self.plan.outcome.objective_outcome,
-                objective_blocker: self.plan.outcome.objective_blocker,
-                execution_margin: self.plan.outcome.execution_margin,
-                factors: self.plan.outcome.factors,
-                exposure,
-                property_proceeds: self.plan.outcome.property_proceeds_plan.proceeds,
-                cash_proceeds: self.plan.outcome.cash_proceeds_plan.proceeds,
-                extraction_arrest,
-                discovered_information,
-                surveillance_signatures,
-                after_action_information,
-                after_action_report,
-                history_event,
-            },
-        );
-        // Extraction releases run last so custody ownership changes only after the operation
-        // itself has reached its terminal record; the validated release was checked against
-        // the arrest version seen during plan validation.
-        if let Some(release) = self.detainee_release {
-            release
-                .commit(state)
-                .expect("preflighted detainee release must remain current during resolution");
-        }
-        for intimidation in self.witness_intimidation {
-            intimidation
-                .commit(state)
-                .expect("preflighted witness pressure must remain current during resolution");
-        }
-        // Sabotage damage runs last so the target's economy degrades only after the
-        // operation itself has reached its terminal record.
-        if let Some(disruption) = self.business_disruption {
-            disruption
-                .commit(state)
-                .expect("preflighted business disruption must remain current during resolution");
-        }
-        // Personal after-action knowledge for each participant: the crew knows what went
-        // down even though the organization's own record is the org-held after-action.
-        // Every draft was validated before the first mutation above.
-        for information in self.participant_information {
-            information
-                .commit(state)
-                .expect("participant information IDs were preflighted before resolution mutation");
-        }
-        Ok(self.plan.snapshot.operation)
-    }
-}
-
-pub(crate) fn validate_operation_resolution_plan(
-    registry: &Registry,
-    state: &AppState,
-    plan: OperationResolutionPlan,
-) -> Result<ValidatedOperationResolution, OperationResolutionError> {
-    validate_plan_snapshot(state, &plan)?;
-    let record = state
-        .operations
-        .get_operation(plan.snapshot.operation)
-        .expect("validated resolution operation must exist");
-    ensure_version_can_advance(record.version(), "operation")?;
-    let effects = validate_resolution_effects(registry, state, record, &plan.outcome)?;
-    let surveillance_information = match &plan.outcome.surveillance {
-        Some(surveillance) => validate_surveillance_information(
-            state,
-            record.responsible_organization(),
-            record.id(),
-            surveillance,
-        )?,
-        None => Vec::new(),
-    };
-    let (incident, incident_authority) = validate_exposure_incident(
-        registry,
-        state,
-        record,
-        &plan.outcome.exposure,
-        plan.outcome.factors.target_police_presence(),
-        plan.snapshot.resolved_at,
-    )?;
-    // Operation crews can report what they personally observed, but case creation and routing
-    // are institutional facts. Do not turn hidden incident-intake truth into organization-held
-    // knowledge here. Players learn case activity through the legal/contact/intelligence paths.
-    let after_action_summary = plan.narrative.summary.clone();
-    let information = validate_record_information(
-        state,
-        InformationDraft {
-            holder: KnowledgeHolder::Organization(record.responsible_organization()),
-            source_kind: InformationSourceKind::AfterAction,
-            topic: crate::intelligence::InformationTopic::OperationalOutcome,
-            source_entity: Some(EntityRef::Character(record.leader())),
-            subject: EntityRef::Operation(record.id()),
-            observed_at: plan.snapshot.resolved_at,
-            reliability: Reliability::DirectAccess,
-            specificity: Specificity::Precise,
-            summary: after_action_summary.clone(),
-        },
-    )?;
-    let history = validate_record_event(
-        state,
-        HistoryEventDraft {
-            kind: HistoryEventKind::Operation,
-            summary: completion_history_summary(record, plan.outcome.objective_outcome),
-            entities: plan.narrative.history_entities.clone(),
-        },
-    )?;
-    let report = validate_record_report(
-        state,
-        ReportDraft {
-            recipient: record.responsible_organization(),
-            kind: ReportKind::AfterAction,
-            title: format!("{} after-action report", record.title()),
-            entries: vec![ReportEntry {
-                attention: AttentionClass::Notable,
-                summary: after_action_summary,
-                sources: Vec::new(),
-                entities: plan.narrative.history_entities.clone(),
-                decision: None,
-            }],
-        },
-    )?;
-    // Personal after-action knowledge for each participant: the crew knows what went down
-    // even though the organization's own record is the org-held after-action. Validating
-    // here keeps commit free of fallible content checks after terminal mutation.
-    let participant_information = record
-        .participants()
-        .into_iter()
-        .map(|participant| {
-            validate_record_information(
-                state,
-                InformationDraft {
-                    holder: KnowledgeHolder::Character(participant),
-                    source_kind: InformationSourceKind::AfterAction,
-                    topic: crate::intelligence::InformationTopic::OperationalOutcome,
-                    source_entity: Some(EntityRef::Character(record.leader())),
-                    subject: EntityRef::Operation(record.id()),
-                    observed_at: plan.snapshot.resolved_at,
-                    reliability: Reliability::DirectAccess,
-                    specificity: Specificity::Precise,
-                    summary: participant_after_action_summary(
-                        record,
-                        plan.outcome.objective_outcome,
-                    ),
-                },
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ValidatedOperationResolution {
-        plan,
-        incident,
-        incident_authority,
-        surveillance_information,
-        information,
-        history,
-        report,
-        detainee_release: effects.detainee_release,
-        witness_intimidation: effects.witness_intimidation,
-        business_disruption: effects.business_disruption,
-        participant_information,
-    })
-}
-
 pub(crate) fn find_due_in_progress_operations(state: &AppState) -> Vec<OperationId> {
     state.operations.find_due_in_progress(state.now())
 }
@@ -970,6 +636,7 @@ pub(crate) fn find_due_in_progress_operations(state: &AppState) -> Vec<Operation
 fn validate_plan_snapshot(
     state: &AppState,
     plan: &OperationResolutionPlan,
+    off_window_patrol_presence_percent: u8,
 ) -> Result<(), OperationResolutionError> {
     let record = state
         .operations
@@ -1006,16 +673,22 @@ fn validate_plan_snapshot(
     // surveillance-specific dependency reports the precise target-staleness error rather than a
     // secondary police-context change caused by the same target mutation.
     if let Some(surveillance) = &plan.outcome.surveillance {
-        validate_surveillance_plan_snapshot(state, surveillance)?;
+        validate_surveillance_plan_snapshot(
+            state,
+            surveillance,
+            off_window_patrol_presence_percent,
+        )?;
     }
-    let current_police_snapshot = resolve_target_police_interval_snapshot(
-        state,
-        resolve_operation_venue_entities(state, record),
-        record
-            .started_at()
-            .expect("in-progress operation must have a start time"),
-        plan.snapshot.resolved_at,
-    );
+    let current_police_snapshot =
+        resolution_factors::resolve_target_police_interval_snapshot_with_percent(
+            state,
+            resolve_operation_venue_entities(state, record),
+            record
+                .started_at()
+                .expect("in-progress operation must have a start time"),
+            plan.snapshot.resolved_at,
+            off_window_patrol_presence_percent,
+        );
     // The real staleness signal is the recomputed snapshots: patrol deployments or the police
     // response may have changed since planning. The plan's outcome factors were derived from the
     // plan snapshot itself, so no re-derivation is needed (and comparing them would be tautological).

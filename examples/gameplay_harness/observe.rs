@@ -661,7 +661,7 @@ pub fn tick_changed_observable_state(outcome: &TickOutcome) -> bool {
         || outcome.executive_brief.is_some()
 }
 
-pub fn choose_safe_start_from_patrol_signal(
+pub fn choose_lower_risk_start_from_patrol_signal(
     now: SimTime,
     signal: &InformationSignal,
     operation_duration: SimDuration,
@@ -695,7 +695,7 @@ pub fn choose_safe_start_from_patrol_signal(
             return Ok(SimTime::from_minutes(candidate));
         }
     }
-    Err(HarnessContractError::NoSafeOperationWindow)
+    Err(HarnessContractError::NoLowerRiskOperationWindow)
 }
 
 pub fn patrol_intervals_from_signal(signal: &InformationSignal) -> Vec<(u64, u64)> {

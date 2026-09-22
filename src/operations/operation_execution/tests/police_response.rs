@@ -1722,6 +1722,80 @@ fn restore_rejects_police_response_presence_that_disagrees_with_frozen_patrol_re
 }
 
 #[test]
+fn off_window_police_response_presence_round_trips_and_rejects_zero_gap_corruption() {
+    let (registry, mut state, police, neighborhood, operation) =
+        make_exposed_business_operation_fixture(true);
+    let deployment = validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(45).expect("fixture patrol minute should validate"),
+                    60,
+                    Rating::try_new(90).expect("fixture patrol presence should validate"),
+                )
+                .expect("fixture patrol window should validate"),
+            ],
+        },
+    )
+    .expect("delayed patrol concentration should validate")
+    .commit(&mut state)
+    .expect("delayed patrol concentration should commit");
+
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let response_id = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.police_response())
+        .expect("ambient residual pressure should still dispatch this exposed operation");
+    let response = state
+        .legal()
+        .get_police_response(response_id)
+        .expect("dispatched response should persist")
+        .clone();
+    assert_eq!(
+        response.patrol(),
+        Some(PoliceResponsePatrolSnapshot::new(deployment, 1))
+    );
+    assert_eq!(
+        response.response_presence().value(),
+        45,
+        "ambient presence 90 must retain the authored 50 percent off-window floor"
+    );
+
+    restore_save(
+        &registry,
+        build_save(&registry, &state).expect("canonical off-window response should save"),
+    )
+    .expect("authored off-window response presence should round-trip");
+
+    let mut corrupted = police_response_wire(&response);
+    corrupted.state.response_presence =
+        Rating::try_new(0).expect("zero remains structurally representable for corruption");
+    let error = restore_save(
+        &registry,
+        replace_serialized_police_response(
+            build_save(&registry, &state)
+                .expect("valid off-window response should save before corruption"),
+            &response,
+            &corrupted,
+        ),
+    )
+    .expect_err("restore must not accept the obsolete zero-presence patrol-gap rule");
+    assert!(matches!(
+        error,
+        crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidPoliceResponse {
+                response: invalid
+            }
+        ) if invalid == response_id
+    ));
+}
+
+#[test]
 fn restore_rejects_arrived_police_response_version_without_a_second_mutation() {
     let (registry, mut state, _police, _neighborhood, operation) =
         make_exposed_business_operation_fixture(true);
@@ -1885,8 +1959,8 @@ fn operation_resolution_preserves_mid_execution_patrol_revision_history() {
             .factors
             .target_police_presence()
             .map(Rating::value),
-        Some(31),
-        "20 minutes at presence 70 followed by 25 minutes in an explicit zero-presence gap must average to 31"
+        Some(56),
+        "20 minutes at explicit presence 70 followed by 25 off-window minutes at reduced ambient presence 45 must average to 56"
     );
     assert_eq!(
         plan.outcome
@@ -1894,7 +1968,7 @@ fn operation_resolution_preserves_mid_execution_patrol_revision_history() {
             .factors
             .target_police_presence()
             .map(Rating::value),
-        Some(31)
+        Some(56)
     );
 
     validate_revise_patrol_deployment(
@@ -1921,7 +1995,7 @@ fn operation_resolution_preserves_mid_execution_patrol_revision_history() {
 }
 
 #[test]
-fn operation_resolution_uses_time_weighted_patrol_presence_across_execution_window() {
+fn operation_resolution_retains_reduced_pressure_outside_short_patrol_window() {
     let (registry, mut state, police, neighborhood, operation) =
         make_exposed_business_operation_fixture(true);
     validate_establish_patrol_deployment(
@@ -1960,7 +2034,8 @@ fn operation_resolution_uses_time_weighted_patrol_presence_across_execution_wind
             .factors
             .target_police_presence()
             .map(Rating::value),
-        Some(2)
+        Some(46),
+        "a short scheduled patrol window must not erase residual district police pressure during the rest of execution"
     );
     assert_eq!(
         plan.outcome
@@ -1968,7 +2043,7 @@ fn operation_resolution_uses_time_weighted_patrol_presence_across_execution_wind
             .factors
             .target_police_presence()
             .map(Rating::value),
-        Some(2)
+        Some(46)
     );
     assert!(
         !plan

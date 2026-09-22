@@ -13,7 +13,11 @@ use crimocracy::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
-use crimocracy::intelligence::{InformationSignal, InformationTopic, KnowledgeHolder};
+use crimocracy::intelligence::intelligence_system::validate_record_information;
+use crimocracy::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
+};
 use crimocracy::legal::investigation_system::validate_incident_intake;
 use crimocracy::legal::jurisdiction_system::resolve_case_intake_authority;
 use crimocracy::legal::legal_representation_system::validate_retain_legal_representation;
@@ -37,14 +41,16 @@ use crimocracy::opportunities::opportunity_system::{
 };
 use crimocracy::opportunities::{OperationOpportunityDraft, OpportunityStatus};
 use crimocracy::recruitment::recruitment_system::validate_recruitment_attempt;
-use crimocracy::recruitment::{RecruitmentApproach, RecruitmentDraft};
+use crimocracy::recruitment::{
+    RecruitmentApproach, RecruitmentAuthority, RecruitmentDraft, RecruitmentOutcome,
+};
 use crimocracy::registry::Registry;
 use crimocracy::social::RelationshipDimensions;
 use crimocracy::social::relationship_system::validate_set_relationship;
 use crimocracy::world::world_system::{insert_character, insert_organization};
 use crimocracy::world::{
-    ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, OrganizationDraft,
-    OrganizationKind, PolicyKind, PolicySetting,
+    ApprovalPolicy, AutonomyLevel, CapabilityKind, CharacterDraft, DriveKind, OrganizationDraft,
+    OrganizationKind, PolicyKind, PolicySetting, TraitKind,
 };
 use crimocracy::{
     contacts::contact_system::{InstitutionalContactDraft, validate_establish_contact},
@@ -58,76 +64,277 @@ use std::path::PathBuf;
 
 use crate::*;
 
+/// Compares the player experience of retaining personnel approval versus delegating it to the
+/// lieutenant. Both branches start from the same world and the same known prospect. The only
+/// treatment is the mandate standing order, so any difference in interruption, roster, and
+/// payroll is the consequence of governance rather than a different opportunity.
+pub fn run_delegation_control_probe(
+    registry: &Registry,
+    seeds: EvaluationSeeds,
+    detail: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut base = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
+    let prospect = insert_character(
+        &mut base.state,
+        CharacterDraft {
+            name: "Nico Serra".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([
+                (CapabilityKind::Driving, rating(68)),
+                (CapabilityKind::Negotiation, rating(54)),
+            ]),
+            // These remain hidden scoring inputs. The player-facing probe only knows that Carlo
+            // has a strong personal line to a plausible independent prospect.
+            traits: BTreeSet::from([TraitKind::Ambitious]),
+            drives: BTreeMap::from([(DriveKind::Status, rating(90))]),
+        },
+    )?;
+    validate_set_relationship(
+        &base.state,
+        prospect,
+        base.lieutenant,
+        RelationshipDimensions {
+            trust: level(95),
+            respect: level(90),
+            fear: level(0),
+            affection: level(75),
+            dependence: level(20),
+            resentment: level(0),
+            debt: level(60),
+        },
+    )?
+    .commit(&mut base.state)?;
+
+    fn set_recruitment_policy(
+        scenario: &mut Scenario<'_>,
+        policy: ApprovalPolicy,
+    ) -> Result<(), Box<dyn Error>> {
+        let mandate = scenario
+            .state
+            .delegation()
+            .get_mandate(scenario.lieutenant_mandate)
+            .expect("player lieutenant mandate must persist");
+        let mut scopes = mandate.scopes().clone();
+        scopes.insert(ResponsibilityScope::Function(
+            ResponsibilityFunction::Personnel,
+        ));
+        let mut standing_orders = mandate.standing_orders().clone();
+        standing_orders.insert(
+            PolicyKind::IndependentRecruitment,
+            PolicySetting::IndependentRecruitment(policy),
+        );
+        validate_revise_mandate(
+            &scenario.state,
+            scenario.lieutenant_mandate,
+            MandateRevisionDraft {
+                scopes,
+                standing_orders,
+                budget: mandate.budget(),
+            },
+        )?
+        .commit(&mut scenario.state)?;
+        Ok(())
+    }
+
+    fn advance_to_recruitment_boundary(
+        registry: &Registry,
+        scenario: &mut Scenario<'_>,
+    ) -> Result<crimocracy::core::simulation::TickOutcome, Box<dyn Error>> {
+        let cadence = registry.recruitment().autonomous_attempt_cadence();
+        let pre_boundary = scenario.state.now()
+            + SimDuration::from_minutes(
+                cadence
+                    .as_minutes()
+                    .checked_sub(1)
+                    .expect("autonomous recruitment cadence must exceed one minute"),
+            );
+        let mut metrics = RunMetrics::default();
+        run_until(scenario, pre_boundary, false, &mut metrics)?;
+        Ok(run_tick(registry, &mut scenario.state)?)
+    }
+
+    fn advance_one_day(
+        registry: &Registry,
+        scenario: &mut Scenario<'_>,
+    ) -> Result<crimocracy::core::simulation::TickOutcome, Box<dyn Error>> {
+        let cadence = registry.recruitment().autonomous_attempt_cadence();
+        let pre_boundary = scenario.state.now()
+            + SimDuration::from_minutes(
+                cadence
+                    .as_minutes()
+                    .checked_sub(1)
+                    .expect("autonomous recruitment cadence must exceed one minute"),
+            );
+        let mut metrics = RunMetrics::default();
+        run_until(scenario, pre_boundary, false, &mut metrics)?;
+        Ok(run_tick(registry, &mut scenario.state)?)
+    }
+
+    let mut approval = base.clone();
+    let mut delegated = base;
+    set_recruitment_policy(&mut approval, ApprovalPolicy::RequireApproval)?;
+    set_recruitment_policy(&mut delegated, ApprovalPolicy::Delegated)?;
+
+    let approval_tick = advance_to_recruitment_boundary(registry, &mut approval)?;
+    let delegated_tick = advance_to_recruitment_boundary(registry, &mut delegated)?;
+
+    let approval_pending = approval
+        .state
+        .decisions()
+        .pending_for_recruitment_approval(approval.player, prospect)
+        .is_some();
+    if !approval_pending
+        || approval
+            .state
+            .recruitment()
+            .latest_attempt_for(prospect, approval.player)
+            .is_some()
+        || approval
+            .state
+            .world()
+            .get_character(prospect)
+            .and_then(|record| record.organization())
+            .is_some()
+    {
+        return Err(
+            "approval-gated delegation must surface a pending player decision without recruiting the prospect first"
+                .into(),
+        );
+    }
+
+    let delegated_attempt = delegated
+        .state
+        .recruitment()
+        .latest_attempt_for(prospect, delegated.player)
+        .ok_or("delegated personnel authority did not autonomously approach its known prospect")?;
+    if !matches!(
+        delegated_attempt.authority(),
+        RecruitmentAuthority::Delegated { .. }
+    ) || delegated_attempt.outcome() != RecruitmentOutcome::Accepted
+        || delegated
+            .state
+            .world()
+            .get_character(prospect)
+            .and_then(|record| record.organization())
+            != Some(delegated.player)
+    {
+        return Err(
+            "delegated personnel authority must autonomously make and own the accepted recruitment attempt"
+                .into(),
+        );
+    }
+    if approval_tick.decision_requests.is_empty()
+        || !delegated_tick
+            .recruitment_attempts
+            .contains(&delegated_attempt.id())
+    {
+        return Err(
+            "delegation probe did not surface the expected interruption-versus-autonomous-action contrast"
+                .into(),
+        );
+    }
+
+    let approval_payroll = advance_one_day(registry, &mut approval)?
+        .payrolls
+        .into_iter()
+        .find(|payroll| payroll.organization() == approval.player)
+        .ok_or("approval branch did not produce player payroll")?;
+    let delegated_payroll = advance_one_day(registry, &mut delegated)?
+        .payrolls
+        .into_iter()
+        .find(|payroll| payroll.organization() == delegated.player)
+        .ok_or("delegated branch did not produce player payroll")?;
+    let wage_delta = delegated_payroll.owed().cents() - approval_payroll.owed().cents();
+    if wage_delta != registry.upkeep().per_member_daily().cents() {
+        return Err(format!(
+            "delegated hire should add exactly one member's recurring daily wage: expected {}c, observed {}c",
+            registry.upkeep().per_member_daily().cents(),
+            wage_delta
+        )
+        .into());
+    }
+
+    validate_harness_state(registry, &approval.state)?;
+    validate_harness_state(registry, &delegated.state)?;
+    if detail {
+        let prospect_name = delegated
+            .state
+            .world()
+            .get_character(prospect)
+            .expect("delegated prospect must persist")
+            .name();
+        println!(
+            "[DELEGATION] Ask-first policy: Carlo surfaced a recruitment decision for {prospect_name}; no approach happened until leadership answers."
+        );
+        println!(
+            "[DELEGATION] Delegated policy: Carlo independently approached {prospect_name} through his own judgment and relationship; the prospect joined without interrupting leadership."
+        );
+        println!(
+            "[CONSEQUENCE] Delegating personnel authority increased the next daily payroll by {}. The benefit is autonomous growth; the cost is that Carlo can enlarge the organization and its carrying cost without a prompt.",
+            format_cents(wage_delta)
+        );
+    }
+    Ok(())
+}
+
 /// Proves that repeated scores on one target decay through the canonical property-proceeds
-/// path. The organization learns the district's patrol rhythm through surveillance, takes the
-/// same business twice, and observes that the immediate re-score recovers only part of the
-/// first haul while value replenishes continuously and a take after the authored recovery
-/// period returns to full value. All observations are
-/// player-visible: held-property records and after-action outcomes.
+/// path. This probe deliberately uses a prepared low-pressure target so law-enforcement timing
+/// cannot obscure the economic question: the organization takes the same business twice,
+/// observes that the immediate re-score recovers only part of the first haul, then waits through
+/// the authored recovery period and sees the target return to full value. The observed evidence
+/// is player-visible held-property value and after-action outcomes.
 pub fn run_repeat_take_probe(
     registry: &Registry,
     seeds: EvaluationSeeds,
     detail: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
-    let target = scenario.target;
-    let opportunity_information = scenario.opportunity_information;
-
-    let recon = authorize_surveillance(&mut scenario)?;
+    // Isolate repeat-take economics from law-enforcement timing. The harbor venue is in the
+    // low-pressure second district and has no jurisdictional response route in this fixture, so
+    // these scores can demonstrate target depletion without relying on the old fiction that a
+    // known patrol gap makes a heavily policed district safe.
+    let target = scenario.expansion_front;
     let mut metrics = RunMetrics {
         strategy: Some(Strategy::Recon),
         variation: Some(scenario.variation),
         ..RunMetrics::default()
     };
-    run_until_operation_terminal(&mut scenario, recon, false, &mut metrics)?;
-    let resolution = scenario
-        .state
-        .operations()
-        .get_operation(recon)
-        .expect("probe surveillance must persist")
-        .resolution()
-        .expect("completed probe surveillance must have a resolution");
-    let mut intelligence = BTreeSet::from([opportunity_information]);
-    let mut learned_patrol_signal = None;
-    for information in resolution.discovered_information() {
-        let record = scenario
-            .state
-            .intelligence()
-            .get_information(*information)
-            .expect("surveillance information must persist");
-        if record.topic() == InformationTopic::PoliceActivity
-            && matches!(
-                record.signal(),
-                Some(InformationSignal::PatrolPattern { .. })
-            )
-        {
-            learned_patrol_signal = record.signal().cloned();
-        }
-        intelligence.insert(*information);
+    let mut intelligence = BTreeSet::new();
+    for topic in [
+        InformationTopic::TargetSecurity,
+        InformationTopic::MarketAccess,
+        InformationTopic::Personnel,
+        InformationTopic::Schedule,
+        InformationTopic::Route,
+    ] {
+        let information = validate_record_information(
+            &scenario.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(scenario.player),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic,
+                source_entity: Some(EntityRef::Character(scenario.scout)),
+                subject: EntityRef::Business(target),
+                observed_at: scenario.state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: format!("Direct preparation for the repeat-take probe: {topic:?}."),
+            },
+        )?
+        .commit(&mut scenario.state)?;
+        intelligence.insert(information);
     }
-    let patrol_signal = learned_patrol_signal
-        .ok_or("repeat-take probe surveillance produced no patrol-pattern observation")?;
-    let duration = registry
-        .get_operation(OperationKind::Burglary)
-        .execution()
-        .duration();
 
     fn run_take(
         scenario: &mut Scenario,
         metrics: &mut RunMetrics,
-        patrol_signal: &InformationSignal,
-        duration: SimDuration,
         target: BusinessId,
         intelligence: &BTreeSet<InformationId>,
         title: &'static str,
     ) -> Result<(i64, SimTime), Box<dyn Error>> {
-        let scheduled_for = choose_safe_start_from_patrol_signal(
-            scenario.state.now(),
-            patrol_signal,
-            duration,
-            SimDuration::from_minutes(60),
-            SimTime::from_minutes(scenario.state.now().as_minutes() + 2_880),
-        )?;
+        let scheduled_for = scenario.state.now() + SimDuration::ONE_MINUTE;
         let burglary = authorize_burglary(
             scenario,
             Strategy::Recon,
@@ -162,8 +369,6 @@ pub fn run_repeat_take_probe(
     let (first_take, first_resolved_at) = run_take(
         &mut scenario,
         &mut metrics,
-        &patrol_signal,
-        duration,
         target,
         &intelligence,
         "repeat-take probe first score",
@@ -171,8 +376,6 @@ pub fn run_repeat_take_probe(
     let (second_take, second_resolved_at) = run_take(
         &mut scenario,
         &mut metrics,
-        &patrol_signal,
-        duration,
         target,
         &intelligence,
         "repeat-take probe immediate re-score",
@@ -224,8 +427,6 @@ pub fn run_repeat_take_probe(
     let (third_take, _) = run_take(
         &mut scenario,
         &mut metrics,
-        &patrol_signal,
-        duration,
         target,
         &intelligence,
         "repeat-take probe rested re-score",

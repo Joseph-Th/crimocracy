@@ -34,6 +34,14 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub(crate) enum SurveillanceRequestError {
+    #[error("surveillance operations require a gather-information objective")]
+    InvalidObjective,
+    #[error("entity {0:?} cannot be directly observed by surveillance")]
+    UnsupportedTarget(EntityRef),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub(crate) enum SurveillanceError {
     #[error("surveillance operations require a gather-information objective")]
     InvalidObjective,
@@ -182,15 +190,15 @@ struct PatrolPatternDeployment {
 pub(crate) fn validate_surveillance_request(
     kind: OperationKind,
     objective: &OperationObjective,
-) -> Result<(), SurveillanceError> {
+) -> Result<(), SurveillanceRequestError> {
     if kind != OperationKind::Surveillance {
         return Ok(());
     }
     let OperationObjective::GatherInformation { target } = objective else {
-        return Err(SurveillanceError::InvalidObjective);
+        return Err(SurveillanceRequestError::InvalidObjective);
     };
     if !is_supported_surveillance_target(*target) {
-        return Err(SurveillanceError::UnsupportedTarget(*target));
+        return Err(SurveillanceRequestError::UnsupportedTarget(*target));
     }
     Ok(())
 }
@@ -228,7 +236,13 @@ pub(crate) fn decide_surveillance_intelligence(
     }
     let observed_at = state.now();
     let surveiller = operation.responsible_organization();
-    let snapshot = resolve_target_snapshot(state, *target, observed_at, surveiller)?;
+    let snapshot = resolve_target_snapshot(
+        state,
+        *target,
+        observed_at,
+        surveiller,
+        registry.legal().off_window_patrol_presence_percent(),
+    )?;
     let bucket_minutes = u16::try_from(
         registry
             .get_operation(OperationKind::Surveillance)
@@ -250,10 +264,17 @@ pub(crate) fn decide_surveillance_intelligence(
 pub(crate) fn validate_surveillance_plan_snapshot(
     state: &AppState,
     plan: &SurveillanceIntelligencePlan,
+    off_window_patrol_presence_percent: u8,
 ) -> Result<(), SurveillanceError> {
     crate::core::time::ensure_time_current(state.now(), plan.observed_at)
         .map_err(|_| SurveillanceError::StaleTarget(plan.target))?;
-    let current = resolve_target_snapshot(state, plan.target, plan.observed_at, plan.surveiller)?;
+    let current = resolve_target_snapshot(
+        state,
+        plan.target,
+        plan.observed_at,
+        plan.surveiller,
+        off_window_patrol_presence_percent,
+    )?;
     if current != plan.snapshot {
         return Err(SurveillanceError::StaleTarget(plan.target));
     }
@@ -331,6 +352,7 @@ fn resolve_target_snapshot(
     target: EntityRef,
     at: SimTime,
     surveiller: OrganizationId,
+    off_window_patrol_presence_percent: u8,
 ) -> Result<SurveillanceTargetSnapshot, SurveillanceError> {
     match target {
         EntityRef::Neighborhood(id) => {
@@ -341,7 +363,7 @@ fn resolve_target_snapshot(
             Ok(SurveillanceTargetSnapshot::Neighborhood {
                 id,
                 name: neighborhood.name().to_owned(),
-                patrol: resolve_patrol_pattern(state, id, at),
+                patrol: resolve_patrol_pattern(state, id, at, off_window_patrol_presence_percent),
             })
         }
         EntityRef::Business(id) => {
@@ -359,7 +381,12 @@ fn resolve_target_snapshot(
                 functions: business.functions().clone(),
                 neighborhood: business.neighborhood(),
                 neighborhood_name: neighborhood.name().to_owned(),
-                patrol: resolve_patrol_pattern(state, business.neighborhood(), at),
+                patrol: resolve_patrol_pattern(
+                    state,
+                    business.neighborhood(),
+                    at,
+                    off_window_patrol_presence_percent,
+                ),
             })
         }
         EntityRef::Character(id) => {
@@ -485,7 +512,12 @@ fn resolve_target_snapshot(
             Ok(SurveillanceTargetSnapshot::Enterprise {
                 enterprise: resolve_enterprise_snapshot(state, enterprise),
                 neighborhood_name,
-                patrol: resolve_patrol_pattern(state, neighborhood, at),
+                patrol: resolve_patrol_pattern(
+                    state,
+                    neighborhood,
+                    at,
+                    off_window_patrol_presence_percent,
+                ),
             })
         }
         EntityRef::Operation(id) => {
@@ -540,6 +572,7 @@ fn resolve_patrol_pattern(
     state: &AppState,
     neighborhood: NeighborhoodId,
     at: SimTime,
+    off_window_patrol_presence_percent: u8,
 ) -> PatrolPatternSnapshot {
     let baseline_presence = state
         .world
@@ -549,7 +582,13 @@ fn resolve_patrol_pattern(
         .institutions
         .police_presence;
     let current_presence =
-        crate::legal::patrol_system::resolve_patrol_presence(state, neighborhood, at);
+        crate::legal::patrol_system::resolve_patrol_presence_snapshot_with_percent(
+            state,
+            neighborhood,
+            at,
+            off_window_patrol_presence_percent,
+        )
+        .presence();
     let deployments = state
         .legal
         .active_patrol_deployments_for_neighborhood(neighborhood)

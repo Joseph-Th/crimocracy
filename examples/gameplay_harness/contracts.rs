@@ -30,7 +30,7 @@ pub fn validate_run_metrics(
                     .zip(metrics.opening_opportunity_valid_until_minute)
                     .is_some_and(|(scout_terminal, valid_until)| scout_terminal >= valid_until)
         }
-        (Some(OpeningStanddownReason::NoSafeWindowBeforeExpiry), Some(assessment)) => {
+        (Some(OpeningStanddownReason::NoLowerRiskWindowBeforeExpiry), Some(assessment)) => {
             assessment.permits_burglary()
                 && metrics
                     .opening_scout_terminal_minute
@@ -149,24 +149,29 @@ pub fn validate_sensitivity_profile_coverage(
     }
     match profile {
         ScenarioProfile::LatePatrol => {
-            let outcome_mix = |aggregate: &Aggregate| {
-                (
-                    aggregate.achieved,
-                    aggregate.partial,
-                    aggregate.failed,
-                    aggregate.aborted,
-                    aggregate.opening_standdowns,
-                )
+            let terminal = |aggregate: &Aggregate| {
+                aggregate.achieved
+                    + aggregate.partial
+                    + aggregate.failed
+                    + aggregate.aborted
+                    + aggregate.opening_standdowns
             };
-            let converged = outcome_mix(rush) == outcome_mix(press)
-                && outcome_mix(press) == outcome_mix(recon)
-                && rush.police_arrived == 0
-                && press.police_arrived == 0
-                && recon.police_arrived == 0;
-            if !converged {
+            let fast_branches_remain_live = terminal(rush) == samples
+                && terminal(press) == samples
+                && rush.opening_standdowns == 0
+                && press.opening_standdowns == 0
+                && rush.unresolved == 0
+                && press.unresolved == 0
+                && rush.achieved > 0
+                && press.achieved > 0;
+            let recon_exploits_timing = recon.achieved == samples
+                && recon.police_arrived == 0
+                && recon.opening_standdowns == 0
+                && recon.unresolved == 0;
+            if !(fast_branches_remain_live && recon_exploits_timing) {
                 return Err(HarnessContractError::MissingBatchEvidence {
                     profile,
-                    evidence: "the late-patrol control no longer converges on immediate outcomes without police arrivals, so it cannot isolate the intended outcome/patrol-timing comparison",
+                    evidence: "the late-patrol treatment must keep immediate action viable and let informed RECON convert the delayed patrol rhythm into clean execution across the covered fixture variations; residual off-window police risk is stochastic and must be reported when observed rather than required in every bounded sample",
                 });
             }
         }
@@ -236,12 +241,12 @@ pub fn validate_night_trap_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
                 && metrics
                     .planning_information_topics
                     .contains(&InformationTopic::MarketAccess)
-                && metrics.outcome.is_some()
+                && (metrics.outcome.is_some() || metrics.aborted)
             {
                 None
             } else {
                 Some(
-                    "surveillance information must carry both patrol and venue-access facts into the burglary plan",
+                    "surveillance must surface patrol and venue-access facts, carry them into the burglary plan, and let the resulting attempt resolve honestly whether it succeeds, fails, or aborts under its standing contingency",
                 )
             }
         }
@@ -409,7 +414,7 @@ pub fn validate_win_back_evidence(metrics: &RunMetrics) -> Result<(), HarnessCon
 /// Full-mode narrative sessions must close the second-wind arc through canonical production paths:
 /// every branch discovers the reopened second score at the same minute. RUSH rebuilds and works
 /// it, PRESS deliberately lets it lapse, and RECON acts on what its fresh casing actually reveals:
-/// work the patrol-safe window when the casing stays clean or its case is explicitly shelved;
+/// work a lower-risk window outside known patrol concentrations when the casing stays clean or its case is explicitly shelved;
 /// otherwise query its standing police contact and stand down when that casing opens a case that
 /// the channel cannot affirmatively clear.
 pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
@@ -427,7 +432,7 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             if metrics.second_opportunity_discovered
                 && (rebuilt || restored)
                 && metrics.second_burglary.is_some()
-                && metrics.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
+                && (metrics.second_burglary_outcome.is_some() || metrics.second_burglary_aborted)
                 && metrics.second_act_recon_information == 0
                 && metrics.second_burglary_terminal_minute.is_some()
                 && metrics.player_personnel_departures > 0
@@ -450,9 +455,9 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
             }
         }
         Strategy::Recon => {
-            let recovered_when_clear = metrics.second_opportunity_discovered
+            let proceeded_when_clear = metrics.second_opportunity_discovered
                 && metrics.second_burglary.is_some()
-                && metrics.second_burglary_outcome == Some(OperationObjectiveOutcome::Achieved)
+                && (metrics.second_burglary_outcome.is_some() || metrics.second_burglary_aborted)
                 && metrics.second_act_recon_information > 0
                 && metrics.second_burglary_terminal_minute.is_some()
                 && (!(metrics.self_heat_check_required || metrics.self_heat_case_opened)
@@ -474,11 +479,11 @@ pub fn validate_second_act_evidence(metrics: &RunMetrics) -> Result<(), HarnessC
                 && metrics.second_opportunity_expired
                 && metrics.second_burglary.is_none()
                 && metrics.second_burglary_outcome.is_none();
-            if recovered_when_clear || stood_down_on_self_heat || withheld {
+            if proceeded_when_clear || stood_down_on_self_heat || withheld {
                 None
             } else {
                 Some(
-                    "the RECON second act must discover the reopened score and re-run surveillance; a clean or explicitly shelved casing case permits the patrol-safe burglary, while a casing case that the police contact confirms active or cannot dependably clear must make the branch stand down until the opportunity expires",
+                    "the RECON second act must discover the reopened score and re-run surveillance; a clean or explicitly shelved casing case permits a burglary timed outside known patrol concentrations, while a casing case that the police contact confirms active or cannot dependably clear must make the branch stand down until the opportunity expires",
                 )
             }
         }

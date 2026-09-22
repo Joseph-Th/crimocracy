@@ -4,7 +4,7 @@ use super::resolution_factors::resolve_target_neighborhoods;
 use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;
-use crate::core::id::{BusinessId, FinancialAccountId, OrganizationId};
+use crate::core::id::{BusinessId, FinancialAccountId, IdKind, OrganizationId};
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
@@ -19,8 +19,12 @@ use crate::decisions::{
 };
 use crate::finance::finance_system::insert_account;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
+use crate::history::HistoryEventKind;
 use crate::intelligence::intelligence_system::validate_record_information;
-use crate::intelligence::{InformationDraft, InformationTopic};
+use crate::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
+};
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
 use crate::legal::jurisdiction_system::validate_set_jurisdiction;
 use crate::legal::patrol_system::{
@@ -44,6 +48,7 @@ use crate::operations::{
     OperationContingency, OperationDraft, OperationKind, OperationObjective,
     OperationObjectiveBlocker, OperationObjectiveOutcome, OperationStatus, RoleKind,
 };
+use crate::reports::ReportKind;
 use crate::reputation::reputation_system::apply_reputation_delta;
 use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::world::world_system::{

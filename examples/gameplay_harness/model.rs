@@ -244,8 +244,8 @@ pub enum HarnessContractError {
     },
     #[error("surveillance report did not contain actionable recurring patrol windows")]
     NoActionablePatrolWindows,
-    #[error("no safe operation window was derivable from the surveillance report")]
-    NoSafeOperationWindow,
+    #[error("no lower-risk operation window was derivable from the surveillance report")]
+    NoLowerRiskOperationWindow,
     #[error(
         "{strategy:?} run recorded inconsistent laundering evidence: gross {gross}c plus owner withdrawals {sweeps}c minus fee {fee}c minus acquisition spend {acquisition}c minus accounted-funds payroll {payroll}c does not equal the accounted balance {balance:?}c"
     )]
@@ -269,7 +269,7 @@ pub enum ScenarioProfile {
     ThinCrew,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum FixtureVariation {
     Clockwork,
     Crowded,
@@ -467,6 +467,53 @@ impl ScenarioProfile {
         }
     }
 
+    pub fn harness_purpose(self) -> &'static str {
+        match self {
+            Self::NightTrap => {
+                "Police concentration overlaps the tempting score, testing speed, exception handling, casing, and downstream legal/personnel consequences."
+            }
+            Self::LatePatrol => {
+                "Named patrol concentrations arrive later than the immediate score, testing whether acting now remains viable while learned timing remains useful without implying zero off-window risk."
+            }
+            Self::FleetingWindow => {
+                "The score expires before full casing can finish, testing whether information has a real opportunity cost instead of being a free dominant prerequisite."
+            }
+            Self::VeteranCrew => {
+                "A highly capable crew tests whether skill materially changes what pressure can be survived and how much value information can unlock."
+            }
+            Self::ThinCrew => {
+                "A marginal crew tests whether poor capability makes caution, partial outcomes, failure, and standing down meaningful rather than cosmetic."
+            }
+        }
+    }
+
+    /// Ambient institutional pressure for the controlled scenario. LatePatrol and FleetingWindow
+    /// deliberately keep the background low so their named treatments isolate patrol timing and
+    /// opportunity-window cost instead of being overwhelmed by ordinary district policing.
+    /// The main NightTrap and crew-quality profiles retain each fixture's natural ambient level.
+    pub fn neighborhood_police_presence(self, variation: FixtureVariation) -> u8 {
+        match self {
+            // LatePatrol is a residual-risk control: ordinary policing can still catch an
+            // immediate move in the most exposed district, while learned timing and planning
+            // information should keep RECON below dispatch pressure.
+            Self::LatePatrol => match variation {
+                FixtureVariation::Clockwork => 28,
+                FixtureVariation::Crowded => 43,
+                FixtureVariation::Quiet => 22,
+            },
+            // FleetingWindow isolates the time cost of scouting. Keep police pressure below the
+            // treatment so losing the opportunity can be attributed to elapsed time, not heat.
+            Self::FleetingWindow => match variation {
+                FixtureVariation::Clockwork => 10,
+                FixtureVariation::Crowded => 12,
+                FixtureVariation::Quiet => 8,
+            },
+            Self::NightTrap | Self::VeteranCrew | Self::ThinCrew => {
+                variation.neighborhood_police_presence()
+            }
+        }
+    }
+
     pub fn lieutenant_management(self) -> u8 {
         match self {
             Self::VeteranCrew => 95,
@@ -592,7 +639,7 @@ impl ScenarioTimeline {
 pub enum OpeningStanddownReason {
     CasingRisk,
     OpportunityExpiredDuringCasing,
-    NoSafeWindowBeforeExpiry,
+    NoLowerRiskWindowBeforeExpiry,
 }
 
 #[derive(Clone)]
@@ -870,7 +917,7 @@ pub struct RunMetrics {
     pub payroll_short_cents: i64,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize)]
 pub struct Aggregate {
     pub samples: u64,
     pub fixture_variations: BTreeSet<FixtureVariation>,
@@ -934,7 +981,7 @@ impl Aggregate {
             metrics.opening_standdown_reason,
             Some(
                 OpeningStanddownReason::OpportunityExpiredDuringCasing
-                    | OpeningStanddownReason::NoSafeWindowBeforeExpiry
+                    | OpeningStanddownReason::NoLowerRiskWindowBeforeExpiry
             )
         ));
         match metrics.outcome {

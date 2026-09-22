@@ -833,7 +833,14 @@ fn direct_enterprise_watch_rejects_changed_patrol_snapshot() {
     .unwrap();
     let before = bincode::serialize(&fixture.state).unwrap();
     assert_eq!(
-        validate_surveillance_plan_snapshot(&fixture.state, &snapshot),
+        validate_surveillance_plan_snapshot(
+            &fixture.state,
+            &snapshot,
+            fixture
+                .registry
+                .legal()
+                .off_window_patrol_presence_percent(),
+        ),
         Err(SurveillanceError::StaleTarget(EntityRef::Enterprise(
             enterprise
         )))

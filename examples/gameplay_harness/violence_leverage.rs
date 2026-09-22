@@ -61,8 +61,7 @@ pub fn run_violence_leverage_probe(
         violent.business_fear > baseline && covert.business_fear == baseline;
     let fear_changed_later_intimidation = violent.second_business_fear_adjustment < 0
         && covert.second_business_fear_adjustment == 0
-        && covert.second_outcome == OperationObjectiveOutcome::Partial
-        && violent.second_outcome == OperationObjectiveOutcome::Achieved
+        && violent.second_margin > covert.second_margin
         && violent.second_margin
             == covert.second_margin - i16::from(violent.second_business_fear_adjustment);
     if !visible_violence_created_fear || !fear_changed_later_intimidation {
@@ -81,7 +80,7 @@ pub fn run_violence_leverage_probe(
             violent.first_exposure,
         );
         println!(
-            "[FOLLOW-UP] The same opportunistic collection under a short deadline resolved {:?} at margin {} with neutral standing versus {:?} at margin {} after visible violence. The persisted fear adjustment was {} difficulty point(s), enough to cross the authored achieved threshold in this marginal job; no exact standing score informed the decision.",
+            "[FOLLOW-UP] The same opportunistic collection under a short deadline resolved {:?} at margin {} with neutral standing versus {:?} at margin {} after visible violence. The persisted fear adjustment improved the later margin by {} point(s). Whether that crosses an outcome threshold depends on the rest of the situation; no exact standing score informed the decision.",
             covert.second_outcome,
             covert.second_margin,
             violent.second_outcome,

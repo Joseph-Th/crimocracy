@@ -219,6 +219,8 @@ pub(crate) enum RegistryBuildError {
     MissingLegalConfig,
     #[error("duplicate legal configuration definition")]
     DuplicateLegalConfig,
+    #[error("legal off-window patrol presence percent must be in 1..100")]
+    InvalidLegalOffWindowPatrolPresencePercent,
     #[error("legal cold-case window must be positive")]
     InvalidLegalColdWindow,
     #[error("legal witness-interview attempt limit must be positive")]
@@ -453,6 +455,9 @@ impl RegistryBuilder {
         if self.legal.is_some() {
             return Err(RegistryBuildError::DuplicateLegalConfig);
         }
+        if !(1..100).contains(&spec.off_window_patrol_presence_percent) {
+            return Err(RegistryBuildError::InvalidLegalOffWindowPatrolPresencePercent);
+        }
         if spec.cold_case_window.as_minutes() == 0 {
             return Err(RegistryBuildError::InvalidLegalColdWindow);
         }
@@ -503,6 +508,7 @@ impl RegistryBuilder {
             return Err(RegistryBuildError::InvalidLegalMaximumDetention);
         }
         self.legal = Some(LegalConfigDefinition {
+            off_window_patrol_presence_percent: spec.off_window_patrol_presence_percent,
             cold_case_window: spec.cold_case_window,
             witness_interview_attempt_limit: spec.witness_interview_attempt_limit,
             witness_testimony: spec.witness_testimony,
