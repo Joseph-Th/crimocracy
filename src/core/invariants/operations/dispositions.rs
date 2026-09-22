@@ -307,7 +307,7 @@ fn validate_disposition_information(
         .get_information(disposition.information)
         .ok_or_else(|| invalid.clone())?;
     if information.holder() != KnowledgeHolder::Organization(operation.responsible_organization())
-        || information.source_kind() != InformationSourceKind::Accountant
+        || information.source_kind() != InformationSourceKind::Accounting
         || information.topic() != InformationTopic::FinancialPerformance
         || information.source_entity() != Some(artifacts.source_entity)
         || information.subject() != EntityRef::Operation(operation.id())

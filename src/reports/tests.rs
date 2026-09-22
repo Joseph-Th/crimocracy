@@ -1,3 +1,5 @@
+//! Report persistence, source integrity, chronology, and executive-surface regression tests.
+
 use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;
@@ -208,7 +210,7 @@ fn restore_rejects_report_citing_information_recorded_later() {
         InformationDraft {
             holder: KnowledgeHolder::Organization(recipient),
             source_kind: InformationSourceKind::DirectObservation,
-            topic: InformationTopic::General,
+            topic: InformationTopic::Personnel,
             source_entity: None,
             subject: EntityRef::Organization(recipient),
             observed_at: state.now(),

@@ -11,13 +11,15 @@ use super::{
 };
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{IdKind, OperationId};
+use crate::core::id::{CharacterId, IdKind, OperationId};
 use crate::core::state::AppState;
 use crate::core::version::ensure_version_can_advance;
 use crate::economy::business_economy_system::ValidatedBusinessDisruption;
 use crate::history::history_system::{ValidatedHistoryEvent, validate_record_event};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
-use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
+use crate::intelligence::intelligence_system::{
+    ValidatedInformation, validate_record_system_information,
+};
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
 };
@@ -33,7 +35,7 @@ use crate::operations::{OperationExposureRecord, OperationObjective, OperationRe
 use crate::registry::Registry;
 use crate::reports::report_system::{ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct ValidatedOperationResolution {
     plan: OperationResolutionPlan,
@@ -47,7 +49,7 @@ pub(crate) struct ValidatedOperationResolution {
     detainee_release: Option<crate::legal::arrest_system::ValidatedRelease>,
     witness_intimidation: Vec<crate::legal::witness_system::ValidatedWitnessCooperation>,
     business_disruption: Option<ValidatedBusinessDisruption>,
-    participant_information: Vec<ValidatedInformation>,
+    participant_information: Vec<(CharacterId, ValidatedInformation)>,
 }
 
 impl ValidatedOperationResolution {
@@ -182,6 +184,18 @@ impl ValidatedOperationResolution {
             .report
             .commit(state)
             .expect("resolution report ID was preflighted before mutation");
+        let participant_information = self
+            .participant_information
+            .into_iter()
+            .map(|(participant, information)| {
+                (
+                    participant,
+                    information
+                        .commit(state)
+                        .expect("participant information IDs were preflighted before resolution"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let extraction_arrest = self.plan.outcome.extraction_arrest;
         state.operations.complete(
             self.plan.snapshot.operation,
@@ -196,6 +210,7 @@ impl ValidatedOperationResolution {
                 cash_proceeds: self.plan.outcome.cash_proceeds_plan.proceeds,
                 extraction_arrest,
                 discovered_information,
+                participant_information,
                 surveillance_signatures,
                 after_action_information,
                 after_action_report,
@@ -216,11 +231,6 @@ impl ValidatedOperationResolution {
             disruption
                 .commit(state)
                 .expect("preflighted business disruption must remain current during resolution");
-        }
-        for information in self.participant_information {
-            information
-                .commit(state)
-                .expect("participant information IDs were preflighted before resolution mutation");
         }
         Ok(self.plan.snapshot.operation)
     }
@@ -257,7 +267,7 @@ pub(crate) fn validate_operation_resolution_plan(
         plan.snapshot.resolved_at,
     )?;
     let after_action_summary = plan.narrative.summary.clone();
-    let information = validate_record_information(
+    let information = validate_record_system_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(record.responsible_organization()),
@@ -298,7 +308,7 @@ pub(crate) fn validate_operation_resolution_plan(
         .participants()
         .into_iter()
         .map(|participant| {
-            validate_record_information(
+            validate_record_system_information(
                 state,
                 InformationDraft {
                     holder: KnowledgeHolder::Character(participant),
@@ -315,6 +325,7 @@ pub(crate) fn validate_operation_resolution_plan(
                     ),
                 },
             )
+            .map(|information| (participant, information))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ValidatedOperationResolution {

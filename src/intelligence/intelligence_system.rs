@@ -38,6 +38,14 @@ pub enum IntelligenceError {
     },
     #[error("internal-report information must be created through the transfer system")]
     InternalReportRequiresTransfer,
+    #[error(
+        "contact-derived information source kind {0:?} must be created through contact disclosure"
+    )]
+    ContactSourceRequiresDisclosure(InformationSourceKind),
+    #[error(
+        "system-authored information source kind {0:?} must be created through its owning system"
+    )]
+    SystemSourceRequiresOwner(InformationSourceKind),
     #[error("internal-report information must retain provenance and a source entity")]
     InternalReportMissingProvenance,
     #[error("internal-report source entity does not match its sole source information holder")]
@@ -46,6 +54,8 @@ pub enum IntelligenceError {
         "information source kind {0:?} cannot be created as an institutional-contact derivation"
     )]
     InvalidContactSourceKind(InformationSourceKind),
+    #[error("information source kind {0:?} cannot be created through the system-authored path")]
+    InvalidSystemSourceKind(InformationSourceKind),
     #[error(
         "institutional-contact source information {information} is not personally held by character {contact}"
     )]
@@ -87,21 +97,8 @@ pub(crate) fn validate_contact_information_derivation(
     recipient: OrganizationId,
     source_kind: InformationSourceKind,
 ) -> Result<ValidatedInformation, IntelligenceError> {
-    match source_kind {
-        InformationSourceKind::PoliceContact
-        | InformationSourceKind::Lawyer
-        | InformationSourceKind::PoliticalContact
-        | InformationSourceKind::ProfessionalContact
-        | InformationSourceKind::Press => {}
-        InformationSourceKind::DirectObservation
-        | InformationSourceKind::Informant
-        | InformationSourceKind::Accountant
-        | InformationSourceKind::Surveillance
-        | InformationSourceKind::StreetRumor
-        | InformationSourceKind::AfterAction
-        | InformationSourceKind::InternalReport => {
-            return Err(IntelligenceError::InvalidContactSourceKind(source_kind));
-        }
+    if !source_kind.is_contact_derivation() {
+        return Err(IntelligenceError::InvalidContactSourceKind(source_kind));
     }
     let source_record = state
         .intelligence
@@ -218,9 +215,20 @@ pub fn validate_record_information(
     state: &AppState,
     draft: InformationDraft,
 ) -> Result<ValidatedInformation, IntelligenceError> {
-    if draft.source_kind == InformationSourceKind::InternalReport {
-        return Err(IntelligenceError::InternalReportRequiresTransfer);
-    }
+    validate_direct_recording_source_kind(draft.source_kind)?;
+    validate_information_draft(state, &draft)?;
+    Ok(ValidatedInformation {
+        draft,
+        signal: None,
+        derived_from: BTreeSet::new(),
+    })
+}
+
+pub(crate) fn validate_record_system_information(
+    state: &AppState,
+    draft: InformationDraft,
+) -> Result<ValidatedInformation, IntelligenceError> {
+    validate_system_recording_source_kind(draft.source_kind)?;
     validate_information_draft(state, &draft)?;
     Ok(ValidatedInformation {
         draft,
@@ -234,9 +242,7 @@ pub(crate) fn validate_record_information_with_signal(
     draft: InformationDraft,
     signal: InformationSignal,
 ) -> Result<ValidatedInformation, IntelligenceError> {
-    if draft.source_kind == InformationSourceKind::InternalReport {
-        return Err(IntelligenceError::InternalReportRequiresTransfer);
-    }
+    validate_direct_recording_source_kind(draft.source_kind)?;
     validate_information_draft(state, &draft)?;
     validate_information_signal(state, &draft, &signal)?;
     Ok(ValidatedInformation {
@@ -244,6 +250,68 @@ pub(crate) fn validate_record_information_with_signal(
         signal: Some(signal),
         derived_from: BTreeSet::new(),
     })
+}
+
+pub(crate) fn validate_record_system_information_with_signal(
+    state: &AppState,
+    draft: InformationDraft,
+    signal: InformationSignal,
+) -> Result<ValidatedInformation, IntelligenceError> {
+    validate_system_recording_source_kind(draft.source_kind)?;
+    validate_information_draft(state, &draft)?;
+    validate_information_signal(state, &draft, &signal)?;
+    Ok(ValidatedInformation {
+        draft,
+        signal: Some(signal),
+        derived_from: BTreeSet::new(),
+    })
+}
+
+fn validate_direct_recording_source_kind(
+    source_kind: InformationSourceKind,
+) -> Result<(), IntelligenceError> {
+    if source_kind == InformationSourceKind::InternalReport {
+        return Err(IntelligenceError::InternalReportRequiresTransfer);
+    }
+    if source_kind.is_contact_derivation() {
+        return Err(IntelligenceError::ContactSourceRequiresDisclosure(
+            source_kind,
+        ));
+    }
+    match source_kind {
+        InformationSourceKind::DirectObservation | InformationSourceKind::StreetRumor => Ok(()),
+        InformationSourceKind::Accounting
+        | InformationSourceKind::Surveillance
+        | InformationSourceKind::AfterAction => {
+            Err(IntelligenceError::SystemSourceRequiresOwner(source_kind))
+        }
+        InformationSourceKind::PoliceContact
+        | InformationSourceKind::PoliticalContact
+        | InformationSourceKind::ProfessionalContact
+        | InformationSourceKind::LegalContact
+        | InformationSourceKind::InternalReport => {
+            unreachable!("derived source kinds are rejected before direct-source matching")
+        }
+    }
+}
+
+fn validate_system_recording_source_kind(
+    source_kind: InformationSourceKind,
+) -> Result<(), IntelligenceError> {
+    match source_kind {
+        InformationSourceKind::Accounting
+        | InformationSourceKind::Surveillance
+        | InformationSourceKind::AfterAction => Ok(()),
+        InformationSourceKind::DirectObservation
+        | InformationSourceKind::StreetRumor
+        | InformationSourceKind::PoliceContact
+        | InformationSourceKind::PoliticalContact
+        | InformationSourceKind::ProfessionalContact
+        | InformationSourceKind::LegalContact
+        | InformationSourceKind::InternalReport => {
+            Err(IntelligenceError::InvalidSystemSourceKind(source_kind))
+        }
+    }
 }
 
 fn validate_information_draft(

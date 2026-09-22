@@ -106,7 +106,7 @@ pub fn build_scenario(
             supervisor: None,
             autonomy: AutonomyLevel::Delegated,
             capabilities: BTreeMap::from([(CapabilityKind::Investigation, rating(90))]),
-            traits: BTreeSet::from([TraitKind::Patient]),
+            traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
     )?;
@@ -187,7 +187,7 @@ pub fn build_scenario(
                 (CapabilityKind::Management, rating(88)),
                 (CapabilityKind::Negotiation, rating(75)),
             ]),
-            traits: BTreeSet::from([TraitKind::Patient]),
+            traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
     )?;

@@ -469,7 +469,7 @@ fn validate_business_cycle_information(
                 .get_information(information_id)
                 .ok_or_else(|| invalid_cycle(cycle))?;
             if information.holder() != holder
-                || information.source_kind() != InformationSourceKind::Accountant
+                || information.source_kind() != InformationSourceKind::Accounting
                 || information.source_entity().is_some()
                 || information.subject() != EntityRef::Business(cycle.business())
                 || information.observed_at() != cycle.occurred_at()

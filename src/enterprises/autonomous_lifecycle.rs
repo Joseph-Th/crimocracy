@@ -121,7 +121,6 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             state.reputation(),
             organization,
             crate::reputation::AudienceKind::Police,
-            crate::reputation::ReputationDimension::Fear,
         );
         if police_fear >= registry.reputation().expansion_police_fear_ceiling() {
             continue;

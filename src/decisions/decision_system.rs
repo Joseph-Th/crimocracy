@@ -296,6 +296,32 @@ fn is_player_pause_requested(
         && state.attention_settings().is_auto_pause_enabled(attention)
 }
 
+/// Single pending-request insertion path shared by every decision kind. Domain-specific
+/// validators prove their dependencies first; the decision owner alone allocates the request
+/// identity, derives the player pause signal, and updates pending indexes.
+pub(super) fn insert_pending_decision_request(
+    state: &mut AppState,
+    recipient: OrganizationId,
+    draft: DecisionRequestDraft,
+    options: BTreeSet<DecisionResponse>,
+) -> Result<DecisionRequestOutcome, DecisionError> {
+    let requests_pause = is_player_pause_requested(state, recipient, draft.attention);
+    let id = state.ids.next_decision_request()?;
+    state
+        .decisions
+        .insert(DecisionRequestRecord::from(DecisionRecordParts {
+            id,
+            recipient,
+            requested_at: state.now(),
+            options,
+            draft,
+        }));
+    Ok(DecisionRequestOutcome {
+        decision: id,
+        requests_pause,
+    })
+}
+
 #[derive(Debug)]
 pub struct ValidatedDecisionRequest {
     draft: DecisionRequestDraft,
@@ -336,22 +362,10 @@ impl ValidatedDecisionRequest {
             });
         }
         self.revalidate_police_response(state)?;
-        let requests_pause = is_player_pause_requested(state, self.recipient, self.draft.attention);
-        let id = state.ids.next_decision_request()?;
-        state
-            .decisions
-            .insert(DecisionRequestRecord::from(DecisionRecordParts {
-                id,
-                recipient: self.recipient,
-                requested_at: state.now(),
-                options: self.options,
-                draft: self.draft,
-            }));
+        let outcome =
+            insert_pending_decision_request(state, self.recipient, self.draft, self.options)?;
         apply_decision_pause_preflighted(state, operation_id, state.now());
-        Ok(DecisionRequestOutcome {
-            decision: id,
-            requests_pause,
-        })
+        Ok(outcome)
     }
 
     fn operation(&self) -> OperationId {

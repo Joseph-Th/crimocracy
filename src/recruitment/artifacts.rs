@@ -8,7 +8,9 @@ use crate::core::id::{CharacterId, OrganizationId};
 use crate::core::state::AppState;
 use crate::history::history_system::{ValidatedHistoryEvent, validate_record_event};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
-use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
+use crate::intelligence::intelligence_system::{
+    ValidatedInformation, validate_record_system_information,
+};
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
@@ -180,7 +182,7 @@ pub(super) fn validate_recruitment_outcome_information(
         .world
         .get_organization(plan.draft.target_organization)
         .expect("validated target organization must exist");
-    Ok(validate_record_information(
+    Ok(validate_record_system_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(plan.draft.target_organization),

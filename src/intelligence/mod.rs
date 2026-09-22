@@ -29,32 +29,41 @@ impl KnowledgeHolder {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InformationSourceKind {
     DirectObservation,
-    Informant,
     PoliceContact,
     PoliticalContact,
     ProfessionalContact,
-    Press,
-    Lawyer,
-    Accountant,
+    LegalContact,
+    Accounting,
     Surveillance,
     StreetRumor,
     AfterAction,
     InternalReport,
 }
 
+impl InformationSourceKind {
+    pub(crate) const fn is_contact_derivation(self) -> bool {
+        matches!(
+            self,
+            Self::PoliceContact
+                | Self::PoliticalContact
+                | Self::ProfessionalContact
+                | Self::LegalContact
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum InformationTopic {
-    General,
     TargetSecurity,
     Personnel,
     Schedule,
     PoliceActivity,
     Route,
     FinancialPerformance,
-    Relationship,
     LegalActivity,
     MarketAccess,
     OperationalOutcome,
+    EnterpriseActivity,
 }
 
 /// Typed semantic facts carried by player-visible information. These are deliberately sparse:
@@ -94,7 +103,7 @@ impl InformationSignal {
                     && matches!(subject, EntityRef::Character(_))
             }
             Self::EnterpriseLocation(_) => {
-                matches!(topic, InformationTopic::Personnel)
+                matches!(topic, InformationTopic::EnterpriseActivity)
                     && matches!(subject, EntityRef::Enterprise(_))
             }
             Self::PersonnelPresence { characters } => {

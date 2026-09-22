@@ -1403,7 +1403,17 @@ fn expired_planning_information_is_not_reported_as_covered() {
     assert_eq!(quality.value(), 0);
     assert_eq!(adjustment, 0);
     assert_eq!(covered, 0);
-    assert_eq!(relevant, 3);
+    assert_eq!(
+        relevant,
+        u8::try_from(
+            registry
+                .get_operation(OperationKind::Intimidation)
+                .execution()
+                .relevant_intelligence_topics()
+                .len(),
+        )
+        .expect("authored relevant-intelligence topic count must fit u8")
+    );
 }
 
 #[test]
@@ -2334,7 +2344,7 @@ fn require_intelligence_topic_constraint_gates_authorization() {
         &state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(organization),
-            source_kind: InformationSourceKind::Surveillance,
+            source_kind: InformationSourceKind::DirectObservation,
             topic: InformationTopic::Route,
             source_entity: None,
             subject: target,
@@ -2365,7 +2375,7 @@ fn require_intelligence_topic_constraint_gates_authorization() {
         &state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(organization),
-            source_kind: InformationSourceKind::Surveillance,
+            source_kind: InformationSourceKind::DirectObservation,
             topic: InformationTopic::TargetSecurity,
             source_entity: None,
             subject: target,

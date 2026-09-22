@@ -127,12 +127,11 @@ fn observe_defector_watch(
             .intelligence()
             .get_information(*information)
             .expect("personnel-watch information must persist");
-        if record.holder() != KnowledgeHolder::Organization(scenario.player)
-            || record.topic() != InformationTopic::Personnel
-        {
+        if record.holder() != KnowledgeHolder::Organization(scenario.player) {
             continue;
         }
-        if record.subject() == EntityRef::Organization(rival)
+        if record.topic() == InformationTopic::Personnel
+            && record.subject() == EntityRef::Organization(rival)
             && matches!(
                 record.signal(),
                 Some(InformationSignal::PersonnelPresence { characters })
@@ -142,8 +141,10 @@ fn observe_defector_watch(
             found = true;
         }
         if narrative
-            && (record.subject() == EntityRef::Organization(rival)
-                || matches!(record.subject(), EntityRef::Enterprise(_)))
+            && ((record.topic() == InformationTopic::Personnel
+                && record.subject() == EntityRef::Organization(rival))
+                || (record.topic() == InformationTopic::EnterpriseActivity
+                    && matches!(record.subject(), EntityRef::Enterprise(_))))
         {
             println!(
                 "[LEARN]   {:?} / {:?}: {}",

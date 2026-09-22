@@ -37,13 +37,12 @@ pub fn apply_reputation_delta(
     state: &mut AppState,
     organization: OrganizationId,
     audience: AudienceKind,
-    dimension: ReputationDimension,
     delta: i8,
 ) -> Result<u8, ReputationError> {
     if state.world().get_organization(organization).is_none() {
         return Err(ReputationError::MissingOrganization(organization));
     }
-    apply_delta(registry, state, organization, audience, dimension, delta)
+    apply_delta(registry, state, organization, audience, delta)
 }
 
 fn apply_delta(
@@ -51,16 +50,9 @@ fn apply_delta(
     state: &mut AppState,
     organization: OrganizationId,
     audience: AudienceKind,
-    dimension: ReputationDimension,
     delta: i8,
 ) -> Result<u8, ReputationError> {
-    let current = resolve_score(
-        registry,
-        &state.reputation,
-        organization,
-        audience,
-        dimension,
-    );
+    let current = resolve_score(registry, &state.reputation, organization, audience);
     if delta == 0 {
         return Ok(current);
     }
@@ -75,7 +67,7 @@ fn apply_delta(
         let baseline = registry.reputation().baseline();
         let mut record =
             ReputationRecord::at_baseline(organization, audience, baseline, state.now());
-        record.set_score(dimension, next, state.now());
+        record.set_score(next, state.now());
         state.reputation.insert_record(record);
     } else {
         let changed_at = state.now();
@@ -83,7 +75,7 @@ fn apply_delta(
             .reputation
             .record_mut(key)
             .expect("touched reputation record must exist");
-        record.set_score(dimension, next, changed_at);
+        record.set_score(next, changed_at);
     }
     state
         .reputation
@@ -98,11 +90,10 @@ pub fn resolve_score(
     reputation: &ReputationState,
     organization: OrganizationId,
     audience: AudienceKind,
-    dimension: ReputationDimension,
 ) -> u8 {
     reputation
         .get_record(organization, audience)
-        .map(|record| record.score(dimension))
+        .map(ReputationRecord::score)
         .unwrap_or_else(|| registry.reputation().baseline())
 }
 
@@ -110,7 +101,6 @@ pub fn resolve_score(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppliedStandingShift {
     pub audience: AudienceKind,
-    pub dimension: ReputationDimension,
     pub delta: i8,
 }
 
@@ -164,7 +154,6 @@ pub(crate) fn apply_operation_reputation_consequences(
         state,
         organization,
         AudienceKind::Underworld,
-        ReputationDimension::Competence,
         competence_delta,
     ));
 
@@ -178,7 +167,6 @@ pub(crate) fn apply_operation_reputation_consequences(
         state,
         organization,
         AudienceKind::Police,
-        ReputationDimension::Fear,
         police_fear,
     ));
 
@@ -196,7 +184,6 @@ pub(crate) fn apply_operation_reputation_consequences(
                 state,
                 organization,
                 audience,
-                ReputationDimension::Fear,
                 config.violent_businesses_fear(),
             ));
         }
@@ -228,16 +215,9 @@ pub(crate) fn apply_racket_inquiry_reputation_consequences(
         return Ok(Vec::new());
     }
     let fear = registry.reputation().racket_inquiry_police_fear();
-    let shifts = resolve_shift(
-        registry,
-        state,
-        organization,
-        AudienceKind::Police,
-        ReputationDimension::Fear,
-        fear,
-    )
-    .into_iter()
-    .collect();
+    let shifts = resolve_shift(registry, state, organization, AudienceKind::Police, fear)
+        .into_iter()
+        .collect();
     commit_consequence_shifts(
         registry,
         state,
@@ -255,19 +235,12 @@ fn resolve_shift(
     state: &AppState,
     organization: OrganizationId,
     audience: AudienceKind,
-    dimension: ReputationDimension,
     delta: i8,
 ) -> Option<AppliedStandingShift> {
     if delta == 0 {
         return None;
     }
-    let current = resolve_score(
-        registry,
-        &state.reputation,
-        organization,
-        audience,
-        dimension,
-    );
+    let current = resolve_score(registry, &state.reputation, organization, audience);
     let proposed = i32::from(current) + i32::from(delta);
     let next = u8::try_from(proposed.clamp(0, 100))
         .expect("clamped reputation arithmetic stays inside the score range");
@@ -275,7 +248,6 @@ fn resolve_shift(
         i8::try_from(i16::from(next) - i16::from(current)).expect("bounded score delta fits i8");
     (next != current).then_some(AppliedStandingShift {
         audience,
-        dimension,
         delta: applied_delta,
     })
 }
@@ -288,8 +260,6 @@ fn audience_label(audience: AudienceKind) -> &'static str {
         AudienceKind::Police => "the police",
         AudienceKind::Businesses => "business owners",
         AudienceKind::Residents => "residents",
-        AudienceKind::Political => "political figures",
-        AudienceKind::Press => "the press",
     }
 }
 
@@ -298,9 +268,7 @@ fn audience_label(audience: AudienceKind) -> &'static str {
 fn dimension_label(dimension: ReputationDimension) -> &'static str {
     match dimension {
         ReputationDimension::Fear => "fear of us",
-        ReputationDimension::Reliability => "reliability in us",
         ReputationDimension::Competence => "opinion of our competence",
-        ReputationDimension::Treachery => "suspicion of our treachery",
     }
 }
 
@@ -323,15 +291,8 @@ fn commit_consequence_shifts(
         Some(report)
     };
     for shift in &shifts {
-        apply_delta(
-            registry,
-            state,
-            organization,
-            shift.audience,
-            shift.dimension,
-            shift.delta,
-        )
-        .expect("resolved standing shift organization was validated before mutation");
+        apply_delta(registry, state, organization, shift.audience, shift.delta)
+            .expect("resolved standing shift organization was validated before mutation");
     }
     if let Some(report) = feedback {
         report
@@ -355,36 +316,34 @@ fn validate_standing_feedback_report(
         // Hand-written prose per produced pair where it adds nuance; every other pair reads
         // as proper text through the exhaustive labels instead of leaking debug names.
         let rising = shift.delta > 0;
-        let clause = match (shift.audience, shift.dimension) {
-            (AudienceKind::Underworld, ReputationDimension::Competence) => {
+        let dimension = shift.audience.dimension();
+        let clause = match shift.audience {
+            AudienceKind::Underworld => {
                 if rising {
                     " the underworld rates our competence higher".to_owned()
                 } else {
                     " the underworld rates our competence lower".to_owned()
                 }
             }
-            (AudienceKind::Police, ReputationDimension::Fear) => {
+            AudienceKind::Police => {
                 if rising {
                     " the police watch us more warily".to_owned()
                 } else {
                     " police wariness toward us eases".to_owned()
                 }
             }
-            (AudienceKind::Businesses, ReputationDimension::Fear) => {
+            AudienceKind::Businesses => {
                 if rising {
                     " business owners grow warier of us".to_owned()
                 } else {
                     " business owners relax around us".to_owned()
                 }
             }
-            // Exhaustive fallback: `audience_label` and `dimension_label` each match every
-            // variant of their enum, so adding an audience or dimension fails to compile
-            // here until its label is authored.
-            (audience, dimension) => format!(
+            AudienceKind::Residents => format!(
                 " {} {} among {} {}",
                 dimension_label(dimension),
                 if rising { "rises" } else { "falls" },
-                audience_label(audience),
+                audience_label(shift.audience),
                 if rising { "slightly" } else { "somewhat" }
             ),
         };
@@ -411,9 +370,9 @@ fn validate_standing_feedback_report(
     )
 }
 
-/// Day-boundary decay: every touched dimension at least one campaign day old drifts one authored
+/// Day-boundary decay: every touched audience metric at least one campaign day old drifts one authored
 /// step toward the baseline from both sides, so old events fade instead of ratcheting forever.
-/// Fresh dimensions wait until a later day boundary rather than losing impact simply because
+/// Fresh impressions wait until a later day boundary rather than losing impact simply because
 /// their event happened shortly before, or earlier within, the current boundary tick. Absent
 /// records stay absent; decay never manufactures impressions.
 pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppState) -> usize {
@@ -430,32 +389,29 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
     for record in touched {
         let organization = record.organization();
         let audience = record.audience();
-        for dimension in crate::reputation::ALL_REPUTATION_DIMENSIONS {
-            let current = record.score(dimension);
-            let changed_at = record.changed_at(dimension);
-            let age = state
-                .now()
-                .as_minutes()
-                .checked_sub(changed_at.as_minutes())
-                .expect("reputation chronology must not place a change in the future");
-            if age < crate::core::time::DAY_MINUTES {
-                continue;
-            }
-            let current_i = i64::from(current);
-            let drifted = if current_i > i64::from(baseline) {
-                (current_i - i64::from(step)).max(i64::from(baseline))
-            } else if current_i < i64::from(baseline) {
-                (current_i + i64::from(step)).min(i64::from(baseline))
-            } else {
-                current_i
-            };
-            if drifted != current_i {
-                let change = drifted - current_i;
-                let change = i8::try_from(change).expect("one-step drift fits i8");
-                apply_delta(registry, state, organization, audience, dimension, change)
-                    .expect("decay touches only existing world organizations");
-                adjusted += 1;
-            }
+        let current = record.score();
+        let age = state
+            .now()
+            .as_minutes()
+            .checked_sub(record.changed_at().as_minutes())
+            .expect("reputation chronology must not place a change in the future");
+        if age < crate::core::time::DAY_MINUTES {
+            continue;
+        }
+        let current_i = i64::from(current);
+        let drifted = if current_i > i64::from(baseline) {
+            (current_i - i64::from(step)).max(i64::from(baseline))
+        } else if current_i < i64::from(baseline) {
+            (current_i + i64::from(step)).min(i64::from(baseline))
+        } else {
+            current_i
+        };
+        if drifted != current_i {
+            let change = drifted - current_i;
+            let change = i8::try_from(change).expect("one-step drift fits i8");
+            apply_delta(registry, state, organization, audience, change)
+                .expect("decay touches only existing world organizations");
+            adjusted += 1;
         }
     }
     adjusted
@@ -472,10 +428,7 @@ impl ReputationRecord {
         Self {
             organization,
             audience,
-            fear: score,
-            reliability: score,
-            competence: score,
-            treachery: score,
+            score,
         }
     }
 }

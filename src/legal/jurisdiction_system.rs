@@ -315,7 +315,6 @@ fn validate_jurisdiction_dependencies(
         | OrganizationKind::LegalServices
         | OrganizationKind::Prosecutor
         | OrganizationKind::Political
-        | OrganizationKind::Press
         | OrganizationKind::Labor
         | OrganizationKind::Civic
         | OrganizationKind::Commercial => {

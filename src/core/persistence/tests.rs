@@ -832,7 +832,7 @@ fn restore_rejects_information_recording_time_that_rewinds_in_id_order() {
             InformationDraft {
                 holder: KnowledgeHolder::Organization(fixture.organization),
                 source_kind: InformationSourceKind::DirectObservation,
-                topic: InformationTopic::General,
+                topic: InformationTopic::Personnel,
                 source_entity: None,
                 subject: EntityRef::Organization(fixture.organization),
                 observed_at: crate::core::time::SimTime::ZERO,
@@ -894,7 +894,7 @@ fn restore_rejects_empty_information_summary() {
         InformationDraft {
             holder: KnowledgeHolder::Organization(fixture.organization),
             source_kind: InformationSourceKind::DirectObservation,
-            topic: InformationTopic::General,
+            topic: InformationTopic::Personnel,
             source_entity: None,
             subject: EntityRef::Organization(fixture.organization),
             observed_at: fixture.state.now(),
@@ -917,6 +917,103 @@ fn restore_rejects_empty_information_summary() {
         error,
         LoadError::InvalidState(StateValidationError::EmptyInformationSummary { information })
     );
+}
+
+#[test]
+fn restore_rejects_contact_source_kind_without_disclosure_provenance() {
+    let mut fixture = fixture();
+    let information = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Organization(fixture.organization),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "Persistence contact-provenance fixture".to_owned(),
+        },
+    )
+    .expect("ordinary information fixture should validate")
+    .commit(&mut fixture.state)
+    .expect("ordinary information fixture should commit");
+    let mut replacement = intelligence_state_wire(fixture.state.intelligence());
+    replacement
+        .records
+        .get_mut(&information)
+        .expect("information fixture should be present in wire mirror")
+        .source
+        .source_kind = InformationSourceKind::PoliceContact;
+
+    let error = restore_save(
+        &fixture.registry,
+        replace_serialized_substate(
+            build_save(&fixture.registry, &fixture.state)
+                .expect("valid information state should save before provenance corruption"),
+            fixture.state.intelligence(),
+            &replacement,
+        ),
+    )
+    .expect_err("contact-derived source kind without a disclosure lineage must fail restore");
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::InvalidInformationProvenance {
+            information,
+            source_information: information,
+        })
+    );
+}
+
+#[test]
+fn restore_rejects_system_source_kind_without_authoritative_owner() {
+    for source_kind in [
+        InformationSourceKind::Accounting,
+        InformationSourceKind::Surveillance,
+        InformationSourceKind::AfterAction,
+    ] {
+        let mut fixture = fixture();
+        let information = validate_record_information(
+            &fixture.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(fixture.organization),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::Personnel,
+                source_entity: None,
+                subject: EntityRef::Organization(fixture.organization),
+                observed_at: fixture.state.now(),
+                reliability: Reliability::GenerallyReliable,
+                specificity: Specificity::Specific,
+                summary: "Persistence system-provenance fixture".to_owned(),
+            },
+        )
+        .expect("ordinary information fixture should validate")
+        .commit(&mut fixture.state)
+        .expect("ordinary information fixture should commit");
+        let mut replacement = intelligence_state_wire(fixture.state.intelligence());
+        replacement
+            .records
+            .get_mut(&information)
+            .expect("information fixture should be present in wire mirror")
+            .source
+            .source_kind = source_kind;
+
+        let error = restore_save(
+            &fixture.registry,
+            replace_serialized_substate(
+                build_save(&fixture.registry, &fixture.state)
+                    .expect("valid information state should save before provenance corruption"),
+                fixture.state.intelligence(),
+                &replacement,
+            ),
+        )
+        .expect_err("system-authored source kind without an owning artifact must fail restore");
+        assert_eq!(
+            error,
+            LoadError::InvalidState(StateValidationError::UnownedSystemInformation { information })
+        );
+    }
 }
 
 #[test]

@@ -15,7 +15,6 @@ pub enum ContactKind {
     Police,
     Legal,
     Political,
-    Press,
     Labor,
     Professional,
 }

@@ -48,8 +48,8 @@ pub enum ContactError {
     ContactHasNoInstitution(CharacterId),
     #[error("institution {0} does not exist")]
     InvalidInstitution(OrganizationId),
-    #[error("criminal organization {0} cannot be used as an institutional contact source")]
-    CriminalInstitution(OrganizationId),
+    #[error("organization {0} has no modeled institutional contact channel")]
+    UnsupportedInstitution(OrganizationId),
     #[error("handler and institutional contact must be different characters")]
     SelfContact,
     #[error("handler {handler} and contact {contact} have no established social relationship")]
@@ -398,9 +398,8 @@ pub fn validate_contact_disclosure(
 pub(crate) const fn information_source_kind(kind: ContactKind) -> InformationSourceKind {
     match kind {
         ContactKind::Police => InformationSourceKind::PoliceContact,
-        ContactKind::Legal => InformationSourceKind::Lawyer,
+        ContactKind::Legal => InformationSourceKind::LegalContact,
         ContactKind::Political => InformationSourceKind::PoliticalContact,
-        ContactKind::Press => InformationSourceKind::Press,
         ContactKind::Labor | ContactKind::Professional => {
             InformationSourceKind::ProfessionalContact
         }
@@ -416,7 +415,6 @@ pub(crate) fn resolve_contact_kind_for_institution_kind(
         | OrganizationKind::LegalServices
         | OrganizationKind::Prosecutor => Some(ContactKind::Legal),
         OrganizationKind::Political => Some(ContactKind::Political),
-        OrganizationKind::Press => Some(ContactKind::Press),
         OrganizationKind::Labor => Some(ContactKind::Labor),
         OrganizationKind::Civic | OrganizationKind::Commercial => Some(ContactKind::Professional),
         OrganizationKind::Criminal => None,
@@ -477,7 +475,7 @@ fn resolve_contact_kind(
         .get_organization(institution)
         .ok_or(ContactError::InvalidInstitution(institution))?;
     resolve_contact_kind_for_institution_kind(institution_record.kind())
-        .ok_or(ContactError::CriminalInstitution(institution))
+        .ok_or(ContactError::UnsupportedInstitution(institution))
 }
 
 /// Whether both human endpoints of the channel are out of custody. The pending-disclosure
@@ -604,16 +602,14 @@ pub fn find_pending_disclosure_sources(
 /// only when production knowledge can actually reach the contact character's hands:
 /// case leads carry LegalActivity to the investigating officer, business books carry
 /// FinancialPerformance to a character owner, and recruitment/informant flows carry
-/// Personnel to the characters who live them. Press keeps its General forward surface for
-/// the unmodeled press systems (see STATUS exclusions); every other entry here has a
-/// live production producer behind it.
+/// Personnel to the characters who live them. Every entry here has a live production
+/// producer behind it.
 fn disclosable_topics(kind: ContactKind) -> &'static [InformationTopic] {
     match kind {
         // Law enforcement relays what its own casework puts in the officer's hands.
         ContactKind::Police => &[InformationTopic::LegalActivity],
         ContactKind::Legal => &[InformationTopic::LegalActivity],
         ContactKind::Political => &[InformationTopic::MarketAccess],
-        ContactKind::Press => &[InformationTopic::General],
         ContactKind::Labor | ContactKind::Professional => &[
             InformationTopic::FinancialPerformance,
             InformationTopic::Personnel,

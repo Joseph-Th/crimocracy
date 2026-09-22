@@ -1,3 +1,5 @@
+//! Operation incident-intake integration tests for witnesses, evidence, and custody boundaries.
+
 use super::*;
 use crate::build_registry;
 use crate::core::state::AppState;

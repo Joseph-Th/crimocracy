@@ -10,7 +10,9 @@ use crate::core::time::SimTime;
 use crate::core::version::ensure_version_can_advance;
 use crate::history::history_system::{ValidatedHistoryEvent, validate_record_event};
 use crate::history::{HistoryEventDraft, HistoryEventKind};
-use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
+use crate::intelligence::intelligence_system::{
+    ValidatedInformation, validate_record_system_information,
+};
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
@@ -444,7 +446,7 @@ fn validate_abort_artifacts(
     let operation = record.id();
     let summary = build_abort_summary(state, record, phase, cause, state.now())?;
     let entities = resolve_abort_entities(state, record, cause)?;
-    let information = validate_record_information(
+    let information = validate_record_system_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(record.responsible_organization()),
@@ -527,7 +529,7 @@ fn validate_abort_police_activity_information(
         neighborhood.name(),
     )
     .expect("String buffer writes are infallible");
-    validate_record_information(
+    validate_record_system_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(record.responsible_organization()),

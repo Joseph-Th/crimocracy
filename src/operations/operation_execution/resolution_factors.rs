@@ -18,8 +18,8 @@ use crate::operations::{
     OperationObjectiveOutcome, OperationRecord, OperationResolutionFactors,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
+use crate::reputation::AudienceKind;
 use crate::reputation::reputation_system::resolve_score;
-use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::world::{CapabilityKind, Rating};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -81,7 +81,6 @@ pub(crate) fn resolve_intimidation_business_fear_adjustment(
         state.reputation(),
         record.responsible_organization(),
         AudienceKind::Businesses,
-        ReputationDimension::Fear,
     );
     let (distance, span, sign) = match fear.cmp(&baseline) {
         std::cmp::Ordering::Greater => (fear - baseline, 100 - baseline, -1_i16),

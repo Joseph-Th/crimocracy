@@ -49,8 +49,8 @@ use crate::operations::{
     OperationObjectiveBlocker, OperationObjectiveOutcome, OperationStatus, RoleKind,
 };
 use crate::reports::ReportKind;
+use crate::reputation::AudienceKind;
 use crate::reputation::reputation_system::apply_reputation_delta;
-use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_neighborhood,
     insert_organization, validate_reassign_character, validate_transfer_business_ownership,
@@ -522,7 +522,6 @@ fn make_intelligence_operation_fixture() -> (Registry, AppState, OperationId) {
     make_intelligence_operation_fixture_with_reports(
         &[
             (InformationTopic::Personnel, 0),
-            (InformationTopic::Relationship, 0),
             (InformationTopic::PoliceActivity, 0),
         ],
         1,
@@ -2461,7 +2460,6 @@ fn business_fear_is_bounded_explainable_intimidation_leverage() {
         &mut feared,
         organization,
         AudienceKind::Businesses,
-        ReputationDimension::Fear,
         registry.reputation().violent_businesses_fear(),
     )
     .expect("one visible-violence fear step should apply");
@@ -2494,7 +2492,6 @@ fn business_fear_is_bounded_explainable_intimidation_leverage() {
         &mut feared_to_rail,
         organization,
         AudienceKind::Businesses,
-        ReputationDimension::Fear,
         100,
     )
     .expect("large test movement should clamp at the reputation rail");
@@ -2521,7 +2518,6 @@ fn business_fear_is_bounded_explainable_intimidation_leverage() {
         &mut unafraid,
         organization,
         AudienceKind::Businesses,
-        ReputationDimension::Fear,
         -3,
     )
     .expect("below-baseline test standing should apply");
@@ -3481,7 +3477,7 @@ fn after_action_names_missing_usable_topics_at_actual_start() {
         .max_intelligence_age()
         .as_minutes();
     let cases = [
-        (vec![], 1, 0, "personnel, police activity, relationships"),
+        (vec![], 1, 0, "personnel, police activity"),
         (
             vec![
                 (InformationTopic::Personnel, 0),
@@ -3489,7 +3485,7 @@ fn after_action_names_missing_usable_topics_at_actual_start() {
             ],
             1,
             1,
-            "police activity, relationships",
+            "police activity",
         ),
         // Old duplicates cannot displace the best personnel report; the police report
         // was usable at scheduling but has expired by the delayed actual start.
@@ -3501,7 +3497,7 @@ fn after_action_names_missing_usable_topics_at_actual_start() {
             ],
             max_age,
             1,
-            "police activity, relationships",
+            "police activity",
         ),
         // Freshness truncation can leave an attached report with zero usable score
         // even just before the maximum age, not only at the expiration boundary.
@@ -3509,16 +3505,15 @@ fn after_action_names_missing_usable_topics_at_actual_start() {
             vec![(InformationTopic::Personnel, 0)],
             max_age - 1,
             0,
-            "personnel, police activity, relationships",
+            "personnel, police activity",
         ),
         (
             vec![
-                (InformationTopic::Relationship, 0),
                 (InformationTopic::Personnel, 0),
                 (InformationTopic::PoliceActivity, 0),
             ],
             1,
-            3,
+            2,
             "",
         ),
     ];
@@ -3535,7 +3530,7 @@ fn after_action_names_missing_usable_topics_at_actual_start() {
         )
         .expect("due operation should resolve");
         assert_eq!(plan.outcome.factors.intelligence_topics_covered(), covered);
-        assert_eq!(plan.outcome.factors.intelligence_topics_relevant(), 3);
+        assert_eq!(plan.outcome.factors.intelligence_topics_relevant(), 2);
         validate_operation_resolution_plan(&registry, &state, plan)
             .expect("coverage resolution should validate")
             .commit(&mut state)
@@ -3559,7 +3554,7 @@ fn after_action_names_missing_usable_topics_at_actual_start() {
             assert!(
                 information
                     .summary()
-                    .contains("Planning intelligence covered all 3 relevant areas")
+                    .contains("Planning intelligence covered all 2 relevant areas")
             );
             assert!(
                 !information
@@ -3568,7 +3563,7 @@ fn after_action_names_missing_usable_topics_at_actual_start() {
             );
         } else {
             assert!(information.summary().contains(&format!(
-                "Planning intelligence covered {covered} of 3 relevant areas"
+                "Planning intelligence covered {covered} of 2 relevant areas"
             )));
             assert!(
                 information

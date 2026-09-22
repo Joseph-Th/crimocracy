@@ -195,8 +195,8 @@ pub(crate) fn apply_due_police_response_arrivals(
             // Only the explicitly designated player organization has an external decision-maker.
             // Every other organization, including all organizations before player designation,
             // must resolve the exception autonomously or the operation can remain blocked forever.
-            // Until rival tactical judgment has its own authored policy, use the conservative
-            // canonical leadership action and abort.
+            // Non-player leadership uses the conservative canonical exception rule: abort rather
+            // than create a decision request that no external decision-maker can resolve.
             let autonomous_leadership_abort = requests_leadership
                 && state.player_organization() != Some(operation.responsible_organization());
             let decision = if requests_leadership && !autonomous_leadership_abort {

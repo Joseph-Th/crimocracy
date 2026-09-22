@@ -17,7 +17,8 @@ use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES_U16, SimTime};
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::intelligence::intelligence_system::{
-    ValidatedInformation, validate_record_information, validate_record_information_with_signal,
+    ValidatedInformation, validate_record_system_information,
+    validate_record_system_information_with_signal,
 };
 use crate::intelligence::{
     CaseActivitySignal, EnterpriseLocationSignal, InformationDraft, InformationRecord,
@@ -304,9 +305,9 @@ pub(crate) fn validate_surveillance_information(
             };
             match &observation.signal {
                 Some(signal) => {
-                    validate_record_information_with_signal(state, draft, signal.clone())
+                    validate_record_system_information_with_signal(state, draft, signal.clone())
                 }
-                None => validate_record_information(state, draft),
+                None => validate_record_system_information(state, draft),
             }
         })
         .collect()
@@ -783,7 +784,7 @@ fn enterprise_observation(
         }
     };
     SurveillanceObservation {
-        topic: InformationTopic::Personnel,
+        topic: InformationTopic::EnterpriseActivity,
         subject: EntityRef::Enterprise(enterprise.id),
         reliability,
         specificity,

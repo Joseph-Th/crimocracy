@@ -140,29 +140,20 @@ fn add_cycle(
     net_cash: Money,
     attention: AttentionClass,
 ) -> Result<(), EnterpriseReportingError> {
-    totals.cycle_count = totals
-        .cycle_count
-        .checked_add(1)
-        .ok_or(EnterpriseReportingError::ArithmeticOverflow)?;
-    if attention == AttentionClass::Notable {
-        totals.notable_cycle_count = totals
-            .notable_cycle_count
-            .checked_add(1)
-            .ok_or(EnterpriseReportingError::ArithmeticOverflow)?;
-    }
-    totals.gross_revenue = totals
-        .gross_revenue
-        .checked_add(gross_revenue)
-        .ok_or(EnterpriseReportingError::ArithmeticOverflow)?;
-    totals.operating_cost = totals
-        .operating_cost
-        .checked_add(operating_cost)
-        .ok_or(EnterpriseReportingError::ArithmeticOverflow)?;
-    totals.net_cash = totals
-        .net_cash
-        .checked_add(net_cash)
-        .ok_or(EnterpriseReportingError::ArithmeticOverflow)?;
-    Ok(())
+    crate::finance::financial_aggregation::accumulate_cycle(
+        &mut totals.cycle_count,
+        &mut totals.notable_cycle_count,
+        &mut totals.gross_revenue,
+        &mut totals.operating_cost,
+        &mut totals.net_cash,
+        crate::finance::financial_aggregation::OperatingCycleAmounts {
+            gross_revenue,
+            operating_cost,
+            net_cash,
+        },
+        attention,
+    )
+    .ok_or(EnterpriseReportingError::ArithmeticOverflow)
 }
 
 #[cfg(test)]

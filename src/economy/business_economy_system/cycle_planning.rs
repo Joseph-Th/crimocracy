@@ -16,7 +16,9 @@ use crate::finance::finance_system::{
     ValidatedLedgerTransaction, validate_record_business_transaction,
 };
 use crate::finance::{LedgerTransactionDraft, Money};
-use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
+use crate::intelligence::intelligence_system::{
+    ValidatedInformation, validate_record_system_information,
+};
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
 };
@@ -419,11 +421,11 @@ pub fn validate_business_cycle_plan(
         plan.economics.attention,
         resolve_accounting_holder(plan.snapshot.owner),
     ) {
-        (AttentionClass::Notable, Some(holder)) => Some(validate_record_information(
+        (AttentionClass::Notable, Some(holder)) => Some(validate_record_system_information(
             state,
             InformationDraft {
                 holder,
-                source_kind: InformationSourceKind::Accountant,
+                source_kind: InformationSourceKind::Accounting,
                 topic: crate::intelligence::InformationTopic::FinancialPerformance,
                 source_entity: None,
                 subject: EntityRef::Business(plan.snapshot.business),

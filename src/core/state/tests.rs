@@ -272,7 +272,7 @@ fn make_test_scenario() -> TestScenario {
                 (CapabilityKind::Management, rating(86)),
                 (CapabilityKind::Negotiation, rating(74)),
             ]),
-            traits: BTreeSet::from([TraitKind::Patient]),
+            traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
     )
@@ -317,7 +317,7 @@ fn make_test_scenario() -> TestScenario {
             supervisor: None,
             autonomy: AutonomyLevel::Delegated,
             capabilities: BTreeMap::from([(CapabilityKind::Investigation, rating(82))]),
-            traits: BTreeSet::from([TraitKind::Patient]),
+            traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
     )
@@ -467,7 +467,7 @@ fn make_test_scenario() -> TestScenario {
         &state,
         InformationDraft {
             holder: KnowledgeHolder::Character(lieutenant),
-            source_kind: InformationSourceKind::PoliceContact,
+            source_kind: InformationSourceKind::DirectObservation,
             topic: crate::intelligence::InformationTopic::PoliceActivity,
             source_entity: Some(EntityRef::Character(detective)),
             subject: EntityRef::Character(associate),
@@ -494,7 +494,7 @@ fn make_test_scenario() -> TestScenario {
         &state,
         InformationDraft {
             holder: KnowledgeHolder::Character(associate),
-            source_kind: InformationSourceKind::PoliceContact,
+            source_kind: InformationSourceKind::DirectObservation,
             topic: crate::intelligence::InformationTopic::PoliceActivity,
             source_entity: Some(EntityRef::Character(detective)),
             subject: EntityRef::Character(associate),

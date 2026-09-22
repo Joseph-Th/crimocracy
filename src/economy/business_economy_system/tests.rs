@@ -1807,7 +1807,7 @@ fn notable_owned_business_cycle_creates_accounting_information_for_owner() {
         information.holder(),
         KnowledgeHolder::Organization(fixture.organization)
     );
-    assert_eq!(information.source_kind(), InformationSourceKind::Accountant);
+    assert_eq!(information.source_kind(), InformationSourceKind::Accounting);
     assert_eq!(information.subject(), EntityRef::Business(fixture.business));
 
     let organization_summary = resolve_organization_business_financial_summary(

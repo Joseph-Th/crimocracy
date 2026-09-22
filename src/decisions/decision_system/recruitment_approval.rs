@@ -5,8 +5,8 @@
 //! authority/policy snapshot contract used again when leadership resolves an approval.
 
 use super::{
-    DecisionError, DecisionRequestOutcome, DecisionResolutionOutcome, is_player_pause_requested,
-    validate_request_metadata,
+    DecisionError, DecisionRequestOutcome, DecisionResolutionOutcome,
+    insert_pending_decision_request, validate_request_metadata,
 };
 use crate::core::id::{DecisionRequestId, IdKind, MandateId, OrganizationId};
 use crate::core::state::AppState;
@@ -167,21 +167,7 @@ impl ValidatedRecruitmentApprovalRequest {
         // the proposal revalidates its own personnel state at commit.
         self.proposal.revalidate_state(state)?;
 
-        let requests_pause = is_player_pause_requested(state, self.recipient, self.draft.attention);
-        let id = state.ids.next_decision_request()?;
-        state
-            .decisions
-            .insert(DecisionRequestRecord::from(DecisionRecordParts {
-                id,
-                recipient: self.recipient,
-                requested_at: state.now(),
-                options: self.options,
-                draft: self.draft,
-            }));
-        Ok(DecisionRequestOutcome {
-            decision: id,
-            requests_pause,
-        })
+        insert_pending_decision_request(state, self.recipient, self.draft, self.options)
     }
 
     /// Commits a non-player approval request and its deterministic leadership response as one

@@ -122,7 +122,7 @@ fn persisted_surveillance_finding(
             .legal
             .get_investigation(id)
             .map(|record| format!("the status of {}", record.title())),
-        (InformationTopic::Personnel, EntityRef::Enterprise(id)) => {
+        (InformationTopic::EnterpriseActivity, EntityRef::Enterprise(id)) => {
             let enterprise = state.enterprises.get_enterprise(id)?;
             let location = match enterprise.location() {
                 EnterpriseLocation::Neighborhood(neighborhood) => {

@@ -96,6 +96,8 @@ pub enum StateValidationError {
         information: InformationId,
         source_information: InformationId,
     },
+    #[error("system-authored information {information} has no authoritative owning artifact")]
+    UnownedSystemInformation { information: InformationId },
     #[error("institutional contact {contact} has invalid persisted state")]
     InvalidInstitutionalContact { contact: ContactId },
     #[error("institutional contact disclosure {disclosure} has invalid persisted provenance")]

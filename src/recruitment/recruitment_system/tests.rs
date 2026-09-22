@@ -39,8 +39,8 @@ use crate::recruitment::autonomous_recruitment::{
 };
 use crate::recruitment::scoring::recruitment_relationship_support;
 use crate::reports::ReportKind;
+use crate::reputation::AudienceKind;
 use crate::reputation::reputation_system::{apply_reputation_delta, resolve_score};
-use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 use crate::world::world_system::{
@@ -445,7 +445,6 @@ fn validated_recruitment_stales_when_target_competence_changes_before_commit() {
         fixture.state.reputation(),
         fixture.target,
         AudienceKind::Underworld,
-        ReputationDimension::Competence,
     );
     let validated = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
         .expect("fresh recruitment should validate");
@@ -455,7 +454,6 @@ fn validated_recruitment_stales_when_target_competence_changes_before_commit() {
         &mut fixture.state,
         fixture.target,
         AudienceKind::Underworld,
-        ReputationDimension::Competence,
         1,
     )
     .expect("canonical reputation change should commit");
@@ -500,7 +498,6 @@ fn day_boundary_recruitment_uses_current_decayed_reputation() {
         &mut fixture.state,
         fixture.target,
         crate::reputation::AudienceKind::Underworld,
-        crate::reputation::ReputationDimension::Competence,
         3,
     )
     .expect("fixture competence reputation should apply");
@@ -526,7 +523,6 @@ fn day_boundary_recruitment_uses_current_decayed_reputation() {
             fixture.state.reputation(),
             fixture.target,
             crate::reputation::AudienceKind::Underworld,
-            crate::reputation::ReputationDimension::Competence,
         ),
         baseline + 2,
         "the persisted attempt must quote the same current reputation the world now holds"
@@ -1986,7 +1982,7 @@ fn protection_offer_uses_only_candidate_known_legal_pressure_and_stales_when_kno
         &fixture.state,
         InformationDraft {
             holder: KnowledgeHolder::Character(fixture.candidate),
-            source_kind: InformationSourceKind::PoliceContact,
+            source_kind: InformationSourceKind::DirectObservation,
             topic: InformationTopic::PoliceActivity,
             source_entity: None,
             subject: EntityRef::Character(fixture.candidate),
@@ -2048,7 +2044,7 @@ fn expired_pressure_knowledge_neither_scores_nor_stales_a_validated_recruitment(
             &fixture.state,
             InformationDraft {
                 holder: KnowledgeHolder::Character(fixture.candidate),
-                source_kind: InformationSourceKind::PoliceContact,
+                source_kind: InformationSourceKind::DirectObservation,
                 topic: InformationTopic::PoliceActivity,
                 source_entity: None,
                 subject: EntityRef::Character(fixture.candidate),

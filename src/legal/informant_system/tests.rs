@@ -615,7 +615,7 @@ fn autonomous_disclosure_skips_capacity_exhausted_case_without_blocking_other_ca
         InformationDraft {
             holder: KnowledgeHolder::Character(fixture.member),
             source_kind: InformationSourceKind::DirectObservation,
-            topic: InformationTopic::General,
+            topic: InformationTopic::Personnel,
             source_entity: None,
             subject: EntityRef::Organization(fixture.criminal),
             observed_at: fixture.state.now(),

@@ -1,3 +1,5 @@
+//! Tick-ordering, due-work atomicity, deterministic RNG, and cross-domain simulation tests.
+
 use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
@@ -25,8 +27,8 @@ use crate::operations::{
     OperationApproach, OperationConstraint, OperationContingency, OperationDraft, OperationKind,
     OperationObjective, OperationStatus, RoleKind,
 };
+use crate::reputation::AudienceKind;
 use crate::reputation::reputation_system::{apply_reputation_delta, resolve_score};
-use crate::reputation::{AudienceKind, ReputationDimension};
 use crate::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_neighborhood,
     insert_organization,
@@ -148,7 +150,6 @@ fn tick_outcome_surfaces_reputation_only_decay_mutation() {
         &mut state,
         organization,
         AudienceKind::Police,
-        ReputationDimension::Fear,
         10,
     )
     .expect("fixture reputation movement should apply");
@@ -167,7 +168,6 @@ fn tick_outcome_surfaces_reputation_only_decay_mutation() {
             state.reputation(),
             organization,
             AudienceKind::Police,
-            ReputationDimension::Fear,
         ),
         baseline + 10 - registry.reputation().daily_decay_step(),
     );

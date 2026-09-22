@@ -13,7 +13,6 @@ pub enum OrganizationKind {
     LegalServices,
     Prosecutor,
     Political,
-    Press,
     Labor,
     Civic,
     Commercial,
@@ -28,15 +27,13 @@ pub enum CapabilityKind {
     Driving,
     Surveillance,
     Investigation,
-    Accounting,
     Negotiation,
     Management,
-    PoliticalInfluence,
     LegalKnowledge,
     SocialAccess,
 }
 
-pub const ALL_CAPABILITY_KINDS: [CapabilityKind; 13] = [
+pub const ALL_CAPABILITY_KINDS: [CapabilityKind; 11] = [
     CapabilityKind::Violence,
     CapabilityKind::Intimidation,
     CapabilityKind::Stealth,
@@ -44,10 +41,8 @@ pub const ALL_CAPABILITY_KINDS: [CapabilityKind; 13] = [
     CapabilityKind::Driving,
     CapabilityKind::Surveillance,
     CapabilityKind::Investigation,
-    CapabilityKind::Accounting,
     CapabilityKind::Negotiation,
     CapabilityKind::Management,
-    CapabilityKind::PoliticalInfluence,
     CapabilityKind::LegalKnowledge,
     CapabilityKind::SocialAccess,
 ];
@@ -58,8 +53,6 @@ pub enum TraitKind {
     Impulsive,
     Greedy,
     Proud,
-    Patient,
-    Cruel,
     Charismatic,
     Vindictive,
     Secretive,
@@ -68,13 +61,11 @@ pub enum TraitKind {
     EasilyFrightened,
 }
 
-pub const ALL_TRAIT_KINDS: [TraitKind; 12] = [
+pub const ALL_TRAIT_KINDS: [TraitKind; 10] = [
     TraitKind::Cautious,
     TraitKind::Impulsive,
     TraitKind::Greedy,
     TraitKind::Proud,
-    TraitKind::Patient,
-    TraitKind::Cruel,
     TraitKind::Charismatic,
     TraitKind::Vindictive,
     TraitKind::Secretive,
@@ -89,23 +80,17 @@ pub enum DriveKind {
     Status,
     Safety,
     Respect,
-    Revenge,
     FamilySecurity,
-    PoliticalAdvancement,
     Independence,
-    IdeologicalCause,
 }
 
-pub const ALL_DRIVE_KINDS: [DriveKind; 9] = [
+pub const ALL_DRIVE_KINDS: [DriveKind; 6] = [
     DriveKind::Money,
     DriveKind::Status,
     DriveKind::Safety,
     DriveKind::Respect,
-    DriveKind::Revenge,
     DriveKind::FamilySecurity,
-    DriveKind::PoliticalAdvancement,
     DriveKind::Independence,
-    DriveKind::IdeologicalCause,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -150,7 +135,6 @@ impl PolicySetting {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum LegalSupportPolicy {
-    None,
     CaseByCase,
     Automatic,
 }

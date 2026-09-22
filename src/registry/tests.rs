@@ -4,6 +4,7 @@ use super::*;
 use crate::build_registry;
 use crate::core::attention::AttentionClass;
 use crate::finance::Money;
+use crate::intelligence::InformationTopic;
 use crate::operations::{ALL_OPERATION_KINDS, OperationApproach, RoleKind};
 use crate::recruitment::RecruitmentApproach;
 use crate::world::{ALL_TRAIT_KINDS, BusinessFunction, CapabilityKind, DriveKind, TraitKind};
@@ -21,6 +22,16 @@ fn burglary_operation_parts() -> (
         definition.required_roles().clone(),
         definition.execution().clone(),
     )
+}
+
+#[test]
+fn surveillance_accepts_observed_enterprise_activity_as_planning_intelligence() {
+    let registry = build_registry();
+    let relevant = registry
+        .get_operation(OperationKind::Surveillance)
+        .execution()
+        .relevant_intelligence_topics();
+    assert!(relevant.contains(&InformationTopic::EnterpriseActivity));
 }
 
 #[test]

@@ -41,7 +41,7 @@ pub fn known_racket_observations(scenario: &Scenario) -> Vec<KnownRacketObservat
         .intelligence()
         .information_for_holder(KnowledgeHolder::Organization(scenario.player))
     {
-        if information.topic() != InformationTopic::Personnel
+        if information.topic() != InformationTopic::EnterpriseActivity
             || !matches!(information.subject(), EntityRef::Enterprise(_))
         {
             continue;
@@ -748,24 +748,18 @@ pub fn print_organization_closing_view(
         crimocracy::reputation::AudienceKind::Underworld,
         crimocracy::reputation::AudienceKind::Police,
         crimocracy::reputation::AudienceKind::Businesses,
+        crimocracy::reputation::AudienceKind::Residents,
     ] {
-        for dimension in [
-            crimocracy::reputation::ReputationDimension::Competence,
-            crimocracy::reputation::ReputationDimension::Fear,
-            crimocracy::reputation::ReputationDimension::Reliability,
-            crimocracy::reputation::ReputationDimension::Treachery,
-        ] {
-            let score = crimocracy::reputation::reputation_system::resolve_score(
-                registry,
-                scenario.state.reputation(),
-                scenario.player,
-                audience,
-                dimension,
-            );
-            let baseline = registry.reputation().baseline();
-            if let Some(band) = standing_band(score, baseline) {
-                println!("  - Standing {audience:?}/{dimension:?}: {band}.");
-            }
+        let dimension = audience.dimension();
+        let score = crimocracy::reputation::reputation_system::resolve_score(
+            registry,
+            scenario.state.reputation(),
+            scenario.player,
+            audience,
+        );
+        let baseline = registry.reputation().baseline();
+        if let Some(band) = standing_band(score, baseline) {
+            println!("  - Standing {audience:?}/{dimension:?}: {band}.");
         }
     }
 }
@@ -788,8 +782,8 @@ fn standing_band(score: u8, baseline: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod standing_tests {
     use super::*;
+    use crimocracy::reputation::AudienceKind;
     use crimocracy::reputation::reputation_system::{apply_reputation_delta, resolve_score};
-    use crimocracy::reputation::{AudienceKind, ReputationDimension};
 
     #[test]
     fn standing_stays_slight_when_three_authored_success_shifts_accumulate() {
@@ -806,7 +800,6 @@ mod standing_tests {
             scenario.state.reputation(),
             scenario.player,
             AudienceKind::Underworld,
-            ReputationDimension::Competence,
         );
         assert_eq!(initial, baseline);
         assert_eq!(standing_band(initial, baseline), None);
@@ -820,7 +813,6 @@ mod standing_tests {
                 &mut scenario.state,
                 scenario.player,
                 AudienceKind::Underworld,
-                ReputationDimension::Competence,
                 shift,
             )
             .unwrap();
@@ -829,7 +821,6 @@ mod standing_tests {
                 scenario.state.reputation(),
                 scenario.player,
                 AudienceKind::Underworld,
-                ReputationDimension::Competence,
             );
             assert_eq!(
                 i16::from(score) - i16::from(baseline),

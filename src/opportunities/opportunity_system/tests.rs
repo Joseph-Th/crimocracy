@@ -188,7 +188,7 @@ fn make_fixture() -> OpportunityFixture {
         &state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(organization),
-            source_kind: InformationSourceKind::Informant,
+            source_kind: InformationSourceKind::StreetRumor,
             topic: InformationTopic::TargetSecurity,
             source_entity: None,
             subject: EntityRef::Business(business),
@@ -382,7 +382,7 @@ fn sensitive_legal_opportunity_sources_require_typed_person_status_from_the_curr
         &fixture.state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(fixture.organization),
-            source_kind: InformationSourceKind::PoliceContact,
+            source_kind: InformationSourceKind::DirectObservation,
             topic: InformationTopic::LegalActivity,
             source_entity: None,
             subject: EntityRef::Character(fixture.leader),
@@ -399,7 +399,7 @@ fn sensitive_legal_opportunity_sources_require_typed_person_status_from_the_curr
         &fixture.state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(fixture.organization),
-            source_kind: InformationSourceKind::PoliceContact,
+            source_kind: InformationSourceKind::DirectObservation,
             topic: InformationTopic::LegalActivity,
             source_entity: None,
             subject: EntityRef::Character(fixture.leader),
@@ -456,7 +456,7 @@ fn sensitive_legal_opportunity_sources_require_typed_person_status_from_the_curr
         &fixture.state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(fixture.organization),
-            source_kind: InformationSourceKind::PoliceContact,
+            source_kind: InformationSourceKind::DirectObservation,
             topic: InformationTopic::LegalActivity,
             source_entity: None,
             subject: EntityRef::Character(witness_character),
@@ -487,7 +487,7 @@ fn sensitive_legal_opportunity_sources_require_typed_person_status_from_the_curr
         &fixture.state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(fixture.organization),
-            source_kind: InformationSourceKind::PoliceContact,
+            source_kind: InformationSourceKind::DirectObservation,
             topic: InformationTopic::LegalActivity,
             source_entity: None,
             subject: EntityRef::Character(witness_character),

@@ -17,8 +17,8 @@ use crimocracy::operations::{
     OperationObjective, OperationObjectiveOutcome, RoleKind,
 };
 use crimocracy::registry::Registry;
+use crimocracy::reputation::AudienceKind;
 use crimocracy::reputation::reputation_system::resolve_score;
-use crimocracy::reputation::{AudienceKind, ReputationDimension};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
@@ -172,7 +172,6 @@ fn run_branch(
         scenario.state.reputation(),
         scenario.player,
         AudienceKind::Businesses,
-        ReputationDimension::Fear,
     );
 
     let second_scheduled_for = scenario.state.now() + SimDuration::ONE_MINUTE;

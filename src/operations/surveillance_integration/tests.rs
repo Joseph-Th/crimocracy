@@ -310,8 +310,8 @@ fn detain_character_for_surveillance_test(
 
 #[test]
 fn successful_surveillance_ticks_deliver_knowledge_without_public_competence() {
+    use crate::reputation::AudienceKind;
     use crate::reputation::reputation_system::resolve_score;
-    use crate::reputation::{AudienceKind, ReputationDimension};
     let mut fixture = fixture(100, false);
     crate::world::world_system::designate_player_organization(&mut fixture.state, fixture.crew)
         .expect("crew can be designated player");
@@ -346,7 +346,6 @@ fn successful_surveillance_ticks_deliver_knowledge_without_public_competence() {
             fixture.state.reputation(),
             fixture.crew,
             AudienceKind::Underworld,
-            ReputationDimension::Competence
         ),
         fixture.registry.reputation().baseline()
     );

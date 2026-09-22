@@ -14,19 +14,17 @@ pub(super) fn validate_reputations(state: &AppState) -> Result<(), StateValidati
                 entity,
             });
         }
-        for dimension in crate::reputation::ALL_REPUTATION_DIMENSIONS {
-            if record.score(dimension) > 100 {
-                return Err(StateValidationError::InvalidReputationScore {
-                    organization: record.organization(),
-                    audience: record.audience(),
-                });
-            }
-            if record.changed_at(dimension) > state.now() {
-                return Err(StateValidationError::InvalidReputationChronology {
-                    organization: record.organization(),
-                    audience: record.audience(),
-                });
-            }
+        if record.score() > 100 {
+            return Err(StateValidationError::InvalidReputationScore {
+                organization: record.organization(),
+                audience: record.audience(),
+            });
+        }
+        if record.changed_at() > state.now() {
+            return Err(StateValidationError::InvalidReputationChronology {
+                organization: record.organization(),
+                audience: record.audience(),
+            });
         }
     }
     Ok(())
@@ -38,10 +36,7 @@ pub(super) fn validate_reputations_against_registry(
 ) -> Result<(), StateValidationError> {
     let baseline = registry.reputation().baseline();
     for record in state.reputation.records() {
-        if crate::reputation::ALL_REPUTATION_DIMENSIONS
-            .iter()
-            .all(|dimension| record.score(*dimension) == baseline)
-        {
+        if record.score() == baseline {
             return Err(StateValidationError::NeutralReputationRecord {
                 organization: record.organization(),
                 audience: record.audience(),

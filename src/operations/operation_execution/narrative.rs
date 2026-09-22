@@ -201,14 +201,13 @@ pub(super) fn outcome_label(outcome: OperationObjectiveOutcome) -> &'static str 
 
 fn information_topic_label(topic: InformationTopic) -> &'static str {
     match topic {
-        InformationTopic::General => "general information",
         InformationTopic::TargetSecurity => "target security",
         InformationTopic::Personnel => "personnel",
+        InformationTopic::EnterpriseActivity => "enterprise activity",
         InformationTopic::Schedule => "schedule",
         InformationTopic::PoliceActivity => "police activity",
         InformationTopic::Route => "route",
         InformationTopic::FinancialPerformance => "financial performance",
-        InformationTopic::Relationship => "relationships",
         InformationTopic::LegalActivity => "legal activity",
         InformationTopic::MarketAccess => "market access",
         InformationTopic::OperationalOutcome => "operational outcomes",

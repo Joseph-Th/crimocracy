@@ -211,11 +211,11 @@ fn organization_policy_history_preserves_exact_revisions() {
         &registry,
         &state,
         organization,
-        PolicySetting::AssociateLegalSupport(LegalSupportPolicy::None),
+        PolicySetting::AssociateLegalSupport(LegalSupportPolicy::CaseByCase),
     )
-    .expect("second legal-support policy change should validate")
+    .expect("legal-support policy should visibly return to case-by-case handling")
     .commit(&registry, &mut state)
-    .expect("legal-support policy should accept its third authored state");
+    .expect("legal-support policy should accept the return to its authored default");
     let record = state
         .world()
         .get_organization(organization)
@@ -235,7 +235,7 @@ fn organization_policy_history_preserves_exact_revisions() {
     assert_eq!(
         record.policy_at_version(PolicyKind::AssociateLegalSupport, 3),
         Some(PolicySetting::AssociateLegalSupport(
-            LegalSupportPolicy::None
+            LegalSupportPolicy::CaseByCase
         ))
     );
     validate_invariants(&state);
@@ -524,7 +524,7 @@ fn registry_validation_rejects_wrong_initial_three_state_organization_policy_set
     );
 
     validate_state_against_registry(&registry, &state)
-        .expect("canonical three-state policy history should remain registry-valid");
+        .expect("canonical legal-support policy history should remain registry-valid");
 }
 
 #[test]

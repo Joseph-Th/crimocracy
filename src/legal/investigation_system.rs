@@ -359,7 +359,6 @@ fn validate_investigation_draft(
         | OrganizationKind::LegalServices
         | OrganizationKind::Prosecutor
         | OrganizationKind::Political
-        | OrganizationKind::Press
         | OrganizationKind::Labor
         | OrganizationKind::Civic
         | OrganizationKind::Commercial => {
@@ -554,7 +553,14 @@ impl ValidatedEvidence {
                 found: investigation.version(),
             });
         }
-        ensure_external_evidence_case_capacity(state, &self.draft)?;
+        ensure_external_evidence_case_capacity(
+            state,
+            self.draft.investigation,
+            self.draft.subject,
+            self.draft.strength,
+            self.draft.reliability,
+            self.draft.admissibility,
+        )?;
         let id = state.ids.next_evidence()?;
         let EvidenceDraft {
             investigation,
@@ -603,7 +609,14 @@ pub fn validate_add_evidence(
         .legal
         .get_investigation(draft.investigation)
         .expect("validated evidence investigation must exist");
-    ensure_external_evidence_case_capacity(state, &draft)?;
+    ensure_external_evidence_case_capacity(
+        state,
+        draft.investigation,
+        draft.subject,
+        draft.strength,
+        draft.reliability,
+        draft.admissibility,
+    )?;
     Ok(ValidatedEvidence {
         draft,
         expected_investigation_version: investigation.version(),
@@ -613,29 +626,30 @@ pub fn validate_add_evidence(
 /// Evidence may arrive while detective work is already scheduled. Preserve that work's complete
 /// worst-case resolution budget unless this exact actionable evidence will cancel the conflicting
 /// lead/witness work in the same owner mutation.
-fn ensure_external_evidence_case_capacity(
+pub(crate) fn ensure_external_evidence_case_capacity(
     state: &AppState,
-    draft: &EvidenceDraft,
+    investigation: InvestigationId,
+    subject: EntityRef,
+    strength: crate::legal::EvidenceStrength,
+    reliability: crate::legal::EvidenceReliability,
+    admissibility: crate::legal::Admissibility,
 ) -> Result<(), VersionCapacityError> {
-    let excluded_work = if evidence_assessment_is_actionable_case_lead(
-        draft.strength,
-        draft.reliability,
-        draft.admissibility,
-    ) {
-        draft.subject.as_character().and_then(|character| {
-            crate::legal::investigation_work_execution::
+    let excluded_work =
+        if evidence_assessment_is_actionable_case_lead(strength, reliability, admissibility) {
+            subject.as_character().and_then(|character| {
+                crate::legal::investigation_work_execution::
                 scheduled_work_invalidated_by_actionable_character(
                     state,
-                    draft.investigation,
+                    investigation,
                     character,
                 )
-        })
-    } else {
-        None
-    };
+            })
+        } else {
+            None
+        };
     crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
         state,
-        draft.investigation,
+        investigation,
         1,
         excluded_work,
     )

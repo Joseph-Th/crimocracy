@@ -340,7 +340,7 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
         })
     );
     for (information, location) in discovered[1..].iter().zip([names[1], names[3], names[4]]) {
-        assert_eq!(information.topic(), InformationTopic::Personnel);
+        assert_eq!(information.topic(), InformationTopic::EnterpriseActivity);
         assert_eq!(
             information.holder(),
             KnowledgeHolder::Organization(fixture.crew)
@@ -704,8 +704,8 @@ fn hosted_enterprise_watch_bounds_patrol_knowledge_by_outcome() {
             &fixture.state,
             InformationDraft {
                 holder: KnowledgeHolder::Organization(fixture.crew),
-                source_kind: InformationSourceKind::Surveillance,
-                topic: InformationTopic::Personnel,
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::EnterpriseActivity,
                 source_entity: Some(EntityRef::Character(fixture.observer)),
                 subject: EntityRef::Enterprise(enterprise),
                 observed_at: fixture.state.now(),
@@ -781,13 +781,11 @@ fn direct_enterprise_watch_rejects_changed_patrol_snapshot() {
             .unwrap()
             .discovered_information()
             .iter()
-            .all(|id| fixture
-                .state
-                .intelligence()
-                .get_information(*id)
-                .unwrap()
-                .topic()
-                == InformationTopic::Personnel)
+            .any(|id| {
+                let information = fixture.state.intelligence().get_information(*id).unwrap();
+                information.subject() == EntityRef::Enterprise(enterprise)
+                    && information.topic() == InformationTopic::EnterpriseActivity
+            })
     );
     let operation = authorize_surveillance(&mut fixture, EntityRef::Enterprise(enterprise));
     run_tick(&fixture.registry, &mut fixture.state);
@@ -978,7 +976,6 @@ fn noncriminal_organization_surveillance_never_discovers_rival_portfolios() {
         OrganizationKind::LegalServices,
         OrganizationKind::Prosecutor,
         OrganizationKind::Political,
-        OrganizationKind::Press,
         OrganizationKind::Labor,
         OrganizationKind::Civic,
         OrganizationKind::Commercial,

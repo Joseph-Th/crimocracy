@@ -92,7 +92,6 @@ pub(super) fn decide_recruitment_attempt_with_approval(
         state.reputation(),
         draft.target_organization,
         crate::reputation::AudienceKind::Underworld,
-        crate::reputation::ReputationDimension::Competence,
     );
     let factors = resolve_recruitment_factors_from_context(RecruitmentFactorContext {
         definition: registry.recruitment(),
@@ -194,7 +193,7 @@ pub(super) fn validate_plan_state_snapshot(
             plan.draft.target_organization,
             crate::reputation::AudienceKind::Underworld,
         )
-        .map(|record| record.score(crate::reputation::ReputationDimension::Competence))
+        .map(|record| record.score())
         .unwrap_or(plan.dependencies.reputation_baseline);
     if found_competence != expected_competence {
         return Err(RecruitmentError::StaleOrganizationCompetence {

@@ -1,8 +1,9 @@
 //! Legal institutions, patrol deployment, investigations, evidence graphs, witnesses, and informants.
 //!
-//! `records.rs` owns the record, draft, enum, and index definitions; `legal_state.rs` owns
+//! `records.rs` is the record-vocabulary facade; its `records/*` children group casework,
+//! custody, representation, prosecution, and policing shapes. `legal_state.rs` owns
 //! [`LegalState`], the single owner of every legal record and derived index, with
-//! `legal_state_validation.rs` holding its projection checks. The eleven subsystem files
+//! `legal_state_validation.rs` holding its projection checks. The subsystem files
 //! (`*_system.rs`, `case_knowledge.rs`, `investigation_work_execution.rs`)
 //! implement validation, decision, and commit paths against those records. This facade
 //! re-exports the exact public surface used by `crate::legal::*` consumers.
@@ -42,7 +43,7 @@ pub use records::{
     ProsecutionCaseStatus, ProsecutionReferralDraft, ProsecutionReferralRecord, WitnessCooperation,
     WitnessStatementDraft, WitnessStatementRecord,
 };
-pub(super) use records::{
+pub(in crate::legal) use records::{
     EvidenceAssessment, EvidenceConnection, EvidenceIdentity, InvestigationWorkIdentity,
     InvestigationWorkRuntime,
 };

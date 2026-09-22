@@ -6,7 +6,9 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, EvidenceId, InvestigationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::intelligence::intelligence_system::{ValidatedInformation, validate_record_information};
+use crate::intelligence::intelligence_system::{
+    ValidatedInformation, validate_record_system_information,
+};
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
@@ -74,7 +76,7 @@ pub(super) fn validate_resolution_artifacts(
     )
     .expect("String buffer writes are infallible");
     let summary = summary_buffer;
-    let information = validate_record_information(
+    let information = validate_record_system_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(case.prosecutor_office()),
@@ -177,7 +179,7 @@ pub(super) fn validate_referral_artifacts(
         evidence.len(),
         initial,
     );
-    let information = validate_record_information(
+    let information = validate_record_system_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(prosecutor_office),

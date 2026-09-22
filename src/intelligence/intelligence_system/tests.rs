@@ -58,6 +58,20 @@ fn typed_signal_compatibility_requires_every_semantic_axis() {
     let business = BusinessId::from_raw(4);
     let neighborhood = NeighborhoodId::from_raw(5);
 
+    let case_activity = InformationSignal::CaseActivity(CaseActivitySignal::Active);
+    assert!(case_activity.is_compatible(
+        InformationTopic::LegalActivity,
+        EntityRef::Organization(organization)
+    ));
+    assert!(!case_activity.is_compatible(
+        InformationTopic::Personnel,
+        EntityRef::Organization(organization)
+    ));
+    assert!(!case_activity.is_compatible(
+        InformationTopic::LegalActivity,
+        EntityRef::Character(character)
+    ));
+
     let legal_person = InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::Detained {
         arrest: ArrestId::from_raw(6),
     });
@@ -76,6 +90,10 @@ fn typed_signal_compatibility_requires_every_semantic_axis() {
     let enterprise_location =
         InformationSignal::EnterpriseLocation(EnterpriseLocationSignal::Business(business));
     assert!(enterprise_location.is_compatible(
+        InformationTopic::EnterpriseActivity,
+        EntityRef::Enterprise(enterprise)
+    ));
+    assert!(!enterprise_location.is_compatible(
         InformationTopic::Personnel,
         EntityRef::Enterprise(enterprise)
     ));
@@ -83,10 +101,10 @@ fn typed_signal_compatibility_requires_every_semantic_axis() {
         InformationTopic::TargetSecurity,
         EntityRef::Enterprise(enterprise)
     ));
-    assert!(
-        !enterprise_location
-            .is_compatible(InformationTopic::Personnel, EntityRef::Business(business))
-    );
+    assert!(!enterprise_location.is_compatible(
+        InformationTopic::EnterpriseActivity,
+        EntityRef::Business(business)
+    ));
 
     let personnel = InformationSignal::PersonnelPresence {
         characters: BTreeSet::from([character]),
@@ -708,16 +726,72 @@ fn peer_transfer_rejects_characters_in_different_organizations() {
 }
 
 #[test]
-fn generic_information_recording_cannot_forge_internal_transfer() {
+fn generic_information_recording_cannot_forge_derived_provenance() {
     let (_registry, mut state, organization, character) = make_transfer_fixture();
     record_character_information(&mut state, character, organization);
+
+    for source_kind in [
+        InformationSourceKind::PoliceContact,
+        InformationSourceKind::LegalContact,
+        InformationSourceKind::PoliticalContact,
+        InformationSourceKind::ProfessionalContact,
+    ] {
+        let error = match validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(organization),
+                source_kind,
+                topic: crate::intelligence::InformationTopic::Personnel,
+                source_entity: Some(EntityRef::Character(character)),
+                subject: EntityRef::Organization(organization),
+                observed_at: state.now(),
+                reliability: crate::intelligence::Reliability::GenerallyReliable,
+                specificity: crate::intelligence::Specificity::Specific,
+                summary: "Contact-derived provenance must come from a disclosure.".to_owned(),
+            },
+        ) {
+            Ok(_) => panic!("generic recording must not create contact-derived information"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            IntelligenceError::ContactSourceRequiresDisclosure(source_kind)
+        );
+    }
+    for source_kind in [
+        InformationSourceKind::Accounting,
+        InformationSourceKind::Surveillance,
+        InformationSourceKind::AfterAction,
+    ] {
+        let error = match validate_record_information(
+            &state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(organization),
+                source_kind,
+                topic: crate::intelligence::InformationTopic::Personnel,
+                source_entity: Some(EntityRef::Character(character)),
+                subject: EntityRef::Organization(organization),
+                observed_at: state.now(),
+                reliability: crate::intelligence::Reliability::GenerallyReliable,
+                specificity: crate::intelligence::Specificity::Specific,
+                summary: "System-authored provenance must come from its owning system.".to_owned(),
+            },
+        ) {
+            Ok(_) => panic!("generic recording must not create system-authored information"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            IntelligenceError::SystemSourceRequiresOwner(source_kind)
+        );
+    }
 
     let internal_report_error = match validate_record_information(
         &state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(organization),
             source_kind: InformationSourceKind::InternalReport,
-            topic: crate::intelligence::InformationTopic::General,
+            topic: crate::intelligence::InformationTopic::Personnel,
             source_entity: Some(EntityRef::Character(character)),
             subject: EntityRef::Organization(organization),
             observed_at: state.now(),

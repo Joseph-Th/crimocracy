@@ -491,11 +491,11 @@ fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationT
         ],
         OperationKind::Intimidation | OperationKind::WitnessPressure => &[
             InformationTopic::Personnel,
-            InformationTopic::Relationship,
             InformationTopic::PoliceActivity,
         ],
         OperationKind::Surveillance => &[
             InformationTopic::Personnel,
+            InformationTopic::EnterpriseActivity,
             InformationTopic::Schedule,
             InformationTopic::Route,
             InformationTopic::PoliceActivity,

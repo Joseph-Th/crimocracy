@@ -14,7 +14,7 @@ use crate::finance::finance_system::{
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
-    IntelligenceError, ValidatedInformation, validate_record_information,
+    IntelligenceError, ValidatedInformation, validate_record_system_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -278,11 +278,11 @@ pub fn validate_dispose_property(
         proceeds.estimated_value(),
         realized_value,
     );
-    let information = validate_record_information(
+    let information = validate_record_system_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(organization),
-            source_kind: InformationSourceKind::Accountant,
+            source_kind: InformationSourceKind::Accounting,
             topic: InformationTopic::FinancialPerformance,
             source_entity: Some(EntityRef::Business(draft.venue)),
             subject: EntityRef::Operation(draft.operation),
@@ -585,11 +585,11 @@ pub fn validate_deposit_operation_cash(
         },
     )?;
     let deposit_summary = build_deposit_summary(operation.title(), amount);
-    let information = validate_record_information(
+    let information = validate_record_system_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(organization),
-            source_kind: InformationSourceKind::Accountant,
+            source_kind: InformationSourceKind::Accounting,
             topic: InformationTopic::FinancialPerformance,
             source_entity: Some(proceeds.target()),
             subject: EntityRef::Operation(draft.operation),

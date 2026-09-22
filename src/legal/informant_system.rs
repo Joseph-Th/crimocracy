@@ -329,28 +329,13 @@ fn ensure_informant_disclosure_case_capacity(
 ) -> Result<(), VersionCapacityError> {
     let strength = informant_strength(information.specificity());
     let reliability = informant_reliability(information.reliability());
-    let excluded_work =
-        if crate::legal::investigation_system::evidence_assessment_is_actionable_case_lead(
-            strength,
-            reliability,
-            Admissibility::Unknown,
-        ) {
-            information.subject().as_character().and_then(|character| {
-                crate::legal::investigation_work_execution::
-                scheduled_work_invalidated_by_actionable_character(
-                    state,
-                    draft.investigation,
-                    character,
-                )
-            })
-        } else {
-            None
-        };
-    crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+    crate::legal::investigation_system::ensure_external_evidence_case_capacity(
         state,
         draft.investigation,
-        1,
-        excluded_work,
+        information.subject(),
+        strength,
+        reliability,
+        Admissibility::Unknown,
     )
 }
 

@@ -698,6 +698,10 @@ pub struct OperationResolutionRecord {
     /// whether the target was actually detained when the crew reached the objective.
     extraction_arrest: Option<ArrestId>,
     discovered_information: BTreeSet<InformationId>,
+    /// Personal debrief information created for every bound participant when this resolution
+    /// committed. Persisting the exact IDs makes after-action provenance explicit rather than
+    /// re-identifying records later from matching prose and timestamps.
+    participant_information: BTreeMap<CharacterId, InformationId>,
     /// Topic/subject/semantic triples actually produced by a surveillance resolution. Persisted
     /// because sightline conditions and the exact typed facts observed at that minute are not
     /// re-derivable after later state changes.
@@ -746,6 +750,10 @@ impl OperationResolutionRecord {
 
     pub fn discovered_information(&self) -> &BTreeSet<InformationId> {
         &self.discovered_information
+    }
+
+    pub fn participant_information(&self) -> &BTreeMap<CharacterId, InformationId> {
+        &self.participant_information
     }
 
     pub fn surveillance_signatures(

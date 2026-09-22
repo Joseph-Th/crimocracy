@@ -18,8 +18,8 @@ use crate::finance::finance_system::{
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
-    IntelligenceError, ValidatedInformation, validate_record_information,
-    validate_record_information_with_signal,
+    IntelligenceError, ValidatedInformation, validate_record_system_information,
+    validate_record_system_information_with_signal,
 };
 use crate::intelligence::{
     InformationDraft, InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
@@ -331,7 +331,7 @@ pub fn validate_retain_legal_representation(
         defendant.name(),
         draft.fee,
     );
-    let information = validate_record_information_with_signal(
+    let information = validate_record_system_information_with_signal(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(draft.sponsor),
@@ -885,7 +885,7 @@ pub fn validate_end_legal_representation(
         .get_character(record.counsel())
         .ok_or(LegalRepresentationError::MissingCounsel(record.counsel()))?;
     let summary = ended_representation_summary(counsel.name(), defendant.name(), reason);
-    let information = validate_record_information(
+    let information = validate_record_system_information(
         state,
         InformationDraft {
             holder: KnowledgeHolder::Organization(record.sponsor()),

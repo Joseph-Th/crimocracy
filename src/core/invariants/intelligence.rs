@@ -1,17 +1,21 @@
 //! Release-safe structural validation for persisted intelligence and provenance.
 
 use crate::core::entity::{EntityRef, is_entity_present};
+use crate::core::id::InformationId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::{
     InformationRecord, InformationSignal, InformationSourceKind, KnowledgeHolder,
     downgraded_reliability_for_contact_derivation, downgraded_specificity_for_contact_derivation,
 };
+use crate::operations::OperationKind;
+use std::collections::BTreeSet;
 
 pub(super) fn validate_intelligence(state: &AppState) -> Result<(), StateValidationError> {
+    let system_owners = collect_system_information_owners(state);
     let mut previous_recorded_at = None;
     for information in state.intelligence.information() {
-        validate_information(state, information)?;
+        validate_information(state, information, &system_owners)?;
         if previous_recorded_at.is_some_and(|at| information.recorded_at() < at) {
             return Err(StateValidationError::InvalidInformationChronology {
                 information: information.id(),
@@ -25,6 +29,7 @@ pub(super) fn validate_intelligence(state: &AppState) -> Result<(), StateValidat
 fn validate_information(
     state: &AppState,
     information: &InformationRecord,
+    system_owners: &SystemInformationOwners,
 ) -> Result<(), StateValidationError> {
     validate_information_references(state, information)?;
     if information.observed_at() > information.recorded_at()
@@ -60,10 +65,110 @@ fn validate_information(
     }
     if information.source_kind() == InformationSourceKind::InternalReport {
         validate_internal_report_provenance(state, information)?;
-    } else if !information.derived_from().is_empty() {
+    } else if information.source_kind().is_contact_derivation()
+        || !information.derived_from().is_empty()
+    {
         validate_contact_derived_provenance(state, information)?;
+    } else if matches!(
+        information.source_kind(),
+        InformationSourceKind::Accounting
+            | InformationSourceKind::Surveillance
+            | InformationSourceKind::AfterAction
+    ) && !system_owners.contains(information.source_kind(), information.id())
+    {
+        return Err(StateValidationError::UnownedSystemInformation {
+            information: information.id(),
+        });
     }
     validate_information_lineage(state, information)
+}
+
+#[derive(Default)]
+struct SystemInformationOwners {
+    accounting: BTreeSet<InformationId>,
+    surveillance: BTreeSet<InformationId>,
+    after_action: BTreeSet<InformationId>,
+}
+
+impl SystemInformationOwners {
+    fn contains(&self, kind: InformationSourceKind, information: InformationId) -> bool {
+        match kind {
+            InformationSourceKind::Accounting => self.accounting.contains(&information),
+            InformationSourceKind::Surveillance => self.surveillance.contains(&information),
+            InformationSourceKind::AfterAction => self.after_action.contains(&information),
+            InformationSourceKind::DirectObservation
+            | InformationSourceKind::PoliceContact
+            | InformationSourceKind::PoliticalContact
+            | InformationSourceKind::ProfessionalContact
+            | InformationSourceKind::LegalContact
+            | InformationSourceKind::StreetRumor
+            | InformationSourceKind::InternalReport => false,
+        }
+    }
+}
+
+fn collect_system_information_owners(state: &AppState) -> SystemInformationOwners {
+    let mut owners = SystemInformationOwners::default();
+
+    for cycle in state.economy.cycles() {
+        if let Some(information) = cycle.information() {
+            owners.accounting.insert(information);
+        }
+    }
+    for cycle in state.enterprises.cycles() {
+        if let Some(information) = cycle.information() {
+            owners.after_action.insert(information);
+        }
+    }
+    for attempt in state.recruitment.attempts() {
+        owners.after_action.insert(attempt.outcome_information());
+    }
+    for representation in state.legal.legal_representations() {
+        owners.after_action.insert(representation.information());
+        if let Some(information) = representation.ended_information() {
+            owners.after_action.insert(information);
+        }
+    }
+    for case in state.legal.prosecution_cases() {
+        if let Some(information) = case.resolution_information() {
+            owners.after_action.insert(information);
+        }
+    }
+    for referral in state.legal.prosecution_referrals() {
+        owners.after_action.insert(referral.information());
+    }
+
+    for operation in state.operations.operations() {
+        if let Some(disposition) = operation.property_disposition() {
+            owners.accounting.insert(disposition.information());
+        }
+        if let Some(disposition) = operation.cash_disposition() {
+            owners.accounting.insert(disposition.information());
+        }
+        if let Some(abort) = operation.abort_record() {
+            let artifacts = abort.artifacts();
+            owners.after_action.insert(artifacts.information());
+            if let Some(information) = artifacts.police_activity_information() {
+                owners.after_action.insert(information);
+            }
+        }
+        let Some(resolution) = operation.resolution() else {
+            continue;
+        };
+        owners
+            .after_action
+            .insert(resolution.after_action_information());
+        if operation.kind() == OperationKind::Surveillance {
+            owners
+                .surveillance
+                .extend(resolution.discovered_information().iter().copied());
+        }
+        owners
+            .after_action
+            .extend(resolution.participant_information().values().copied());
+    }
+
+    owners
 }
 
 fn validate_information_references(
@@ -145,15 +250,7 @@ fn validate_contact_derived_provenance(
         .intelligence
         .get_information(source)
         .ok_or_else(|| invalid_provenance(information, source))?;
-    let valid_contact_kind = matches!(
-        information.source_kind(),
-        InformationSourceKind::PoliceContact
-            | InformationSourceKind::Lawyer
-            | InformationSourceKind::PoliticalContact
-            | InformationSourceKind::ProfessionalContact
-            | InformationSourceKind::Press
-    );
-    if !valid_contact_kind
+    if !information.source_kind().is_contact_derivation()
         || information.derived_from().len() != 1
         || state
             .contacts

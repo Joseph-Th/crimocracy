@@ -58,7 +58,8 @@ use crate::finance::finance_system::{
 };
 use crate::finance::{AccountKind, FinancialOwner, LedgerTransactionDraft, Money};
 use crate::intelligence::intelligence_system::{
-    IntelligenceError, PlannedInformationSource, ValidatedInformation, validate_record_information,
+    IntelligenceError, PlannedInformationSource, ValidatedInformation,
+    validate_record_system_information,
 };
 use crate::intelligence::{
     InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
@@ -687,7 +688,7 @@ pub fn validate_enterprise_cycle_plan(
                 drew_enforcement_attention,
                 plan.snapshot.suspends_after_settlement,
             );
-            let information = validate_record_information(
+            let information = validate_record_system_information(
                 state,
                 InformationDraft {
                     holder: KnowledgeHolder::Organization(record.organization()),

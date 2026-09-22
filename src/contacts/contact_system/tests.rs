@@ -702,13 +702,13 @@ fn establishment_token_rejects_relationship_change_without_partial_contact() {
 
 #[test]
 fn disclosure_token_rejects_contact_termination_and_duplicate_source() {
-    let mut fixture = make_fixture(OrganizationKind::Press);
+    let mut fixture = make_fixture(OrganizationKind::LegalAuthority);
     let contact = establish(&mut fixture);
     let source_character = fixture.source;
     let source = record_source_information_with_topic(
         &mut fixture,
         KnowledgeHolder::Character(source_character),
-        InformationTopic::General,
+        InformationTopic::LegalActivity,
     );
     let stale = validate_contact_disclosure(&fixture.state, contact, source)
         .expect("contact disclosure should initially validate");
@@ -729,13 +729,13 @@ fn disclosure_token_rejects_contact_termination_and_duplicate_source() {
     );
     assert_eq!(fixture.state.contacts().disclosures().count(), 0);
 
-    let mut duplicate_fixture = make_fixture(OrganizationKind::Press);
+    let mut duplicate_fixture = make_fixture(OrganizationKind::LegalAuthority);
     let duplicate_contact = establish(&mut duplicate_fixture);
     let duplicate_source_character = duplicate_fixture.source;
     let duplicate_source = record_source_information_with_topic(
         &mut duplicate_fixture,
         KnowledgeHolder::Character(duplicate_source_character),
-        InformationTopic::General,
+        InformationTopic::LegalActivity,
     );
     validate_contact_disclosure(
         &duplicate_fixture.state,
@@ -764,34 +764,35 @@ fn disclosure_token_rejects_contact_termination_and_duplicate_source() {
 }
 
 #[test]
-fn press_contact_cannot_launder_operational_knowledge_outside_its_domain() {
-    let mut fixture = make_fixture(OrganizationKind::Press);
-    let contact = establish(&mut fixture);
-    let source_character = fixture.source;
-    let source =
-        record_source_information(&mut fixture, KnowledgeHolder::Character(source_character));
-    let error = validate_contact_disclosure(&fixture.state, contact, source)
-        .err()
-        .expect("press contacts must not disclose police-activity knowledge");
+fn institution_without_modeled_contact_channel_is_rejected() {
+    let fixture = make_fixture(OrganizationKind::Criminal);
+    let error = validate_establish_contact(
+        &fixture.state,
+        InstitutionalContactDraft {
+            sponsor: fixture.sponsor,
+            handler: fixture.handler,
+            contact: fixture.source,
+        },
+    )
+    .expect_err("criminal organizations have no modeled institutional disclosure channel");
     assert_eq!(
         error,
-        ContactError::InformationOutsideContactDomain {
-            information: source,
-            topic: InformationTopic::PoliceActivity,
-            kind: ContactKind::Press,
-        }
+        ContactError::UnsupportedInstitution(fixture.institution)
     );
-    assert_eq!(fixture.state.contacts().disclosures().count(), 0);
-    validate_invariants(&fixture.state);
 }
 
 #[test]
 fn institution_kind_controls_disclosure_channel_without_generic_influence_score() {
     for (organization_kind, contact_kind, source_kind) in [
         (
+            OrganizationKind::LawEnforcement,
+            ContactKind::Police,
+            InformationSourceKind::PoliceContact,
+        ),
+        (
             OrganizationKind::LegalAuthority,
             ContactKind::Legal,
-            InformationSourceKind::Lawyer,
+            InformationSourceKind::LegalContact,
         ),
         (
             OrganizationKind::Political,
@@ -827,8 +828,7 @@ fn institution_kind_controls_disclosure_channel_without_generic_influence_score(
             ContactKind::Labor | ContactKind::Professional => {
                 InformationTopic::FinancialPerformance
             }
-            ContactKind::Police => InformationTopic::PoliceActivity,
-            ContactKind::Press => InformationTopic::General,
+            ContactKind::Police => InformationTopic::LegalActivity,
         };
         let source = record_source_information_with_topic(
             &mut fixture,

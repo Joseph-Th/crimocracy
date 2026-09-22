@@ -298,7 +298,7 @@ fn collect_probe(
             followup,
             intervention,
             absence: selected.is_none().then_some(
-                "The organization watch produced no player-held Personnel observation with an Enterprise subject. No follow-up was authorized; this does not establish that the rival has no rackets.",
+                "The organization watch produced no player-held EnterpriseActivity observation with an Enterprise subject. No follow-up was authorized; this does not establish that the rival has no rackets.",
             ),
         },
         evaluation,
@@ -348,7 +348,7 @@ fn select_observed_enterprise(
             .get_information(*id)
             .expect("discovered information must persist");
         (information.holder() == KnowledgeHolder::Organization(scenario.player)
-            && information.topic() == InformationTopic::Personnel
+            && information.topic() == InformationTopic::EnterpriseActivity
             && matches!(information.subject(), EntityRef::Enterprise(_)))
         .then_some((information.subject(), *id))
     })
@@ -360,7 +360,7 @@ fn select_observed_business_location(
 ) -> Option<BusinessId> {
     let information = scenario.state.intelligence().get_information(source)?;
     if information.holder() != KnowledgeHolder::Organization(scenario.player)
-        || information.topic() != InformationTopic::Personnel
+        || information.topic() != InformationTopic::EnterpriseActivity
         || !matches!(information.subject(), EntityRef::Enterprise(_))
     {
         return None;
@@ -659,7 +659,7 @@ mod tests {
             .observations
             .iter()
             .find(|item| {
-                item.topic == InformationTopic::Personnel
+                item.topic == InformationTopic::EnterpriseActivity
                     && matches!(item.subject, EntityRef::Enterprise(_))
             })
             .expect("default watch discovers a rival racket");
@@ -813,10 +813,11 @@ mod tests {
         assert!(json.get("diagnostic").is_none());
         assert!(
             visible.discovery.observations.iter().any(|item| {
-                item.topic == InformationTopic::Personnel
-                    && item.subject == visible.discovery.target
+                item.topic == InformationTopic::EnterpriseActivity
+                    && item.information == first.information
+                    && item.subject == first.subject
             }),
-            "racket discoveries must retain the original personnel observation"
+            "organization surveillance must retain the enterprise-activity observation selected for the follow-up"
         );
 
         // Filesystem identity is adapter-only and never participates in simulation policy.

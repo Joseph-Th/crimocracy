@@ -250,7 +250,6 @@ fn resolve_eligible_expansion_mandates(
             &state.reputation,
             organization,
             crate::reputation::AudienceKind::Police,
-            crate::reputation::ReputationDimension::Fear,
         );
         if police_fear >= registry.reputation().expansion_police_fear_ceiling() {
             continue;

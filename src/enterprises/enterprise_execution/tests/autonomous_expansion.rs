@@ -388,7 +388,6 @@ fn autonomous_lifecycle_retires_revoked_racket_even_while_police_fear_blocks_ope
         &mut fixture.state,
         fixture.organization,
         crate::reputation::AudienceKind::Police,
-        crate::reputation::ReputationDimension::Fear,
         fear_delta,
     )
     .expect("fixture police fear should apply");
@@ -1711,7 +1710,6 @@ fn same_tick_racket_fear_blocks_due_autonomous_expansion() {
         &mut fixture.state,
         fixture.organization,
         crate::reputation::AudienceKind::Police,
-        crate::reputation::ReputationDimension::Fear,
         setup_delta,
     )
     .expect("pre-tick fear setup should apply");
@@ -1757,7 +1755,6 @@ fn same_tick_racket_fear_blocks_due_autonomous_expansion() {
             &fixture.state.reputation,
             fixture.organization,
             crate::reputation::AudienceKind::Police,
-            crate::reputation::ReputationDimension::Fear,
         ),
         registry.reputation().expansion_police_fear_ceiling(),
         "day-boundary decay plus the fresh racket consequence should land exactly on the ceiling"
@@ -1782,7 +1779,6 @@ fn police_fear_at_or_above_the_authored_ceiling_stalls_expansion_until_it_cools(
         &mut fixture.state,
         fixture.organization,
         crate::reputation::AudienceKind::Police,
-        crate::reputation::ReputationDimension::Fear,
         100,
     )
     .expect("fear adjustment should apply");
@@ -1804,7 +1800,6 @@ fn police_fear_at_or_above_the_authored_ceiling_stalls_expansion_until_it_cools(
             &fixture.state.reputation,
             fixture.organization,
             crate::reputation::AudienceKind::Police,
-            crate::reputation::ReputationDimension::Fear,
         );
         if fear <= ceiling {
             break;
@@ -1823,7 +1818,6 @@ fn police_fear_at_or_above_the_authored_ceiling_stalls_expansion_until_it_cools(
             &fixture.state.reputation,
             fixture.organization,
             crate::reputation::AudienceKind::Police,
-            crate::reputation::ReputationDimension::Fear,
         ),
         ceiling
     );
@@ -1840,7 +1834,6 @@ fn police_fear_at_or_above_the_authored_ceiling_stalls_expansion_until_it_cools(
         &mut fixture.state,
         fixture.organization,
         crate::reputation::AudienceKind::Police,
-        crate::reputation::ReputationDimension::Fear,
         -1,
     )
     .expect("cooling adjustment should apply");

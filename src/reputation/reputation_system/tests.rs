@@ -20,24 +20,17 @@ struct ReputationScoreWire {
 struct ReputationRecordWire {
     organization: OrganizationId,
     audience: AudienceKind,
-    fear: ReputationScoreWire,
-    reliability: ReputationScoreWire,
-    competence: ReputationScoreWire,
-    treachery: ReputationScoreWire,
+    score: ReputationScoreWire,
 }
 
 fn reputation_record_wire(record: &ReputationRecord) -> ReputationRecordWire {
-    let score = |dimension| ReputationScoreWire {
-        value: record.score(dimension),
-        changed_at: record.changed_at(dimension),
-    };
     ReputationRecordWire {
         organization: record.organization(),
         audience: record.audience(),
-        fear: score(ReputationDimension::Fear),
-        reliability: score(ReputationDimension::Reliability),
-        competence: score(ReputationDimension::Competence),
-        treachery: score(ReputationDimension::Treachery),
+        score: ReputationScoreWire {
+            value: record.score(),
+            changed_at: record.changed_at(),
+        },
     }
 }
 
@@ -97,29 +90,17 @@ fn reputation_deltas_create_sparse_records_clamped_to_the_score_range() {
     let (registry, mut state, organization) = make_state();
     let baseline = registry.reputation().baseline();
 
-    // First touch creates one record at baseline-plus-delta; other dimensions stay
-    // at baseline and untouched audiences stay absent entirely.
-    let after = apply_reputation_delta(
-        &registry,
-        &mut state,
-        organization,
-        AudienceKind::Police,
-        ReputationDimension::Fear,
-        7,
-    )
-    .expect("delta on a live organization should apply");
+    // First touch creates one record at baseline-plus-delta; untouched audiences stay absent.
+    let after =
+        apply_reputation_delta(&registry, &mut state, organization, AudienceKind::Police, 7)
+            .expect("delta on a live organization should apply");
     assert_eq!(after, baseline + 7);
     assert_eq!(state.reputation.records().count(), 1);
     let record = state
         .reputation
         .get_record(organization, AudienceKind::Police)
         .expect("touched impression should persist");
-    assert_eq!(record.score(ReputationDimension::Fear), baseline + 7);
-    assert_eq!(
-        record.score(ReputationDimension::Competence),
-        baseline,
-        "untouched dimensions keep the baseline"
-    );
+    assert_eq!(record.score(), baseline + 7);
     assert!(
         state
             .reputation
@@ -133,7 +114,6 @@ fn reputation_deltas_create_sparse_records_clamped_to_the_score_range() {
         &mut state,
         organization,
         AudienceKind::Police,
-        ReputationDimension::Fear,
         100,
     )
     .expect("clamped delta should apply");
@@ -143,7 +123,6 @@ fn reputation_deltas_create_sparse_records_clamped_to_the_score_range() {
         &mut state,
         organization,
         AudienceKind::Police,
-        ReputationDimension::Fear,
         -120,
     )
     .expect("clamped delta should apply");
@@ -163,7 +142,6 @@ fn standing_shift_reports_the_clamped_delta_that_was_actually_applied() {
         &mut state,
         organization,
         AudienceKind::Police,
-        ReputationDimension::Fear,
         raise_to_rail,
     )
     .expect("fixture standing should move near the upper rail");
@@ -181,7 +159,6 @@ fn standing_shift_reports_the_clamped_delta_that_was_actually_applied() {
             &state.reputation,
             organization,
             AudienceKind::Police,
-            ReputationDimension::Fear,
         ),
         100
     );
@@ -192,17 +169,11 @@ fn standing_shift_reports_the_clamped_delta_that_was_actually_applied() {
 fn reputation_deltas_reject_unknown_organizations_without_state_change() {
     let (registry, mut state, _organization) = make_state();
     let missing = crate::core::id::OrganizationId::from_raw(9_999);
-    let error = match apply_reputation_delta(
-        &registry,
-        &mut state,
-        missing,
-        AudienceKind::Underworld,
-        ReputationDimension::Competence,
-        3,
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("unknown organizations must be rejected"),
-    };
+    let error =
+        match apply_reputation_delta(&registry, &mut state, missing, AudienceKind::Underworld, 3) {
+            Err(error) => error,
+            Ok(_) => panic!("unknown organizations must be rejected"),
+        };
     assert_eq!(error, ReputationError::MissingOrganization(missing));
     assert!(state.reputation.records().next().is_none());
 }
@@ -225,11 +196,7 @@ fn operation_consequences_move_exactly_the_modeled_audiences() {
         .reputation
         .records()
         .filter(|record| record.organization() == organization)
-        .filter(|record| {
-            crate::reputation::ALL_REPUTATION_DIMENSIONS
-                .iter()
-                .any(|dimension| record.score(*dimension) != registry.reputation().baseline())
-        })
+        .filter(|record| record.score() != registry.reputation().baseline())
         .map(|record| record.audience())
         .collect();
     assert_eq!(touched.len(), 4);
@@ -240,23 +207,20 @@ fn operation_consequences_move_exactly_the_modeled_audiences() {
             .expect("touched audience should hold a record");
         match audience {
             AudienceKind::Underworld => assert_eq!(
-                record.score(ReputationDimension::Competence),
+                record.score(),
                 registry.reputation().baseline()
                     + registry.reputation().achieved_underworld_competence() as u8
             ),
             AudienceKind::Police => assert_eq!(
-                record.score(ReputationDimension::Fear),
+                record.score(),
                 registry.reputation().baseline()
                     + registry.reputation().identifying_exposure_police_fear() as u8
             ),
             AudienceKind::Businesses | AudienceKind::Residents => assert_eq!(
-                record.score(ReputationDimension::Fear),
+                record.score(),
                 registry.reputation().baseline()
                     + registry.reputation().violent_businesses_fear() as u8
             ),
-            AudienceKind::Political | AudienceKind::Press => {
-                panic!("violent success must not touch {:?}", record.audience())
-            }
         }
     }
     validate_invariants(&state);
@@ -287,7 +251,6 @@ fn surveillance_rewards_no_public_competence_but_keeps_exposure_consequences() {
                 state.reputation(),
                 organization,
                 AudienceKind::Underworld,
-                ReputationDimension::Competence
             ),
             registry.reputation().baseline(),
         );
@@ -308,7 +271,6 @@ fn surveillance_rewards_no_public_competence_but_keeps_exposure_consequences() {
                 state.reputation(),
                 organization,
                 AudienceKind::Police,
-                ReputationDimension::Fear
             ),
             registry.reputation().baseline() + expected_fear as u8,
         );
@@ -326,7 +288,6 @@ fn operation_consequences_do_not_report_clamped_scores_as_movement() {
         &mut state,
         organization,
         AudienceKind::Police,
-        ReputationDimension::Fear,
         100,
     )
     .expect("pre-clamp should apply");
@@ -342,19 +303,22 @@ fn operation_consequences_do_not_report_clamped_scores_as_movement() {
     .expect("consequences should apply");
     // The clamped fear dimension did not move, so it must not surface as standing
     // feedback; the dimensions with headroom still report normally.
-    assert!(!shifts.iter().any(|shift| {
-        shift.audience == AudienceKind::Police && shift.dimension == ReputationDimension::Fear
-    }));
-    assert!(shifts.iter().any(|shift| {
-        shift.audience == AudienceKind::Underworld
-            && shift.dimension == ReputationDimension::Competence
-    }));
+    assert!(
+        !shifts
+            .iter()
+            .any(|shift| { shift.audience == AudienceKind::Police })
+    );
+    assert!(
+        shifts
+            .iter()
+            .any(|shift| { shift.audience == AudienceKind::Underworld })
+    );
     assert_eq!(
         state
             .reputation
             .get_record(organization, AudienceKind::Police)
             .expect("police impression should persist")
-            .score(ReputationDimension::Fear),
+            .score(),
         100,
         "the clamp itself is unchanged"
     );
@@ -371,7 +335,6 @@ fn daily_decay_drifts_touched_impressions_back_to_the_baseline() {
         &mut state,
         organization,
         AudienceKind::Underworld,
-        ReputationDimension::Competence,
         25,
     )
     .expect("adjustment should apply");
@@ -386,7 +349,6 @@ fn daily_decay_drifts_touched_impressions_back_to_the_baseline() {
             &state.reputation,
             organization,
             AudienceKind::Underworld,
-            ReputationDimension::Competence,
         );
         let expected = (baseline + 25).saturating_sub(day.min(25) as u8);
         assert_eq!(last, expected, "decay step {day}");
@@ -418,7 +380,6 @@ fn fresh_reputation_does_not_decay_at_the_next_day_boundary() {
         &mut state,
         organization,
         AudienceKind::Police,
-        ReputationDimension::Fear,
         10,
     )
     .expect("fresh police fear should apply");
@@ -431,7 +392,6 @@ fn fresh_reputation_does_not_decay_at_the_next_day_boundary() {
             &state.reputation,
             organization,
             AudienceKind::Police,
-            ReputationDimension::Fear,
         ),
         baseline + 10,
         "a one-minute-old consequence must not lose a full daily decay step"
@@ -445,7 +405,6 @@ fn fresh_reputation_does_not_decay_at_the_next_day_boundary() {
             &state.reputation,
             organization,
             AudienceKind::Police,
-            ReputationDimension::Fear,
         ),
         baseline + 9,
         "the first later day boundary after a full day of age should decay normally"
@@ -453,7 +412,7 @@ fn fresh_reputation_does_not_decay_at_the_next_day_boundary() {
 }
 
 #[test]
-fn reputation_dimensions_age_independently() {
+fn audience_impressions_age_independently() {
     let (registry, mut state, organization) = make_state();
     let baseline = registry.reputation().baseline();
     apply_reputation_delta(
@@ -461,31 +420,40 @@ fn reputation_dimensions_age_independently() {
         &mut state,
         organization,
         AudienceKind::Underworld,
-        ReputationDimension::Treachery,
         10,
     )
-    .expect("old treachery impression should apply");
+    .expect("old underworld competence should apply");
     state.advance_clock(SimDuration::from_minutes(1_439));
     apply_reputation_delta(
         &registry,
         &mut state,
         organization,
-        AudienceKind::Underworld,
-        ReputationDimension::Competence,
+        AudienceKind::Police,
         10,
     )
-    .expect("fresh competence impression should apply");
+    .expect("fresh police fear should apply");
 
     state.advance_clock(SimDuration::ONE_MINUTE);
     assert_eq!(apply_daily_reputation_decay(&registry, &mut state), 1);
-    let record = state
-        .reputation()
-        .get_record(organization, AudienceKind::Underworld)
-        .expect("one audience record should retain both active dimensions");
-    assert_eq!(record.score(ReputationDimension::Treachery), baseline + 9);
-    assert_eq!(record.score(ReputationDimension::Competence), baseline + 10);
+    assert_eq!(
+        resolve_score(
+            &registry,
+            state.reputation(),
+            organization,
+            AudienceKind::Underworld,
+        ),
+        baseline + 9
+    );
+    assert_eq!(
+        resolve_score(
+            &registry,
+            state.reputation(),
+            organization,
+            AudienceKind::Police,
+        ),
+        baseline + 10
+    );
 }
-
 #[test]
 fn clamped_noop_does_not_refresh_reputation_age() {
     let (registry, mut state, organization) = make_state();
@@ -494,20 +462,12 @@ fn clamped_noop_does_not_refresh_reputation_age() {
         &mut state,
         organization,
         AudienceKind::Police,
-        ReputationDimension::Fear,
         100,
     )
     .expect("initial fear should clamp at the upper rail");
     state.advance_clock(SimDuration::from_minutes(1_439));
-    apply_reputation_delta(
-        &registry,
-        &mut state,
-        organization,
-        AudienceKind::Police,
-        ReputationDimension::Fear,
-        1,
-    )
-    .expect("a clamped no-op remains a valid reputation request");
+    apply_reputation_delta(&registry, &mut state, organization, AudienceKind::Police, 1)
+        .expect("a clamped no-op remains a valid reputation request");
 
     state.advance_clock(SimDuration::ONE_MINUTE);
     assert_eq!(apply_daily_reputation_decay(&registry, &mut state), 1);
@@ -517,7 +477,6 @@ fn clamped_noop_does_not_refresh_reputation_age() {
             &state.reputation,
             organization,
             AudienceKind::Police,
-            ReputationDimension::Fear,
         ),
         99,
         "an event that changed nothing must not make an old impression artificially fresh"
@@ -532,7 +491,6 @@ fn direct_neutralization_removes_sparse_reputation_record_immediately() {
         &mut state,
         organization,
         AudienceKind::Businesses,
-        ReputationDimension::Fear,
         7,
     )
     .expect("positive standing movement should apply");
@@ -548,7 +506,6 @@ fn direct_neutralization_removes_sparse_reputation_record_immediately() {
         &mut state,
         organization,
         AudienceKind::Businesses,
-        ReputationDimension::Fear,
         -7,
     )
     .expect("countervailing standing movement should apply");
@@ -567,15 +524,8 @@ fn save_rejects_future_dated_reputation_movement() {
     use crate::core::persistence::{SaveError, build_save};
 
     let (registry, mut state, organization) = make_state();
-    apply_reputation_delta(
-        &registry,
-        &mut state,
-        organization,
-        AudienceKind::Police,
-        ReputationDimension::Fear,
-        5,
-    )
-    .expect("valid reputation should exist before corruption");
+    apply_reputation_delta(&registry, &mut state, organization, AudienceKind::Police, 5)
+        .expect("valid reputation should exist before corruption");
     let future = state
         .now()
         .checked_add(SimDuration::ONE_MINUTE)
@@ -585,7 +535,7 @@ fn save_rejects_future_dated_reputation_movement() {
         .get_record(organization, AudienceKind::Police)
         .expect("fixture reputation should persist");
     let mut replacement = reputation_record_wire(&original);
-    replacement.fear.changed_at = future;
+    replacement.score.changed_at = future;
     state = replace_serialized_reputation_record(&state, &original, &replacement);
 
     let error = build_save(&registry, &state)
@@ -610,7 +560,6 @@ fn save_rejects_persisted_neutral_reputation_record() {
         &mut state,
         organization,
         AudienceKind::Residents,
-        ReputationDimension::Fear,
         1,
     )
     .expect("valid non-neutral reputation should exist before corruption");
@@ -620,10 +569,7 @@ fn save_rejects_persisted_neutral_reputation_record() {
         .expect("fixture reputation should persist");
     let mut replacement = reputation_record_wire(&original);
     let baseline = registry.reputation().baseline();
-    replacement.fear.value = baseline;
-    replacement.reliability.value = baseline;
-    replacement.competence.value = baseline;
-    replacement.treachery.value = baseline;
+    replacement.score.value = baseline;
     state = replace_serialized_reputation_record(&state, &original, &replacement);
 
     let error = build_save(&registry, &state)
@@ -645,7 +591,6 @@ fn decay_never_fires_off_the_day_boundary() {
         &mut state,
         organization,
         AudienceKind::Underworld,
-        ReputationDimension::Competence,
         10,
     )
     .expect("adjustment should apply");
@@ -656,7 +601,6 @@ fn decay_never_fires_off_the_day_boundary() {
         &state.reputation,
         organization,
         AudienceKind::Underworld,
-        ReputationDimension::Competence,
     );
     assert_eq!(score, registry.reputation().baseline() + 10);
 }
@@ -671,7 +615,6 @@ fn reputation_records_survive_the_persistence_envelope_and_stay_decidable() {
         &mut state,
         organization,
         AudienceKind::Police,
-        ReputationDimension::Fear,
         registry.reputation().identifying_exposure_police_fear(),
     )
     .expect("adjustment should apply");
@@ -687,7 +630,7 @@ fn reputation_records_survive_the_persistence_envelope_and_stay_decidable() {
         .get_record(organization, AudienceKind::Police)
         .expect("touched impression should survive the round trip");
     assert_eq!(
-        record.score(ReputationDimension::Fear),
+        record.score(),
         registry.reputation().baseline()
             + registry.reputation().identifying_exposure_police_fear() as u8
     );
@@ -924,7 +867,7 @@ fn racket_inquiry_raises_owner_police_fear_through_the_canonical_path() {
         .expect("vice-inquiry consequences should apply");
     assert_eq!(shifts.len(), 1);
     assert_eq!(shifts[0].audience, AudienceKind::Police);
-    assert_eq!(shifts[0].dimension, ReputationDimension::Fear);
+    assert_eq!(shifts[0].audience.dimension(), ReputationDimension::Fear);
     assert_eq!(shifts[0].delta, authored);
     assert_eq!(
         resolve_score(
@@ -932,7 +875,6 @@ fn racket_inquiry_raises_owner_police_fear_through_the_canonical_path() {
             &state.reputation,
             organization,
             AudienceKind::Police,
-            ReputationDimension::Fear
         ),
         baseline + u8::try_from(authored).expect("authored fear delta must be non-negative")
     );
