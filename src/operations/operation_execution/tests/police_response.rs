@@ -9,6 +9,103 @@ struct PoliceResponseRoutingWire {
     source_operation: OperationId,
 }
 
+fn add_parallel_exposed_burglary(
+    registry: &Registry,
+    state: &mut AppState,
+    neighborhood: NeighborhoodId,
+    source_operation: OperationId,
+) -> OperationId {
+    let organization = state
+        .operations()
+        .get_operation(source_operation)
+        .expect("source exposure operation should persist")
+        .responsible_organization();
+    let business = insert_business(
+        registry,
+        state,
+        BusinessDraft {
+            name: "Parallel Observed Retail Target".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Independent,
+        },
+    )
+    .expect("parallel exposure business should validate");
+    let leader = insert_character(
+        state,
+        CharacterDraft {
+            name: "Parallel Exposure Crew Leader".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([
+                (
+                    CapabilityKind::Management,
+                    Rating::try_new(80).expect("parallel management should validate"),
+                ),
+                (
+                    CapabilityKind::Stealth,
+                    Rating::try_new(0).expect("parallel stealth should validate"),
+                ),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("parallel exposure leader should validate");
+    let specialist = insert_character(
+        state,
+        CharacterDraft {
+            name: "Parallel Exposure Entry Specialist".to_owned(),
+            organization: Some(organization),
+            supervisor: Some(leader),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([
+                (
+                    CapabilityKind::Burglary,
+                    Rating::try_new(80).expect("parallel burglary should validate"),
+                ),
+                (
+                    CapabilityKind::Stealth,
+                    Rating::try_new(0).expect("parallel stealth should validate"),
+                ),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("parallel exposure specialist should validate");
+    validate_authorize_operation(
+        registry,
+        state,
+        OperationDraft {
+            title: "Parallel observed burglary".to_owned(),
+            kind: OperationKind::Burglary,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::AcquireProperty {
+                target: EntityRef::Business(business),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, leader),
+                (RoleKind::EntrySpecialist, specialist),
+            ]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::from_minutes(1),
+        },
+    )
+    .expect("parallel exposure operation should validate")
+    .commit(state)
+    .expect("parallel exposure operation should commit")
+}
+
 #[test]
 fn rival_post_entry_police_exception_aborts_instead_of_waiting_for_player_direction() {
     let (registry, mut state, police, neighborhood, operation) =
@@ -1011,6 +1108,94 @@ fn police_arrival_abort_artifact_exhaustion_leaves_response_dispatched_and_opera
     assert_eq!(operation_record.version(), operation_version);
     assert_eq!(state.ids.next_raw(IdKind::Information), information_next);
     assert_eq!(state.ids.next_raw(IdKind::HistoryEvent), history_next);
+}
+
+#[test]
+fn same_minute_police_arrival_batch_rejects_information_exhaustion_atomically() {
+    let (registry, mut state, _police, neighborhood, first_operation) =
+        make_exposed_business_operation_fixture(true);
+    let second_operation =
+        add_parallel_exposed_burglary(&registry, &mut state, neighborhood, first_operation);
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(
+        started.started_operations,
+        vec![first_operation, second_operation]
+    );
+    let first_response = state
+        .operations()
+        .get_operation(first_operation)
+        .and_then(|record| record.police_response())
+        .expect("first operation should dispatch a response");
+    let second_response = state
+        .operations()
+        .get_operation(second_operation)
+        .and_then(|record| record.police_response())
+        .expect("second operation should dispatch a response");
+    let first_due = state
+        .legal()
+        .get_police_response(first_response)
+        .expect("first response should persist")
+        .arrival_due_at();
+    let second_due = state
+        .legal()
+        .get_police_response(second_response)
+        .expect("second response should persist")
+        .arrival_due_at();
+    assert_eq!(
+        first_due, second_due,
+        "parallel identical exposure should produce a same-minute response cohort"
+    );
+    let minutes_until_due = u32::try_from(first_due.as_minutes() - state.now().as_minutes())
+        .expect("fixture response delay must fit SimDuration");
+    state.advance_clock(SimDuration::from_minutes(minutes_until_due));
+
+    // Each running burglary has two distinct participants, so each arrival needs two
+    // first-hand PoliceActivity information IDs. Leave capacity for three: either arrival
+    // fits individually, but the four-ID due set does not.
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::Information, u32::MAX - 3);
+    let before =
+        bincode::serialize(&state).expect("pre-exhaustion response cohort should serialize");
+
+    let error = crate::operations::police_response_integration::apply_due_police_response_arrivals(
+        &mut state,
+    )
+    .expect_err("the full same-minute response cohort must reserve its information budget first");
+    assert!(matches!(
+        error,
+        crate::operations::police_response_integration::PoliceResponseIntegrationError::IdExhaustion(
+            IdExhaustionError::Exhausted {
+                kind: "information",
+                next,
+            }
+        ) if next == u32::MAX - 3
+    ));
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected response cohort should serialize"),
+        before,
+        "allocator pressure must not let the earlier response arrive as a prefix"
+    );
+    for response in [first_response, second_response] {
+        let record = state
+            .legal()
+            .get_police_response(response)
+            .expect("rejected response should persist");
+        assert_eq!(record.status(), PoliceResponseStatus::Dispatched);
+        assert_eq!(record.arrived_at(), None);
+    }
+    for operation in [first_operation, second_operation] {
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(operation)
+                .expect("rejected response operation should persist")
+                .status(),
+            OperationStatus::InProgress
+        );
+    }
+    validate_state(&state).expect("rejected response cohort should remain structurally valid");
+    validate_invariants(&state);
 }
 
 #[test]

@@ -322,18 +322,30 @@ fn validate_scheduled_work(
     investigator: &crate::world::CharacterRecord,
     scheduled_investigators: &mut BTreeSet<crate::core::id::CharacterId>,
 ) -> Result<(), StateValidationError> {
-    let invalid_witness_focus = work
+    let focused_witness = work
         .focus()
         .witness_id()
-        .and_then(|case_witness| state.legal.get_case_witness(case_witness))
-        .is_some_and(|witness| {
-            !witness.statements().is_empty()
-                || crate::legal::witness_system::case_witness_is_case_subject(state, witness)
-        });
+        .and_then(|case_witness| state.legal.get_case_witness(case_witness));
+    let invalid_witness_focus = focused_witness.is_some_and(|witness| {
+        !witness.statements().is_empty()
+            || crate::legal::witness_system::case_witness_is_case_subject(state, witness)
+    });
+    let remaining_case_advances = match work.kind() {
+        InvestigationWorkKind::EvidenceReview => 2,
+        InvestigationWorkKind::WitnessInterview => 3,
+    };
+    let insufficient_case_headroom = investigation
+        .version()
+        .checked_add(remaining_case_advances)
+        .is_none();
+    let insufficient_witness_headroom =
+        focused_witness.is_some_and(|witness| witness.version().checked_add(2).is_none());
     if work.version() != 1
         || work.resolution().is_some()
         || work.cancellation().is_some()
         || invalid_witness_focus
+        || insufficient_case_headroom
+        || insufficient_witness_headroom
         || !scheduled_investigators.insert(work.investigator())
         || investigation.status() != InvestigationStatus::Active
         || investigation.lead_investigator() != Some(work.investigator())

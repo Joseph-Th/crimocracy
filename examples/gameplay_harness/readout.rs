@@ -971,6 +971,43 @@ fn daily_rate(cents: i64, cycle_minutes: u64) -> i64 {
         .expect("daily earnings must fit money range")
 }
 
+fn investigation_lived_across_matched_window(run: &RunMetrics) -> bool {
+    let boundary = run.matched_financial_boundary_minute.unwrap_or(u64::MAX);
+    run.investigation_created
+        && run
+            .investigation_opened_minute
+            .is_some_and(|opened| opened < boundary)
+}
+
+#[cfg(test)]
+mod experience_contract_tests {
+    use super::*;
+
+    #[test]
+    fn financial_heat_window_uses_hidden_case_timing_without_requiring_player_disclosure() {
+        let run = RunMetrics {
+            investigation_created: true,
+            investigation_opened_minute: Some(120),
+            case_open_minute: None,
+            matched_financial_boundary_minute: Some(1_440),
+            ..RunMetrics::default()
+        };
+        assert!(
+            investigation_lived_across_matched_window(&run),
+            "diagnostic district heat must not disappear merely because leadership never learned the case-open fact"
+        );
+
+        let later = RunMetrics {
+            investigation_opened_minute: Some(1_500),
+            ..run
+        };
+        assert!(
+            !investigation_lived_across_matched_window(&later),
+            "a case opened after the matched window must not be charged to that earlier window"
+        );
+    }
+}
+
 pub fn enterprise_label(scenario: &Scenario, enterprise: EnterpriseId) -> String {
     let record = scenario
         .state
@@ -1707,7 +1744,6 @@ pub fn print_experience_readout(
     // on every cycle in it; branches whose cases appeared later (or never) pay less over the
     // same window. With casing risk live, nearly every branch draws some case, so the honest
     // signal is differential: an early-opened case must cost more than a cleaner branch earned.
-    let boundary = |run: &RunMetrics| run.matched_financial_boundary_minute.unwrap_or(u64::MAX);
     let enterprise_window = |run: &RunMetrics| {
         run.matched_enterprise_net_cents
             .or(run.enterprise_net_cents)
@@ -1720,11 +1756,7 @@ pub fn print_experience_readout(
     let long_case_nets: Vec<i64> = all_runs
         .iter()
         .filter_map(|run| {
-            let case_lived_across_window = run.investigation_created
-                && run
-                    .case_open_minute
-                    .is_some_and(|open| open < boundary(run));
-            case_lived_across_window
+            investigation_lived_across_matched_window(run)
                 .then_some(())
                 .and_then(|_| enterprise_window(run))
         })

@@ -282,6 +282,23 @@ pub struct ValidatedLedgerTransaction {
 
 impl ValidatedLedgerTransaction {
     pub fn commit(self, state: &mut AppState) -> Result<LedgerTransactionId, FinanceError> {
+        self.ensure_current(state)?;
+        state.ids.reserve_many(&self.id_budget())?;
+        Ok(self.commit_preflighted(state))
+    }
+
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
+        let opening_count = self
+            .openings
+            .as_ref()
+            .map_or(0, ValidatedFinancialAccountOpenings::count_u32);
+        vec![
+            (IdKind::FinancialAccount, opening_count),
+            (IdKind::LedgerTransaction, 1),
+        ]
+    }
+
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), FinanceError> {
         crate::core::time::ensure_time_current(state.now(), self.draft.occurred_at).map_err(
             |(occurred_at, now)| FinanceError::NonCurrentTransactionTime { occurred_at, now },
         )?;
@@ -327,14 +344,10 @@ impl ValidatedLedgerTransaction {
                 });
             }
         }
-        let opening_count = self
-            .openings
-            .as_ref()
-            .map_or(0, ValidatedFinancialAccountOpenings::count_u32);
-        state.ids.reserve_many(&[
-            (IdKind::FinancialAccount, opening_count),
-            (IdKind::LedgerTransaction, 1),
-        ])?;
+        Ok(())
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) -> LedgerTransactionId {
         if let Some(openings) = self.openings {
             openings.commit_after_preflight(state);
         }
@@ -358,7 +371,7 @@ impl ValidatedLedgerTransaction {
             },
             &self.balances,
         );
-        Ok(id)
+        id
     }
 }
 
@@ -441,8 +454,7 @@ fn validate_record_transaction_with_optional_openings(
         }
     }
     if net_cents != 0 {
-        let diagnostic =
-            i64::try_from(net_cents).unwrap_or(if net_cents > 0 { i64::MAX } else { i64::MIN });
+        let diagnostic = i64::try_from(net_cents).map_err(|_| FinanceError::PostingSumOverflow)?;
         return Err(FinanceError::Unbalanced {
             net_cents: diagnostic,
         });
@@ -473,9 +485,6 @@ fn validate_ledger_posting_shape(
     *net_cents = net_cents
         .checked_add(i128::from(posting.amount.cents()))
         .ok_or(FinanceError::PostingSumOverflow)?;
-    if *net_cents > i128::from(i64::MAX) || *net_cents < i128::from(i64::MIN) {
-        return Err(FinanceError::PostingSumOverflow);
-    }
     Ok(())
 }
 

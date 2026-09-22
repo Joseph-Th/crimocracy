@@ -3,7 +3,9 @@
 use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, OrganizationId, ProsecutionCaseId};
 use crate::core::state::AppState;
-use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
+use crate::core::version::{
+    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
+};
 use crate::legal::{ProsecutionCaseRecord, ProsecutionCaseStatus};
 use crate::world::CapabilityKind;
 use std::cmp::Reverse;
@@ -130,7 +132,7 @@ impl ValidatedProsecutorAssignment {
         {
             return Err(ProsecutionStaffingError::StaleCase { case: self.case });
         }
-        ensure_version_can_advance(case.version(), "prosecution case")?;
+        ensure_version_can_advance_by(case.version(), 2, "prosecution case")?;
         let prosecutor = state
             .world
             .get_character(self.prosecutor)
@@ -158,7 +160,7 @@ pub fn validate_assign_prosecutor(
         .legal
         .get_prosecution_case(case)
         .expect("validated prosecution case must exist");
-    ensure_version_can_advance(case_record.version(), "prosecution case")?;
+    ensure_version_can_advance_by(case_record.version(), 2, "prosecution case")?;
     let prosecutor_record = state
         .world
         .get_character(prosecutor)
@@ -238,12 +240,18 @@ pub(crate) fn apply_autonomous_prosecution_staffing(
         .collect();
     let mut office_rosters: BTreeMap<OrganizationId, Vec<(CharacterId, u8)>> = BTreeMap::new();
     let mut workloads: BTreeMap<CharacterId, usize> = BTreeMap::new();
-    let mut staffed = Vec::new();
+    let mut planned = Vec::new();
     for case in cases {
         let case_record = state
             .legal
             .get_prosecution_case(case)
             .ok_or(ProsecutionStaffingError::MissingCase(case))?;
+        // Reviewing cases can legitimately reach the finite version rail while unstaffed.
+        // Direct assignment remains fail-closed with VersionCapacity, but autonomous maintenance
+        // must skip a permanently unstaffable record so it cannot fail every later tick.
+        if case_record.version() > u32::MAX - 2 {
+            continue;
+        }
         let office = case_record.prosecutor_office();
         let roster = office_rosters.entry(office).or_insert_with(|| {
             state
@@ -289,10 +297,21 @@ pub(crate) fn apply_autonomous_prosecution_staffing(
         let Some(prosecutor) = prosecutor else {
             continue;
         };
-        validate_assign_prosecutor(state, case, prosecutor)?.commit(state)?;
+        let assignment = validate_assign_prosecutor(state, case, prosecutor)?;
         *workloads
             .get_mut(&prosecutor)
             .expect("assigned cached prosecutor must carry a workload") += 1;
+        planned.push((case, prosecutor, assignment));
+    }
+
+    // Case selection and workload balancing are fully modeled in the local planning maps above.
+    // Validate every ranked assignment before the first case mutates so one exhausted/stale case
+    // cannot leave only the earlier case IDs staffed behind an error return.
+    let mut staffed = Vec::with_capacity(planned.len());
+    for (case, prosecutor, assignment) in planned {
+        assignment
+            .commit(state)
+            .expect("prevalidated prosecution staffing plan must remain current within one pass");
         staffed.push((case, prosecutor));
     }
     Ok(staffed)

@@ -404,7 +404,7 @@ fn validate_business_economy_schedule(
                     return Err(invalid());
                 }
             }
-            None if economy.last_cycle_at().is_some() => {}
+            None if economy.version() == u32::MAX || economy.last_cycle_at().is_some() => {}
             None => return Err(invalid()),
         },
         BusinessOperatingStatus::Suspended if economy.next_cycle_at().is_some() => {
@@ -618,7 +618,11 @@ fn validate_business_economy_registry_schedule(
     .flatten()
     .max()
     .expect("established business economy always has a schedule base");
-    let expected_next = schedule_base.checked_add(cycle);
+    let expected_next = if economy.version() == u32::MAX {
+        None
+    } else {
+        schedule_base.checked_add(cycle)
+    };
     if economy.next_cycle_at() != expected_next {
         return Err(StateValidationError::InvalidBusinessEconomySchedule {
             business: economy.business(),

@@ -866,6 +866,20 @@ impl OperationRecord {
         &self.command.constraints
     }
 
+    /// Earliest authored hard completion deadline, if any. Constraint interpretation belongs to
+    /// the operation record vocabulary so scheduling, derived indexes, abort narration, and
+    /// persistence validation cannot drift on which deadline governs a plan.
+    pub(crate) fn completion_deadline(&self) -> Option<SimTime> {
+        self.command
+            .constraints
+            .iter()
+            .filter_map(|constraint| match constraint {
+                OperationConstraint::CompleteBy(deadline) => Some(*deadline),
+                OperationConstraint::RequireIntelligenceTopic(_) => None,
+            })
+            .min()
+    }
+
     pub fn contingencies(&self) -> &[OperationContingency] {
         &self.command.contingencies
     }

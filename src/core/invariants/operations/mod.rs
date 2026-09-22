@@ -10,6 +10,7 @@ use crate::core::id::InformationId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::decisions::{DecisionContext, DecisionResponse, DecisionStatus};
 use crate::history::HistoryEventKind;
 use crate::intelligence::{
     InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
@@ -28,9 +29,9 @@ use crate::operations::operation_objective::{
     blocker_matches_objective, character_objective_target, effective_objective_outcome,
 };
 use crate::operations::operation_scheduling::{
-    resolve_deadline_without_execution_window, resolve_earliest_operation_deadline,
-    resolve_operation_booking_window, resolve_operation_booking_window_at,
-    resolve_operation_earliest_start, try_resolve_operation_earliest_start,
+    resolve_deadline_without_execution_window, resolve_operation_booking_window,
+    resolve_operation_booking_window_at, resolve_operation_earliest_start,
+    try_resolve_operation_earliest_start,
 };
 use crate::operations::operation_system::{
     is_information_subject_relevant, is_valid_operation_objective,
@@ -274,7 +275,7 @@ fn validate_authored_operation_plan(
         {
             return true;
         }
-        resolve_earliest_operation_deadline(operation).is_some_and(|deadline| {
+        operation.completion_deadline().is_some_and(|deadline| {
             abort.aborted_at() >= deadline
                 || resolve_deadline_without_execution_window(
                     execution,
@@ -723,18 +724,6 @@ fn detention_abort_matches_arrest(
             .any(|arrest| arrest.character() == character && arrest.arrested_at() == aborted_at)
 }
 
-/// The earliest authored completion deadline among the persisted constraints, if any.
-fn resolve_completion_deadline(operation: &OperationRecord) -> Option<SimTime> {
-    operation
-        .constraints()
-        .iter()
-        .filter_map(|constraint| match constraint {
-            OperationConstraint::CompleteBy(deadline) => Some(*deadline),
-            OperationConstraint::RequireIntelligenceTopic(_) => None,
-        })
-        .min()
-}
-
 #[derive(Default)]
 struct OperationInvariantContext {
     after_action_information: BTreeSet<InformationId>,
@@ -979,6 +968,54 @@ fn validate_common_runtime_links(
     state: &AppState,
     operation: &OperationRecord,
 ) -> Result<(), StateValidationError> {
+    // The current operation vocabulary has one bounded active lifecycle:
+    // authorize(v1) -> begin(v2) -> optional police-decision pause(v3) -> continue(v4), followed
+    // by one terminal status advance. Completed work may then advance once more for its single
+    // property/cash disposition. Rejecting versions outside this envelope at restore keeps an
+    // impossible high-version active record from entering a due queue it can never leave.
+    let continued_police_decisions = state
+        .decisions
+        .decisions_for_operation(operation.id())
+        .filter(|decision| {
+            matches!(
+                decision.context(),
+                DecisionContext::OperationPoliceArrival { .. }
+            ) && decision.status() == DecisionStatus::Resolved
+                && decision
+                    .resolution()
+                    .is_some_and(|resolution| resolution.response() == DecisionResponse::Continue)
+        })
+        .count();
+    let version_matches_status = match operation.status() {
+        OperationStatus::Authorized => operation.version() == 1,
+        OperationStatus::InProgress => match continued_police_decisions {
+            0 => operation.version() == 2,
+            1 => operation.version() == 4,
+            _ => false,
+        },
+        OperationStatus::AwaitingDecision => {
+            operation.version() == 3
+                && continued_police_decisions == 0
+                && state
+                    .decisions
+                    .pending_for_operation(operation.id())
+                    .is_some()
+        }
+        OperationStatus::Completed => {
+            let disposition_count = u32::from(operation.property_disposition().is_some())
+                + u32::from(operation.cash_disposition().is_some());
+            disposition_count <= 1
+                && match continued_police_decisions {
+                    0 => operation.version() == 3 + disposition_count,
+                    1 => operation.version() == 5 + disposition_count,
+                    _ => false,
+                }
+        }
+        OperationStatus::Aborted => (2..=5).contains(&operation.version()),
+    };
+    if !version_matches_status {
+        return Err(invalid_runtime(operation));
+    }
     if operation.entry_at().is_some_and(|entry_at| {
         operation
             .started_at()

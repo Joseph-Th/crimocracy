@@ -2,6 +2,8 @@
 //! candidate selection and canonical establishment through the same validated path a player
 //! command uses.
 
+mod candidate_planning;
+
 use crate::core::id::{
     BusinessId, EnterpriseId, FinancialAccountId, MandateId, NeighborhoodId, OrganizationId,
 };
@@ -10,22 +12,25 @@ use crate::delegation::delegation_system::DelegationError;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::enterprises::autonomous_planning::{
     AutonomousEnterpriseError, ObservedDistrictPressure, available_working_capital,
-    reserve_working_capital, resolve_committed_working_capital,
-    resolve_observed_district_case_count, resolve_observed_district_pressure,
+    reserve_working_capital, resolve_committed_working_capital, resolve_observed_district_pressure,
 };
 use crate::enterprises::enterprise_execution::{
-    can_authority_cover_location, enterprise_location_is_occupied,
-    resolve_enterprise_financial_projection, resolve_location_neighborhood,
-    validate_establish_enterprise, validate_establish_enterprise_with_openings,
+    resolve_location_neighborhood, validate_establish_enterprise,
+    validate_establish_enterprise_with_openings,
 };
 use crate::enterprises::{
     ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation,
 };
 use crate::finance::finance_system::validate_open_accounts;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
-use crate::registry::{EnterpriseDefinition, EnterpriseNetworkMode, Registry};
+use crate::registry::{EnterpriseDefinition, Registry};
 use crate::world::territory_influence::resolve_neighborhood_influence;
 use crate::world::{AutonomyLevel, CapabilityKind, Rating};
+use candidate_planning::{
+    collect_business_scope_candidates, collect_district_candidates,
+    collect_neighborhood_scope_candidates, compare_expansion_plans,
+    compare_phase_expansion_candidates,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 const LED_NEIGHBORHOOD_AUTHORITY_RANK: usize = 0;
@@ -52,6 +57,13 @@ struct ExpansionEconomicsContext<'a> {
     observed_district_pressure: &'a ObservedDistrictPressure,
     management: Option<Rating>,
     available_working_capital: Money,
+}
+
+struct ExpansionIterationContext<'a> {
+    registry: &'a Registry,
+    state: &'a AppState,
+    observed_district_pressure: &'a ObservedDistrictPressure,
+    district_leaders: &'a BTreeMap<NeighborhoodId, Option<OrganizationId>>,
 }
 
 #[derive(Clone, Copy)]
@@ -110,8 +122,13 @@ pub(crate) fn apply_due_autonomous_enterprises_excluding(
         // State is immutable while this iteration evaluates candidates. Resolve each district's
         // current economic leader once, then discard the cache after the chosen establishment
         // because that mutation may legitimately change territorial standing.
-        let mut district_leaders: BTreeMap<NeighborhoodId, Option<OrganizationId>> =
-            BTreeMap::new();
+        let district_leaders = resolve_district_leaders(state);
+        let iteration = ExpansionIterationContext {
+            registry,
+            state,
+            observed_district_pressure: &observed_district_pressure,
+            district_leaders: &district_leaders,
+        };
         let mut selected: Option<(
             OrganizationId,
             usize,
@@ -127,25 +144,27 @@ pub(crate) fn apply_due_autonomous_enterprises_excluding(
             ) else {
                 continue;
             };
+            // The state cannot mutate until one phase-wide winner is chosen. Resolve the
+            // organization's usable business network once for this immutable selection pass
+            // instead of rescanning the same ownership/economy indexes for every mandate.
+            let owned_venues = resolve_available_owned_businesses(state, *organization);
             for (index, mandate) in organization_mandates.iter().enumerate() {
                 let Some(plan) = decide_autonomous_expansion(
-                    registry,
-                    state,
+                    &iteration,
                     *organization,
                     mandate,
                     available_working_capital,
-                    &observed_district_pressure,
+                    &owned_venues,
                 )?
                 else {
                     continue;
                 };
                 let neighborhood = resolve_location_neighborhood(state, plan.location)
                     .expect("autonomous candidate location must resolve to a live neighborhood");
-                let district_leader = *district_leaders.entry(neighborhood).or_insert_with(|| {
-                    resolve_neighborhood_influence(state, neighborhood)
-                        .expect("autonomous candidate neighborhood must resolve for influence")
-                        .economic_leader()
-                });
+                let district_leader = district_leaders
+                    .get(&neighborhood)
+                    .copied()
+                    .expect("autonomous candidate neighborhood must retain its influence snapshot");
                 let candidate = (
                     *organization,
                     index,
@@ -331,14 +350,14 @@ fn commit_autonomous_expansion_plan(
 /// storefront to embody an entire supply chain or letting a district manager bind remote assets.
 /// Candidate economics come from the same gross/cost composition as production cycle settlement.
 fn decide_autonomous_expansion(
-    registry: &Registry,
-    state: &AppState,
+    iteration: &ExpansionIterationContext<'_>,
     organization: OrganizationId,
     mandate: &crate::delegation::MandateRecord,
     available_working_capital: Money,
-    observed_district_pressure: &ObservedDistrictPressure,
+    owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
 ) -> Result<Option<AutonomousExpansionPlan>, AutonomousEnterpriseError> {
-    let district_scopes = resolve_ranked_district_scopes(state, organization, mandate);
+    let district_scopes =
+        resolve_ranked_district_scopes(organization, mandate, iteration.district_leaders);
     let business_scopes: Vec<ResponsibilityScope> = mandate
         .scopes()
         .iter()
@@ -349,39 +368,29 @@ fn decide_autonomous_expansion(
         ResponsibilityScope::Function(ResponsibilityFunction::Enterprise);
     let has_enterprise_function_scope = mandate.scopes().contains(&enterprise_function_scope);
 
-    let owned_venues: BTreeMap<BusinessId, &crate::world::BusinessRecord> = state
-        .world()
-        .businesses_owned_by_organization(organization)
-        .filter(|business| {
-            crate::enterprises::enterprise_execution::business_is_available_for_enterprise(
-                state,
-                business.id(),
-            )
-        })
-        .map(|business| (business.id(), business))
-        .collect();
-    let management = state
+    let management = iteration
+        .state
         .world()
         .get_character(mandate.manager())
         .expect("active mandate must reference a live manager")
         .capability(CapabilityKind::Management);
     let economics = ExpansionEconomicsContext {
-        registry,
-        state,
+        registry: iteration.registry,
+        state: iteration.state,
         organization,
-        observed_district_pressure,
+        observed_district_pressure: iteration.observed_district_pressure,
         management,
         available_working_capital,
     };
     let mut candidates = Vec::new();
     for kind in ALL_ENTERPRISE_KINDS {
-        let definition = registry.get_enterprise(kind);
+        let definition = iteration.registry.get_enterprise(kind);
         collect_district_candidates(
             &economics,
             kind,
             definition,
             &district_scopes,
-            &owned_venues,
+            owned_venues,
             &mut candidates,
         )?;
         collect_business_scope_candidates(
@@ -390,17 +399,17 @@ fn decide_autonomous_expansion(
             definition,
             BUSINESS_AUTHORITY_RANK,
             &business_scopes,
-            &owned_venues,
+            owned_venues,
             &mut candidates,
         )?;
         if has_enterprise_function_scope {
             collect_enterprise_function_candidates(
                 &economics,
-                organization,
                 kind,
                 definition,
                 enterprise_function_scope,
-                &owned_venues,
+                owned_venues,
+                iteration.district_leaders,
                 &mut candidates,
             )?;
         }
@@ -410,9 +419,9 @@ fn decide_autonomous_expansion(
 }
 
 fn resolve_ranked_district_scopes(
-    state: &AppState,
     organization: OrganizationId,
     mandate: &crate::delegation::MandateRecord,
+    district_leaders: &BTreeMap<NeighborhoodId, Option<OrganizationId>>,
 ) -> Vec<(usize, ResponsibilityScope)> {
     // District preference is influence-aware, not raw id order: districts the organization
     // already leads form the first authority tier, contested or empty districts form the second.
@@ -426,10 +435,11 @@ fn resolve_ranked_district_scopes(
             ResponsibilityScope::Business(_) | ResponsibilityScope::Function(_) => None,
         })
         .map(|id| {
-            let leads = resolve_neighborhood_influence(state, id)
-                .expect("mandate scopes reference live neighborhoods")
-                .economic_leader()
-                .is_some_and(|leader| leader == organization);
+            let leader = district_leaders
+                .get(&id)
+                .copied()
+                .expect("mandate scopes reference live neighborhoods");
+            let leads = leader == Some(organization);
             (
                 if leads {
                     LED_NEIGHBORHOOD_AUTHORITY_RANK
@@ -449,19 +459,15 @@ fn resolve_ranked_district_scopes(
 
 fn collect_enterprise_function_candidates(
     economics: &ExpansionEconomicsContext<'_>,
-    organization: OrganizationId,
     kind: EnterpriseKind,
     definition: &EnterpriseDefinition,
     scope: ResponsibilityScope,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
+    district_leaders: &BTreeMap<NeighborhoodId, Option<OrganizationId>>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
 ) -> Result<(), AutonomousEnterpriseError> {
-    for neighborhood in economics.state.world().neighborhoods() {
-        let neighborhood_id = neighborhood.id();
-        let leads = resolve_neighborhood_influence(economics.state, neighborhood_id)
-            .expect("world neighborhood must resolve for influence")
-            .economic_leader()
-            .is_some_and(|leader| leader == organization);
+    for (neighborhood_id, leader) in district_leaders {
+        let leads = *leader == Some(economics.organization);
         let authority_rank = if leads {
             ENTERPRISE_FUNCTION_LED_AUTHORITY_RANK
         } else {
@@ -474,7 +480,7 @@ fn collect_enterprise_function_candidates(
             NeighborhoodExpansionAuthority {
                 rank: authority_rank,
                 scope,
-                neighborhood: neighborhood_id,
+                neighborhood: *neighborhood_id,
             },
             owned_venues,
             candidates,
@@ -483,309 +489,41 @@ fn collect_enterprise_function_candidates(
     Ok(())
 }
 
-fn collect_district_candidates(
-    economics: &ExpansionEconomicsContext<'_>,
-    kind: EnterpriseKind,
-    definition: &EnterpriseDefinition,
-    district_scopes: &[(usize, ResponsibilityScope)],
-    owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
-    candidates: &mut Vec<AutonomousExpansionPlan>,
-) -> Result<(), AutonomousEnterpriseError> {
-    for (authority_rank, scope) in district_scopes.iter().copied() {
-        let ResponsibilityScope::Neighborhood(neighborhood) = scope else {
-            continue;
-        };
-        collect_neighborhood_scope_candidates(
-            economics,
-            kind,
-            definition,
-            NeighborhoodExpansionAuthority {
-                rank: authority_rank,
-                scope,
-                neighborhood,
-            },
-            owned_venues,
-            candidates,
-        )?;
-    }
-    Ok(())
+/// Resolves district leadership once per immutable phase-wide selection pass. Establishing the
+/// winner can change territorial influence, so the caller rebuilds this projection at the start
+/// of the next loop iteration rather than retaining it across mutation.
+fn resolve_district_leaders(state: &AppState) -> BTreeMap<NeighborhoodId, Option<OrganizationId>> {
+    state
+        .world()
+        .neighborhoods()
+        .map(|neighborhood| {
+            let id = neighborhood.id();
+            let leader = resolve_neighborhood_influence(state, id)
+                .expect("world neighborhood must resolve for autonomous expansion")
+                .economic_leader();
+            (id, leader)
+        })
+        .collect()
 }
 
-fn collect_neighborhood_scope_candidates(
-    economics: &ExpansionEconomicsContext<'_>,
-    kind: EnterpriseKind,
-    definition: &EnterpriseDefinition,
-    authority: NeighborhoodExpansionAuthority,
-    owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
-    candidates: &mut Vec<AutonomousExpansionPlan>,
-) -> Result<(), AutonomousEnterpriseError> {
-    if definition.required_business_functions().is_empty() {
-        let Some(supporting_businesses) =
-            resolve_support_network(definition, owned_venues, None, authority.scope)
-        else {
-            return Ok(());
-        };
-        if let Some(candidate) = build_ranked_candidate(
-            economics,
-            kind,
-            authority.rank,
-            authority.scope,
-            EnterpriseLocation::Neighborhood(authority.neighborhood),
-            supporting_businesses,
-        )? {
-            candidates.push(candidate);
-        }
-        return Ok(());
-    }
-
-    collect_hosted_candidates_in_neighborhood(
-        economics,
-        kind,
-        definition,
-        authority,
-        owned_venues,
-        candidates,
-    )
-}
-
-fn collect_hosted_candidates_in_neighborhood(
-    economics: &ExpansionEconomicsContext<'_>,
-    kind: EnterpriseKind,
-    definition: &EnterpriseDefinition,
-    authority: NeighborhoodExpansionAuthority,
-    owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
-    candidates: &mut Vec<AutonomousExpansionPlan>,
-) -> Result<(), AutonomousEnterpriseError> {
-    for (business_id, business) in owned_venues {
-        if business.neighborhood() != authority.neighborhood
-            || !host_satisfies_business_requirements(definition, business)
-        {
-            continue;
-        }
-        let Some(supporting_businesses) = resolve_support_network(
-            definition,
-            owned_venues,
-            Some(*business_id),
-            authority.scope,
-        ) else {
-            continue;
-        };
-        if let Some(candidate) = build_ranked_candidate(
-            economics,
-            kind,
-            authority.rank,
-            authority.scope,
-            EnterpriseLocation::Business(*business_id),
-            supporting_businesses,
-        )? {
-            candidates.push(candidate);
-        }
-    }
-    Ok(())
-}
-
-fn collect_business_scope_candidates(
-    economics: &ExpansionEconomicsContext<'_>,
-    kind: EnterpriseKind,
-    definition: &EnterpriseDefinition,
-    authority_rank: usize,
-    business_scopes: &[ResponsibilityScope],
-    owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
-    candidates: &mut Vec<AutonomousExpansionPlan>,
-) -> Result<(), AutonomousEnterpriseError> {
-    let requires_host = !definition.required_business_functions().is_empty();
-    for scope in business_scopes {
-        let ResponsibilityScope::Business(business_id) = scope else {
-            continue;
-        };
-        let Some(business) = owned_venues.get(business_id) else {
-            continue;
-        };
-        if requires_host && !host_satisfies_business_requirements(definition, business) {
-            continue;
-        }
-        let Some(supporting_businesses) =
-            resolve_support_network(definition, owned_venues, Some(*business_id), *scope)
-        else {
-            continue;
-        };
-        if let Some(candidate) = build_ranked_candidate(
-            economics,
-            kind,
-            authority_rank,
-            *scope,
-            EnterpriseLocation::Business(*business_id),
-            supporting_businesses,
-        )? {
-            candidates.push(candidate);
-        }
-    }
-    Ok(())
-}
-
-fn build_ranked_candidate(
-    economics: &ExpansionEconomicsContext<'_>,
-    kind: EnterpriseKind,
-    authority_rank: usize,
-    scope: ResponsibilityScope,
-    location: EnterpriseLocation,
-    supporting_businesses: BTreeSet<BusinessId>,
-) -> Result<Option<AutonomousExpansionPlan>, AutonomousEnterpriseError> {
-    if enterprise_location_is_occupied(economics.state, kind, location) {
-        return Ok(None);
-    }
-    let observed_active_cases = resolve_observed_district_case_count(
-        economics.state,
-        economics.observed_district_pressure,
-        economics.organization,
-        location,
-    )?;
-    let (required_working_capital, expected_net_cash) = resolve_enterprise_financial_projection(
-        economics.registry,
-        economics.state,
-        kind,
-        location,
-        supporting_businesses.len(),
-        economics.management,
-        observed_active_cases,
-    )?;
-    if required_working_capital > economics.available_working_capital
-        || expected_net_cash <= Money::ZERO
-    {
-        return Ok(None);
-    }
-    Ok(Some(AutonomousExpansionPlan {
-        authority_rank,
-        expected_net_cash,
-        kind,
-        scope,
-        location,
-        supporting_businesses,
-        required_working_capital,
-    }))
-}
-
-fn compare_expansion_plans(
-    left: &AutonomousExpansionPlan,
-    right: &AutonomousExpansionPlan,
-) -> std::cmp::Ordering {
-    left.authority_rank
-        .cmp(&right.authority_rank)
-        .then_with(|| right.expected_net_cash.cmp(&left.expected_net_cash))
-        .then(
-            left.required_working_capital
-                .cmp(&right.required_working_capital),
-        )
-        .then(left.kind.cmp(&right.kind))
-        .then(left.location.cmp(&right.location))
-        .then(left.supporting_businesses.cmp(&right.supporting_businesses))
-}
-
-/// Orders one candidate from each active mandate for the phase-wide competition. A mandate's
-/// `authority_rank` is an internal governance preference: it decides which plan that manager
-/// brings forward, but it cannot grant one organization priority over another organization in a
-/// shared district. Cross-organization competition instead honors existing territorial leadership,
-/// then the concrete economics of the proposed racket. Stable identifiers settle only exact
-/// world/economic ties.
-fn compare_phase_expansion_candidates(
-    left_organization: OrganizationId,
-    left_leads_district: bool,
-    left: &AutonomousExpansionPlan,
-    right_organization: OrganizationId,
-    right_leads_district: bool,
-    right: &AutonomousExpansionPlan,
-) -> std::cmp::Ordering {
-    if left_organization == right_organization {
-        return compare_expansion_plans(left, right);
-    }
-    usize::from(!left_leads_district)
-        .cmp(&usize::from(!right_leads_district))
-        .then_with(|| right.expected_net_cash.cmp(&left.expected_net_cash))
-        .then(
-            left.required_working_capital
-                .cmp(&right.required_working_capital),
-        )
-        .then(left.kind.cmp(&right.kind))
-        .then(left.location.cmp(&right.location))
-        .then(left.supporting_businesses.cmp(&right.supporting_businesses))
-}
-
-fn host_satisfies_business_requirements(
-    definition: &EnterpriseDefinition,
-    business: &crate::world::BusinessRecord,
-) -> bool {
-    definition
-        .required_business_functions()
-        .iter()
-        .all(|function| business.has_function(*function))
-}
-
-/// Chooses the smallest supporting-business set that covers the authored network requirements.
-/// The host, when any, contributes its functions for free and is never repeated in the support
-/// set. Dynamic programming is bounded by the small authored `BusinessFunction` vocabulary, so
-/// exact minimum cardinality is cheap; equal-size solutions use lexicographic business-ID order.
-/// This prevents planner heuristics from attaching redundant surcharge-producing businesses.
-fn resolve_support_network(
-    definition: &EnterpriseDefinition,
-    owned_businesses: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
-    host: Option<BusinessId>,
-    scope: ResponsibilityScope,
-) -> Option<BTreeSet<BusinessId>> {
-    let mut required = definition.required_network_functions().clone();
-    if definition.network_mode() == EnterpriseNetworkMode::HostMayContribute
-        && let Some(host) = host
-        && let Some(business) = owned_businesses.get(&host)
-    {
-        required.retain(|function| !business.has_function(*function));
-    }
-    if required.is_empty() {
-        return Some(BTreeSet::new());
-    }
-
-    let mut best_by_coverage = BTreeMap::from([(BTreeSet::new(), BTreeSet::new())]);
-    for (business_id, business) in owned_businesses {
-        if Some(*business_id) == host
-            || !can_authority_cover_location(
-                scope,
-                EnterpriseLocation::Business(*business_id),
-                business.neighborhood(),
+/// One organization's currently usable business network for an immutable expansion selection
+/// pass. Hosting and support both require live organization-owned businesses, so one snapshot can
+/// serve every mandate without repeatedly traversing the same owner index.
+fn resolve_available_owned_businesses(
+    state: &AppState,
+    organization: OrganizationId,
+) -> BTreeMap<BusinessId, &crate::world::BusinessRecord> {
+    state
+        .world()
+        .businesses_owned_by_organization(organization)
+        .filter(|business| {
+            crate::enterprises::enterprise_execution::business_is_available_for_enterprise(
+                state,
+                business.id(),
             )
-        {
-            continue;
-        }
-        let business_coverage: BTreeSet<_> = required
-            .iter()
-            .copied()
-            .filter(|function| business.has_function(*function))
-            .collect();
-        if business_coverage.is_empty() {
-            continue;
-        }
-
-        // Snapshot before considering this business so a state transition cannot reuse the same
-        // business twice. At most 2^N coverage states exist for N authored network functions.
-        let prior_states: Vec<_> = best_by_coverage
-            .iter()
-            .map(|(coverage, selected)| (coverage.clone(), selected.clone()))
-            .collect();
-        for (mut coverage, mut selected) in prior_states {
-            let previous_coverage = coverage.len();
-            coverage.extend(business_coverage.iter().copied());
-            if coverage.len() == previous_coverage {
-                continue;
-            }
-            selected.insert(*business_id);
-            let replace = best_by_coverage.get(&coverage).is_none_or(|existing| {
-                selected.len() < existing.len()
-                    || (selected.len() == existing.len()
-                        && selected.iter().cmp(existing.iter()).is_lt())
-            });
-            if replace {
-                best_by_coverage.insert(coverage, selected);
-            }
-        }
-    }
-    best_by_coverage.remove(&required)
+        })
+        .map(|business| (business.id(), business))
+        .collect()
 }
 
 fn resolve_max_autonomous_working_capital(

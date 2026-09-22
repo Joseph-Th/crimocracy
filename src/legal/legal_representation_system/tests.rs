@@ -237,9 +237,9 @@ fn automatic_legal_support_aggregates_split_organization_liquidity() {
     .expect("automatic legal-support policy should validate")
     .commit(&fx.registry, &mut fx.state)
     .expect("automatic legal-support policy should commit");
-    let retained = apply_automatic_legal_support(&fx.registry, &mut fx.state)
+    let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
         .expect("aggregate sponsor liquidity should fund automatic counsel");
-    assert_eq!(retained.len(), 1);
+    assert_eq!(outcome.retained.len(), 1);
     assert_eq!(
         fx.state
             .finance()
@@ -259,7 +259,7 @@ fn automatic_legal_support_aggregates_split_organization_liquidity() {
     let representation = fx
         .state
         .legal()
-        .get_legal_representation(retained[0])
+        .get_legal_representation(outcome.retained[0])
         .expect("representation should persist");
     let payment = fx
         .state
@@ -429,6 +429,7 @@ fn mandate_automatic_legal_support_respects_exhausted_budget_window() {
     assert!(
         apply_automatic_legal_support(&fx.registry, &mut fx.state)
             .expect("an exhausted budget is ordinary unavailability, not a failed legal pass")
+            .retained
             .is_empty()
     );
     assert!(
@@ -1035,13 +1036,13 @@ fn automatic_legal_support_skips_detained_counsel_for_a_later_viable_channel() {
     .commit(&mut fx.state)
     .expect("counsel detention should commit");
 
-    let retained = apply_automatic_legal_support(&fx.registry, &mut fx.state)
+    let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
         .expect("automatic support should continue past an unavailable older channel");
-    assert_eq!(retained.len(), 1);
+    assert_eq!(outcome.retained.len(), 1);
     let representation = fx
         .state
         .legal()
-        .get_legal_representation(retained[0])
+        .get_legal_representation(outcome.retained[0])
         .expect("replacement representation should persist");
     assert_eq!(representation.contact(), replacement_contact);
     assert_eq!(representation.counsel(), replacement_counsel);
@@ -1095,13 +1096,13 @@ fn automatic_legal_support_prefers_stronger_later_counsel() {
         "fixture must make the stronger lawyer the newer contact"
     );
 
-    let retained = apply_automatic_legal_support(&fx.registry, &mut fx.state)
+    let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
         .expect("automatic support should select among viable lawyers");
-    assert_eq!(retained.len(), 1);
+    assert_eq!(outcome.retained.len(), 1);
     let representation = fx
         .state
         .legal()
-        .get_legal_representation(retained[0])
+        .get_legal_representation(outcome.retained[0])
         .expect("automatic representation should persist");
     assert_eq!(representation.contact(), stronger_contact);
     assert_eq!(representation.counsel(), stronger_counsel);
@@ -1225,6 +1226,7 @@ fn mandate_automatic_legal_support_cannot_spend_without_legal_budget_authority()
     assert!(
         apply_automatic_legal_support(&fx.registry, &mut fx.state)
             .expect("missing delegated budget is an unavailable prerequisite, not state drift")
+            .retained
             .is_empty()
     );
     assert!(
@@ -1785,6 +1787,88 @@ fn automatic_policy_concludes_representation_after_release_and_frees_the_contact
         .expect("contact termination should commit");
     validate_state(&fixture.state).expect("concluded representation state should validate");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn automatic_policy_conclusion_batch_rejects_allocator_exhaustion_atomically() {
+    let mut fixture = fixture();
+    let mut first_draft = representation_draft(&fixture, 7_500, None);
+    first_draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
+    let first = validate_retain_legal_representation(&fixture.state, first_draft)
+        .expect("first automatic retention should validate")
+        .commit(&mut fixture.state)
+        .expect("first automatic retention should commit");
+
+    let second_defendant = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Arrested Associate".to_owned(),
+            organization: Some(fixture.sponsor),
+            supervisor: fixture.supervisor,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second defendant should validate");
+    let second_arrest_draft = arrest_draft_for_character(
+        &mut fixture,
+        second_defendant,
+        "Second automatic-support custody inquiry",
+    );
+    let second_arrest = validate_arrest(&fixture.registry, &fixture.state, second_arrest_draft)
+        .expect("second defendant arrest should validate")
+        .commit(&mut fixture.state)
+        .expect("second defendant arrest should commit");
+    let mut second_draft = representation_draft(&fixture, 7_500, None);
+    second_draft.arrest = second_arrest;
+    second_draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
+    let second = validate_retain_legal_representation(&fixture.state, second_draft)
+        .expect("second automatic retention should validate")
+        .commit(&mut fixture.state)
+        .expect("second automatic retention should commit");
+
+    for arrest in [fixture.arrest, second_arrest] {
+        validate_release_arrest(&fixture.state, arrest)
+            .expect("represented detention should release")
+            .commit(&mut fixture.state)
+            .expect("represented detention release should commit");
+    }
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX - 1);
+    let before = bincode::serialize(&fixture.state)
+        .expect("pre-exhaustion automatic-support state serializes");
+
+    let error = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
+        .expect_err("two conclusions must reserve both information artifacts before mutation");
+    assert!(matches!(
+        error,
+        LegalRepresentationError::IdExhaustion(
+            crate::core::id::IdExhaustionError::Exhausted {
+                kind: "information",
+                next
+            }
+        ) if next == u32::MAX - 1
+    ));
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected conclusion state serializes"),
+        before,
+        "batch allocator failure must not conclude only the first automatic retainer"
+    );
+    for representation in [first, second] {
+        assert_eq!(
+            fixture
+                .state
+                .legal()
+                .get_legal_representation(representation)
+                .expect("automatic representation should persist")
+                .status(),
+            LegalRepresentationStatus::Active
+        );
+    }
 }
 
 #[test]

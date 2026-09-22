@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::validate_invariants;
+use crate::core::invariants::{validate_invariants, validate_state};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::time::{SimDuration, SimTime};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::legal::arrest_system::validate_arrest;
@@ -12,8 +13,11 @@ use crate::legal::{
     Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
     InvestigationDraft,
 };
+use crate::social::relationship_system::validate_set_relationship;
+use crate::social::{RelationshipDimensions, RelationshipLevel};
 use crate::world::world_system::{insert_character, insert_organization};
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 const DAY_MINUTES: u32 = 1_440;
@@ -24,6 +28,51 @@ struct PayrollFixture {
     boss: CharacterId,
     member: CharacterId,
     treasury: FinancialAccountId,
+}
+
+#[derive(Serialize)]
+struct RelationshipRecordWire {
+    from: CharacterId,
+    to: CharacterId,
+    dimensions: RelationshipDimensions,
+    version: u32,
+}
+
+fn replace_serialized_relationship_version(
+    envelope: SaveEnvelope,
+    original: &crate::social::RelationshipRecord,
+    version: u32,
+) -> SaveEnvelope {
+    let replacement = RelationshipRecordWire {
+        from: original.from(),
+        to: original.to(),
+        dimensions: original.dimensions(),
+        version,
+    };
+    let original_bytes =
+        bincode::serialize(original).expect("relationship record should serialize");
+    let replacement_bytes =
+        bincode::serialize(&replacement).expect("replacement relationship should serialize");
+    assert_eq!(
+        original_bytes.len(),
+        replacement_bytes.len(),
+        "version-only relationship corruption must preserve wire size"
+    );
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized target relationship must appear exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout relationship corruption must remain decodable")
 }
 
 fn make_test_payroll_fixture() -> PayrollFixture {
@@ -79,6 +128,45 @@ fn make_test_payroll_fixture() -> PayrollFixture {
         member,
         treasury,
     }
+}
+
+/// Adds a one-member criminal organization with an empty payroll treasury.
+fn add_single_member_payroll_organization(
+    registry: &Registry,
+    state: &mut AppState,
+    name: &str,
+) -> (OrganizationId, CharacterId, FinancialAccountId) {
+    let organization = insert_organization(
+        registry,
+        state,
+        OrganizationDraft {
+            name: name.to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("payroll organization should validate");
+    let boss = insert_character(
+        state,
+        CharacterDraft {
+            name: format!("{name} Boss"),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Tight,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("payroll boss should validate");
+    let treasury = insert_account(
+        state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("payroll treasury should validate");
+    (organization, boss, treasury)
 }
 
 /// Seeds a treasury balance from an external counterparty so balances stay ledger-consistent.
@@ -190,6 +278,261 @@ fn funded_payroll_moves_wages_into_member_pockets() {
             .is_none()
     );
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn daily_payroll_reserves_all_organization_ledger_ids_before_first_payment() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let rival = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Second Payroll Family".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("second criminal organization should validate");
+    let rival_boss = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Payroll Boss".to_owned(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Tight,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second payroll member should validate");
+    let rival_treasury = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(rival),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("second treasury should validate");
+    credit_account(&mut fixture.state, fixture.boss, fixture.treasury, 100_000);
+    credit_account(&mut fixture.state, rival_boss, rival_treasury, 100_000);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::LedgerTransaction, u32::MAX - 1);
+    let before =
+        bincode::serialize(&fixture.state).expect("pre-payroll allocator state should serialize");
+
+    let error = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect_err("two funded organizations require two ledger transaction IDs");
+    assert_eq!(
+        error,
+        PayrollError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "ledger transaction",
+            next: u32::MAX - 1,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected payroll state should serialize"),
+        before,
+        "allocator exhaustion must reject the complete daily payroll before the first organization pays"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.treasury)
+            .expect("first treasury should persist")
+            .balance(),
+        Money::from_cents(100_000)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(rival_treasury)
+            .expect("second treasury should persist")
+            .balance(),
+        Money::from_cents(100_000)
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn daily_payroll_reserves_all_wage_account_ids_before_first_payment() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let (_rival, rival_boss, rival_treasury) =
+        add_single_member_payroll_organization(&registry, &mut fixture.state, "Account Rail Crew");
+    credit_account(&mut fixture.state, fixture.boss, fixture.treasury, 100_000);
+    credit_account(&mut fixture.state, rival_boss, rival_treasury, 100_000);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+
+    // The two-member fixture plus the one-member rival need three new StreetCash wage accounts.
+    // Leave capacity for only two. No organization may receive a prefix payroll.
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::FinancialAccount, u32::MAX - 2);
+    let before =
+        bincode::serialize(&fixture.state).expect("pre-payroll account rail should serialize");
+
+    let error = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect_err("the full payday must reserve every missing wage account before mutation");
+    assert_eq!(
+        error,
+        PayrollError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "financial account",
+            next: u32::MAX - 2,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected payroll state should serialize"),
+        before,
+        "wage-account exhaustion must reject the complete daily payroll"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn daily_payroll_reserves_later_player_shortfall_report_before_rival_payment() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let (player, _player_boss, _player_treasury) =
+        add_single_member_payroll_organization(&registry, &mut fixture.state, "Later Player Crew");
+    crate::world::world_system::designate_player_organization(&mut fixture.state, player)
+        .expect("later criminal organization should be eligible as player organization");
+    credit_account(&mut fixture.state, fixture.boss, fixture.treasury, 100_000);
+    // The later player crew intentionally has no spendable cash, so it owes a shortfall report.
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Report, u32::MAX);
+    let before =
+        bincode::serialize(&fixture.state).expect("pre-payroll report rail should serialize");
+
+    let error = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect_err("later player shortfall report exhaustion must reject the entire payday");
+    assert_eq!(
+        error,
+        PayrollError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "report",
+            next: u32::MAX,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected payroll state should serialize"),
+        before,
+        "later player report exhaustion must not let the earlier rival organization get paid"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.treasury)
+            .expect("earlier treasury should persist")
+            .balance(),
+        Money::from_cents(100_000)
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn daily_payroll_preflights_later_relationship_version_before_first_payment() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xDA11_A701C);
+
+    let (_first_org, first_boss, first_treasury) =
+        add_single_member_payroll_organization(&registry, &mut state, "Earlier Funded Crew");
+    credit_account(&mut state, first_boss, first_treasury, 100_000);
+
+    let later_org = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Later Unpaid Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("later criminal organization should validate");
+    let later_boss = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Later Unpaid Boss".to_owned(),
+            organization: Some(later_org),
+            supervisor: None,
+            autonomy: AutonomyLevel::Tight,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("later boss should validate");
+    let later_member = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Later Unpaid Member".to_owned(),
+            organization: Some(later_org),
+            supervisor: Some(later_boss),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("later member should validate");
+    let mut dimensions = RelationshipDimensions::zero();
+    dimensions.resentment =
+        RelationshipLevel::try_new(1).expect("fixture resentment should be valid");
+    validate_set_relationship(&state, later_member, later_boss, dimensions)
+        .expect("fixture relationship should validate")
+        .commit(&mut state)
+        .expect("fixture relationship should commit");
+
+    let original = state
+        .social()
+        .get_relationship(later_member, later_boss)
+        .expect("fixture relationship should persist")
+        .clone();
+    let envelope = build_save(&registry, &state).expect("payroll fixture should save");
+    let corrupted = replace_serialized_relationship_version(envelope, &original, u32::MAX);
+    state = restore_save(&registry, corrupted)
+        .expect("max-version relationship remains structurally valid");
+    state.advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    let before = bincode::serialize(&state).expect("pre-payroll state should serialize");
+
+    let error = apply_daily_payroll(&registry, &mut state)
+        .expect_err("later shortfall relationship exhaustion must reject the whole payday");
+    let PayrollError::Relationship(
+        crate::social::relationship_system::RelationshipError::VersionCapacity(capacity),
+    ) = error
+    else {
+        panic!("unexpected payroll preflight error: {error:?}");
+    };
+    assert_eq!(capacity.record_kind(), "relationship");
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected payroll state should serialize"),
+        before,
+        "later relationship exhaustion must not let the earlier organization get paid"
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(first_treasury)
+            .expect("earlier treasury should persist")
+            .balance(),
+        Money::from_cents(100_000)
+    );
+    validate_state(&state).expect("rejected payroll state should remain release-valid");
+    validate_invariants(&state);
 }
 
 #[test]
@@ -840,7 +1183,6 @@ fn player_shortfall_report_exhaustion_rejects_before_money_or_resentment_moves()
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
-    let funding = find_funding_accounts(&fixture.state, fixture.organization);
     let treasury_before = fixture
         .state
         .finance()
@@ -854,13 +1196,11 @@ fn player_shortfall_report_exhaustion_rejects_before_money_or_resentment_moves()
         .ids
         .set_next_raw_for_test(IdKind::Report, u32::MAX);
 
-    let error = apply_organization_payroll(
-        &registry,
-        &mut fixture.state,
-        fixture.organization,
-        &funding,
-    )
-    .expect_err("report exhaustion must reject before payroll mutation");
+    let plan = plan_organization_payroll(&registry, &fixture.state, fixture.organization)
+        .expect("player payroll should plan")
+        .expect("fixture organization has members");
+    let error = apply_organization_payroll(&registry, &mut fixture.state, plan)
+        .expect_err("report exhaustion must reject before payroll mutation");
     assert!(matches!(
         error,
         PayrollError::IdExhaustion(IdExhaustionError::Exhausted { kind: "report", .. })
@@ -911,7 +1251,6 @@ fn player_shortfall_ledger_exhaustion_rejects_before_money_accounts_resentment_o
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
-    let funding = find_funding_accounts(&fixture.state, fixture.organization);
     let treasury_before = fixture
         .state
         .finance()
@@ -925,13 +1264,11 @@ fn player_shortfall_ledger_exhaustion_rejects_before_money_accounts_resentment_o
         .ids
         .set_next_raw_for_test(IdKind::LedgerTransaction, u32::MAX);
 
-    let error = apply_organization_payroll(
-        &registry,
-        &mut fixture.state,
-        fixture.organization,
-        &funding,
-    )
-    .expect_err("ledger exhaustion must reject the whole shortfall composite");
+    let plan = plan_organization_payroll(&registry, &fixture.state, fixture.organization)
+        .expect("player payroll should plan")
+        .expect("fixture organization has members");
+    let error = apply_organization_payroll(&registry, &mut fixture.state, plan)
+        .expect_err("ledger exhaustion must reject the whole shortfall composite");
     assert!(matches!(
         error,
         PayrollError::Finance(FinanceError::IdExhaustion(IdExhaustionError::Exhausted {

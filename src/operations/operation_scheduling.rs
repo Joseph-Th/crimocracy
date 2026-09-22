@@ -318,17 +318,6 @@ pub(crate) fn find_due_authorized_operations(state: &AppState) -> Vec<OperationI
         .collect()
 }
 
-pub(crate) fn resolve_earliest_operation_deadline(record: &OperationRecord) -> Option<SimTime> {
-    record
-        .constraints()
-        .iter()
-        .filter_map(|constraint| match constraint {
-            OperationConstraint::CompleteBy(deadline) => Some(*deadline),
-            OperationConstraint::RequireIntelligenceTopic(_) => None,
-        })
-        .min()
-}
-
 /// True once an operation can no longer satisfy its earliest completion deadline.
 /// An authorized operation misses its deadline on the deadline minute itself because beginning
 /// then could never resolve before it. Live work keeps the deadline minute: an in-progress or
@@ -343,7 +332,7 @@ pub(crate) fn has_missed_operation_deadline(
     let Some(record) = state.operations.get_operation(operation) else {
         return false;
     };
-    let Some(deadline) = resolve_earliest_operation_deadline(record) else {
+    let Some(deadline) = record.completion_deadline() else {
         return false;
     };
     if record.status() == OperationStatus::Authorized {
@@ -369,33 +358,15 @@ pub(crate) fn has_operation_deadline_fully_passed(
     state
         .operations
         .get_operation(operation)
-        .and_then(resolve_earliest_operation_deadline)
+        .and_then(OperationRecord::completion_deadline)
         .is_some_and(|deadline| state.now() > deadline)
 }
 
-/// Finds in-progress or decision-paused work whose completion deadline has fully passed, restoring
-/// one global chronological order across the separate status indexes.
+/// Finds in-progress or decision-paused work whose completion deadline has fully passed. The
+/// operation owner maintains this as a derived chronological index, so quiet ticks do not scan
+/// every running and paused operation merely to rediscover immutable authored deadlines.
 pub(crate) fn find_due_operations_with_missed_deadlines(state: &AppState) -> Vec<OperationId> {
-    let mut due = state
+    state
         .operations
-        .operations_with_status(OperationStatus::InProgress)
-        .chain(
-            state
-                .operations
-                .operations_with_status(OperationStatus::AwaitingDecision),
-        )
-        .filter(|operation| {
-            resolve_earliest_operation_deadline(operation)
-                .is_some_and(|deadline| state.now() > deadline)
-        })
-        .map(|operation| {
-            (
-                resolve_earliest_operation_deadline(operation)
-                    .expect("filtered overdue operation must retain a completion deadline"),
-                operation.id(),
-            )
-        })
-        .collect::<Vec<_>>();
-    due.sort_unstable();
-    due.into_iter().map(|(_, operation)| operation).collect()
+        .find_running_past_completion_deadline(state.now())
 }

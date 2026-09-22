@@ -16,9 +16,7 @@ use crate::intelligence::{
     Specificity,
 };
 use crate::operations::operation_objective::resolve_objective_blocker;
-use crate::operations::operation_scheduling::{
-    has_missed_operation_deadline, resolve_earliest_operation_deadline,
-};
+use crate::operations::operation_scheduling::has_missed_operation_deadline;
 use crate::operations::operation_system::OperationError;
 use crate::operations::{
     OperationAbortArtifacts, OperationAbortCause, OperationAbortPhase, OperationAbortRecord,
@@ -679,7 +677,8 @@ pub(crate) fn build_abort_summary(
             ))
         }
         OperationAbortCause::DeadlineMissed => {
-            let deadline = resolve_earliest_operation_deadline(operation)
+            let deadline = operation
+                .completion_deadline()
                 .expect("validated deadline abort must retain a completion deadline");
             let phase_text = match phase {
                 OperationAbortPhase::BeforeStart => "before execution could begin",

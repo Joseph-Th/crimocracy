@@ -644,6 +644,10 @@ fn resolve_initial_burglary(
         // The case ID is audit-only. Acting policy learns case existence and timing from its own
         // LegalActivity information after the resolution is surfaced.
         scenario.investigation = resolution.exposure().investigation();
+        metrics.investigation_opened_minute = scenario
+            .investigation
+            .and_then(|investigation| scenario.state.legal().get_investigation(investigation))
+            .map(|investigation| investigation.opened_at().as_minutes());
         metrics.burglary_information_quality =
             Some(resolution.factors().intelligence_quality().value());
         metrics.property_acquired_value_cents = resolution

@@ -151,11 +151,9 @@ impl ValidatedPropertyDisposition {
         self,
         state: &mut AppState,
     ) -> Result<PropertyDispositionOutcome, PropertyDispositionError> {
-        state.ids.reserve_many(&[
-            (IdKind::LedgerTransaction, 1),
-            (IdKind::Information, 1),
-            (IdKind::Report, 1),
-        ])?;
+        let mut budget = self.ledger.id_budget();
+        budget.extend([(IdKind::Information, 1), (IdKind::Report, 1)]);
+        state.ids.reserve_many(&budget)?;
         let operation = state.operations.get_operation(self.draft.operation).ok_or(
             PropertyDispositionError::MissingOperation(self.draft.operation),
         )?;
@@ -645,11 +643,9 @@ impl ValidatedCashDisposition {
         self,
         state: &mut AppState,
     ) -> Result<CashDispositionOutcome, PropertyDispositionError> {
-        state.ids.reserve_many(&[
-            (IdKind::LedgerTransaction, 1),
-            (IdKind::Information, 1),
-            (IdKind::Report, 1),
-        ])?;
+        let mut budget = self.ledger.id_budget();
+        budget.extend([(IdKind::Information, 1), (IdKind::Report, 1)]);
+        state.ids.reserve_many(&budget)?;
         let operation = state.operations.get_operation(self.draft.operation).ok_or(
             PropertyDispositionError::MissingOperation(self.draft.operation),
         )?;

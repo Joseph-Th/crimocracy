@@ -1537,6 +1537,83 @@ fn unbalanced_transaction_leaves_balances_unchanged() {
 }
 
 #[test]
+fn balanced_transaction_allows_intermediate_sum_beyond_money_range() {
+    let registry = build_registry();
+    let mut state = AppState::new(39);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Wide Ledger Test".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("organization fixture should validate");
+    let owner = FinancialOwner::Organization(organization);
+    let accounts = (0..4)
+        .map(|_| {
+            insert_account(
+                &mut state,
+                FinancialAccountDraft {
+                    owner,
+                    kind: AccountKind::Settlement,
+                },
+            )
+            .expect("wide-sum account fixture should validate")
+        })
+        .collect::<Vec<_>>();
+
+    let transaction = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Balanced wide accumulator transfer".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: accounts[0],
+                    amount: Money::from_cents(i64::MAX),
+                },
+                LedgerPosting {
+                    account: accounts[1],
+                    amount: Money::from_cents(i64::MAX),
+                },
+                LedgerPosting {
+                    account: accounts[2],
+                    amount: Money::from_cents(-i64::MAX),
+                },
+                LedgerPosting {
+                    account: accounts[3],
+                    amount: Money::from_cents(-i64::MAX),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("an exactly balanced transaction must not be rejected by an intermediate sum");
+    transaction
+        .commit(&mut state)
+        .expect("wide balanced transaction should commit");
+
+    assert_eq!(
+        state
+            .finance()
+            .get_account(accounts[0])
+            .expect("first account should persist")
+            .balance(),
+        Money::from_cents(i64::MAX)
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(accounts[3])
+            .expect("fourth account should persist")
+            .balance(),
+        Money::from_cents(-i64::MAX)
+    );
+    validate_invariants(&state);
+}
+
+#[test]
 fn stale_validated_transaction_cannot_overwrite_newer_balances() {
     let registry = build_registry();
     let mut state = AppState::new(41);

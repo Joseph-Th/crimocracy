@@ -143,6 +143,11 @@ fn validate_transaction(
     }
     let net_cents = validate_postings(transaction, scratch)?;
     if net_cents != 0 {
+        let net_cents = i64::try_from(net_cents).map_err(|_| {
+            StateValidationError::LedgerArithmeticOverflow {
+                transaction: transaction.id(),
+            }
+        })?;
         return Err(StateValidationError::UnbalancedLedgerTransaction {
             transaction: transaction.id(),
             net_cents,
@@ -158,9 +163,9 @@ fn validate_transaction(
 fn validate_postings(
     transaction: &LedgerTransactionRecord,
     scratch: &mut FinanceValidationScratch,
-) -> Result<i64, StateValidationError> {
+) -> Result<i128, StateValidationError> {
     scratch.seen_posting_accounts.clear();
-    let mut net_cents = 0_i64;
+    let mut net_cents = 0_i128;
     for posting in transaction.postings() {
         if posting.amount == Money::ZERO || !scratch.seen_posting_accounts.insert(posting.account) {
             return Err(invalid_transaction(transaction));
@@ -171,11 +176,11 @@ fn validate_postings(
                 entity: EntityRef::FinancialAccount(posting.account),
             });
         };
-        net_cents = net_cents.checked_add(posting.amount.cents()).ok_or(
-            StateValidationError::LedgerArithmeticOverflow {
+        net_cents = net_cents
+            .checked_add(i128::from(posting.amount.cents()))
+            .ok_or(StateValidationError::LedgerArithmeticOverflow {
                 transaction: transaction.id(),
-            },
-        )?;
+            })?;
         scratch.derived_balance_cents[slot] = scratch.derived_balance_cents[slot]
             .checked_add(posting.amount.cents())
             .ok_or(StateValidationError::FinancialBalanceMismatch)?;

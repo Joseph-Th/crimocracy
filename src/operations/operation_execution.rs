@@ -666,12 +666,6 @@ impl ValidatedOperationResolution {
         self,
         state: &mut AppState,
     ) -> Result<OperationId, OperationResolutionError> {
-        let incident_evidence_count = self
-            .incident
-            .as_ref()
-            .map(ValidatedIncidentIntake::evidence_count)
-            .transpose()?
-            .unwrap_or(0);
         let surveillance_information_count = u32::try_from(self.surveillance_information.len())
             .expect("surveillance information count must fit u32");
         let mut budget = vec![
@@ -689,12 +683,7 @@ impl ValidatedOperationResolution {
             u32::try_from(operation.participants().len()).expect("participant count must fit u32");
         budget.push((IdKind::Information, participant_count));
         if let Some(incident) = self.incident.as_ref() {
-            budget.push((
-                IdKind::Investigation,
-                u32::from(incident.requires_new_investigation()),
-            ));
-            budget.push((IdKind::Evidence, incident_evidence_count));
-            budget.push((IdKind::CaseWitness, u32::from(incident.has_witness())));
+            budget.extend(incident.id_budget()?);
         }
         state.ids.reserve_many(&budget)?;
         validate_plan_snapshot(state, &self.plan)?;

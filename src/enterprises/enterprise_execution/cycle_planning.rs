@@ -165,7 +165,11 @@ pub fn decide_enterprise_cycle(
             authority,
             occurred_at: state.now(),
             // Re-anchor after delayed settlement instead of paying missed cycles in a burst.
-            next_cycle_at: state.now().checked_add(economics.cycle()),
+            // Consuming the final representable enterprise version also exhausts recurrence;
+            // otherwise the derived due index would schedule a cycle that can never commit.
+            next_cycle_at: (record.version() < u32::MAX - 1)
+                .then(|| state.now().checked_add(economics.cycle()))
+                .flatten(),
             suspends_after_settlement,
             supporting_business_versions,
             host_business_version,

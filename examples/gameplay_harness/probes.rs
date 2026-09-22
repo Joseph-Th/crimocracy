@@ -1155,6 +1155,7 @@ pub fn persist_run_artifact(
     let diagnostic = serde_json::json!({
         "case": {
             "investigation_created": metrics.investigation_created,
+            "investigation_opened_minute": metrics.investigation_opened_minute,
             "session_case_staffed": metrics.session_case_staffed,
             "case_cold_minute": metrics.case_cold_minute,
             "evidence_count": metrics.evidence_count,

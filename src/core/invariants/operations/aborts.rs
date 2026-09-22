@@ -1,6 +1,6 @@
 //! Persisted operation-abort lifecycle and artifact validation.
 
-use super::{detention_abort_matches_arrest, is_after_action_title, resolve_completion_deadline};
+use super::{detention_abort_matches_arrest, is_after_action_title};
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{InformationId, ReportId};
@@ -95,7 +95,7 @@ fn validate_before_start_abort(
         OperationAbortCause::DeadlineMissed => {
             if operation.started_at().is_some()
                 || operation.resolution_due_at().is_some()
-                || resolve_completion_deadline(operation).is_none()
+                || operation.completion_deadline().is_none()
             {
                 return Err(invalid_abort(operation));
             }
@@ -154,7 +154,8 @@ fn validate_in_progress_abort(
             let (started_at, due_at) = resolve_abort_started_due(operation)?;
             if started_at > due_at
                 || abort.aborted_at() < started_at
-                || resolve_completion_deadline(operation)
+                || operation
+                    .completion_deadline()
                     .is_none_or(|deadline| deadline > abort.aborted_at())
             {
                 return Err(invalid_abort(operation));
@@ -293,7 +294,8 @@ fn validate_awaiting_deadline_abort(
     if started_at > due_at
         || started_at > paused_at
         || paused_at > abort.aborted_at()
-        || resolve_completion_deadline(operation)
+        || operation
+            .completion_deadline()
             .is_none_or(|deadline| deadline > abort.aborted_at())
     {
         return Err(invalid_abort(operation));

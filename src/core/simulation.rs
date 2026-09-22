@@ -5,36 +5,38 @@
 //! New autonomous work must slot explicitly here with a "runs after X so Y" comment.
 
 use crate::core::id::{
-    BusinessCycleId, CharacterId, EnterpriseCycleId, InvestigationId, InvestigationWorkId,
-    OperationId, OpportunityId, PoliceResponseId, ProsecutionCaseId, RecruitmentAttemptId,
-    ReportId,
+    BusinessCycleId, CharacterId, EnterpriseCycleId, IdExhaustionError, InvestigationId,
+    InvestigationWorkId, OperationId, OpportunityId, PoliceResponseId, ProsecutionCaseId,
+    RecruitmentAttemptId, ReportId,
 };
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::DecisionResponse;
-use crate::decisions::decision_system::{DecisionRequestOutcome, validate_resolve_decision};
+use crate::decisions::decision_system::{
+    DecisionError, DecisionRequestOutcome, ValidatedDecisionResolution, validate_resolve_decision,
+};
 use crate::economy::business_economy_system::{
     decide_business_cycle, find_due_businesses, validate_business_cycle_plan,
 };
 use crate::enterprises::enterprise_execution::{
-    EnterpriseCycleRandomness, decide_enterprise_cycle, find_due_enterprises,
+    EnterpriseCycleRandomness, EnterpriseError, decide_enterprise_cycle, find_due_enterprises,
     validate_enterprise_cycle_plan,
 };
 use crate::legal::investigation_system::apply_autonomous_investigator_staffing;
 use crate::legal::investigation_system::apply_cold_case_decay;
 use crate::legal::investigation_work_execution::{
-    InvestigationWorkRandomness, InvestigationWorkSchedulingOutcome,
+    InvestigationWorkError, InvestigationWorkRandomness, InvestigationWorkSchedulingOutcome,
     apply_investigation_work_scheduling, decide_investigation_work_resolution,
     find_due_scheduled_investigation_work, validate_investigation_work_resolution_plan,
 };
 use crate::operations::operation_abort::{
-    validate_deadline_missed_operation, validate_expired_opportunity_operation,
-    validate_objective_unavailable_operation,
+    ValidatedOperationAbort, validate_deadline_missed_operation,
+    validate_expired_opportunity_operation, validate_objective_unavailable_operation,
 };
 use crate::operations::operation_execution::{
-    OperationResolutionRandomness, decide_operation_resolution, find_due_in_progress_operations,
-    validate_operation_resolution_plan,
+    OperationResolutionError, OperationResolutionRandomness, decide_operation_resolution,
+    find_due_in_progress_operations, validate_operation_resolution_plan,
 };
 use crate::operations::operation_scheduling::{
     find_due_authorized_operations, find_due_operations_with_missed_deadlines,
@@ -74,8 +76,8 @@ pub struct TickOutcome {
     pub custody_releases: Vec<crate::core::id::ArrestId>,
     pub automatic_legal_support: Vec<crate::core::id::LegalRepresentationId>,
     /// Automatic-policy retainers ended because their represented matter is no longer active.
-    /// The legal-support API returns newly retained counsel, so this separate count keeps a
-    /// conclusion-only tick visible to adapters and validation.
+    /// The legal-support owner reports this separately from newly retained counsel so a
+    /// conclusion-only tick remains visible to adapters and validation without rescanning state.
     pub concluded_automatic_legal_support: usize,
     pub business_cycles: Vec<BusinessCycleId>,
     pub resumed_businesses: Vec<crate::core::id::BusinessId>,
@@ -150,7 +152,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         witness_interviews: scheduled_witness_interviews,
     } = apply_investigation_work_scheduling(registry, state)
         .expect("valid state should schedule due investigation work");
-    let resolved_investigation_work = run_investigation_work_phase(registry, state);
+    let resolved_investigation_work = run_investigation_work_phase(registry, state)
+        .expect("valid due investigation-work cohort must resolve atomically");
     // The police institution converts accumulated case evidence into custody after detective
     // work resolves, so an interview or forensic analysis finishing this minute is visible to
     // the same minute's arrest decision.
@@ -166,23 +169,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // promised counsel materially affect custodial cooperation risk instead of retaining counsel
     // only after the irreversible decision. It also sees every new arrest created above and
     // concludes automatic retainers for matters already ended.
-    let automatic_support_before = state
-        .legal()
-        .active_automatic_policy_representations()
-        .count();
-    let automatic_legal_support =
+    let automatic_legal_support_outcome =
         crate::legal::legal_representation_system::apply_automatic_legal_support(registry, state)
             .expect("valid state should resolve automatic legal-support retention");
-    let automatic_support_after = state
-        .legal()
-        .active_automatic_policy_representations()
-        .count();
-    let concluded_automatic_legal_support = automatic_support_before
-        .checked_add(automatic_legal_support.len())
-        .and_then(|expected_without_conclusions| {
-            expected_without_conclusions.checked_sub(automatic_support_after)
-        })
-        .expect("automatic legal-support lifecycle counts must remain internally consistent");
+    let automatic_legal_support = automatic_legal_support_outcome.retained;
+    let concluded_automatic_legal_support = automatic_legal_support_outcome.concluded;
     // A member arrested exactly one cadence window ago now faces the decision with current
     // representation visible. New informants then disclose personally-held knowledge.
     let informant_recruitments =
@@ -196,7 +187,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // decay does not perturb any domain RNG sequence.
     let cold_case_decay = apply_cold_case_decay(state, registry.legal().cold_case_window())
         .expect("valid state should resolve cold-case decay");
-    let business_cycles = run_business_cycle_phase(registry, state);
+    let business_cycles = run_business_cycle_phase(registry, state)
+        .expect("valid state should settle the complete due business-cycle cohort");
     // Legitimate-business recovery follows today's settlements so a chronic-loss suspension has
     // already taken effect. The lifecycle pass skips a business suspended at this exact instant,
     // and only non-player owners with positive current zero-variance economics resume through the
@@ -206,7 +198,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
             registry, state,
         )
         .expect("valid state should maintain suspended non-player business economies");
-    let enterprise_cycles = run_enterprise_cycle_phase(registry, state);
+    let enterprise_cycles = run_enterprise_cycle_phase(registry, state)
+        .expect("valid due enterprise cycles must settle atomically");
     // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
     // the same day's wages. Reputation then settles the day boundary before recruitment: daily
     // decay advances only impressions old enough to fade, while operation/racket consequences from
@@ -313,22 +306,12 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
     let mut aborted_operations = police_response_outcome.aborted_operations;
 
     let due_authorized = find_due_authorized_operations(state);
+    let prestart_aborts = prepare_authorized_prestart_aborts(registry, state, &due_authorized)
+        .expect("valid due authorized abort cohort must preflight atomically");
     let mut started_operations = Vec::with_capacity(due_authorized.len());
-    for operation in due_authorized {
-        if has_missed_operation_deadline(registry, state, operation) {
-            validate_deadline_missed_operation(registry, state, operation)
-                .expect("a missed operation deadline must validate")
-                .commit(state)
-                .expect("a missed operation deadline must commit atomically");
-            aborted_operations.push(operation);
-        } else if let Some((opportunity, _)) = state
-            .opportunities()
-            .expired_window_for_operation(operation, state.now())
-        {
-            validate_expired_opportunity_operation(state, operation, opportunity.id())
-                .expect("an expired linked opportunity must validate a pre-start abort")
-                .commit(state)
-                .expect("an expired linked opportunity must abort atomically");
+    for (operation, prestart_abort) in due_authorized.into_iter().zip(prestart_aborts) {
+        if let Some(abort) = prestart_abort {
+            (*abort).commit_preflighted(state);
             aborted_operations.push(operation);
         } else {
             match apply_transition(registry, state, operation, OperationTransition::Begin) {
@@ -339,13 +322,6 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
                 // and linked opportunity windows are handled by the pre-checks above, so temporary
                 // unavailability cannot silently carry work beyond an authored viability boundary.
                 Err(OperationError::ParticipantBusy { .. }) => {}
-                Err(OperationError::ObjectiveUnavailable { blocker, .. }) => {
-                    validate_objective_unavailable_operation(state, operation, blocker)
-                        .expect("an unavailable due objective must validate a pre-start abort")
-                        .commit(state)
-                        .expect("an unavailable due objective must abort atomically");
-                    aborted_operations.push(operation);
-                }
                 Err(error) => {
                     panic!(
                         "due authorized operation could not begin through its canonical path: {error}"
@@ -357,60 +333,12 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
     // Preserve the established retry boundary: a follow-up that was blocked at begin time by a
     // still-paused operation does not immediately retry merely because overdue cleanup releases
     // the participant later in this same phase. It remains Authorized until the next tick.
-    for operation in find_due_operations_with_missed_deadlines(state) {
-        let record = state
-            .operations()
-            .get_operation(operation)
-            .expect("overdue operation must still exist");
-        if let Some(decision) = state.decisions().pending_for_operation(operation) {
-            let recipient = record.responsible_organization();
-            validate_resolve_decision(
-                registry,
-                state,
-                decision,
-                recipient,
-                DecisionResponse::Abort,
-            )
-            .expect("an overdue operation decision must support automatic abort")
-            .commit(state)
-            .expect("automatic deadline decision abort must commit atomically");
-            aborted_operations.push(operation);
-        } else {
-            validate_deadline_missed_operation(registry, state, operation)
-                .expect("an overdue in-progress operation must validate a deadline abort")
-                .commit(state)
-                .expect("an overdue in-progress operation must abort atomically");
-            aborted_operations.push(operation);
-        }
-    }
-    let due_operations = find_due_in_progress_operations(state);
-    let mut resolved_operations = Vec::with_capacity(due_operations.len());
-    for operation in due_operations {
-        let kind = state
-            .operations()
-            .get_operation(operation)
-            .expect("due operation must still exist")
-            .kind();
-        let execution = registry.get_operation(kind).execution();
-        let execution_variance =
-            draw_signed_variance(state.operation_rng_mut(), execution.variance_limit());
-        let exposure_variance = draw_signed_variance(
-            state.operation_rng_mut(),
-            execution.exposure_variance_limit(),
-        );
-        let plan = decide_operation_resolution(
-            registry,
-            state,
-            operation,
-            OperationResolutionRandomness::new(execution_variance, exposure_variance),
-        )
-        .expect("due in-progress operation must resolve a valid plan");
-        let resolved = validate_operation_resolution_plan(registry, state, plan)
-            .expect("fresh operation resolution plan must validate")
-            .commit(state)
-            .expect("validated operation resolution must commit atomically");
-        resolved_operations.push(resolved);
-    }
+    aborted_operations.extend(
+        apply_overdue_operation_cleanup(registry, state)
+            .expect("valid overdue operations must abort as one artifact-preflighted cohort"),
+    );
+    let resolved_operations = run_operation_resolution_phase(registry, state)
+        .expect("valid due operation resolutions must commit atomically");
     OperationsPhaseOutcome {
         started: started_operations,
         arrived_police_responses,
@@ -420,15 +348,182 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
     }
 }
 
+#[derive(Debug, Error)]
+enum OperationPhaseBatchError {
+    #[error(transparent)]
+    Operation(#[from] OperationError),
+    #[error(transparent)]
+    Decision(#[from] DecisionError),
+    #[error(transparent)]
+    IdExhaustion(#[from] IdExhaustionError),
+}
+
+fn prepare_authorized_prestart_aborts(
+    registry: &Registry,
+    state: &AppState,
+    due_authorized: &[OperationId],
+) -> Result<Vec<Option<Box<ValidatedOperationAbort>>>, OperationPhaseBatchError> {
+    let mut planned = Vec::with_capacity(due_authorized.len());
+    let mut budget = Vec::new();
+    for operation in due_authorized {
+        let record = state
+            .operations()
+            .get_operation(*operation)
+            .expect("due authorized operation must still exist");
+        let abort = if has_missed_operation_deadline(registry, state, *operation) {
+            Some(validate_deadline_missed_operation(
+                registry, state, *operation,
+            )?)
+        } else if let Some((opportunity, _)) = state
+            .opportunities()
+            .expired_window_for_operation(*operation, state.now())
+        {
+            Some(validate_expired_opportunity_operation(
+                state,
+                *operation,
+                opportunity.id(),
+            )?)
+        } else if let Some(blocker) =
+            crate::operations::operation_objective::resolve_objective_blocker(state, record)
+        {
+            Some(validate_objective_unavailable_operation(
+                state, *operation, blocker,
+            )?)
+        } else {
+            None
+        };
+        if let Some(abort) = &abort {
+            budget.extend(abort.id_budget());
+        }
+        planned.push(abort.map(Box::new));
+    }
+    // Preserve the existing per-operation begin/abort ordering, but prove the complete artifact
+    // budget for every deterministic pre-start abort first. Operation begin may allocate only a
+    // PoliceResponseId, so intervening successful starts cannot consume these reserved artifact
+    // kinds before a later prepared abort commits.
+    state.ids.reserve_many(&budget)?;
+    Ok(planned)
+}
+
+enum PreparedOverdueOperationCleanup {
+    Direct {
+        operation: OperationId,
+        abort: Box<ValidatedOperationAbort>,
+    },
+    Decision {
+        operation: OperationId,
+        resolution: ValidatedDecisionResolution,
+    },
+}
+
+fn apply_overdue_operation_cleanup(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<Vec<OperationId>, OperationPhaseBatchError> {
+    let due = find_due_operations_with_missed_deadlines(state);
+    let mut planned = Vec::with_capacity(due.len());
+    let mut budget = Vec::new();
+
+    for operation in due {
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("overdue operation must still exist");
+        if let Some(decision) = state.decisions().pending_for_operation(operation) {
+            let resolution = validate_resolve_decision(
+                registry,
+                state,
+                decision,
+                record.responsible_organization(),
+                DecisionResponse::Abort,
+            )?;
+            budget.extend(resolution.id_budget());
+            planned.push(PreparedOverdueOperationCleanup::Decision {
+                operation,
+                resolution,
+            });
+        } else {
+            let abort = validate_deadline_missed_operation(registry, state, operation)?;
+            budget.extend(abort.id_budget());
+            planned.push(PreparedOverdueOperationCleanup::Direct {
+                operation,
+                abort: Box::new(abort),
+            });
+        }
+    }
+
+    // Active-operation invariants forbid participant overlap and each pending decision belongs to
+    // exactly one operation. No planned overdue abort can therefore stale another member of this
+    // cohort. Reserve every persistent artifact before terminating the first operation so global
+    // ID pressure cannot make deadline chronology decide which same-minute operation survives.
+    state.ids.reserve_many(&budget)?;
+
+    let mut aborted = Vec::with_capacity(planned.len());
+    for action in planned {
+        match action {
+            PreparedOverdueOperationCleanup::Direct { operation, abort } => {
+                (*abort).commit_preflighted(state);
+                aborted.push(operation);
+            }
+            PreparedOverdueOperationCleanup::Decision {
+                operation,
+                resolution,
+            } => {
+                resolution
+                    .commit(state)
+                    .expect("prevalidated disjoint overdue decision must remain current");
+                aborted.push(operation);
+            }
+        }
+    }
+    Ok(aborted)
+}
+
+fn run_operation_resolution_phase(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<Vec<OperationId>, OperationResolutionError> {
+    let due_operations = find_due_in_progress_operations(state);
+    let mut resolved_operations = Vec::with_capacity(due_operations.len());
+    for operation in due_operations {
+        let kind = state
+            .operations()
+            .get_operation(operation)
+            .expect("due operation must still exist")
+            .kind();
+        let execution = registry.get_operation(kind).execution();
+        let mut advanced_rng = state.operation_rng_mut().clone();
+        let execution_variance =
+            draw_signed_variance(&mut advanced_rng, execution.variance_limit());
+        let exposure_variance =
+            draw_signed_variance(&mut advanced_rng, execution.exposure_variance_limit());
+        let plan = decide_operation_resolution(
+            registry,
+            state,
+            operation,
+            OperationResolutionRandomness::new(execution_variance, exposure_variance),
+        )?;
+        let resolved = validate_operation_resolution_plan(registry, state, plan)?.commit(state)?;
+        // A cycle's RNG draw is part of that cycle's transaction. Publish it only after the
+        // validated resolution has committed, so allocator or freshness rejection cannot consume
+        // randomness for an operation that did not actually resolve.
+        *state.operation_rng_mut() = advanced_rng;
+        resolved_operations.push(resolved);
+    }
+    Ok(resolved_operations)
+}
+
 /// Resolves due scheduled detective work with pre-drawn variance. Runs after operation
 /// consequences so legal state created by an operation is visible to later institutional work
 /// in the same minute without bypassing evidence ownership.
 fn run_investigation_work_phase(
     registry: &Registry,
     state: &mut AppState,
-) -> Vec<InvestigationWorkId> {
+) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
     let due_work = find_due_scheduled_investigation_work(state);
-    let mut resolved = Vec::with_capacity(due_work.len());
+    let mut advanced_rng = state.investigation_rng_mut().clone();
+    let mut planned = Vec::with_capacity(due_work.len());
+    let mut id_budget = Vec::new();
     for work in due_work {
         let kind = state
             .legal()
@@ -436,27 +531,49 @@ fn run_investigation_work_phase(
             .expect("due investigation work must still exist")
             .kind();
         let variance_limit = registry.get_investigation_work(kind).variance_limit();
-        let variance = draw_signed_variance(state.investigation_rng_mut(), variance_limit);
+        let variance = draw_signed_variance(&mut advanced_rng, variance_limit);
         let plan = decide_investigation_work_resolution(
             registry,
             state,
             work,
             InvestigationWorkRandomness::new(variance),
-        )
-        .expect("due investigation work must resolve a valid plan");
-        let committed = validate_investigation_work_resolution_plan(registry, state, plan)
-            .expect("fresh investigation work resolution plan must validate")
-            .commit(state)
-            .expect("validated investigation work must commit atomically");
-        resolved.push(committed);
+        )?;
+        let validated = validate_investigation_work_resolution_plan(registry, state, plan)?;
+        id_budget.extend(validated.id_budget());
+        planned.push(validated);
     }
-    resolved
+
+    // Due work belongs to distinct active case/lead pairs. Freeze every draw and validate every
+    // resolution against the same pre-pass snapshot, then reserve the complete artifact budget
+    // before publishing either RNG progress or the first case mutation. This prevents a later
+    // successful review/interview from leaving an earlier prefix resolved when global evidence or
+    // statement IDs are nearly exhausted.
+    state.ids.reserve_many(&id_budget)?;
+
+    let mut resolved = Vec::with_capacity(planned.len());
+    for validated in planned {
+        resolved.push(
+            validated
+                .commit(state)
+                .expect("prevalidated distinct investigation work must remain current"),
+        );
+    }
+    // Publish the frozen draw sequence only after every due resolution has committed. The work
+    // items are disjoint, but keeping RNG publication last preserves the transaction boundary
+    // even if a future resolution effect introduces a new fallible dependency.
+    *state.investigation_rng_mut() = advanced_rng;
+    Ok(resolved)
 }
 
 /// Settles due business operating cycles with pre-drawn gross variance.
-fn run_business_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<BusinessCycleId> {
+fn run_business_cycle_phase(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<Vec<BusinessCycleId>, crate::economy::business_economy_system::BusinessEconomyError> {
     let due_businesses = find_due_businesses(state);
-    let mut business_cycles = Vec::with_capacity(due_businesses.len());
+    let mut advanced_rng = state.business_rng_mut().clone();
+    let mut planned = Vec::with_capacity(due_businesses.len());
+    let mut id_budget = Vec::new();
     for business in due_businesses {
         let kind = state
             .world()
@@ -467,22 +584,37 @@ fn run_business_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<Bu
             .get_business(kind)
             .economics()
             .gross_variance_basis_points();
-        let variance = draw_basis_point_variance(state.business_rng_mut(), variance_limit);
+        let variance = draw_basis_point_variance(&mut advanced_rng, variance_limit);
         let plan = decide_business_cycle(registry, state, business, variance)
             .expect("due active business must resolve a valid cycle plan");
-        let cycle = validate_business_cycle_plan(state, plan)
-            .expect("fresh business cycle plan must validate")
-            .commit(state)
-            .expect("validated business cycle must commit atomically");
-        business_cycles.push(cycle);
+        let validated = validate_business_cycle_plan(state, plan)
+            .expect("fresh business cycle plan must validate");
+        id_budget.extend(validated.id_budget());
+        planned.push(validated);
     }
-    business_cycles
+
+    // Business economies have business-owned operating/settlement accounts, with settlement
+    // accounts unique by owner index. Due cycles therefore cannot stale one another's financial
+    // snapshots. Freeze every draw and reserve the complete persistent-ID budget before
+    // publishing RNG progress or the first settlement so allocator pressure cannot settle only
+    // the lowest business IDs in a same-minute cohort.
+    state.ids.reserve_many(&id_budget)?;
+    *state.business_rng_mut() = advanced_rng;
+
+    let mut business_cycles = Vec::with_capacity(planned.len());
+    for validated in planned {
+        business_cycles.push(validated.commit_preflighted(state));
+    }
+    Ok(business_cycles)
 }
 
 /// Settles due enterprise cycles. Both draws happen unconditionally per due cycle so the
 /// enterprise stream consumes the same number of values whatever the district's case pressure
 /// turns out to be.
-fn run_enterprise_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<EnterpriseCycleId> {
+fn run_enterprise_cycle_phase(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<Vec<EnterpriseCycleId>, EnterpriseError> {
     let due_enterprises = find_due_enterprises(state);
     let mut enterprise_cycles = Vec::with_capacity(due_enterprises.len());
     for enterprise in due_enterprises {
@@ -492,13 +624,12 @@ fn run_enterprise_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<
             .expect("due enterprise must exist")
             .kind();
         let economics = registry.get_enterprise(kind).economics();
-        let variance = draw_basis_point_variance(
-            state.enterprise_rng_mut(),
-            economics.gross_variance_basis_points(),
-        );
+        let mut advanced_rng = state.enterprise_rng_mut().clone();
+        let variance =
+            draw_basis_point_variance(&mut advanced_rng, economics.gross_variance_basis_points());
         let enforcement_attention_roll = u16::try_from(
             draw_index(
-                state.enterprise_rng_mut(),
+                &mut advanced_rng,
                 crate::enterprises::enterprise_execution::EnterpriseCycleRandomness::ENFORCEMENT_ATTENTION_ROLL_COUNT,
             )
                 .expect("racket-attention roll range is never empty"),
@@ -509,15 +640,15 @@ fn run_enterprise_cycle_phase(registry: &Registry, state: &mut AppState) -> Vec<
             state,
             enterprise,
             EnterpriseCycleRandomness::new(variance, enforcement_attention_roll),
-        )
-        .expect("due active enterprise must resolve a valid cycle plan");
-        let cycle = validate_enterprise_cycle_plan(state, plan)
-            .expect("fresh enterprise cycle plan must validate")
-            .commit(state)
-            .expect("validated enterprise cycle must commit atomically");
+        )?;
+        let cycle = validate_enterprise_cycle_plan(state, plan)?.commit(state)?;
+        // Enterprise cycles stay sequential because they may share organization cash and one
+        // racket's enforcement incident can change another racket's live legal-pressure context.
+        // Still publish each item's two draws only after that item commits.
+        *state.enterprise_rng_mut() = advanced_rng;
         enterprise_cycles.push(cycle);
     }
-    enterprise_cycles
+    Ok(enterprise_cycles)
 }
 
 /// Day-boundary decay runs first in the reputation cluster: eligible aged impressions fade one

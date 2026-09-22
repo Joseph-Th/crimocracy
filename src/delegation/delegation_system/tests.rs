@@ -242,6 +242,54 @@ fn stale_policy_token_rejects_change_away_and_back_without_mutation() {
 }
 
 #[test]
+fn stale_policy_no_op_token_rejects_intervening_change_without_mutation() {
+    let (registry, mut state, authority) = make_authority_fixture();
+    let organization = state
+        .delegation()
+        .get_mandate(authority.mandate)
+        .expect("mandate fixture should persist")
+        .organization();
+    let initial = resolve_policy_for_manager(
+        &state,
+        authority.manager,
+        PolicyKind::IndependentRecruitment,
+    )
+    .expect("initial organization policy should resolve");
+    let stale_no_op = validate_set_policy(&registry, &state, organization, initial.setting)
+        .expect("setting the current policy should validate as an idempotent token");
+
+    validate_set_policy(
+        &registry,
+        &state,
+        organization,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .expect("intervening policy change should validate")
+    .commit(&registry, &mut state)
+    .expect("intervening policy change should commit");
+    let before = bincode::serialize(&state).expect("changed state should serialize");
+
+    let error = stale_no_op
+        .commit(&registry, &mut state)
+        .expect_err("a no-op token must stale once the policy changes");
+    assert_eq!(
+        error,
+        DelegationError::StaleOrganizationPolicy {
+            organization,
+            policy: PolicyKind::IndependentRecruitment,
+            expected: initial.source_version,
+            found: initial.source_version + 1,
+        }
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected state should serialize"),
+        before,
+        "stale idempotent policy commit must be atomic"
+    );
+    validate_invariants(&state);
+}
+
+#[test]
 fn resolves_authority_with_versioned_dependencies() {
     let (_registry, state, authority) = make_authority_fixture();
     let resolved = resolve_mandate_authority(&state, authority)

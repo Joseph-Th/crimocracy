@@ -24,7 +24,7 @@ use crate::operations::operation_scheduling::{
     earliest_operation_start_from_authorization, find_busy_participant,
     find_busy_participant_for_begin, projected_authorized_operation_window,
     projected_operation_window, resolve_deadline_without_execution_window,
-    resolve_earliest_operation_deadline, resolve_operation_earliest_start,
+    resolve_operation_earliest_start,
 };
 use crate::operations::operation_state::{checked_shift_past_pause, pause_duration_minutes};
 use crate::operations::police_response_integration::{
@@ -1027,7 +1027,7 @@ pub(crate) fn validate_begin_operation(
             earliest_start,
         });
     }
-    if let Some(deadline) = resolve_earliest_operation_deadline(record)
+    if let Some(deadline) = record.completion_deadline()
         && state.now() >= deadline
     {
         return Err(OperationError::DeadlineMissed {

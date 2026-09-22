@@ -349,7 +349,7 @@ fn validate_active_enterprise(
                 });
             }
         }
-        None if enterprise.last_cycle_at().is_some() => {}
+        None if enterprise.version() == u32::MAX || enterprise.last_cycle_at().is_some() => {}
         None => {
             return Err(StateValidationError::InvalidEnterpriseSchedule {
                 enterprise: enterprise.id(),
@@ -559,7 +559,11 @@ fn validate_enterprise_definition(
         .flatten()
         .max()
         .expect("established enterprise always has a schedule base");
-        let expected_next = schedule_base.checked_add(definition.economics().cycle());
+        let expected_next = if enterprise.version() == u32::MAX {
+            None
+        } else {
+            schedule_base.checked_add(definition.economics().cycle())
+        };
         if enterprise.next_cycle_at() != expected_next {
             return Err(StateValidationError::InvalidEnterpriseSchedule {
                 enterprise: enterprise.id(),

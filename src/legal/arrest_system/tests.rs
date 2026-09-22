@@ -910,6 +910,91 @@ fn autonomous_arrest_is_evidence_driven_not_case_origin_driven() {
 }
 
 #[test]
+fn autonomous_arrest_cohort_reserves_all_arrest_ids_before_first_detention() {
+    let mut fixture = fixture();
+    add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let crew = fixture
+        .state
+        .world()
+        .get_character(fixture.suspect)
+        .and_then(|character| character.organization())
+        .expect("fixture suspect should belong to the criminal crew");
+    let second_suspect = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second arrestable subject".to_owned(),
+            organization: Some(crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second arrestable subject should validate");
+    let second_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Second evidence-backed custody case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(second_suspect)]),
+        },
+    )
+    .expect("second custody case should validate")
+    .commit(&mut fixture.state)
+    .expect("second custody case should commit");
+    add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        second_case,
+        second_suspect,
+    );
+    add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        second_case,
+        second_suspect,
+    );
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Arrest, u32::MAX - 1);
+    let before =
+        bincode::serialize(&fixture.state).expect("pre-exhaustion custody state should serialize");
+
+    let error = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect_err("the full arrest cohort must fit before the first detention");
+    assert_eq!(
+        error,
+        ArrestError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "arrest",
+            next: u32::MAX - 1,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected custody state should serialize"),
+        before,
+        "later arrest-ID exhaustion must not leave the first candidate detained"
+    );
+    for character in [fixture.suspect, second_suspect] {
+        assert!(
+            fixture
+                .state
+                .legal()
+                .active_arrest_for_character(character)
+                .is_none()
+        );
+    }
+    validate_state(&fixture.state).expect("rejected arrest cohort should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn autonomous_arrest_leaves_legal_authority_cases_outside_police_custody() {
     let mut fixture = fixture();
     let legal_authority = insert_organization(

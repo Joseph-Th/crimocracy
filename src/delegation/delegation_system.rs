@@ -150,17 +150,16 @@ pub enum DelegationError {
 pub struct ValidatedPolicyChange {
     organization: OrganizationId,
     setting: PolicySetting,
-    /// Version held at validation; `None` when the setting is already current and the
-    /// commit is a no-op that must not invalidate held policy snapshots.
-    expected_policy_version: Option<u32>,
+    /// Exact version observed at validation. Even an idempotent set keeps this snapshot so a
+    /// token validated as a no-op cannot silently report success after another command changes
+    /// the policy before commit.
+    expected_policy_version: u32,
+    requires_change: bool,
     approval_cancellations: Option<ValidatedRecruitmentApprovalCancellations>,
 }
 
 impl ValidatedPolicyChange {
     pub fn commit(self, registry: &Registry, state: &mut AppState) -> Result<(), DelegationError> {
-        let Some(expected_version) = self.expected_policy_version else {
-            return Ok(());
-        };
         let organization_record = state
             .world
             .get_organization(self.organization)
@@ -171,13 +170,21 @@ impl ValidatedPolicyChange {
                 organization: self.organization,
                 policy: self.setting.kind(),
             })?;
-        if current_version != expected_version {
+        if current_version != self.expected_policy_version {
             return Err(DelegationError::StaleOrganizationPolicy {
                 organization: self.organization,
                 policy: self.setting.kind(),
-                expected: expected_version,
+                expected: self.expected_policy_version,
                 found: current_version,
             });
+        }
+        if !self.requires_change {
+            debug_assert_eq!(
+                organization_record.policy(self.setting.kind()),
+                Some(self.setting),
+                "same-version no-op token must still observe its validated setting"
+            );
+            return Ok(());
         }
         // Same currency contract mandate revision/revocation enforce at commit: a changed
         // approval set between validation and commit rejects the operation instead of
@@ -209,20 +216,21 @@ pub fn validate_set_policy(
         .get_organization(organization)
         .ok_or(DelegationError::MissingOrganization(organization))?;
     registry.get_policy(setting.kind());
-    if organization_record.policy(setting.kind()) == Some(setting) {
-        return Ok(ValidatedPolicyChange {
-            organization,
-            setting,
-            expected_policy_version: None,
-            approval_cancellations: None,
-        });
-    }
     let expected_policy_version = organization_record.policy_version(setting.kind()).ok_or(
         DelegationError::MissingOrganizationPolicy {
             organization,
             policy: setting.kind(),
         },
     )?;
+    if organization_record.policy(setting.kind()) == Some(setting) {
+        return Ok(ValidatedPolicyChange {
+            organization,
+            setting,
+            expected_policy_version,
+            requires_change: false,
+            approval_cancellations: None,
+        });
+    }
     ensure_version_can_advance(expected_policy_version, "organization policy")?;
 
     let approval_cancellations = matches!(setting, PolicySetting::IndependentRecruitment(_))
@@ -237,7 +245,8 @@ pub fn validate_set_policy(
     Ok(ValidatedPolicyChange {
         organization,
         setting,
-        expected_policy_version: Some(expected_policy_version),
+        expected_policy_version,
+        requires_change: true,
         approval_cancellations,
     })
 }

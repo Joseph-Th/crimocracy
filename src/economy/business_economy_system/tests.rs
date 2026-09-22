@@ -179,6 +179,124 @@ fn due_business_cycle_near_clock_horizon_settles_then_exhausts_future_recurrence
     );
 }
 
+#[test]
+fn final_business_version_settles_then_exhausts_future_recurrence() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let original = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("established economy should persist")
+        .clone();
+    let mut replacement = business_economy_wire(&original);
+    replacement.version = u32::MAX - 1;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_economy(
+            build_save(&registry, &fixture.state).expect("economy fixture should save"),
+            &original,
+            &replacement,
+        ),
+    )
+    .expect("near-terminal active economy should remain current-version valid");
+    let cycle_duration = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .cycle();
+    fixture.state.advance_clock(cycle_duration);
+
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+            .expect("final representable business cycle should decide"),
+    )
+    .expect("final representable business cycle should validate")
+    .commit(&mut fixture.state)
+    .expect("final representable business cycle should commit");
+
+    let economy = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("terminal-rail economy should persist");
+    assert_eq!(economy.version(), u32::MAX);
+    assert_eq!(economy.status(), BusinessOperatingStatus::Active);
+    assert_eq!(economy.next_cycle_at(), None);
+    assert!(
+        find_due_businesses(&fixture.state).is_empty(),
+        "the final version must not schedule an impossible future settlement"
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("version-exhausted active economy should remain registry-valid");
+    restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("version-exhausted economy should remain saveable"),
+    )
+    .expect("version-exhausted economy should survive restore");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn final_business_version_resume_becomes_active_without_impossible_recurrence() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    validate_suspend_business_economy(&fixture.state, fixture.business)
+        .expect("fresh economy should suspend")
+        .commit(&mut fixture.state)
+        .expect("fresh economy suspension should commit");
+
+    let original = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("suspended economy should persist")
+        .clone();
+    assert_eq!(original.last_cycle_at(), None);
+    let mut replacement = business_economy_wire(&original);
+    replacement.version = u32::MAX - 1;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_economy(
+            build_save(&registry, &fixture.state).expect("suspended economy fixture should save"),
+            &original,
+            &replacement,
+        ),
+    )
+    .expect("near-terminal suspended economy should remain valid");
+
+    validate_resume_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("final representable resume should validate")
+        .commit(&mut fixture.state)
+        .expect("final representable resume should commit");
+
+    let economy = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .expect("terminal resumed economy should persist");
+    assert_eq!(economy.version(), u32::MAX);
+    assert_eq!(economy.status(), BusinessOperatingStatus::Active);
+    assert_eq!(economy.last_cycle_at(), None);
+    assert_eq!(economy.next_cycle_at(), None);
+    assert!(
+        find_due_businesses(&fixture.state).is_empty(),
+        "a final-version resume must not schedule an economy cycle that cannot advance"
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("terminal resumed economy should remain registry-valid");
+    restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("terminal resumed economy should remain saveable"),
+    )
+    .expect("terminal resumed economy should survive restore");
+    validate_invariants(&fixture.state);
+}
+
 fn ledger_transaction_wire(
     record: &crate::finance::LedgerTransactionRecord,
 ) -> LedgerTransactionRecordWire {
@@ -2414,6 +2532,45 @@ fn chronic_losing_business_surfaces_losses_then_suspends_at_the_authored_thresho
     let mut last_information = None;
     for cycle_index in 0..threshold {
         state.advance_clock(SimDuration::from_minutes(1_440));
+        if cycle_index + 1 == threshold {
+            let original = state
+                .economy()
+                .get_business_economy(business)
+                .expect("pre-threshold economy should persist")
+                .clone();
+            let mut replacement = business_economy_wire(&original);
+            replacement.version = u32::MAX - 1;
+            let mut terminal_state = restore_save(
+                &registry,
+                replace_serialized_economy(
+                    build_save(&registry, &state).expect("pre-threshold economy should save"),
+                    &original,
+                    &replacement,
+                ),
+            )
+            .expect("near-terminal pre-threshold economy should remain valid");
+            let terminal_plan = decide_business_cycle(&registry, &terminal_state, business, -500)
+                .expect("terminal threshold cycle should decide");
+            validate_business_cycle_plan(&terminal_state, terminal_plan)
+                .expect("terminal threshold cycle should validate")
+                .commit(&mut terminal_state)
+                .expect("settlement and chronic-loss suspension should share the final revision");
+            let terminal = terminal_state
+                .economy()
+                .get_business_economy(business)
+                .expect("terminal suspended economy should persist");
+            assert_eq!(terminal.version(), u32::MAX);
+            assert_eq!(terminal.status(), BusinessOperatingStatus::Suspended);
+            assert_eq!(terminal.next_cycle_at(), None);
+            validate_state_against_registry(&registry, &terminal_state)
+                .expect("terminal chronic-loss suspension should remain registry-valid");
+            restore_save(
+                &registry,
+                build_save(&registry, &terminal_state)
+                    .expect("terminal chronic-loss suspension should save"),
+            )
+            .expect("terminal chronic-loss suspension should restore");
+        }
         // Maximum authored downside variance keeps every settlement net-negative.
         let plan = decide_business_cycle(&registry, &state, business, -500)
             .expect("losing business cycle should decide");

@@ -41,9 +41,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
-use crate::core::version::{
-    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
-};
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::delegation::delegation_system::{
     DelegationError, ensure_mandate_authority_current, resolve_mandate_authority,
 };
@@ -270,9 +268,9 @@ struct EnterpriseCycleSnapshot {
     expected_enterprise_version: u32,
     authority: ResolvedMandateAuthority,
     occurred_at: SimTime,
-    /// `None` means this cycle settled successfully but its next authored recurrence lies beyond
-    /// the finite simulation clock. The enterprise stays live and authoritative, but there is no
-    /// further representable settlement instant to schedule.
+    /// `None` means this cycle settled successfully but no further recurrence is representable:
+    /// either the authored cadence lies beyond the finite clock or this settlement consumed the
+    /// final enterprise version. The racket stays live and authoritative but unscheduled.
     next_cycle_at: Option<SimTime>,
     /// Set when this losing settlement reaches the authored consecutive-loss threshold:
     /// commit suspends the enterprise instead of leaving the next cycle scheduled.
@@ -471,8 +469,8 @@ fn validate_cash_account_kind(
 impl ValidatedEnterpriseCycle {
     fn id_budget(&self) -> Result<Vec<(IdKind, u32)>, EnterpriseError> {
         let mut budget = Vec::new();
-        if self.ledger.is_some() {
-            budget.push((IdKind::LedgerTransaction, 1));
+        if let Some(ledger) = &self.ledger {
+            budget.extend(ledger.id_budget());
         }
         if self.information.is_some() {
             budget.push((IdKind::Information, 1));
@@ -481,12 +479,7 @@ impl ValidatedEnterpriseCycle {
             budget.push((IdKind::Report, 1));
         }
         if let Some(incident) = &self.incident {
-            budget.push((
-                IdKind::Investigation,
-                u32::from(incident.requires_new_investigation()),
-            ));
-            budget.push((IdKind::Evidence, incident.evidence_count()?));
-            budget.push((IdKind::CaseWitness, u32::from(incident.has_witness())));
+            budget.extend(incident.id_budget()?);
         }
         budget.push((IdKind::EnterpriseCycle, 1));
         Ok(budget)
@@ -563,19 +556,8 @@ impl ValidatedEnterpriseCycle {
                 },
             },
             self.plan.snapshot.next_cycle_at,
+            self.plan.snapshot.suspends_after_settlement,
         );
-        if self.plan.snapshot.suspends_after_settlement {
-            // Domain-owner consequence for chronic losses: suspend the racket instead of
-            // scheduling another identical loss. Any restart still uses the canonical resume
-            // token; eligible non-player rackets may exercise it during daily maintenance.
-            state.enterprises.set_status(
-                self.plan.snapshot.enterprise,
-                EnterpriseStatus::Suspended,
-                None,
-                None,
-                state.now(),
-            );
-        }
         Ok(cycle_id)
     }
 }
@@ -595,11 +577,7 @@ fn validate_enterprise_cycle_snapshot_current<'a>(
             found: record.version(),
         });
     }
-    ensure_version_can_advance_by(
-        record.version(),
-        1 + u32::from(plan.snapshot.suspends_after_settlement),
-        "enterprise",
-    )?;
+    ensure_version_can_advance(record.version(), "enterprise")?;
     if record.status() != EnterpriseStatus::Active {
         return Err(EnterpriseError::EnterpriseNotActive(
             plan.snapshot.enterprise,

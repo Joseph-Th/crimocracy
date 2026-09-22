@@ -1158,6 +1158,58 @@ fn restore_rejects_overlapping_active_operation_bookings() {
 }
 
 #[test]
+fn restore_rejects_impossible_high_version_authorized_operation() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let operation = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, target),
+    )
+    .expect("operation fixture should validate")
+    .commit(&mut state)
+    .expect("operation fixture should commit");
+    let original = state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized operation should persist")
+        .clone();
+    let mut replacement = original.clone();
+    replacement.runtime.version = u32::MAX - 1;
+    let original_bytes = bincode::serialize(&original).expect("operation record should serialize");
+    let replacement_bytes =
+        bincode::serialize(&replacement).expect("replacement operation should serialize");
+    assert_eq!(
+        replacement_bytes.len(),
+        original_bytes.len(),
+        "fixed-width version corruption must preserve the operation wire size"
+    );
+    let envelope = build_save(&registry, &state).expect("authorized operation should save");
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized operation must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    let corrupted: SaveEnvelope = bincode::deserialize(&envelope_bytes)
+        .expect("same-layout version corruption should decode");
+
+    let error = restore_save(&registry, corrupted).expect_err(
+        "restore must reject an active operation outside the canonical version envelope",
+    );
+    assert_eq!(
+        error,
+        LoadError::InvalidState(StateValidationError::InvalidOperationRuntime { operation })
+    );
+}
+
+#[test]
 fn current_minute_authorization_reserves_crew_through_its_real_next_tick_window() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let first = validate_authorize_operation(
@@ -1834,6 +1886,44 @@ fn missed_deadline_scan_preserves_deadline_chronology_before_operation_id() {
     );
     validate_state(&state).expect("overdue operation fixture should remain structurally valid");
     validate_invariants(&state);
+}
+
+#[test]
+fn restore_rebuilds_active_completion_deadline_index() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let mut draft = make_test_draft(organization, leader, target);
+    draft
+        .constraints
+        .push(crate::operations::OperationConstraint::CompleteBy(
+            SimTime::from_minutes(10),
+        ));
+    let operation = validate_authorize_operation(&registry, &state, draft)
+        .expect("deadline-constrained operation should validate")
+        .commit(&mut state)
+        .expect("deadline-constrained operation should commit");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
+        .expect("operation should begin before its deadline");
+
+    let envelope = build_save(&registry, &state).expect("active deadline state should save");
+    let bytes = bincode::serialize(&envelope).expect("active deadline save should serialize");
+    let decoded: SaveEnvelope =
+        bincode::deserialize(&bytes).expect("active deadline save should deserialize");
+    let mut restored =
+        restore_save(&registry, decoded).expect("active deadline state should restore");
+    restored.advance_clock(SimDuration::from_minutes(10));
+
+    assert_eq!(
+        find_due_operations_with_missed_deadlines(&restored),
+        vec![operation],
+        "restore must rebuild the derived completion-deadline index"
+    );
+    assert!(
+        restored.operations().has_consistent_indexes(),
+        "restored operation indexes must remain exact"
+    );
+    validate_state(&restored).expect("restored overdue operation remains structurally coherent");
+    validate_invariants(&restored);
 }
 
 #[test]

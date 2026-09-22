@@ -620,7 +620,12 @@ impl EnterpriseState {
         );
     }
 
-    fn apply_cycle(&mut self, cycle: EnterpriseCycleRecord, next_cycle_at: Option<SimTime>) {
+    fn apply_cycle(
+        &mut self,
+        cycle: EnterpriseCycleRecord,
+        next_cycle_at: Option<SimTime>,
+        suspend_after_settlement: bool,
+    ) {
         let enterprise_id = cycle.enterprise();
         let old_next_cycle_at = self
             .records
@@ -633,14 +638,44 @@ impl EnterpriseState {
             old_next_cycle_at,
             enterprise_id,
         );
+        if suspend_after_settlement {
+            let record = self
+                .records
+                .get(&enterprise_id)
+                .expect("validated enterprise disappeared before cycle commit");
+            Self::remove_from_set_index(
+                &mut self.active_by_organization,
+                record.organization(),
+                enterprise_id,
+            );
+            Self::remove_from_set_index(
+                &mut self.active_by_mandate,
+                record.authority().mandate,
+                enterprise_id,
+            );
+        }
         let enterprise = self
             .records
             .get_mut(&enterprise_id)
             .expect("validated enterprise disappeared before cycle commit");
         enterprise.runtime.last_cycle_at = Some(cycle.occurred_at());
-        enterprise.runtime.next_cycle_at = next_cycle_at;
+        enterprise.runtime.next_cycle_at = if suspend_after_settlement {
+            None
+        } else {
+            next_cycle_at
+        };
+        if suspend_after_settlement {
+            enterprise.runtime.status = EnterpriseStatus::Suspended;
+            enterprise.runtime.retired_at = None;
+        }
         enterprise.runtime.version = advance_version_preflighted(enterprise.runtime.version);
-        if let Some(next_cycle_at) = next_cycle_at {
+        if suspend_after_settlement {
+            let inserted = self.suspended.insert(enterprise_id);
+            debug_assert!(
+                inserted,
+                "active enterprise must not already be suspended-indexed"
+            );
+        } else if let Some(next_cycle_at) = next_cycle_at {
             self.active_by_next_cycle
                 .entry(next_cycle_at)
                 .or_default()

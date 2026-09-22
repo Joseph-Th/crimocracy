@@ -2,16 +2,21 @@
 
 use super::*;
 use crate::build_registry;
+use crate::core::entity::EntityRef;
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
-use crate::core::persistence::{build_save, restore_save};
+use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_test_tick as run_tick;
 use crate::legal::arrest_system::validate_arrest;
 use crate::legal::investigation_system::{
     validate_add_evidence, validate_assign_investigator, validate_open_investigation,
 };
-use crate::legal::{ArrestDraft, EvidenceDraft, InvestigationDraft, InvestigationWorkFocus};
+use crate::legal::{
+    Admissibility, ArrestDraft, EvidenceDraft, EvidenceReliability, EvidenceStrength,
+    InvestigationDraft, InvestigationWorkFocus, InvestigationWorkKind, InvestigationWorkOutcome,
+    InvestigationWorkStatus,
+};
 use crate::world::world_system::{insert_character, insert_organization};
 use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind, Rating};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +34,37 @@ struct WorkFixture {
     first_evidence: EvidenceId,
     /// Kept in the case graph so review support has multi-evidence context; not focused directly.
     _second_evidence: EvidenceId,
+}
+
+fn replace_serialized_record<T: serde::Serialize>(
+    envelope: SaveEnvelope,
+    original: &T,
+    replacement: &T,
+    context: &str,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("source record should serialize");
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("replacement record should serialize");
+    assert_eq!(
+        replacement_bytes.len(),
+        original_bytes.len(),
+        "{context} version-only corruption must preserve wire size"
+    );
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized {context} must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout version corruption must remain decodable")
 }
 
 fn run_until_work_resolved(registry: &Registry, state: &mut AppState, work: InvestigationWorkId) {
@@ -250,6 +286,165 @@ fn held_work_schedule_rejects_clock_overflow_before_work_id_is_consumed() {
     assert_eq!(fixture.state.legal().investigation_work().count(), 0);
 }
 
+#[test]
+fn evidence_review_scheduling_requires_full_resolution_version_headroom() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let original = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("fixture investigation should persist")
+        .clone();
+    let mut replacement = original.clone();
+    replacement.version = u32::MAX - 2;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_record(
+            build_save(&registry, &fixture.state).expect("review fixture should save"),
+            &original,
+            &replacement,
+            "investigation",
+        ),
+    )
+    .expect("near-terminal active investigation should remain structurally valid");
+
+    let error = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        review_draft(&fixture, fixture.first_evidence),
+    )
+    .expect_err("review scheduling must reserve its schedule plus worst-case resolution revisions");
+    let InvestigationWorkError::VersionCapacity(error) = error else {
+        panic!("unexpected review headroom error: {error:?}");
+    };
+    assert_eq!(error.record_kind(), "investigation");
+    assert!(
+        apply_evidence_review_scheduling(&registry, &mut fixture.state)
+            .expect("autonomous review maintenance should defer terminal-rail work")
+            .is_empty()
+    );
+    assert_eq!(fixture.state.legal().investigation_work().count(), 0);
+    validate_state(&fixture.state).expect("deferred near-terminal case should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn witness_interview_scheduling_requires_case_and_witness_resolution_headroom() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            subject: EntityRef::Character(fixture.target),
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("witness fixture should validate")
+    .commit(&mut fixture.state)
+    .expect("witness fixture should commit");
+    let original_investigation = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("witness investigation should persist")
+        .clone();
+    let mut replacement_investigation = original_investigation.clone();
+    replacement_investigation.version = u32::MAX - 3;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_record(
+            build_save(&registry, &fixture.state).expect("witness case fixture should save"),
+            &original_investigation,
+            &replacement_investigation,
+            "investigation",
+        ),
+    )
+    .expect("near-terminal witness case should remain structurally valid");
+    let interview_draft = InvestigationWorkDraft {
+        investigation: fixture.investigation,
+        investigator: fixture.investigator,
+        kind: InvestigationWorkKind::WitnessInterview,
+        focus: InvestigationWorkFocus::witness(case_witness),
+    };
+
+    let error = validate_schedule_investigation_work(&registry, &fixture.state, interview_draft)
+        .expect_err("interview scheduling must reserve four case revisions from the current state");
+    let InvestigationWorkError::VersionCapacity(error) = error else {
+        panic!("unexpected interview case-headroom error: {error:?}");
+    };
+    assert_eq!(error.record_kind(), "investigation");
+    assert!(
+        apply_witness_interview_scheduling(&registry, &mut fixture.state)
+            .expect("autonomous interview maintenance should defer a near-terminal case")
+            .is_empty()
+    );
+
+    // Restore the ordinary case version, then exhaust only the witness headroom. Connected
+    // testimony advances the witness once for its statement and once for the completed attempt.
+    let current_investigation = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("near-terminal investigation should persist")
+        .clone();
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_record(
+            build_save(&registry, &fixture.state).expect("near-terminal case should save"),
+            &current_investigation,
+            &original_investigation,
+            "investigation",
+        ),
+    )
+    .expect("ordinary investigation version should restore");
+    let original_witness = fixture
+        .state
+        .legal()
+        .get_case_witness(case_witness)
+        .expect("case witness should persist")
+        .clone();
+    let mut replacement_witness = original_witness.clone();
+    replacement_witness.version = u32::MAX - 1;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_record(
+            build_save(&registry, &fixture.state).expect("witness-version fixture should save"),
+            &original_witness,
+            &replacement_witness,
+            "case witness",
+        ),
+    )
+    .expect("near-terminal case witness should remain structurally valid");
+
+    let error = validate_schedule_investigation_work(&registry, &fixture.state, interview_draft)
+        .expect_err("interview scheduling must reserve two possible witness revisions");
+    let InvestigationWorkError::VersionCapacity(error) = error else {
+        panic!("unexpected witness-headroom error: {error:?}");
+    };
+    assert_eq!(error.record_kind(), "case witness");
+    assert!(
+        apply_witness_interview_scheduling(&registry, &mut fixture.state)
+            .expect("autonomous interview maintenance should skip exhausted witness headroom")
+            .is_empty()
+    );
+    assert_eq!(fixture.state.legal().investigation_work().count(), 0);
+    validate_state(&fixture.state).expect("deferred witness work state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
 struct TestEvidenceDraft {
     investigation: InvestigationId,
     police: crate::core::id::OrganizationId,
@@ -461,6 +656,91 @@ fn combined_autonomous_scheduler_handles_review_and_interview_cases_in_one_pass(
         InvestigationWorkFocus::witness(case_witness)
     );
     validate_state(&fixture.state).expect("combined scheduling state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn combined_autonomous_scheduler_rejects_work_id_exhaustion_atomically() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let interview_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Parallel atomic witness inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.target)]),
+        },
+    )
+    .expect("parallel witness case should validate")
+    .commit(&mut fixture.state)
+    .expect("parallel witness case should commit");
+    validate_assign_investigator(&fixture.state, interview_case, fixture.second_investigator)
+        .expect("second detective assignment should validate")
+        .commit(&mut fixture.state)
+        .expect("second detective assignment should commit");
+    add_evidence(
+        &mut fixture.state,
+        TestEvidenceDraft {
+            investigation: interview_case,
+            police: fixture.police,
+            subject: EntityRef::Character(fixture.target),
+            origin: EntityRef::Character(fixture.middle),
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+        },
+    );
+    crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: interview_case,
+            witness: fixture.witness,
+            subject: EntityRef::Character(fixture.target),
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("parallel case witness should validate")
+    .commit(&mut fixture.state)
+    .expect("parallel case witness should commit");
+
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::InvestigationWork, u32::MAX - 1);
+    let before = bincode::serialize(&fixture.state)
+        .expect("pre-exhaustion scheduling state should serialize");
+
+    let error = apply_investigation_work_scheduling(&registry, &mut fixture.state)
+        .expect_err("two planned work records must reserve both IDs before mutation");
+    assert_eq!(
+        error,
+        InvestigationWorkError::IdExhaustion(crate::core::id::IdExhaustionError::Exhausted {
+            kind: "investigation work",
+            next: u32::MAX - 1,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected scheduling state should serialize"),
+        before,
+        "allocator failure must not schedule only the earlier case"
+    );
+    for investigator in [fixture.investigator, fixture.second_investigator] {
+        assert!(
+            fixture
+                .state
+                .legal()
+                .scheduled_work_for_investigator(investigator)
+                .is_none(),
+            "no investigator may receive a prefix work assignment"
+        );
+    }
+    validate_state(&fixture.state).expect("rejected scheduling batch should remain valid");
     validate_invariants(&fixture.state);
 }
 

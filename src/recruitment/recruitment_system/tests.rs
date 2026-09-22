@@ -33,6 +33,7 @@ use crate::legal::{
     Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
     InvestigationDraft,
 };
+use crate::recruitment::RecruitmentApproach;
 use crate::recruitment::autonomous_recruitment::{
     AutonomousRecruitmentError, apply_due_autonomous_recruitment,
 };
@@ -60,6 +61,66 @@ struct Fixture {
     incumbent: CharacterId,
     recruiter: CharacterId,
     candidate: CharacterId,
+}
+
+fn detain_recruitment_character(
+    fixture: &mut Fixture,
+    character: CharacterId,
+    title: &str,
+) -> crate::core::id::ArrestId {
+    let police = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Recruitment Custody Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("custody authority should validate");
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: police,
+            title: title.to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(character)]),
+        },
+    )
+    .expect("recruitment custody investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("recruitment custody investigation should commit");
+    let mut evidence = BTreeSet::new();
+    for kind in [EvidenceKind::Document, EvidenceKind::Fingerprint] {
+        let id = validate_add_evidence(
+            &fixture.state,
+            EvidenceDraft {
+                investigation,
+                custodian: police,
+                subject: EntityRef::Character(character),
+                origin: None,
+                kind,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility: Admissibility::Admissible,
+                discovered_at: fixture.state.now(),
+            },
+        )
+        .expect("recruitment custody evidence should validate")
+        .commit(&mut fixture.state)
+        .expect("recruitment custody evidence should commit");
+        evidence.insert(id);
+    }
+    validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character,
+            investigation,
+            evidence,
+        },
+    )
+    .expect("recruitment custody arrest should validate")
+    .commit(&mut fixture.state)
+    .expect("recruitment custody arrest should commit")
 }
 
 #[test]
@@ -536,59 +597,8 @@ fn detained_delegated_manager_does_not_attempt_autonomous_recruitment() {
     let registry = build_registry();
     let mut fixture = fixture();
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
-    let police = insert_organization(
-        &registry,
-        &mut fixture.state,
-        OrganizationDraft {
-            name: "Recruitment Custody Bureau".to_owned(),
-            kind: OrganizationKind::LawEnforcement,
-        },
-    )
-    .expect("custody authority should validate");
-    let investigation = validate_open_investigation(
-        &fixture.state,
-        InvestigationDraft {
-            owner: police,
-            title: "Recruiter custody test".to_owned(),
-            subjects: BTreeSet::from([EntityRef::Character(fixture.recruiter)]),
-        },
-    )
-    .expect("recruiter investigation should validate")
-    .commit(&mut fixture.state)
-    .expect("recruiter investigation should commit");
-    let mut evidence = BTreeSet::new();
-    for kind in [EvidenceKind::Document, EvidenceKind::Fingerprint] {
-        let id = validate_add_evidence(
-            &fixture.state,
-            EvidenceDraft {
-                investigation,
-                custodian: police,
-                subject: EntityRef::Character(fixture.recruiter),
-                origin: None,
-                kind,
-                strength: EvidenceStrength::Strong,
-                reliability: EvidenceReliability::HighlyReliable,
-                admissibility: Admissibility::Admissible,
-                discovered_at: fixture.state.now(),
-            },
-        )
-        .expect("recruiter custody evidence should validate")
-        .commit(&mut fixture.state)
-        .expect("recruiter custody evidence should commit");
-        evidence.insert(id);
-    }
-    validate_arrest(
-        &registry,
-        &fixture.state,
-        ArrestDraft {
-            character: fixture.recruiter,
-            investigation,
-            evidence,
-        },
-    )
-    .expect("delegated recruiter arrest should validate")
-    .commit(&mut fixture.state)
-    .expect("delegated recruiter arrest should commit");
+    let recruiter = fixture.recruiter;
+    detain_recruitment_character(&mut fixture, recruiter, "Recruiter custody test");
     assert!(
         fixture
             .state
@@ -615,6 +625,149 @@ fn detained_delegated_manager_does_not_attempt_autonomous_recruitment() {
         Some(fixture.source)
     );
     validate_state(&fixture.state).expect("detained-manager recruitment state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn validated_executive_refusal_stales_when_recruiter_detained_before_commit() {
+    let mut fixture = fixture();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(95, 95, 10, 85, 90, 0, 0),
+    )
+    .expect("strong incumbent relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("incumbent relationship should commit");
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(10, 20, 30, 5, 0, 0, 0),
+    )
+    .expect("weak recruiter relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("recruiter relationship should commit");
+    let draft = RecruitmentDraft {
+        approach: RecruitmentApproach::Advancement,
+        ..protection_draft(&fixture)
+    };
+    assert_eq!(
+        decide_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+            .expect("fixture should produce a valid refusal")
+            .context
+            .outcome,
+        RecruitmentOutcome::Refused,
+        "regression requires the no-reassignment refusal path"
+    );
+    let validated = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("free executive recruiter refusal should validate");
+    let recruiter = fixture.recruiter;
+    let arrest = detain_recruitment_character(
+        &mut fixture,
+        recruiter,
+        "Executive recruiter stale-token custody",
+    );
+    let attempts_before = fixture.state.recruitment().attempts().count();
+    let before = bincode::serialize(&fixture.state).expect("post-arrest state should serialize");
+
+    let error = validated
+        .commit(&mut fixture.state)
+        .expect_err("detention after validation must stale the executive recruitment token");
+    assert_eq!(
+        error,
+        RecruitmentError::DetainedRecruiter {
+            recruiter: fixture.recruiter,
+            arrest,
+        }
+    );
+    assert_eq!(
+        fixture.state.recruitment().attempts().count(),
+        attempts_before,
+        "rejected stale token must not record a recruitment attempt"
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "rejected detained-recruiter commit must be atomic"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .organization(),
+        Some(fixture.source)
+    );
+    validate_state(&fixture.state).expect("rejected detained-recruiter state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn validated_executive_refusal_stales_when_candidate_bound_after_validation() {
+    let mut fixture = fixture();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(95, 95, 10, 85, 90, 0, 0),
+    )
+    .expect("strong incumbent relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("incumbent relationship should commit");
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(10, 20, 30, 5, 0, 0, 0),
+    )
+    .expect("weak recruiter relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("recruiter relationship should commit");
+    let draft = RecruitmentDraft {
+        approach: RecruitmentApproach::Advancement,
+        ..protection_draft(&fixture)
+    };
+    let validated = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("free candidate refusal should validate");
+    let candidate = fixture.candidate;
+    let arrest =
+        detain_recruitment_character(&mut fixture, candidate, "Candidate stale-token custody");
+    let attempts_before = fixture.state.recruitment().attempts().count();
+    let before = bincode::serialize(&fixture.state).expect("post-arrest state should serialize");
+
+    let error = validated
+        .commit(&mut fixture.state)
+        .expect_err("a newly unavailable candidate must stale even a refusal token");
+    assert_eq!(
+        error,
+        RecruitmentError::World(WorldError::ActiveArrestAssignment {
+            character: fixture.candidate,
+            arrest,
+        })
+    );
+    assert_eq!(
+        fixture.state.recruitment().attempts().count(),
+        attempts_before,
+        "rejected candidate-availability token must not record an attempt"
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "rejected unavailable-candidate commit must be atomic"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.candidate)
+            .expect("candidate should persist")
+            .organization(),
+        Some(fixture.source)
+    );
+    validate_state(&fixture.state).expect("rejected unavailable-candidate state should validate");
     validate_invariants(&fixture.state);
 }
 
@@ -2804,6 +2957,22 @@ fn canonical_world_dependencies_block_poaching_a_manager_with_direct_reports() {
         0
     );
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn candidate_discovery_classifies_version_exhaustion_as_prospect_unavailability() {
+    assert!(candidate_reassignment_is_unavailable(
+        WorldError::VersionCapacity(crate::core::version::VersionCapacityError::new("character"))
+    ));
+    assert!(!candidate_reassignment_is_unavailable(
+        WorldError::MissingCharacter(CharacterId::from_raw(999_999))
+    ));
+    assert!(!candidate_reassignment_is_unavailable(
+        WorldError::IdExhaustion(crate::core::id::IdExhaustionError::Exhausted {
+            kind: "character",
+            next: u32::MAX,
+        })
+    ));
 }
 
 #[test]

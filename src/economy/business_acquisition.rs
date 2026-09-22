@@ -151,7 +151,6 @@ impl ValidatedBusinessAcquisition {
         // Fresh account IDs are predicted without consuming allocator state. The payment token
         // owns that plan and opens the accounts only when the whole acquisition is ready to
         // commit, so no rollback path exists and every rejection is truly state-neutral.
-        let mut fresh_account_count = 0_u32;
         let mut establishment = None;
         let payment = if let Some(economy) = existing_economy {
             validate_record_transaction(
@@ -196,8 +195,6 @@ impl ValidatedBusinessAcquisition {
                     &openings,
                 )?,
             );
-            fresh_account_count = u32::try_from(openings.len())
-                .expect("validated acquisition account count must fit u32");
             validate_record_transaction_with_openings(
                 state,
                 openings,
@@ -244,12 +241,9 @@ impl ValidatedBusinessAcquisition {
         // ---- Phase 3: reserve the complete persistent-ID budget, then commit. --------
         // No mutation occurs before this aggregate preflight. From this point onward each
         // fallible canonical commit is guarded by dependencies that this function alone controls.
-        state.ids.reserve_many(&[
-            (IdKind::BusinessOwnershipChange, 1),
-            (IdKind::FinancialAccount, fresh_account_count),
-            (IdKind::LedgerTransaction, 1),
-            (IdKind::Report, 1),
-        ])?;
+        let mut id_budget = payment.id_budget();
+        id_budget.extend([(IdKind::BusinessOwnershipChange, 1), (IdKind::Report, 1)]);
+        state.ids.reserve_many(&id_budget)?;
         transfer
             .commit(state)
             .expect("a just-revalidated ownership transfer must commit atomically");

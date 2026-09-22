@@ -3,12 +3,10 @@
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     CaseWitnessId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId,
-    ProsecutionCaseId, WitnessStatementId,
+    InvestigationWorkId, ProsecutionCaseId, WitnessStatementId,
 };
 use crate::core::state::AppState;
-use crate::core::version::{
-    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
-};
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::legal::{
     Admissibility, CaseWitnessDraft, CaseWitnessRecord, EvidenceAssessment, EvidenceConnection,
     EvidenceIdentity, EvidenceKind, EvidenceRecord, EvidenceReliability, EvidenceStrength,
@@ -174,7 +172,12 @@ pub fn validate_register_case_witness(
         .legal
         .get_investigation(draft.investigation)
         .expect("validated investigation must still exist");
-    ensure_version_can_advance(investigation.version(), "investigation")?;
+    crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+        state,
+        draft.investigation,
+        1,
+        None,
+    )?;
     let witness = state
         .world
         .get_character(draft.witness)
@@ -203,7 +206,12 @@ fn validate_registration_snapshot(
             found: investigation.version(),
         });
     }
-    ensure_version_can_advance(investigation.version(), "investigation")?;
+    crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+        state,
+        draft.investigation,
+        1,
+        None,
+    )?;
     let witness = state
         .world
         .get_character(draft.witness)
@@ -332,6 +340,18 @@ impl ValidatedWitnessCooperation {
                 cooperation: self.cooperation,
             });
         }
+        crate::legal::investigation_work_execution::ensure_external_case_witness_mutation_capacity(
+            state,
+            self.case_witness,
+            1,
+            None,
+        )?;
+        crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+            state,
+            witness.investigation(),
+            1,
+            None,
+        )?;
         Ok(())
     }
 
@@ -361,8 +381,18 @@ pub fn validate_set_witness_cooperation(
         .legal
         .get_investigation(witness.investigation())
         .expect("validated case witness investigation must exist");
-    ensure_version_can_advance(witness.version(), "case witness")?;
-    ensure_version_can_advance(investigation.version(), "investigation")?;
+    crate::legal::investigation_work_execution::ensure_external_case_witness_mutation_capacity(
+        state,
+        case_witness,
+        1,
+        None,
+    )?;
+    crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+        state,
+        witness.investigation(),
+        1,
+        None,
+    )?;
     Ok(ValidatedWitnessCooperation {
         case_witness,
         cooperation,
@@ -383,9 +413,14 @@ pub struct ValidatedWitnessStatement {
     testimony: WitnessTestimonyDefinition,
     expected_witness_version: u32,
     expected_investigation_version: u32,
+    originating_work: Option<InvestigationWorkId>,
 }
 
 impl ValidatedWitnessStatement {
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
+        vec![(IdKind::WitnessStatement, 1), (IdKind::Evidence, 1)]
+    }
+
     pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), WitnessError> {
         let case_witness = validate_witness_mutation_snapshot(
             state,
@@ -394,11 +429,19 @@ impl ValidatedWitnessStatement {
             self.expected_investigation_version,
         )?;
         validate_statement_dependencies(state, case_witness, &self.draft)?;
-        let investigation = state
-            .legal
-            .get_investigation(case_witness.investigation())
-            .expect("validated witness investigation must exist");
-        ensure_version_can_advance_by(investigation.version(), 2, "investigation")?;
+        let excluded_work = statement_excluded_work(state, case_witness, self.originating_work);
+        crate::legal::investigation_work_execution::ensure_external_case_witness_mutation_capacity(
+            state,
+            case_witness.id(),
+            1,
+            excluded_work,
+        )?;
+        crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+            state,
+            case_witness.investigation(),
+            2,
+            excluded_work,
+        )?;
         crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
             state,
             case_witness.investigation(),
@@ -425,35 +468,39 @@ impl ValidatedWitnessStatement {
     pub(crate) fn commit_from_investigation_work(
         self,
         state: &mut AppState,
-        originating_work: crate::core::id::InvestigationWorkId,
+        originating_work: InvestigationWorkId,
     ) -> Result<WitnessStatementOutcome, WitnessError> {
+        debug_assert_eq!(
+            self.originating_work,
+            Some(originating_work),
+            "work-derived witness statement token must retain its originating work"
+        );
         self.commit_with_originating_work(state, Some(originating_work))
     }
 
     fn commit_with_originating_work(
         self,
         state: &mut AppState,
-        originating_work: Option<crate::core::id::InvestigationWorkId>,
+        originating_work: Option<InvestigationWorkId>,
     ) -> Result<WitnessStatementOutcome, WitnessError> {
-        state
-            .ids
-            .reserve_many(&[(IdKind::WitnessStatement, 1), (IdKind::Evidence, 1)])?;
+        state.ids.reserve_many(&self.id_budget())?;
         self.ensure_current(state)?;
-        let (investigation_id, witness_id, subject, cooperation) = {
-            let case_witness = validate_witness_mutation_snapshot(
-                state,
-                self.draft.case_witness,
-                self.expected_witness_version,
-                self.expected_investigation_version,
-            )?;
-            validate_statement_dependencies(state, case_witness, &self.draft)?;
-            (
-                case_witness.investigation(),
-                case_witness.witness(),
-                case_witness.subject(),
-                case_witness.cooperation(),
-            )
-        };
+        Ok(self.commit_preflighted(state, originating_work))
+    }
+
+    fn commit_preflighted(
+        self,
+        state: &mut AppState,
+        originating_work: Option<InvestigationWorkId>,
+    ) -> WitnessStatementOutcome {
+        let case_witness = state
+            .legal
+            .get_case_witness(self.draft.case_witness)
+            .expect("preflighted case witness must still exist");
+        let investigation_id = case_witness.investigation();
+        let witness_id = case_witness.witness();
+        let subject = case_witness.subject();
+        let cooperation = case_witness.cooperation();
         let statement = state
             .ids
             .next_witness_statement()
@@ -520,10 +567,10 @@ impl ValidatedWitnessStatement {
                 .insert_witness_statement_from_investigation_work(statement_record, work),
             None => state.legal.insert_witness_statement(statement_record),
         }
-        Ok(WitnessStatementOutcome {
+        WitnessStatementOutcome {
             statement,
             evidence,
-        })
+        }
     }
 }
 
@@ -532,13 +579,43 @@ pub fn validate_record_witness_statement(
     state: &AppState,
     draft: WitnessStatementDraft,
 ) -> Result<ValidatedWitnessStatement, WitnessError> {
+    validate_record_witness_statement_internal(registry, state, draft, None)
+}
+
+pub(crate) fn validate_record_witness_statement_for_investigation_work(
+    registry: &Registry,
+    state: &AppState,
+    draft: WitnessStatementDraft,
+    originating_work: InvestigationWorkId,
+) -> Result<ValidatedWitnessStatement, WitnessError> {
+    validate_record_witness_statement_internal(registry, state, draft, Some(originating_work))
+}
+
+fn validate_record_witness_statement_internal(
+    registry: &Registry,
+    state: &AppState,
+    draft: WitnessStatementDraft,
+    originating_work: Option<InvestigationWorkId>,
+) -> Result<ValidatedWitnessStatement, WitnessError> {
     let case_witness = validate_case_witness_for_active_case(state, draft.case_witness)?;
     validate_statement_dependencies(state, case_witness, &draft)?;
     let investigation = state
         .legal
         .get_investigation(case_witness.investigation())
         .expect("validated witness investigation must exist");
-    ensure_version_can_advance_by(investigation.version(), 2, "investigation")?;
+    let excluded_work = statement_excluded_work(state, case_witness, originating_work);
+    crate::legal::investigation_work_execution::ensure_external_case_witness_mutation_capacity(
+        state,
+        case_witness.id(),
+        1,
+        excluded_work,
+    )?;
+    crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+        state,
+        case_witness.investigation(),
+        2,
+        excluded_work,
+    )?;
     crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
         state,
         case_witness.investigation(),
@@ -560,6 +637,24 @@ pub fn validate_record_witness_statement(
         testimony: registry.legal().witness_testimony(),
         expected_witness_version: case_witness.version(),
         expected_investigation_version: investigation.version(),
+        originating_work,
+    })
+}
+
+fn statement_excluded_work(
+    state: &AppState,
+    case_witness: &CaseWitnessRecord,
+    originating_work: Option<InvestigationWorkId>,
+) -> Option<InvestigationWorkId> {
+    originating_work.or_else(|| {
+        state
+            .legal
+            .scheduled_work_for_focus(
+                case_witness.investigation(),
+                crate::legal::InvestigationWorkKind::WitnessInterview,
+                crate::legal::InvestigationWorkFocus::witness(case_witness.id()),
+            )
+            .map(|work| work.id())
     })
 }
 

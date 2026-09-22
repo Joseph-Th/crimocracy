@@ -1424,6 +1424,133 @@ fn due_enterprise_cycle_near_clock_horizon_settles_then_exhausts_future_recurren
     validate_invariants(&restored);
 }
 
+#[test]
+fn final_enterprise_version_settles_then_exhausts_future_recurrence() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let original = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("established enterprise should persist")
+        .clone();
+    let mut replacement = enterprise_wire(&original);
+    replacement.runtime.version = u32::MAX - 1;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_enterprise(
+            build_save(&registry, &fixture.state).expect("enterprise fixture should save"),
+            &original,
+            &replacement,
+        ),
+    )
+    .expect("near-terminal active enterprise should remain current-version valid");
+    let cycle_duration = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .cycle();
+    fixture.state.advance_clock(cycle_duration);
+
+    validate_enterprise_cycle_plan(
+        &fixture.state,
+        decide_enterprise_cycle(
+            &registry,
+            &fixture.state,
+            enterprise,
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
+        )
+        .expect("final representable enterprise cycle should decide"),
+    )
+    .expect("final representable enterprise cycle should validate")
+    .commit(&mut fixture.state)
+    .expect("final representable enterprise cycle should commit");
+
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("terminal-rail enterprise should persist");
+    assert_eq!(record.version(), u32::MAX);
+    assert_eq!(record.status(), EnterpriseStatus::Active);
+    assert_eq!(record.next_cycle_at(), None);
+    assert!(
+        find_due_enterprises(&fixture.state).is_empty(),
+        "the final version must not schedule an impossible future racket settlement"
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("version-exhausted active enterprise should remain registry-valid");
+    restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("version-exhausted enterprise should remain saveable"),
+    )
+    .expect("version-exhausted enterprise should survive restore");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn final_enterprise_version_resume_becomes_active_without_impossible_recurrence() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("fresh enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("fresh enterprise suspension should commit");
+
+    let original = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("suspended enterprise should persist")
+        .clone();
+    assert_eq!(original.last_cycle_at(), None);
+    let mut replacement = enterprise_wire(&original);
+    replacement.runtime.version = u32::MAX - 1;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_enterprise(
+            build_save(&registry, &fixture.state)
+                .expect("suspended enterprise fixture should save"),
+            &original,
+            &replacement,
+        ),
+    )
+    .expect("near-terminal suspended enterprise should remain valid");
+
+    validate_resume_enterprise(&registry, &fixture.state, enterprise)
+        .expect("final representable enterprise resume should validate")
+        .commit(&mut fixture.state)
+        .expect("final representable enterprise resume should commit");
+
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("terminal resumed enterprise should persist");
+    assert_eq!(record.version(), u32::MAX);
+    assert_eq!(record.status(), EnterpriseStatus::Active);
+    assert_eq!(record.last_cycle_at(), None);
+    assert_eq!(record.next_cycle_at(), None);
+    assert!(
+        find_due_enterprises(&fixture.state).is_empty(),
+        "a final-version resume must not schedule an enterprise cycle that cannot advance"
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("terminal resumed enterprise should remain registry-valid");
+    restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("terminal resumed enterprise should remain saveable"),
+    )
+    .expect("terminal resumed enterprise should survive restore");
+    validate_invariants(&fixture.state);
+}
+
 fn replace_serialized_business(
     envelope: SaveEnvelope,
     original: &crate::world::BusinessRecord,
@@ -4710,6 +4837,53 @@ fn chronic_losing_enterprise_reports_losses_then_suspends_at_the_authored_thresh
     let mut last_information = None;
     for cycle_index in 0..threshold {
         state.advance_clock(SimDuration::from_minutes(1_440));
+        if cycle_index + 1 == threshold {
+            let original = state
+                .enterprises()
+                .get_enterprise(enterprise)
+                .expect("pre-threshold enterprise should persist")
+                .clone();
+            let mut replacement = enterprise_wire(&original);
+            replacement.runtime.version = u32::MAX - 1;
+            let mut terminal_state = restore_save(
+                &registry,
+                replace_serialized_enterprise(
+                    build_save(&registry, &state).expect("pre-threshold enterprise should save"),
+                    &original,
+                    &replacement,
+                ),
+            )
+            .expect("near-terminal pre-threshold enterprise should remain valid");
+            let terminal_plan = decide_enterprise_cycle(
+                &registry,
+                &terminal_state,
+                enterprise,
+                EnterpriseCycleRandomness::new(
+                    0,
+                    EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+                ),
+            )
+            .expect("terminal threshold enterprise cycle should decide");
+            validate_enterprise_cycle_plan(&terminal_state, terminal_plan)
+                .expect("terminal threshold enterprise cycle should validate")
+                .commit(&mut terminal_state)
+                .expect("settlement and chronic-loss suspension should share the final revision");
+            let terminal = terminal_state
+                .enterprises()
+                .get_enterprise(enterprise)
+                .expect("terminal suspended enterprise should persist");
+            assert_eq!(terminal.version(), u32::MAX);
+            assert_eq!(terminal.status(), EnterpriseStatus::Suspended);
+            assert_eq!(terminal.next_cycle_at(), None);
+            validate_state_against_registry(&registry, &terminal_state)
+                .expect("terminal chronic-loss enterprise suspension should remain registry-valid");
+            restore_save(
+                &registry,
+                build_save(&registry, &terminal_state)
+                    .expect("terminal chronic-loss enterprise suspension should save"),
+            )
+            .expect("terminal chronic-loss enterprise suspension should restore");
+        }
         let plan = decide_enterprise_cycle(
             &registry,
             &state,
@@ -4895,6 +5069,52 @@ fn establishment_rejects_a_duplicate_kind_at_an_occupied_location_even_when_susp
         "retired history and the fresh active replacement both remain queryable"
     );
     crate::core::invariants::validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_lifecycle_leaves_version_exhausted_suspended_enterprise_at_terminal_rail() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("active enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("enterprise suspension should commit");
+
+    let original = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("suspended enterprise should persist")
+        .clone();
+    let mut replacement = enterprise_wire(&original);
+    replacement.runtime.version = u32::MAX;
+    let envelope = build_save(&registry, &fixture.state)
+        .expect("suspended enterprise should save before version-capacity fixture rewrite");
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_enterprise(envelope, &original, &replacement),
+    )
+    .expect("a suspended enterprise at the finite version rail should remain structurally valid");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state).expect(
+        "finite version capacity should leave the racket suspended, not fail daily maintenance",
+    );
+    assert!(outcome.resumed.is_empty());
+    assert!(outcome.retired.is_empty());
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("version-exhausted enterprise should persist");
+    assert_eq!(record.status(), EnterpriseStatus::Suspended);
+    assert_eq!(record.version(), u32::MAX);
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("terminal-rail suspended enterprise should remain registry-valid");
+    validate_invariants(&fixture.state);
 }
 
 #[test]

@@ -9,7 +9,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{BusinessCycleId, BusinessId, EnterpriseId, FinancialAccountId, IdKind};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::core::version::ensure_version_can_advance_by;
+use crate::core::version::ensure_version_can_advance;
 use crate::economy::{BusinessCycleRecord, BusinessOperatingStatus};
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::finance::finance_system::{
@@ -30,9 +30,9 @@ struct BusinessCycleSnapshot {
     owner: BusinessOwner,
     expected_economy_version: u32,
     occurred_at: SimTime,
-    /// `None` means this cycle settled successfully but its next authored recurrence lies beyond
-    /// the finite simulation clock. The economy remains operational; there is simply no further
-    /// representable settlement instant to schedule.
+    /// `None` means this cycle settled successfully but no further recurrence is representable:
+    /// either the authored cadence lies beyond the finite clock or this settlement consumed the
+    /// final economy version. The economy remains operational but unscheduled.
     next_cycle_at: Option<SimTime>,
     /// Whether this settlement reaches the authored consecutive-loss threshold. At that point
     /// active enterprise infrastructure may require the otherwise-closing front to remain open.
@@ -140,10 +140,14 @@ pub fn decide_business_cycle(
     let blocking_enterprise = loss_threshold_reached
         .then(|| active_enterprise_dependency(state, business))
         .flatten();
-    // Settling work that is due now must not fail only because its *next* recurrence lies past
-    // the finite clock. `None` is persisted as an exhausted recurrence and registry-aware
-    // validation proves that the authored cadence really does overflow from this settlement.
-    let next_cycle_at = state.now().checked_add(economics.cycle());
+    // Settling work that is due now must not fail only because its *next* recurrence is
+    // unrepresentable. `None` is the existing exhausted-recurrence shape for both finite clock
+    // and finite version rails. A non-suspending cycle from MAX-1 consumes the final economy
+    // version, so scheduling another settlement would manufacture a future tick that can never
+    // commit.
+    let next_cycle_at = (economy.version() < u32::MAX - 1)
+        .then(|| state.now().checked_add(economics.cycle()))
+        .flatten();
     Ok(BusinessCyclePlan {
         snapshot: BusinessCycleSnapshot {
             business,
@@ -239,15 +243,24 @@ pub struct ValidatedBusinessCycle {
 
 impl ValidatedBusinessCycle {
     pub fn commit(self, state: &mut AppState) -> Result<BusinessCycleId, BusinessEconomyError> {
+        self.ensure_current(state)?;
+        state.ids.reserve_many(&self.id_budget())?;
+        Ok(self.commit_preflighted(state))
+    }
+
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
         let mut budget = Vec::new();
-        if self.ledger.is_some() {
-            budget.push((IdKind::LedgerTransaction, 1));
+        if let Some(ledger) = &self.ledger {
+            budget.extend(ledger.id_budget());
         }
         if self.information.is_some() {
             budget.push((IdKind::Information, 1));
         }
         budget.push((IdKind::BusinessCycle, 1));
-        state.ids.reserve_many(&budget)?;
+        budget
+    }
+
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), BusinessEconomyError> {
         let business = validate_business(state, self.plan.snapshot.business)?;
         if business.version() != self.plan.snapshot.expected_business_version {
             return Err(BusinessEconomyError::StaleBusiness {
@@ -269,11 +282,7 @@ impl ValidatedBusinessCycle {
                 found: economy.version(),
             });
         }
-        ensure_version_can_advance_by(
-            economy.version(),
-            1 + u32::from(self.plan.snapshot.suspends_after_settlement()),
-            "business economy",
-        )?;
+        ensure_version_can_advance(economy.version(), "business economy")?;
         if economy.status() != BusinessOperatingStatus::Active {
             return Err(BusinessEconomyError::EconomyNotActive(
                 self.plan.snapshot.business,
@@ -292,10 +301,14 @@ impl ValidatedBusinessCycle {
             self.plan.accounts.settlement_account,
             Some(self.plan.snapshot.business),
         )?;
-        let transaction = match self.ledger {
-            Some(ledger) => Some(ledger.commit(state)?),
-            None => None,
-        };
+        if let Some(ledger) = &self.ledger {
+            ledger.ensure_current(state)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) -> BusinessCycleId {
+        let transaction = self.ledger.map(|ledger| ledger.commit_preflighted(state));
         let information = self.information.map(|information| {
             information
                 .commit(state)
@@ -328,21 +341,9 @@ impl ValidatedBusinessCycle {
                 },
             },
             self.plan.snapshot.next_cycle_at,
+            self.plan.snapshot.suspends_after_settlement(),
         );
-        if self.plan.snapshot.suspends_after_settlement() {
-            // Domain-owner consequence for chronic losses: suspend instead of scheduling
-            // another identical loss. Any later restart still uses the canonical resume token;
-            // non-player books may exercise that token through daily autonomous maintenance.
-            state.economy.set_status(
-                self.plan.snapshot.business,
-                BusinessOperatingStatus::Suspended,
-                None,
-                None,
-                false,
-                None,
-            );
-        }
-        Ok(cycle)
+        cycle
     }
 }
 
@@ -371,11 +372,7 @@ pub fn validate_business_cycle_plan(
             found: economy.version(),
         });
     }
-    ensure_version_can_advance_by(
-        economy.version(),
-        1 + u32::from(plan.snapshot.suspends_after_settlement()),
-        "business economy",
-    )?;
+    ensure_version_can_advance(economy.version(), "business economy")?;
     if economy.status() != BusinessOperatingStatus::Active {
         return Err(BusinessEconomyError::EconomyNotActive(
             plan.snapshot.business,

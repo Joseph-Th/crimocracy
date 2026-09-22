@@ -8,7 +8,7 @@ use super::{
     InvestigationWorkError, is_reviewable_evidence_kind, scheduled_work_for_investigator,
     validate_schedule_investigation_work,
 };
-use crate::core::id::{CharacterId, EvidenceId, InvestigationId, InvestigationWorkId};
+use crate::core::id::{CharacterId, EvidenceId, IdKind, InvestigationId, InvestigationWorkId};
 use crate::core::state::AppState;
 use crate::legal::{
     InvestigationRecord, InvestigationWorkDraft, InvestigationWorkFocus, InvestigationWorkKind,
@@ -36,7 +36,7 @@ pub(crate) fn apply_investigation_work_scheduling(
         .active_investigations()
         .map(|investigation| investigation.id())
         .collect();
-    let mut outcome = InvestigationWorkSchedulingOutcome::default();
+    let mut planned = Vec::new();
 
     for investigation_id in investigations {
         let investigation = state
@@ -49,16 +49,37 @@ pub(crate) fn apply_investigation_work_scheduling(
         if scheduled_work_for_investigator(state, investigator).is_some() {
             continue;
         }
-        if let Some(work) =
-            schedule_next_evidence_review(registry, state, investigation_id, investigator)?
+        if investigation.version() <= u32::MAX - 3
+            && let Some(work) =
+                plan_next_evidence_review(registry, state, investigation_id, investigator)?
         {
-            outcome.evidence_reviews.push(work);
+            planned.push((InvestigationWorkKind::EvidenceReview, work));
             continue;
         }
-        if let Some(work) =
-            schedule_next_witness_interview(registry, state, investigation_id, investigator)?
+        if investigation.version() <= u32::MAX - 4
+            && let Some(work) =
+                plan_next_witness_interview(registry, state, investigation_id, investigator)?
         {
-            outcome.witness_interviews.push(work);
+            planned.push((InvestigationWorkKind::WitnessInterview, work));
+        }
+    }
+
+    // One canonical scheduling pass allocates at most one work record per staffed case. Every
+    // plan above targets a distinct case/investigator pair, so preflight the complete ID budget
+    // before the first schedule mutation instead of allowing a later capacity failure to leave
+    // only the earlier case IDs scheduled.
+    state.ids.reserve(
+        IdKind::InvestigationWork,
+        u32::try_from(planned.len()).expect("persisted investigation count must fit the ID space"),
+    )?;
+    let mut outcome = InvestigationWorkSchedulingOutcome::default();
+    for (kind, work) in planned {
+        let id = work
+            .commit(state)
+            .expect("prevalidated investigation-work plan must remain current within one pass");
+        match kind {
+            InvestigationWorkKind::EvidenceReview => outcome.evidence_reviews.push(id),
+            InvestigationWorkKind::WitnessInterview => outcome.witness_interviews.push(id),
         }
     }
     Ok(outcome)
@@ -83,6 +104,9 @@ pub(crate) fn apply_witness_interview_scheduling(
             .legal
             .get_investigation(investigation_id)
             .expect("indexed active investigation must exist");
+        if investigation.version() > u32::MAX - 4 {
+            continue;
+        }
         let Some(investigator) = available_case_investigator(state, investigation) else {
             continue;
         };
@@ -90,9 +114,9 @@ pub(crate) fn apply_witness_interview_scheduling(
             continue;
         }
         if let Some(work) =
-            schedule_next_witness_interview(registry, state, investigation_id, investigator)?
+            plan_next_witness_interview(registry, state, investigation_id, investigator)?
         {
-            scheduled.push(work);
+            scheduled.push(work.commit(state)?);
         }
     }
     Ok(scheduled)
@@ -114,6 +138,9 @@ pub(crate) fn apply_evidence_review_scheduling(
             .legal
             .get_investigation(investigation_id)
             .expect("indexed active investigation must exist");
+        if investigation.version() > u32::MAX - 3 {
+            continue;
+        }
         let Some(investigator) = available_case_investigator(state, investigation) else {
             continue;
         };
@@ -121,9 +148,9 @@ pub(crate) fn apply_evidence_review_scheduling(
             continue;
         }
         if let Some(work) =
-            schedule_next_evidence_review(registry, state, investigation_id, investigator)?
+            plan_next_evidence_review(registry, state, investigation_id, investigator)?
         {
-            scheduled.push(work);
+            scheduled.push(work.commit(state)?);
         }
     }
     Ok(scheduled)
@@ -141,12 +168,12 @@ fn available_case_investigator(
         .filter(|lead| state.legal.active_arrest_for_character(*lead).is_none())
 }
 
-fn schedule_next_evidence_review(
+fn plan_next_evidence_review(
     registry: &Registry,
-    state: &mut AppState,
+    state: &AppState,
     investigation: InvestigationId,
     investigator: CharacterId,
-) -> Result<Option<InvestigationWorkId>, InvestigationWorkError> {
+) -> Result<Option<super::ValidatedInvestigationWorkSchedule>, InvestigationWorkError> {
     let record = state
         .legal
         .get_investigation(investigation)
@@ -163,21 +190,21 @@ fn schedule_next_evidence_review(
             kind: InvestigationWorkKind::EvidenceReview,
             focus: InvestigationWorkFocus::evidence(source),
         },
-    )?
-    .commit(state)?;
+    )?;
     Ok(Some(work))
 }
 
-fn schedule_next_witness_interview(
+fn plan_next_witness_interview(
     registry: &Registry,
-    state: &mut AppState,
+    state: &AppState,
     investigation: InvestigationId,
     investigator: CharacterId,
-) -> Result<Option<InvestigationWorkId>, InvestigationWorkError> {
+) -> Result<Option<super::ValidatedInvestigationWorkSchedule>, InvestigationWorkError> {
     let mut witnesses: Vec<_> = state
         .legal
         .case_witnesses_for_investigation(investigation)
         .filter(|witness| witness.statements().is_empty())
+        .filter(|witness| witness.version() <= u32::MAX - 2)
         .filter(|witness| {
             !crate::legal::witness_system::case_witness_is_case_subject(state, witness)
         })
@@ -209,8 +236,7 @@ fn schedule_next_witness_interview(
                 kind: InvestigationWorkKind::WitnessInterview,
                 focus,
             },
-        )?
-        .commit(state)?;
+        )?;
         return Ok(Some(work));
     }
     Ok(None)

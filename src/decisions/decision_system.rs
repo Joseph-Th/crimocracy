@@ -14,7 +14,7 @@ pub use recruitment_approval::{
 
 use crate::core::attention::AttentionClass;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, IdExhaustionError, OperationId, OrganizationId,
+    CharacterId, DecisionRequestId, IdExhaustionError, IdKind, OperationId, OrganizationId,
     PoliceResponseId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
@@ -306,6 +306,10 @@ pub struct ValidatedDecisionRequest {
 }
 
 impl ValidatedDecisionRequest {
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
+        vec![(IdKind::DecisionRequest, 1)]
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<DecisionRequestOutcome, DecisionError> {
         let operation_id = self.operation();
         let operation = state
@@ -528,6 +532,17 @@ pub struct DecisionResolutionOutcome {
 }
 
 impl ValidatedDecisionResolution {
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
+        match &self.action {
+            DecisionResolutionAction::Operation { abort, .. } => abort
+                .as_ref()
+                .map_or_else(Vec::new, |abort| abort.id_budget()),
+            DecisionResolutionAction::RecruitmentApproval { attempt, .. } => attempt
+                .as_ref()
+                .map_or_else(Vec::new, |attempt| attempt.id_budget()),
+        }
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<DecisionResolutionOutcome, DecisionError> {
         let decision = state
             .decisions

@@ -223,12 +223,13 @@ impl ValidatedLegalRepresentation {
         self,
         state: &mut AppState,
     ) -> Result<LegalRepresentationId, LegalRepresentationError> {
-        state.ids.reserve_many(&[
-            (IdKind::LedgerTransaction, 1),
+        let mut budget = self.payment.id_budget();
+        budget.extend([
             (IdKind::Information, 1),
             (IdKind::Report, 1),
             (IdKind::LegalRepresentation, 1),
-        ])?;
+        ]);
+        state.ids.reserve_many(&budget)?;
         validate_time(state, self.retained_at)?;
         validate_dependency_versions(
             state,
@@ -712,10 +713,12 @@ pub struct ValidatedLegalRepresentationEnd {
 }
 
 impl ValidatedLegalRepresentationEnd {
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
+        vec![(IdKind::Information, 1), (IdKind::Report, 1)]
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<(), LegalRepresentationError> {
-        state
-            .ids
-            .reserve_many(&[(IdKind::Information, 1), (IdKind::Report, 1)])?;
+        state.ids.reserve_many(&self.id_budget())?;
         self.ensure_current(state)?;
         self.commit_preflighted(state);
         Ok(())
@@ -809,13 +812,10 @@ impl ValidatedCounselDetentionEnds {
     }
 
     pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
-        let count = u32::try_from(self.representations.len())
-            .expect("active representation count must fit u32");
-        if count == 0 {
-            Vec::new()
-        } else {
-            vec![(IdKind::Information, count), (IdKind::Report, count)]
-        }
+        self.representations
+            .iter()
+            .flat_map(ValidatedLegalRepresentationEnd::id_budget)
+            .collect()
     }
 
     pub(crate) fn commit_preflighted(self, state: &mut AppState) {

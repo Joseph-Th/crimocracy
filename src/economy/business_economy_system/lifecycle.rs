@@ -187,15 +187,18 @@ pub(crate) fn validate_acquisition_restart(
         .finance
         .get_account(economy.operating_account())
         .expect("account validation proved the operating account exists");
-    state
-        .now()
-        .checked_add(cycle_duration)
-        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+    let cycle_duration = schedulable_cycle_duration(economy.version(), cycle_duration);
+    if let Some(cycle_duration) = cycle_duration {
+        state
+            .now()
+            .checked_add(cycle_duration)
+            .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+    }
     Ok(ValidatedBusinessEconomyStatusChange {
         business,
         expected_version: economy.version(),
         change: BusinessEconomyStatusChange::Restart,
-        cycle_duration: Some(cycle_duration),
+        cycle_duration,
         restart_capital_floor: Some(OperatingCapitalFloor {
             amount: operating.spendable_balance(),
             account_version: operating.version(),
@@ -232,15 +235,28 @@ fn validate_resume_with_cycle_duration(
         Some(business),
     )?;
     ensure_version_can_advance(economy.version(), "business economy")?;
-    state
-        .now()
-        .checked_add(cycle_duration)
-        .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+    let cycle_duration = schedulable_cycle_duration(economy.version(), cycle_duration);
+    if let Some(cycle_duration) = cycle_duration {
+        state
+            .now()
+            .checked_add(cycle_duration)
+            .ok_or(BusinessEconomyError::SimulationTimeOverflow)?;
+    }
     Ok(ValidatedBusinessEconomyStatusChange {
         business,
         expected_version: economy.version(),
         change: BusinessEconomyStatusChange::Resume,
-        cycle_duration: Some(cycle_duration),
+        cycle_duration,
         restart_capital_floor: None,
     })
+}
+
+/// Returning to Active consumes one economy version immediately. If that transition consumes the
+/// final representable version, the economy remains operational as terminal state but must not
+/// schedule another cycle that can never advance its version.
+fn schedulable_cycle_duration(
+    current_version: u32,
+    cycle_duration: SimDuration,
+) -> Option<SimDuration> {
+    (current_version < u32::MAX - 1).then_some(cycle_duration)
 }

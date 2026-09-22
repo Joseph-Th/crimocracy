@@ -57,6 +57,50 @@ pub struct PayrollOutcome {
     transaction: Option<LedgerTransactionId>,
 }
 
+struct OrganizationPayrollPlan {
+    organization: OrganizationId,
+    funding: Vec<FinancialAccountId>,
+    per_member: Money,
+    owed: Money,
+    paid: Money,
+    allocations: Vec<(CharacterId, Option<CharacterId>, Money)>,
+}
+
+impl OrganizationPayrollPlan {
+    fn short(&self) -> Money {
+        self.owed
+            .checked_sub(self.paid)
+            .expect("planned payroll payment cannot exceed the wage obligation")
+    }
+
+    fn id_budget(&self, state: &AppState) -> Vec<(IdKind, u32)> {
+        let mut budget = Vec::new();
+        if self.paid > Money::ZERO {
+            let missing_wage_accounts = self
+                .allocations
+                .iter()
+                .filter(|(member, _, amount)| {
+                    *amount > Money::ZERO
+                        && state
+                            .finance()
+                            .accounts_for(FinancialOwner::Character(*member))
+                            .all(|account| account.kind() != AccountKind::StreetCash)
+                })
+                .count();
+            budget.push((
+                IdKind::FinancialAccount,
+                u32::try_from(missing_wage_accounts)
+                    .expect("payroll member count must fit the financial-account ID space"),
+            ));
+            budget.push((IdKind::LedgerTransaction, 1));
+        }
+        if self.short() > Money::ZERO && state.player_organization() == Some(self.organization) {
+            budget.push((IdKind::Report, 1));
+        }
+        budget
+    }
+}
+
 impl PayrollOutcome {
     pub fn organization(&self) -> OrganizationId {
         self.organization
@@ -104,28 +148,37 @@ pub(crate) fn apply_daily_payroll(
         .filter(|record| record.kind() == OrganizationKind::Criminal)
         .map(|record| record.id())
         .collect();
-    let mut outcomes = Vec::with_capacity(organizations.len());
+    let mut plans = Vec::with_capacity(organizations.len());
     for organization in organizations {
-        let outcome = apply_organization_payroll(
-            registry,
-            state,
-            organization,
-            &find_funding_accounts(state, organization),
-        )?;
-        if let Some(outcome) = outcome {
-            outcomes.push(outcome);
+        if let Some(plan) = plan_organization_payroll(registry, state, organization)? {
+            plans.push(plan);
         }
+    }
+    // Prove every non-ID finite dependency before the first organization mutates.
+    // Account openings themselves are intentionally validated at commit because each organization
+    // must observe the allocator position left by the preceding payroll; the aggregate ID budget
+    // below guarantees those openings cannot exhaust.
+    for plan in &plans {
+        preflight_organization_payroll(registry, state, plan)?;
+    }
+    let mut budget = Vec::new();
+    for plan in &plans {
+        budget.extend(plan.id_budget(state));
+    }
+    state.ids.reserve_many(&budget)?;
+
+    let mut outcomes = Vec::with_capacity(plans.len());
+    for plan in plans {
+        outcomes.push(apply_organization_payroll(registry, state, plan)?);
     }
     Ok(outcomes)
 }
 
-fn apply_organization_payroll(
+fn plan_organization_payroll(
     registry: &Registry,
-    state: &mut AppState,
+    state: &AppState,
     organization: OrganizationId,
-    funding: &[FinancialAccountId],
-) -> Result<Option<PayrollOutcome>, PayrollError> {
-    let upkeep = registry.upkeep();
+) -> Result<Option<OrganizationPayrollPlan>, PayrollError> {
     // Payroll is a standing membership cost, not compensation sampled from the member's exact
     // availability at midnight. Custody blocks work while it lasts, but it does not end
     // membership or erase the day's wage obligation. Filtering on current detention here would
@@ -140,48 +193,141 @@ fn apply_organization_payroll(
     if members.is_empty() {
         return Ok(None);
     }
-    let per_member = upkeep.per_member_daily();
+    let per_member = registry.upkeep().per_member_daily();
     let owed = per_member
         .checked_mul(i64::try_from(members.len()).map_err(|_| PayrollError::MemberCountOverflow)?)
         .ok_or(PayrollError::ArithmeticOverflow)?;
-
+    let funding = find_funding_accounts(state, organization);
     // Payroll is an organization-level obligation, so every organization-owned liquid cash
-    // account is eligible. Enterprise records may reference the same cash account as one
-    // another or as the general treasury; those references do not create account ownership or
-    // segregation. Excluding a referenced account would therefore let bookkeeping metadata
-    // make real organization cash disappear from payroll. We only need availability up to the
-    // amount owed, so the i128 accumulator cannot overflow even if a campaign has many very
-    // large positive accounts.
-    let paid = resolve_payroll_liquidity(state, funding, owed);
+    // account is eligible. Enterprise records may reference the same cash account as one another
+    // or as the general treasury; those references do not create ownership or segregation.
+    let paid = resolve_payroll_liquidity(state, &funding, owed);
     let allocations = allocate_member_payments(
         &members,
         per_member,
         paid,
         payroll_remainder_offset(state.now(), members.len()),
     );
-    let transaction = validate_payroll_payment(state, funding, &allocations, paid)?;
-
-    let short = owed.checked_sub(paid).expect("paid cannot exceed owed");
-    let mut outcome = PayrollOutcome {
+    Ok(Some(OrganizationPayrollPlan {
         organization,
+        funding,
+        per_member,
         owed,
         paid,
+        allocations,
+    }))
+}
+
+fn preflight_organization_payroll(
+    registry: &Registry,
+    state: &AppState,
+    plan: &OrganizationPayrollPlan,
+) -> Result<(), PayrollError> {
+    use crate::core::version::ensure_version_can_advance;
+
+    // Existing funding accounts that will actually be debited must retain one version slot.
+    let mut remaining = plan.paid;
+    for account_id in &plan.funding {
+        if remaining == Money::ZERO {
+            break;
+        }
+        let account = state
+            .finance()
+            .get_account(*account_id)
+            .expect("planned payroll funding came from the finance owner index");
+        let spendable = account.spendable_balance();
+        if spendable == Money::ZERO {
+            continue;
+        }
+        ensure_version_can_advance(account.version(), "financial account")
+            .map_err(FinanceError::from)?;
+        remaining = remaining
+            .checked_sub(spendable.min(remaining))
+            .expect("planned payroll debit cannot exceed remaining wages");
+    }
+    debug_assert_eq!(remaining, Money::ZERO);
+
+    // Existing wage pockets also need one version slot and enough numeric balance headroom.
+    // Missing pockets are covered by the aggregate FinancialAccount ID reservation.
+    for (member, _, amount) in &plan.allocations {
+        if *amount == Money::ZERO {
+            continue;
+        }
+        let owner = FinancialOwner::Character(*member);
+        if let Some(account) = state
+            .finance()
+            .accounts_for(owner)
+            .find(|account| account.kind() == AccountKind::StreetCash)
+        {
+            ensure_version_can_advance(account.version(), "financial account")
+                .map_err(FinanceError::from)?;
+            account
+                .balance()
+                .checked_add(*amount)
+                .ok_or(PayrollError::Finance(FinanceError::BalanceOverflow(
+                    account.id(),
+                )))?;
+        }
+    }
+
+    let short = plan.short();
+    if short > Money::ZERO {
+        let outcome = PayrollOutcome {
+            organization: plan.organization,
+            owed: plan.owed,
+            paid: plan.paid,
+            short,
+            transaction: None,
+        };
+        let underpaid: Vec<_> = plan
+            .allocations
+            .iter()
+            .filter(|(_, _, amount)| *amount < plan.per_member)
+            .copied()
+            .collect();
+        // This proves relationship version capacity and player-report shape. The resulting tokens
+        // are discarded because each organization's real commit revalidates against the allocator
+        // position produced by earlier disjoint payrolls.
+        let _ = validate_shortfall_consequences(
+            registry,
+            state,
+            plan.organization,
+            &outcome,
+            &underpaid,
+            plan.per_member,
+        )?;
+    }
+    Ok(())
+}
+
+fn apply_organization_payroll(
+    registry: &Registry,
+    state: &mut AppState,
+    plan: OrganizationPayrollPlan,
+) -> Result<PayrollOutcome, PayrollError> {
+    let transaction = validate_payroll_payment(state, &plan.funding, &plan.allocations, plan.paid)?;
+    let short = plan.short();
+    let mut outcome = PayrollOutcome {
+        organization: plan.organization,
+        owed: plan.owed,
+        paid: plan.paid,
         short,
         transaction: None,
     };
     let consequences = if short.cents() > 0 {
-        let underpaid: Vec<_> = allocations
+        let underpaid: Vec<_> = plan
+            .allocations
             .iter()
-            .filter(|(_, _, amount)| *amount < per_member)
+            .filter(|(_, _, amount)| *amount < plan.per_member)
             .copied()
             .collect();
         Some(validate_shortfall_consequences(
             registry,
             state,
-            organization,
+            plan.organization,
             &outcome,
             &underpaid,
-            per_member,
+            plan.per_member,
         )?)
     } else {
         None
@@ -205,7 +351,7 @@ fn apply_organization_payroll(
     if let Some(consequences) = consequences {
         consequences.commit_preflighted(state);
     }
-    Ok(Some(outcome))
+    Ok(outcome)
 }
 
 fn resolve_payroll_liquidity(

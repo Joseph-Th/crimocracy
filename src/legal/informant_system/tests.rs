@@ -112,6 +112,120 @@ fn record_personal_information(fixture: &mut Fixture) -> InformationId {
     .expect("personal information should commit")
 }
 
+fn arrest_high_safety_detainee(
+    registry: &crate::registry::Registry,
+    fixture: &mut Fixture,
+    label: &str,
+) -> CharacterId {
+    let detainee = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: format!("{label} Detainee"),
+            organization: Some(fixture.criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::from([(
+                DriveKind::Safety,
+                Rating::try_new(100).expect("maximum Safety drive should validate"),
+            )]),
+        },
+    )
+    .expect("high-Safety detainee should validate");
+    let case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: format!("{label} custody inquiry"),
+            subjects: BTreeSet::from([EntityRef::Character(detainee)]),
+        },
+    )
+    .expect("detainee case should validate")
+    .commit(&mut fixture.state)
+    .expect("detainee case should commit");
+    let strong = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("strong detainee evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("strong detainee evidence should commit");
+    let corroborating = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: case,
+            custodian: fixture.police,
+            subject: EntityRef::Character(detainee),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("corroborating detainee evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("corroborating detainee evidence should commit");
+    crate::legal::arrest_system::validate_arrest(
+        registry,
+        &fixture.state,
+        ArrestDraft {
+            character: detainee,
+            investigation: case,
+            evidence: BTreeSet::from([strong, corroborating]),
+        },
+    )
+    .expect("detainee arrest should validate")
+    .commit(&mut fixture.state)
+    .expect("detainee arrest should commit");
+    detainee
+}
+
+fn replace_serialized_investigation_version(
+    envelope: SaveEnvelope,
+    original: &crate::legal::InvestigationRecord,
+    version: u32,
+) -> SaveEnvelope {
+    let mut replacement = original.clone();
+    replacement.version = version;
+    let original_bytes =
+        bincode::serialize(original).expect("investigation record should serialize");
+    let replacement_bytes =
+        bincode::serialize(&replacement).expect("replacement investigation should serialize");
+    assert_eq!(
+        replacement_bytes.len(),
+        original_bytes.len(),
+        "version-only investigation corruption must preserve wire size"
+    );
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized target investigation must appear exactly once in the save envelope"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout investigation corruption must remain decodable")
+}
+
 #[test]
 fn disclosure_requires_personal_knowledge_and_creates_provenance_evidence() {
     let mut fixture = fixture();
@@ -400,6 +514,183 @@ fn autonomous_disclosure_reaches_each_matching_case_in_one_pass() {
         BTreeSet::from([fixture.investigation, second_case])
     );
     validate_state(&fixture.state).expect("multi-case disclosure state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_disclosure_batch_rejects_allocator_exhaustion_atomically() {
+    let mut fixture = fixture();
+    validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant establishment should validate")
+    .commit(&mut fixture.state)
+    .expect("informant establishment should commit");
+    let information = record_personal_information(&mut fixture);
+    let second_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Parallel allocator-pressure inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(fixture.criminal)]),
+        },
+    )
+    .expect("parallel case should validate")
+    .commit(&mut fixture.state)
+    .expect("parallel case should commit");
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Evidence, u32::MAX - 1);
+    let evidence_before = fixture.state.legal().all_evidence().count();
+    let before = bincode::serialize(&fixture.state)
+        .expect("pre-exhaustion disclosure state should serialize");
+
+    let error = apply_informant_disclosures(&mut fixture.state)
+        .expect_err("two same-pass disclosures must reserve both evidence IDs before mutation");
+    assert_eq!(
+        error,
+        InformantError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "evidence",
+            next: u32::MAX - 1,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected disclosure state should serialize"),
+        before,
+        "allocator failure must not disclose the fact into only the first matching case"
+    );
+    assert_eq!(
+        fixture.state.legal().all_evidence().count(),
+        evidence_before
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .informant_disclosures()
+            .next()
+            .is_none(),
+        "neither matching case may receive a prefix disclosure"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .informant_disclosure_for_case_information(fixture.investigation, information)
+            .is_none()
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .informant_disclosure_for_case_information(second_case, information)
+            .is_none()
+    );
+    validate_state(&fixture.state).expect("rejected disclosure batch should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_disclosure_skips_capacity_exhausted_case_without_blocking_other_cases() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant establishment should validate")
+    .commit(&mut fixture.state)
+    .expect("informant establishment should commit");
+    let first_information = record_personal_information(&mut fixture);
+    let second_information = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(fixture.member),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::General,
+            source_entity: None,
+            subject: EntityRef::Organization(fixture.criminal),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "The member independently confirmed another current crew fact.".to_owned(),
+        },
+    )
+    .expect("second personal information should validate")
+    .commit(&mut fixture.state)
+    .expect("second personal information should commit");
+    let other_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Still representable parallel inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(fixture.criminal)]),
+        },
+    )
+    .expect("parallel case should validate")
+    .commit(&mut fixture.state)
+    .expect("parallel case should commit");
+    let investigation_record = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("fixture investigation should persist")
+        .clone();
+    let envelope = build_save(&registry, &fixture.state).expect("disclosure fixture should save");
+    let corrupted =
+        replace_serialized_investigation_version(envelope, &investigation_record, u32::MAX - 1);
+    fixture.state = restore_save(&registry, corrupted)
+        .expect("high-version active investigation should remain structurally valid");
+    let exhausted_version = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("exhausted case should persist")
+        .version();
+
+    let disclosures = apply_informant_disclosures(&mut fixture.state)
+        .expect("one exhausted case must not block representable parallel files");
+    assert_eq!(
+        disclosures.len(),
+        2,
+        "both held facts should reach the parallel case in the same pass"
+    );
+    for information in [first_information, second_information] {
+        assert!(
+            fixture
+                .state
+                .legal()
+                .informant_disclosure_for_case_information(fixture.investigation, information)
+                .is_none()
+        );
+        assert!(
+            fixture
+                .state
+                .legal()
+                .informant_disclosure_for_case_information(other_case, information)
+                .is_some(),
+            "the representable case must still receive every matching fact"
+        );
+    }
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(fixture.investigation)
+            .expect("exhausted case should persist")
+            .version(),
+        exhausted_version,
+        "skipping an over-capacity disclosure cohort must leave that case untouched"
+    );
+    validate_state(&fixture.state).expect("terminal-capacity disclosure state should validate");
     validate_invariants(&fixture.state);
 }
 
@@ -978,6 +1269,18 @@ fn active_counsel_materially_reduces_detainee_flip_risk() {
 }
 
 #[test]
+fn informant_flip_uses_half_open_percentile_threshold() {
+    assert!(!informant_flip_succeeds(0, 0));
+    assert!(informant_flip_succeeds(0, 1));
+    assert!(informant_flip_succeeds(74, 75));
+    assert!(
+        !informant_flip_succeeds(75, 75),
+        "a 75% chance accepts rolls 0 through 74, not roll 75"
+    );
+    assert!(informant_flip_succeeds(99, 100));
+}
+
+#[test]
 fn informant_id_exhaustion_rejects_before_consuming_investigation_rng() {
     let registry = build_registry();
     let mut fixture = fixture();
@@ -1084,6 +1387,127 @@ fn informant_id_exhaustion_rejects_before_consuming_investigation_rng() {
         after_failure, untouched_draw,
         "a rejected informant establishment must not advance the investigation RNG"
     );
+}
+
+#[test]
+fn informant_recruitment_batch_rejects_later_success_exhaustion_atomically() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let detainees = (0..6)
+        .map(|index| {
+            arrest_high_safety_detainee(&registry, &mut fixture, &format!("Batch {index}"))
+        })
+        .collect::<Vec<_>>();
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        registry.legal().informant_decision_delay().as_minutes(),
+    ));
+
+    let chance = resolve_informant_flip_chance(registry.legal(), 100, false);
+    let mut preview_rng = fixture.state.investigation_rng_mut().clone();
+    let successful = detainees
+        .iter()
+        .filter(|_| {
+            let roll = crate::core::simulation::draw_index(&mut preview_rng, 100)
+                .expect("preview percentile draw should succeed");
+            (roll as u32) < chance
+        })
+        .count();
+    assert!(
+        successful >= 2,
+        "fixed batch fixture must exercise a later successful flip"
+    );
+    let next = u32::MAX - (u32::try_from(successful).expect("small fixture count fits u32") - 1);
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Informant, next);
+    let before = bincode::serialize(&fixture.state)
+        .expect("pre-exhaustion informant state should serialize");
+    let mut untouched_rng = fixture.state.investigation_rng_mut().clone();
+
+    let error = apply_detainee_informant_recruitment(&registry, &mut fixture.state).expect_err(
+        "the full successful cohort must fit before the first informant is established",
+    );
+    assert_eq!(
+        error,
+        InformantError::IdExhaustion(IdExhaustionError::Exhausted {
+            kind: "informant",
+            next,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected informant state should serialize"),
+        before,
+        "later successful-flip exhaustion must not establish an earlier prefix"
+    );
+    assert_eq!(fixture.state.legal().informants().count(), 0);
+
+    let after_failure =
+        crate::core::simulation::draw_index(fixture.state.investigation_rng_mut(), 100)
+            .expect("post-failure comparison draw should succeed");
+    let untouched_draw = crate::core::simulation::draw_index(&mut untouched_rng, 100)
+        .expect("control comparison draw should succeed");
+    assert_eq!(
+        after_failure, untouched_draw,
+        "batch rejection must not publish any of the speculative informant-decision draws"
+    );
+    validate_state(&fixture.state).expect("rejected informant cohort should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn informant_recruitment_commits_exactly_the_successful_frozen_draws() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let detainees = (0..6)
+        .map(|index| {
+            arrest_high_safety_detainee(&registry, &mut fixture, &format!("Outcome {index}"))
+        })
+        .collect::<Vec<_>>();
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        registry.legal().informant_decision_delay().as_minutes(),
+    ));
+
+    let chance = resolve_informant_flip_chance(registry.legal(), 100, false);
+    let mut preview_rng = fixture.state.investigation_rng_mut().clone();
+    let expected_characters = detainees
+        .iter()
+        .copied()
+        .filter(|_| {
+            let roll = crate::core::simulation::draw_index(&mut preview_rng, 100)
+                .expect("preview percentile draw should succeed");
+            informant_flip_succeeds(roll, chance)
+        })
+        .collect::<Vec<_>>();
+    let expected_next_draw = crate::core::simulation::draw_index(&mut preview_rng, 100)
+        .expect("preview continuation draw should succeed");
+
+    let recruited = apply_detainee_informant_recruitment(&registry, &mut fixture.state)
+        .expect("ordinary informant cohort should resolve");
+    let recruited_characters = recruited
+        .iter()
+        .map(|informant| {
+            fixture
+                .state
+                .legal()
+                .get_informant(*informant)
+                .expect("recruited informant should persist")
+                .character()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recruited_characters, expected_characters,
+        "the cohort must establish exactly the candidates whose frozen percentile draw succeeds"
+    );
+    let actual_next_draw =
+        crate::core::simulation::draw_index(fixture.state.investigation_rng_mut(), 100)
+            .expect("post-cohort continuation draw should succeed");
+    assert_eq!(
+        actual_next_draw, expected_next_draw,
+        "successful cohort execution must publish the full frozen draw sequence exactly once"
+    );
+    validate_state(&fixture.state).expect("successful informant cohort should remain valid");
+    validate_invariants(&fixture.state);
 }
 
 #[test]

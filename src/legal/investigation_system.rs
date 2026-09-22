@@ -1,7 +1,13 @@
-//! Case-opening, investigator-staffing, and evidence transactions; sibling legal state keeps indexes synchronized.
+//! Investigation transactions and autonomous case policies; sibling legal state keeps indexes synchronized.
 
+mod autonomous_staffing;
+mod cold_case_decay;
 mod incident_intake;
 
+pub(crate) use autonomous_staffing::apply_autonomous_investigator_staffing;
+pub use autonomous_staffing::{ValidatedInvestigatorAssignment, validate_assign_investigator};
+pub use cold_case_decay::ColdCaseDecayOutcome;
+pub(crate) use cold_case_decay::apply_cold_case_decay;
 pub(crate) use incident_intake::case_origin_responsible_organization;
 pub use incident_intake::{
     IncidentIntakeOutcome, ValidatedIncidentIntake, validate_incident_intake,
@@ -13,15 +19,13 @@ use crate::core::id::{
     InvestigationWorkId, OrganizationId, ProsecutionCaseId,
 };
 use crate::core::state::AppState;
-use crate::core::time::{SimDuration, SimTime};
+use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::legal::{
     EvidenceAssessment, EvidenceConnection, EvidenceDraft, EvidenceIdentity, EvidenceRecord,
     InvestigationDraft, InvestigationRecord, InvestigationStatus,
 };
-use crate::world::{CapabilityKind, OrganizationKind};
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use crate::world::OrganizationKind;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -377,8 +381,26 @@ pub struct ValidatedInvestigationTransition {
     expected_version: u32,
 }
 
+struct PreparedInvestigationTransition {
+    transition: ValidatedInvestigationTransition,
+    next_status: InvestigationStatus,
+    knowledge: Option<crate::intelligence::intelligence_system::ValidatedInformation>,
+}
+
 impl ValidatedInvestigationTransition {
     pub fn commit(self, state: &mut AppState) -> Result<(), InvestigationError> {
+        let prepared = self.prepare_current(state)?;
+        if prepared.knowledge.is_some() {
+            state.ids.reserve(IdKind::Information, 1)?;
+        }
+        prepared.commit_preflighted(state);
+        Ok(())
+    }
+
+    fn prepare_current(
+        self,
+        state: &AppState,
+    ) -> Result<PreparedInvestigationTransition, InvestigationError> {
         let investigation = state
             .legal
             .get_investigation(self.investigation)
@@ -408,18 +430,26 @@ impl ValidatedInvestigationTransition {
             )?,
             None => None,
         };
-        if knowledge.is_some() {
-            state.ids.reserve(IdKind::Information, 1)?;
-        }
-        state
-            .legal
-            .set_investigation_status(self.investigation, next_status, state.now());
-        if let Some(knowledge) = knowledge {
+        Ok(PreparedInvestigationTransition {
+            transition: self,
+            next_status,
+            knowledge,
+        })
+    }
+}
+
+impl PreparedInvestigationTransition {
+    fn commit_preflighted(self, state: &mut AppState) {
+        state.legal.set_investigation_status(
+            self.transition.investigation,
+            self.next_status,
+            state.now(),
+        );
+        if let Some(knowledge) = self.knowledge {
             knowledge
                 .commit(state)
                 .expect("case-activity information ID was preflighted before transition mutation");
         }
-        Ok(())
     }
 }
 
@@ -506,467 +536,6 @@ fn validate_investigation_transition_dependencies(
     Ok(())
 }
 
-/// Deterministically shelves origin-linked investigations whose owning authority has been
-/// institutionally inactive for the authored cold window.
-///
-/// Cold cases are handled through the canonical lifecycle transition. Scheduled work defers decay,
-/// suspension revalidates the no-active-arrest rule, and a case whose actionable subjects are all
-/// detained takes the explicit close branch below. Work that appeared between the deadline index
-/// scan and this call simply keeps the case active and decay retries on the refreshed deadline.
-/// Only cases carrying a case-origination link (an operation or enterprise
-/// whose exposure opened them) are eligible: institution-authored casework keeps its lifecycle
-/// until an explicit staff decision. Identifying a concrete character does not manufacture
-/// perpetual institutional activity: if the case produces no further work or evidence for the
-/// full cold window, it shelves like any other originated file. A case whose every actionable
-/// identified subject is already detained closes instead because custody cleared its live work.
-/// Shelving releases the case's investigators, and a later incident sharing the shelf's subject
-/// matter resumes the same file (`find_resumable_shelf`) rather than starting from silence.
-pub(crate) fn apply_cold_case_decay(
-    state: &mut AppState,
-    cold_case_window: SimDuration,
-) -> Result<ColdCaseDecayOutcome, InvestigationError> {
-    let now_minutes = state.now().as_minutes();
-    let window_minutes = u64::from(cold_case_window.as_minutes());
-    // Before a complete inactivity window has elapsed, no timestamp can possibly be cold.
-    // Saturating subtraction would incorrectly turn that interval into threshold minute zero,
-    // causing cases opened at campaign start to qualify on the first tick because the activity
-    // index query is inclusive.
-    if now_minutes < window_minutes {
-        return Ok(ColdCaseDecayOutcome {
-            suspended: Vec::new(),
-            closed: Vec::new(),
-        });
-    }
-    let threshold_minutes = now_minutes - window_minutes;
-    let candidates = state
-        .legal
-        .find_active_cases_inactive_since(SimTime::from_minutes(threshold_minutes));
-    let mut suspended = Vec::new();
-    let mut closed = Vec::new();
-    for investigation in candidates {
-        let record = state
-            .legal
-            .get_investigation(investigation)
-            .expect("cold-case candidate must still exist");
-        if record.origin().is_none() {
-            continue;
-        }
-        // Scheduled work is a modeled reason for an apparently cold case to remain active:
-        // the institution has already committed resources even if the old inactivity deadline
-        // was present in the index snapshot. Defer explicitly; every other transition failure
-        // below is exceptional and must surface.
-        if state
-            .legal
-            .work_for_investigation(investigation)
-            .any(|work| work.status() == crate::legal::InvestigationWorkStatus::Scheduled)
-        {
-            continue;
-        }
-        // An originated case whose every actionable identified subject is in custody is fully
-        // worked: the institutional trail ends, so the case closes rather than shelving while
-        // its subjects are held. An at-large lead does not defeat the inactivity rule forever;
-        // without new evidence or work for the authored window, the file shelves and releases
-        // its investigator seat until a later incident reactivates it.
-        //
-        // Custody is scoped to this case's own arrests: a subject detained under an unrelated
-        // file does not clear this investigation's live work. A case with live custody of its
-        // own cannot suspend either, so it defers to a later pass instead of aborting the
-        // whole batch on one detained file.
-        let detained_here: BTreeSet<_> = state
-            .legal
-            .arrests_for_investigation(investigation)
-            .filter(|arrest| arrest.status() == crate::legal::ArrestStatus::Detained)
-            .map(|arrest| arrest.character())
-            .collect();
-        let identified_subjects = actionable_character_subjects(state, record);
-        if !identified_subjects.is_empty()
-            && identified_subjects
-                .iter()
-                .all(|character| detained_here.contains(character))
-        {
-            validate_transition_investigation(
-                state,
-                investigation,
-                InvestigationTransition::Close,
-            )?
-            .commit(state)?;
-            closed.push(investigation);
-            continue;
-        }
-        if !detained_here.is_empty() {
-            // Live custody under this file blocks suspension, so the case waits for custody
-            // to resolve instead of aborting the whole decay batch on one detained file.
-            continue;
-        }
-        validate_transition_investigation(state, investigation, InvestigationTransition::Suspend)?
-            .commit(state)?;
-        // The transition commit refreshes the lead's personal knowledge to "shelved".
-        suspended.push(investigation);
-    }
-    Ok(ColdCaseDecayOutcome { suspended, closed })
-}
-
-fn actionable_character_subjects(
-    state: &AppState,
-    investigation: &crate::legal::InvestigationRecord,
-) -> Vec<CharacterId> {
-    investigation
-        .evidence()
-        .iter()
-        .filter_map(|evidence_id| {
-            let evidence = state
-                .legal
-                .get_evidence(*evidence_id)
-                .expect("investigation evidence index must reference persisted evidence");
-            if !evidence_is_actionable_case_lead(evidence) {
-                return None;
-            }
-            evidence.subject().as_character()
-        })
-        .collect()
-}
-
-/// Cold-window decay results, split so observers can distinguish shelved cases from cases
-/// fully closed because every identified subject is already in custody.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ColdCaseDecayOutcome {
-    pub suspended: Vec<InvestigationId>,
-    pub closed: Vec<InvestigationId>,
-}
-
-#[derive(Debug)]
-pub struct ValidatedInvestigatorAssignment {
-    investigation: InvestigationId,
-    investigator: CharacterId,
-    expected_investigation_version: u32,
-    expected_investigator_version: u32,
-}
-
-impl ValidatedInvestigatorAssignment {
-    pub fn commit(self, state: &mut AppState) -> Result<(), InvestigationError> {
-        let investigation = state
-            .legal
-            .get_investigation(self.investigation)
-            .ok_or(InvestigationError::MissingInvestigation(self.investigation))?;
-        if investigation.version() != self.expected_investigation_version {
-            return Err(InvestigationError::StaleInvestigation {
-                investigation: self.investigation,
-                expected: self.expected_investigation_version,
-                found: investigation.version(),
-            });
-        }
-        ensure_version_can_advance(investigation.version(), "investigation")?;
-        let investigator = state
-            .world
-            .get_character(self.investigator)
-            .ok_or(InvestigationError::MissingCharacter(self.investigator))?;
-        if investigator.version() != self.expected_investigator_version {
-            return Err(InvestigationError::StaleInvestigator {
-                investigator: self.investigator,
-                expected: self.expected_investigator_version,
-                found: investigator.version(),
-            });
-        }
-        validate_investigator_assignment_dependencies(
-            state,
-            self.investigation,
-            self.investigator,
-        )?;
-        // Taking the lead seat is a material case-activity fact: the new lead personally
-        // knows the case is active. Prepared before mutation; committed after the role write.
-        let activity_knowledge = crate::legal::case_knowledge::prepare_case_activity_knowledge(
-            state,
-            self.investigation,
-            crate::intelligence::CaseActivitySignal::Active,
-            self.investigator,
-        )?;
-        let witness_knowledge: Vec<_> = state
-            .legal
-            .case_witnesses_for_investigation(self.investigation)
-            .map(|witness| {
-                crate::legal::case_knowledge::prepare_case_witness_knowledge(
-                    state,
-                    self.investigation,
-                    witness.witness(),
-                    self.investigator,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        let information_count = usize::from(activity_knowledge.is_some()) + witness_knowledge.len();
-        if information_count != 0 {
-            // Staffing and the lead's first-hand case knowledge are one logical transaction.
-            // Preflight every information allocation before the lead/index mutation so allocator
-            // exhaustion cannot leave a staffed case behind an error return.
-            state.ids.reserve(
-                IdKind::Information,
-                u32::try_from(information_count)
-                    .expect("persisted case-witness count must fit the information ID space"),
-            )?;
-        }
-        state
-            .legal
-            .set_lead_investigator(self.investigation, self.investigator);
-        if let Some(knowledge) = activity_knowledge {
-            knowledge
-                .commit(state)
-                .expect("case-activity information ID was preflighted before staffing mutation");
-        }
-        for knowledge in witness_knowledge {
-            knowledge
-                .commit(state)
-                .expect("case-witness information IDs were preflighted before staffing mutation");
-        }
-        Ok(())
-    }
-}
-
-/// Assigns an investigator as the lead of an active case. Staffing is single-seat: every
-/// canonical producer promotes one lead, and support-investigator bookkeeping does not exist.
-pub fn validate_assign_investigator(
-    state: &AppState,
-    investigation: InvestigationId,
-    investigator: CharacterId,
-) -> Result<ValidatedInvestigatorAssignment, InvestigationError> {
-    validate_investigator_assignment_dependencies(state, investigation, investigator)?;
-    let investigation_record = state
-        .legal
-        .get_investigation(investigation)
-        .expect("validated investigation must still exist");
-    ensure_version_can_advance(investigation_record.version(), "investigation")?;
-    let investigator_record = state
-        .world
-        .get_character(investigator)
-        .expect("validated investigator must still exist");
-    Ok(ValidatedInvestigatorAssignment {
-        investigation,
-        investigator,
-        expected_investigation_version: investigation_record.version(),
-        expected_investigator_version: investigator_record.version(),
-    })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct InvestigationStaffingPriority {
-    actionable_evidence: Reverse<usize>,
-    best_strength: Reverse<crate::legal::EvidenceStrength>,
-    best_reliability: Reverse<crate::legal::EvidenceReliability>,
-    evidence_count: Reverse<usize>,
-    last_activity_at: Reverse<SimTime>,
-    investigation: InvestigationId,
-}
-
-fn investigation_staffing_priority(
-    state: &AppState,
-    investigation_id: InvestigationId,
-) -> InvestigationStaffingPriority {
-    let investigation = state
-        .legal
-        .get_investigation(investigation_id)
-        .expect("unstaffed-investigation index must reference an investigation");
-    let mut actionable_evidence = 0_usize;
-    let mut best_actionable_assessment = (
-        crate::legal::EvidenceStrength::Weak,
-        crate::legal::EvidenceReliability::Questionable,
-    );
-    for evidence_id in investigation.evidence() {
-        let evidence = state
-            .legal
-            .get_evidence(*evidence_id)
-            .expect("investigation evidence set must reference an evidence record");
-        if evidence_is_actionable_case_lead(evidence) {
-            actionable_evidence += 1;
-            best_actionable_assessment =
-                best_actionable_assessment.max((evidence.strength(), evidence.reliability()));
-        }
-    }
-    InvestigationStaffingPriority {
-        actionable_evidence: Reverse(actionable_evidence),
-        best_strength: Reverse(best_actionable_assessment.0),
-        best_reliability: Reverse(best_actionable_assessment.1),
-        evidence_count: Reverse(investigation.evidence().len()),
-        last_activity_at: Reverse(investigation.last_activity_at()),
-        investigation: investigation_id,
-    }
-}
-
-pub(crate) fn apply_autonomous_investigator_staffing(
-    state: &mut AppState,
-) -> Result<Vec<(InvestigationId, CharacterId)>, InvestigationError> {
-    let mut investigations: Vec<_> = state.legal.active_investigations_without_lead().collect();
-    // Scarce detective capacity is allocated by case substance rather than record creation
-    // order. Prefer cases with more actionable evidence, then the strongest such evidence,
-    // broader evidence, and more recent institutional activity. The case id is only the final
-    // deterministic tie-break when the institution has no modeled reason to prefer either file.
-    investigations.sort_unstable_by_key(|investigation| {
-        investigation_staffing_priority(state, *investigation)
-    });
-
-    // Availability and Investigation capability are authority-wide facts for this staffing pass.
-    // Build each authority's ranked pool once instead of rescanning every member for every
-    // unstaffed case. Case-specific subject/witness conflicts remain checked below, and the
-    // per-pass assignment set preserves one-active-case capacity as assignments commit.
-    let owners: BTreeSet<_> = investigations
-        .iter()
-        .map(|investigation| {
-            state
-                .legal
-                .get_investigation(*investigation)
-                .expect("unstaffed-investigation index must reference an investigation")
-                .owner()
-        })
-        .collect();
-    let mut candidates_by_owner = BTreeMap::new();
-    for owner in owners {
-        let mut candidates: Vec<_> = state
-            .world
-            .characters_in_organization(owner)
-            .filter(|record| {
-                state
-                    .legal
-                    .active_arrest_for_character(record.id())
-                    .is_none()
-                    && state
-                        .legal
-                        .active_investigation_for_investigator(record.id())
-                        .is_none()
-            })
-            .filter_map(|record| {
-                record
-                    .capability(CapabilityKind::Investigation)
-                    .map(|capability| (record.id(), capability.value()))
-            })
-            .collect();
-        candidates.sort_unstable_by_key(|(investigator, capability)| {
-            (Reverse(*capability), *investigator)
-        });
-        candidates_by_owner.insert(
-            owner,
-            candidates
-                .into_iter()
-                .map(|(investigator, _)| investigator)
-                .collect::<Vec<_>>(),
-        );
-    }
-
-    let mut staffed = Vec::new();
-    let mut assigned_this_pass = BTreeSet::new();
-    for investigation_id in investigations {
-        let investigation = state
-            .legal
-            .get_investigation(investigation_id)
-            .ok_or(InvestigationError::MissingInvestigation(investigation_id))?;
-        let owner = investigation.owner();
-        let investigator = candidates_by_owner
-            .get(&owner)
-            .into_iter()
-            .flatten()
-            .copied()
-            .find(|investigator| {
-                !assigned_this_pass.contains(investigator)
-                    && !investigation
-                        .subjects()
-                        .contains(&EntityRef::Character(*investigator))
-                    && state
-                        .legal
-                        .case_witness_for(investigation_id, *investigator)
-                        .is_none()
-            });
-        let Some(investigator) = investigator else {
-            continue;
-        };
-
-        // Selection used the same current authoritative indexes and predicates as the canonical
-        // validator. A rejection now is not a modeled "no investigator available" outcome; it
-        // means state or allocator capacity is broken and must surface instead of disappearing.
-        validate_assign_investigator(state, investigation_id, investigator)?.commit(state)?;
-        assigned_this_pass.insert(investigator);
-        // The assignment commit records the new lead's personal case-activity knowledge, so
-        // contact channels can disclose it without any case-graph read.
-        staffed.push((investigation_id, investigator));
-    }
-    Ok(staffed)
-}
-
-fn validate_investigator_assignment_dependencies(
-    state: &AppState,
-    investigation_id: InvestigationId,
-    investigator_id: CharacterId,
-) -> Result<(), InvestigationError> {
-    let investigation = state
-        .legal
-        .get_investigation(investigation_id)
-        .ok_or(InvestigationError::MissingInvestigation(investigation_id))?;
-    if investigation.status() != InvestigationStatus::Active {
-        return Err(InvestigationError::InactiveInvestigation);
-    }
-    let investigator = state
-        .world
-        .get_character(investigator_id)
-        .ok_or(InvestigationError::MissingCharacter(investigator_id))?;
-    if let Some(arrest) = state.legal.active_arrest_for_character(investigator_id) {
-        return Err(InvestigationError::DetainedInvestigator {
-            investigator: investigator_id,
-            arrest: arrest.id(),
-        });
-    }
-    if investigation
-        .subjects()
-        .contains(&EntityRef::Character(investigator_id))
-    {
-        return Err(InvestigationError::InvestigatorIsCaseSubject {
-            investigation: investigation_id,
-            investigator: investigator_id,
-        });
-    }
-    if let Some(witness) = state
-        .legal
-        .case_witness_for(investigation_id, investigator_id)
-    {
-        return Err(InvestigationError::InvestigatorIsCaseWitness {
-            investigation: investigation_id,
-            investigator: investigator_id,
-            witness: witness.id(),
-        });
-    }
-    if investigator.organization() != Some(investigation.owner()) {
-        return Err(InvestigationError::InvestigatorOwnerMismatch {
-            investigator: investigator_id,
-            owner: investigation.owner(),
-        });
-    }
-    // One active case per investigator: a detective already leading another active case cannot
-    // take a second active case.
-    if state
-        .legal
-        .active_investigation_for_investigator(investigator_id)
-        .is_some()
-    {
-        return Err(InvestigationError::InvestigatorAtCaseCapacity {
-            investigator: investigator_id,
-        });
-    }
-    if investigator
-        .capability(CapabilityKind::Investigation)
-        .is_none()
-    {
-        return Err(InvestigationError::MissingInvestigationCapability(
-            investigator_id,
-        ));
-    }
-    // Single-seat staffing: a canonical producer fills an empty lead seat; replacing a lead
-    // is not an assignment operation.
-    if let Some(current) = investigation.lead_investigator() {
-        return Err(InvestigationError::LeadSeatFilled {
-            investigation: investigation_id,
-            lead: current,
-        });
-    }
-    Ok(())
-}
-
 pub struct ValidatedEvidence {
     draft: EvidenceDraft,
     expected_investigation_version: u32,
@@ -985,7 +554,7 @@ impl ValidatedEvidence {
                 found: investigation.version(),
             });
         }
-        ensure_version_can_advance(investigation.version(), "investigation")?;
+        ensure_external_evidence_case_capacity(state, &self.draft)?;
         let id = state.ids.next_evidence()?;
         let EvidenceDraft {
             investigation,
@@ -1034,11 +603,42 @@ pub fn validate_add_evidence(
         .legal
         .get_investigation(draft.investigation)
         .expect("validated evidence investigation must exist");
-    ensure_version_can_advance(investigation.version(), "investigation")?;
+    ensure_external_evidence_case_capacity(state, &draft)?;
     Ok(ValidatedEvidence {
         draft,
         expected_investigation_version: investigation.version(),
     })
+}
+
+/// Evidence may arrive while detective work is already scheduled. Preserve that work's complete
+/// worst-case resolution budget unless this exact actionable evidence will cancel the conflicting
+/// lead/witness work in the same owner mutation.
+fn ensure_external_evidence_case_capacity(
+    state: &AppState,
+    draft: &EvidenceDraft,
+) -> Result<(), VersionCapacityError> {
+    let excluded_work = if evidence_assessment_is_actionable_case_lead(
+        draft.strength,
+        draft.reliability,
+        draft.admissibility,
+    ) {
+        draft.subject.as_character().and_then(|character| {
+            crate::legal::investigation_work_execution::
+                scheduled_work_invalidated_by_actionable_character(
+                    state,
+                    draft.investigation,
+                    character,
+                )
+        })
+    } else {
+        None
+    };
+    crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+        state,
+        draft.investigation,
+        1,
+        excluded_work,
+    )
 }
 
 /// Work-derived evidence kinds and informant statements may only be created through their

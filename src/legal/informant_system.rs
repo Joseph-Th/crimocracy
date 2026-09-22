@@ -7,7 +7,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
+use crate::core::version::VersionCapacityError;
 use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
@@ -197,6 +197,11 @@ impl ValidatedInformantDisclosure {
         state
             .ids
             .reserve_many(&[(IdKind::Evidence, 1), (IdKind::InformantDisclosure, 1)])?;
+        self.ensure_current(state)?;
+        Ok(self.commit_preflighted(state))
+    }
+
+    fn ensure_current(&self, state: &AppState) -> Result<(), InformantError> {
         let investigation = state
             .legal
             .get_investigation(self.draft.investigation)
@@ -210,23 +215,16 @@ impl ValidatedInformantDisclosure {
                 found: investigation.version(),
             });
         }
-        ensure_version_can_advance(investigation.version(), "investigation")?;
         validate_disclosure_dependencies(state, self.draft)?;
 
-        let informant = state
-            .legal
-            .get_informant(self.draft.informant)
-            .expect("validated informant must still exist");
-        let handler = informant.handler();
-        let character = informant.character();
         let information = state
             .intelligence
             .get_information(self.draft.source_information)
             .expect("validated source information must still exist");
+        ensure_informant_disclosure_case_capacity(state, self.draft, information)?;
         let subject = information.subject();
         let strength = informant_strength(information.specificity());
         let reliability = informant_reliability(information.reliability());
-        let disclosed_at = state.now();
         crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
             state,
             self.draft.investigation,
@@ -235,7 +233,24 @@ impl ValidatedInformantDisclosure {
             reliability,
             Admissibility::Unknown,
         )?;
+        Ok(())
+    }
 
+    fn commit_preflighted(self, state: &mut AppState) -> InformantDisclosureId {
+        let informant = state
+            .legal
+            .get_informant(self.draft.informant)
+            .expect("preflighted informant must still exist");
+        let handler = informant.handler();
+        let character = informant.character();
+        let information = state
+            .intelligence
+            .get_information(self.draft.source_information)
+            .expect("preflighted source information must still exist");
+        let subject = information.subject();
+        let strength = informant_strength(information.specificity());
+        let reliability = informant_reliability(information.reliability());
+        let disclosed_at = state.now();
         let evidence_id = state
             .ids
             .next_evidence()
@@ -275,7 +290,7 @@ impl ValidatedInformantDisclosure {
         state
             .legal
             .insert_informant_disclosure(evidence, disclosure, disclosed_at);
-        Ok(disclosure_id)
+        disclosure_id
     }
 }
 
@@ -288,11 +303,11 @@ pub fn validate_record_informant_disclosure(
         .legal
         .get_investigation(draft.investigation)
         .expect("validated investigation must exist");
-    ensure_version_can_advance(investigation.version(), "investigation")?;
     let information = state
         .intelligence
         .get_information(draft.source_information)
         .expect("validated source information must exist");
+    ensure_informant_disclosure_case_capacity(state, draft, information)?;
     crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
         state,
         draft.investigation,
@@ -305,6 +320,38 @@ pub fn validate_record_informant_disclosure(
         draft,
         expected_investigation_version: investigation.version(),
     })
+}
+
+fn ensure_informant_disclosure_case_capacity(
+    state: &AppState,
+    draft: InformantDisclosureDraft,
+    information: &crate::intelligence::InformationRecord,
+) -> Result<(), VersionCapacityError> {
+    let strength = informant_strength(information.specificity());
+    let reliability = informant_reliability(information.reliability());
+    let excluded_work =
+        if crate::legal::investigation_system::evidence_assessment_is_actionable_case_lead(
+            strength,
+            reliability,
+            Admissibility::Unknown,
+        ) {
+            information.subject().as_character().and_then(|character| {
+                crate::legal::investigation_work_execution::
+                scheduled_work_invalidated_by_actionable_character(
+                    state,
+                    draft.investigation,
+                    character,
+                )
+            })
+        } else {
+            None
+        };
+    crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+        state,
+        draft.investigation,
+        1,
+        excluded_work,
+    )
 }
 
 fn validate_disclosure_dependencies(
@@ -460,7 +507,8 @@ pub(crate) fn apply_detainee_informant_recruitment(
         candidates.push((arrest, character, handler, safety));
     }
 
-    let mut recruited = Vec::new();
+    let mut planned = Vec::with_capacity(candidates.len());
+    let mut advanced_rng = state.investigation_rng_mut().clone();
     for (arrest, character, handler, safety) in candidates {
         let chance = resolve_informant_flip_chance(
             registry.legal(),
@@ -470,23 +518,40 @@ pub(crate) fn apply_detainee_informant_recruitment(
                 .active_representation_for_arrest(arrest)
                 .is_some(),
         );
-        // Draw speculatively so an ordinary failed flip still consumes its authored decision
-        // draw, while a successful flip only publishes that advanced RNG state after the
-        // establishment commits. Allocation or freshness failure therefore rejects without
-        // perturbing future investigation randomness.
+        // Validate the entire due cohort before publishing any draw or relationship. Candidates
+        // are distinct detained characters, so one successful establishment cannot invalidate
+        // another candidate's character/handler snapshot in this same pass.
         let validated = validate_establish_informant(state, InformantDraft { character, handler })?;
-        let mut advanced_rng = state.investigation_rng_mut().clone();
         let roll = crate::core::simulation::draw_index(&mut advanced_rng, 100)
             .expect("percentile draw over the nonempty 0..100 index range cannot fail");
-        if roll as u32 >= chance {
-            *state.investigation_rng_mut() = advanced_rng;
+        planned.push((validated, informant_flip_succeeds(roll, chance)));
+    }
+
+    // Reserve only the relationships the frozen draw sequence will actually create. This keeps
+    // near-exhaustion behavior exact rather than pessimistically requiring one ID per candidate,
+    // while preventing a later successful flip from leaving earlier recruits and RNG draws
+    // committed behind an allocator error.
+    let successful = u32::try_from(planned.iter().filter(|(_, success)| *success).count())
+        .expect("detained candidate count must fit the informant ID space");
+    state.ids.reserve(IdKind::Informant, successful)?;
+
+    let mut recruited = Vec::with_capacity(successful as usize);
+    for (validated, success) in planned {
+        if !success {
             continue;
         }
-        let informant = validated.commit(state)?;
-        *state.investigation_rng_mut() = advanced_rng;
-        recruited.push(informant);
+        recruited.push(
+            validated
+                .commit(state)
+                .expect("prevalidated informant establishment and ID budget must remain current"),
+        );
     }
+    *state.investigation_rng_mut() = advanced_rng;
     Ok(recruited)
+}
+
+fn informant_flip_succeeds(roll: usize, chance: u32) -> bool {
+    u32::try_from(roll).expect("percentile draw fits u32") < chance
 }
 
 fn resolve_informant_flip_chance(
@@ -560,6 +625,96 @@ pub(crate) fn apply_informant_disclosures(
     // Stable commit order is informant id, then information id, then case id. IDs order equal
     // facts only; they no longer decide whether another matching case receives the fact at all.
     candidates.sort_unstable();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Investigation versions are finite, while an active file can legitimately survive all the
+    // way to that rail after years of evidence, staffing, witness, and lifecycle revisions. One
+    // case must never make the institution's whole disclosure pass fail forever. Preserve the
+    // all-or-none guarantee *per case*: if this minute's complete fact cohort would exceed that
+    // case's remaining version capacity, skip the case entirely and keep processing other files.
+    // Direct disclosure remains fail-closed with VersionCapacity for callers that explicitly ask
+    // to mutate such a case.
+    let mut required_advances_by_investigation: BTreeMap<InvestigationId, u32> = BTreeMap::new();
+    for (_, _, investigation) in &candidates {
+        let advances = required_advances_by_investigation
+            .entry(*investigation)
+            .or_insert(0);
+        *advances = advances
+            .checked_add(1)
+            .ok_or_else(|| VersionCapacityError::new("investigation"))?;
+    }
+    let blocked_investigations: BTreeSet<_> = required_advances_by_investigation
+        .iter()
+        .filter_map(|(investigation, required)| {
+            let version = state
+                .legal
+                .get_investigation(*investigation)
+                .expect("active disclosure candidate must reference a live investigation")
+                .version();
+            let headroom =
+                crate::legal::investigation_work_execution::scheduled_work_investigation_headroom(
+                    state,
+                    *investigation,
+                    None,
+                );
+            required
+                .checked_add(headroom)
+                .is_none_or(|total| total > u32::MAX - version)
+                .then_some(*investigation)
+        })
+        .collect();
+    if !blocked_investigations.is_empty() {
+        candidates.retain(|(_, _, investigation)| !blocked_investigations.contains(investigation));
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+    }
+
+    // One pass promises same-minute propagation to every matching file. Preflight the whole
+    // finite-resource budget before the first disclosure mutates a case so ID or case-version
+    // exhaustion cannot publish only a prefix and let stable IDs decide which case received the
+    // fact before cold-case processing.
+    let candidate_count =
+        u32::try_from(candidates.len()).map_err(|_| VersionCapacityError::new("investigation"))?;
+    state.ids.reserve_many(&[
+        (IdKind::Evidence, candidate_count),
+        (IdKind::InformantDisclosure, candidate_count),
+    ])?;
+    let mut advances_by_investigation: BTreeMap<InvestigationId, u32> = BTreeMap::new();
+    for (informant, information, investigation) in &candidates {
+        let draft = InformantDisclosureDraft {
+            informant: *informant,
+            investigation: *investigation,
+            source_information: *information,
+        };
+        validate_disclosure_dependencies(state, draft)?;
+        let advances = advances_by_investigation.entry(*investigation).or_insert(0);
+        *advances = advances
+            .checked_add(1)
+            .ok_or_else(|| VersionCapacityError::new("investigation"))?;
+        let information = state
+            .intelligence
+            .get_information(*information)
+            .expect("preflighted disclosure information must exist");
+        crate::legal::investigation_system::ensure_evidence_prosecution_recusal_capacity(
+            state,
+            *investigation,
+            information.subject(),
+            informant_strength(information.specificity()),
+            informant_reliability(information.reliability()),
+            Admissibility::Unknown,
+        )?;
+    }
+    for (investigation, advances) in advances_by_investigation {
+        crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(
+            state,
+            investigation,
+            advances,
+            None,
+        )?;
+    }
 
     let mut disclosures = Vec::new();
     for (informant, information, investigation) in candidates {
@@ -573,8 +728,11 @@ pub(crate) fn apply_informant_disclosures(
                 investigation,
                 source_information: information,
             },
-        )?
-        .commit(state)?;
+        )?;
+        // Validation used the post-previous-disclosure state and the whole pass already reserved
+        // aggregate ID/version capacity before the first mutation. Nothing can stale this token
+        // between validation and its owner mutation.
+        let disclosure = disclosure.commit_preflighted(state);
         disclosures.push(disclosure);
     }
     Ok(disclosures)

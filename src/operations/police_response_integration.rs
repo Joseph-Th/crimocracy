@@ -154,9 +154,8 @@ pub(crate) fn apply_due_police_response_arrivals(
     state: &mut AppState,
 ) -> Result<PoliceResponseProcessingOutcome, PoliceResponseIntegrationError> {
     let due = find_due_police_responses(state);
-    let mut arrived = Vec::with_capacity(due.len());
-    let mut decisions = Vec::new();
-    let mut aborted_operations = Vec::new();
+    let mut planned = Vec::with_capacity(due.len());
+    let mut batch_budget = Vec::new();
     for response_id in due {
         let (
             operation_id,
@@ -237,38 +236,58 @@ pub(crate) fn apply_due_police_response_arrivals(
 
         // One arrival is a cross-domain transaction: legal response status, operation abort or
         // leadership decision, and every participant's first-hand police-pressure knowledge must
-        // appear together. Reserve the complete persistent-ID budget before marking the response
-        // Arrived so allocator exhaustion cannot strand a partially processed arrival.
-        let mut budget = abort
-            .as_ref()
-            .map_or_else(Vec::new, |abort| abort.id_budget());
-        if decision.is_some() {
-            budget.push((IdKind::DecisionRequest, 1));
+        // appear together. Collect every due response first because valid state gives each
+        // response a distinct source operation, and operation booking prevents those running
+        // operations from sharing participants. Earlier arrival effects therefore cannot stale
+        // another due response's prepared transaction in this same minute.
+        if let Some(abort) = abort.as_ref() {
+            batch_budget.extend(abort.id_budget());
+        }
+        if let Some(decision) = decision.as_ref() {
+            batch_budget.extend(decision.id_budget());
         }
         let participant_information = u32::try_from(participant_pressure.len())
             .expect("operation participant count must fit u32");
-        if participant_information > 0 {
-            budget.push((IdKind::Information, participant_information));
-        }
-        state.ids.reserve_many(&budget)?;
+        batch_budget.push((IdKind::Information, participant_information));
+        planned.push((
+            response_id,
+            operation_id,
+            arrival,
+            abort,
+            decision,
+            participant_pressure,
+        ));
+    }
 
-        arrival.commit(state)?;
+    // All responses in this due set occur at one simulation instant. Reserve their complete
+    // persistent-ID budget before marking the first response Arrived so global allocator pressure
+    // cannot make stable PoliceResponseId order decide which operation receives same-minute
+    // enforcement consequences.
+    state.ids.reserve_many(&batch_budget)?;
+
+    let mut arrived = Vec::with_capacity(planned.len());
+    let mut decisions = Vec::new();
+    let mut aborted_operations = Vec::new();
+    for (response_id, operation_id, arrival, abort, decision, participant_pressure) in planned {
+        arrival
+            .commit(state)
+            .expect("prevalidated distinct police-response arrival must remain current");
         if let Some(abort) = abort {
             abort
                 .commit(state)
-                .expect("fresh police-arrival abort token must commit atomically");
+                .expect("prevalidated distinct police-arrival abort must remain current");
             aborted_operations.push(operation_id);
         } else if let Some(decision) = decision {
             decisions.push(
                 decision
                     .commit(state)
-                    .expect("prevalidated police-response decision request must remain current"),
+                    .expect("prevalidated distinct police-response decision must remain current"),
             );
         }
         for information in participant_pressure {
             information
                 .commit(state)
-                .expect("police-pressure information IDs were preflighted before arrival mutation");
+                .expect("police-pressure information IDs were preflighted for the full due set");
         }
         arrived.push(response_id);
     }

@@ -399,9 +399,13 @@ fn observe_investigation_and_arrests(
     narrative: bool,
     metrics: &mut RunMetrics,
 ) {
-    metrics.investigation_work_scheduled = metrics.investigation_work_scheduled.saturating_add(
-        u32::try_from(outcome.scheduled_investigation_work.len()).unwrap_or(u32::MAX),
-    );
+    let scheduled_work = outcome
+        .scheduled_investigation_work
+        .len()
+        .saturating_add(outcome.scheduled_witness_interviews.len());
+    metrics.investigation_work_scheduled = metrics
+        .investigation_work_scheduled
+        .saturating_add(u32::try_from(scheduled_work).unwrap_or(u32::MAX));
     metrics.investigation_work_resolved = metrics.investigation_work_resolved.saturating_add(
         u32::try_from(outcome.resolved_investigation_work.len()).unwrap_or(u32::MAX),
     );

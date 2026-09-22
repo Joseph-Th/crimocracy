@@ -697,6 +697,11 @@ pub struct RunMetrics {
     pub followup_case_active: Option<bool>,
     pub cold_case_confirmed: Option<bool>,
     pub case_cold_minute: Option<u64>,
+    /// Earliest opening instant of the burglary's actual exposure investigation. Diagnostic
+    /// hidden truth only; acting policy must never consume this field.
+    pub investigation_opened_minute: Option<u64>,
+    /// Opening instant carried by player-held LegalActivity information, when that information
+    /// was actually surfaced. None means leadership never obtained the case-opening fact.
     pub case_open_minute: Option<u64>,
     pub counterintelligence_scheduled_at: Option<u64>,
     pub exposure_score: Option<i16>,
@@ -716,6 +721,8 @@ pub struct RunMetrics {
     /// before the window closed: Some(true) still active, Some(false) shelved, None no read.
     pub self_heat_case_active: Option<bool>,
     pub evidence_count: usize,
+    /// Total detective work scheduled during the observed arc, including both evidence reviews
+    /// and witness interviews. `witness_interviews_scheduled` below is the interview subset.
     pub investigation_work_scheduled: u32,
     pub investigation_work_resolved: u32,
     pub burglary_information_quality: Option<u8>,

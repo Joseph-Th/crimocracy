@@ -36,6 +36,12 @@ struct ResolvedAutomaticLegalSupport {
     authorization: Option<MandateAuthority>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AutomaticLegalSupportOutcome {
+    pub(crate) retained: Vec<LegalRepresentationId>,
+    pub(crate) concluded: usize,
+}
+
 /// Executes `AssociateLegalSupport(Automatic)` governance: every detained member of an
 /// organization that runs the Automatic policy gets counsel retained through the canonical
 /// representation path. Organization policy may aggregate sponsor liquidity; a mandate-sourced
@@ -47,7 +53,7 @@ struct ResolvedAutomaticLegalSupport {
 pub(crate) fn apply_automatic_legal_support(
     registry: &crate::registry::Registry,
     state: &mut AppState,
-) -> Result<Vec<crate::core::id::LegalRepresentationId>, LegalRepresentationError> {
+) -> Result<AutomaticLegalSupportOutcome, LegalRepresentationError> {
     // Automatic support concludes when the matter it covers does: a representation this pass
     // retained for a detainee who has left custody ends with `MatterConcluded`, so concluded
     // matters stop blocking contact termination. A contact may carry several concurrent
@@ -63,9 +69,9 @@ pub(crate) fn apply_automatic_legal_support(
     if !state.legal.has_active_automatic_policy_representations()
         && !state.legal.has_detained_arrests()
     {
-        return Ok(Vec::new());
+        return Ok(AutomaticLegalSupportOutcome::default());
     }
-    conclude_inactive_automatic_representations(state)?;
+    let concluded = conclude_inactive_automatic_representations(state)?;
     let candidates = resolve_automatic_legal_support_candidates(state)?;
     let mut retained = Vec::new();
     for candidate in candidates {
@@ -81,12 +87,15 @@ pub(crate) fn apply_automatic_legal_support(
         };
         retained.push(validated_representation.commit(state)?);
     }
-    Ok(retained)
+    Ok(AutomaticLegalSupportOutcome {
+        retained,
+        concluded,
+    })
 }
 
 fn conclude_inactive_automatic_representations(
     state: &mut AppState,
-) -> Result<(), LegalRepresentationError> {
+) -> Result<usize, LegalRepresentationError> {
     let concluded: Vec<LegalRepresentationId> = state
         .legal
         .active_automatic_policy_representations()
@@ -98,18 +107,35 @@ fn conclude_inactive_automatic_representations(
         })
         .map(|record| record.id())
         .collect();
-    for representation in concluded {
-        // These records came from the authoritative active index in the same pass. A failure
-        // here means the canonical state contract is broken and must surface instead of
-        // leaving a concluded automatic retainer active indefinitely.
-        validate_end_legal_representation(
-            state,
-            representation,
-            LegalRepresentationEndReason::MatterConcluded,
-        )?
-        .commit(state)?;
+    let concluded_count = concluded.len();
+    if concluded_count == 0 {
+        return Ok(0);
     }
-    Ok(())
+
+    // Validate every ending before the first representation mutates. Each ending emits one
+    // information record and one report; reserve the whole batch up front so allocator
+    // exhaustion cannot conclude a prefix of same-minute automatic matters.
+    let endings = concluded
+        .into_iter()
+        .map(|representation| {
+            validate_end_legal_representation(
+                state,
+                representation,
+                LegalRepresentationEndReason::MatterConcluded,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let artifact_budget = endings
+        .iter()
+        .flat_map(
+            crate::legal::legal_representation_system::ValidatedLegalRepresentationEnd::id_budget,
+        )
+        .collect::<Vec<_>>();
+    state.ids.reserve_many(&artifact_budget)?;
+    for ending in endings {
+        ending.commit_preflighted(state);
+    }
+    Ok(concluded_count)
 }
 
 fn resolve_automatic_legal_support_candidates(

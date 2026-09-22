@@ -183,10 +183,13 @@ pub fn validate_resume_enterprise(
         Some(record.id()),
     )?;
     let cycle_duration = definition.economics().cycle();
-    state
-        .now()
-        .checked_add(cycle_duration)
-        .ok_or(EnterpriseError::SimulationTimeOverflow)?;
+    let cycle_duration = (record.version() < u32::MAX - 1).then_some(cycle_duration);
+    if let Some(cycle_duration) = cycle_duration {
+        state
+            .now()
+            .checked_add(cycle_duration)
+            .ok_or(EnterpriseError::SimulationTimeOverflow)?;
+    }
     let supporting_business_versions =
         snapshot_supporting_business_versions(state, record.supporting_businesses())?;
     let host_business_version = match record.location() {
@@ -203,7 +206,7 @@ pub fn validate_resume_enterprise(
         enterprise,
         expected_version: record.version(),
         change: EnterpriseStatusChange::Resume,
-        cycle_duration: Some(cycle_duration),
+        cycle_duration,
         authority: Some(authority),
         supporting_business_versions,
         host_business_version,

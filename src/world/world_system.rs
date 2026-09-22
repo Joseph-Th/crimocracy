@@ -272,7 +272,11 @@ pub struct ValidatedCharacterReassignment {
 }
 
 impl ValidatedCharacterReassignment {
-    pub fn commit(self, state: &mut AppState) -> Result<(), WorldError> {
+    /// Re-proves every mutable dependency captured by this token without applying the membership
+    /// change. Consumers that use reassignment eligibility as a prerequisite, but do not always
+    /// mutate membership themselves, can therefore share the world owner's exact current-state
+    /// rule instead of reproducing cross-domain availability checks.
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), WorldError> {
         let record = state
             .world
             .get_character(self.character)
@@ -291,11 +295,19 @@ impl ValidatedCharacterReassignment {
             self.organization,
             self.supervisor,
             self.allowed_recruitment_approval,
-        )?;
+        )
+    }
+
+    pub fn commit(self, state: &mut AppState) -> Result<(), WorldError> {
+        self.ensure_current(state)?;
+        self.commit_preflighted(state);
+        Ok(())
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) {
         state
             .world
             .reassign_character(self.character, self.organization, self.supervisor);
-        Ok(())
     }
 }
 

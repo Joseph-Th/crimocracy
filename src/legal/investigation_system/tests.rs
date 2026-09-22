@@ -1940,6 +1940,185 @@ fn autonomous_staffing_prioritizes_developed_case_over_creation_order() {
 }
 
 #[test]
+fn autonomous_investigator_staffing_batch_rejects_information_exhaustion_atomically() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x57AF_A70C);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Atomic Staffing Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let subject = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Atomic Staffing Subject".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("subject fixture should validate");
+    let first_detective = insert_test_investigator(&mut state, police, "Atomic Senior", 90);
+    let second_detective = insert_test_investigator(&mut state, police, "Atomic Junior", 80);
+    let first = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "First atomic staffing case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(subject)]),
+        },
+    )
+    .expect("first case should validate")
+    .commit(&mut state)
+    .expect("first case should commit");
+    let second = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Second atomic staffing case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(subject)]),
+        },
+    )
+    .expect("second case should validate")
+    .commit(&mut state)
+    .expect("second case should commit");
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX - 1);
+    let before =
+        bincode::serialize(&state).expect("pre-exhaustion staffing state should serialize");
+
+    let error = apply_autonomous_investigator_staffing(&mut state)
+        .expect_err("two staffing assignments require both activity-knowledge IDs up front");
+    assert_eq!(
+        error,
+        InvestigationError::IdExhaustion(crate::core::id::IdExhaustionError::Exhausted {
+            kind: "information",
+            next: u32::MAX - 1,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected staffing state should serialize"),
+        before,
+        "allocator exhaustion must not staff only the first ranked case"
+    );
+    for investigation in [first, second] {
+        assert!(
+            state
+                .legal()
+                .get_investigation(investigation)
+                .expect("unstaffed case should persist")
+                .lead_investigator()
+                .is_none()
+        );
+    }
+    assert!(
+        state
+            .legal()
+            .active_investigation_for_investigator(first_detective)
+            .is_none()
+    );
+    assert!(
+        state
+            .legal()
+            .active_investigation_for_investigator(second_detective)
+            .is_none()
+    );
+    validate_state(&state).expect("rejected staffing batch should remain structurally valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn autonomous_investigator_staffing_preserves_post_assignment_version_headroom() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x57AF_F17E);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Finite Rail Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let subject = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Finite Rail Subject".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("subject fixture should validate");
+    let senior = insert_test_investigator(&mut state, police, "Finite Senior", 90);
+    let junior = insert_test_investigator(&mut state, police, "Finite Junior", 80);
+    let first = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Representable staffing case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(subject)]),
+        },
+    )
+    .expect("first case should validate")
+    .commit(&mut state)
+    .expect("first case should commit");
+    let second = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Finite rail staffing case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(subject)]),
+        },
+    )
+    .expect("second case should validate")
+    .commit(&mut state)
+    .expect("second case should commit");
+    let original = state
+        .legal()
+        .get_investigation(second)
+        .expect("second investigation should persist")
+        .clone();
+    let mut replacement = investigation_record_wire(&original);
+    replacement.version = u32::MAX - 1;
+    let envelope = replace_serialized_investigation(
+        build_save(&registry, &state).expect("unstaffed investigations should save"),
+        &original,
+        &replacement,
+    );
+    state = restore_save(&registry, envelope)
+        .expect("near-terminal active unstaffed investigation should remain structurally valid");
+
+    let staffed = apply_autonomous_investigator_staffing(&mut state)
+        .expect("finite-rail case should not block representable detective staffing");
+    assert_eq!(staffed, vec![(first, senior)]);
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(first)
+            .expect("representable case should persist")
+            .lead_investigator(),
+        Some(senior)
+    );
+    let exhausted = state
+        .legal()
+        .get_investigation(second)
+        .expect("finite-rail investigation should persist");
+    assert_eq!(exhausted.lead_investigator(), None);
+    assert_eq!(exhausted.version(), u32::MAX - 1);
+    assert!(matches!(
+        validate_assign_investigator(&state, second, junior),
+        Err(InvestigationError::VersionCapacity(_))
+    ));
+    validate_state_against_registry(&registry, &state)
+        .expect("finite-rail investigation staffing should remain registry-valid");
+    validate_invariants(&state);
+}
+
+#[test]
 fn structural_validation_rejects_one_investigator_leading_two_active_cases() {
     let registry = build_registry();
     let mut state = AppState::new(0x57AF_D00B);
@@ -2949,7 +3128,7 @@ fn case_graph_indexes_track_shared_subjects_and_evidence_kinds() {
 }
 
 #[test]
-fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition() {
+fn cold_case_decay_cools_and_reopens_operation_originated_cases_canonically() {
     let registry = build_registry();
     let mut state = AppState::new(0xC01D_1933);
     let police = insert_organization(
@@ -3179,6 +3358,156 @@ fn operation_originated_cases_cool_and_reopen_through_the_canonical_transition()
 }
 
 #[test]
+fn cold_case_decay_uses_elapsed_time_since_nonzero_activity() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xC01D_71AE);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Elapsed Time Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Elapsed Time Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+
+    state.advance_clock(SimDuration::from_minutes(10));
+    let (_leader, origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "Nonzero activity");
+    let investigation =
+        open_test_origin_incident(&mut state, police, origin, "Nonzero activity inquiry");
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(investigation)
+            .expect("originated investigation should persist")
+            .last_activity_at(),
+        SimTime::from_minutes(10)
+    );
+
+    state.advance_clock(SimDuration::from_minutes(119));
+    assert_eq!(
+        apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+            .expect("pre-threshold cold-case pass should resolve"),
+        ColdCaseDecayOutcome {
+            suspended: Vec::new(),
+            closed: Vec::new(),
+        },
+        "119 elapsed inactive minutes must not be treated as a full 120-minute window"
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(investigation)
+            .expect("pre-threshold investigation should persist")
+            .status(),
+        InvestigationStatus::Active
+    );
+
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    assert_eq!(
+        apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+            .expect("exact-threshold cold-case pass should resolve"),
+        ColdCaseDecayOutcome {
+            suspended: vec![investigation],
+            closed: Vec::new(),
+        },
+        "exactly 120 elapsed inactive minutes must make the originated case cold"
+    );
+    validate_state(&state).expect("elapsed-time cold-case state should remain valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn cold_case_decay_defers_originated_case_with_scheduled_work() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xC01D_5CED);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Scheduled Work Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Scheduled Work Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let detective = insert_test_investigator(&mut state, police, "Working Detective", 80);
+    let (_leader, origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "Scheduled");
+    let investigation =
+        open_test_origin_incident(&mut state, police, origin, "Scheduled-work cold inquiry");
+    validate_assign_investigator(&state, investigation, detective)
+        .expect("lead assignment should validate")
+        .commit(&mut state)
+        .expect("lead assignment should commit");
+    let evidence = *state
+        .legal()
+        .get_investigation(investigation)
+        .expect("originated investigation should persist")
+        .evidence()
+        .iter()
+        .next()
+        .expect("originated investigation should contain intake evidence");
+    let work = validate_schedule_investigation_work(
+        &registry,
+        &state,
+        InvestigationWorkDraft {
+            investigation,
+            investigator: detective,
+            kind: InvestigationWorkKind::EvidenceReview,
+            focus: InvestigationWorkFocus::evidence(evidence),
+        },
+    )
+    .expect("evidence review should validate")
+    .commit(&mut state)
+    .expect("evidence review should schedule");
+
+    state.advance_clock(SimDuration::from_minutes(121));
+    assert_eq!(
+        apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+            .expect("scheduled work should defer rather than fail cold decay"),
+        ColdCaseDecayOutcome {
+            suspended: Vec::new(),
+            closed: Vec::new(),
+        }
+    );
+    let investigation_record = state
+        .legal()
+        .get_investigation(investigation)
+        .expect("deferred investigation should persist");
+    assert_eq!(investigation_record.status(), InvestigationStatus::Active);
+    assert_eq!(investigation_record.lead_investigator(), Some(detective));
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation_work(work)
+            .expect("scheduled work should persist")
+            .status(),
+        InvestigationWorkStatus::Scheduled
+    );
+    validate_state(&state).expect("scheduled-work deferral should remain structurally valid");
+    validate_invariants(&state);
+}
+
+#[test]
 fn cold_case_decay_surfaces_knowledge_id_exhaustion_without_partial_suspension() {
     let registry = build_registry();
     let mut state = AppState::new(0xC01D_A70C);
@@ -3287,6 +3616,166 @@ fn cold_case_decay_surfaces_knowledge_id_exhaustion_without_partial_suspension()
     assert_eq!(after.version(), before.version());
     assert_eq!(after.lead_investigator(), before.lead_investigator());
     validate_state(&state).expect("failed cold-case decay must leave state structurally valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn cold_case_decay_batch_rejects_allocator_exhaustion_atomically() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xC01D_BA7C);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Batch Cold Case Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Batch Cold Case Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let (_first_leader, first_origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "First cold");
+    let (_second_leader, second_origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "Second cold");
+    let first =
+        open_test_origin_incident(&mut state, police, first_origin, "First batch cold inquiry");
+    let second = open_test_origin_incident(
+        &mut state,
+        police,
+        second_origin,
+        "Second batch cold inquiry",
+    );
+    let first_detective = insert_test_investigator(&mut state, police, "First Batch Detective", 80);
+    let second_detective =
+        insert_test_investigator(&mut state, police, "Second Batch Detective", 80);
+    validate_assign_investigator(&state, first, first_detective)
+        .expect("first cold-case lead should validate")
+        .commit(&mut state)
+        .expect("first cold-case lead should commit");
+    validate_assign_investigator(&state, second, second_detective)
+        .expect("second cold-case lead should validate")
+        .commit(&mut state)
+        .expect("second cold-case lead should commit");
+
+    state.advance_clock(SimDuration::from_minutes(121));
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX - 1);
+    let before =
+        bincode::serialize(&state).expect("pre-exhaustion cold-case state should serialize");
+
+    let error = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+        .expect_err("two due shelves must reserve both knowledge IDs before mutation");
+    assert_eq!(
+        error,
+        InvestigationError::IdExhaustion(crate::core::id::IdExhaustionError::Exhausted {
+            kind: "information",
+            next: u32::MAX - 1,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected cold-case state should serialize"),
+        before,
+        "allocator failure must not shelf only the first due case"
+    );
+    for (investigation, investigator) in [(first, first_detective), (second, second_detective)] {
+        let record = state
+            .legal()
+            .get_investigation(investigation)
+            .expect("due investigation should persist");
+        assert_eq!(record.status(), InvestigationStatus::Active);
+        assert_eq!(record.lead_investigator(), Some(investigator));
+    }
+    validate_state(&state).expect("rejected cold-case batch should remain structurally valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn cold_case_decay_skips_version_exhausted_case_and_shelves_other_due_files() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xC01D_F17E);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Finite Cold Case Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Finite Cold Case Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let (_, exhausted_origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "Finite cold");
+    let (_, ordinary_origin) =
+        insert_test_surveillance_origin(&registry, &mut state, criminal, "Ordinary cold");
+    let exhausted = open_test_origin_incident(
+        &mut state,
+        police,
+        exhausted_origin,
+        "Finite-rail cold inquiry",
+    );
+    let ordinary = open_test_origin_incident(
+        &mut state,
+        police,
+        ordinary_origin,
+        "Representable cold inquiry",
+    );
+    let original = state
+        .legal()
+        .get_investigation(exhausted)
+        .expect("finite-rail case should persist")
+        .clone();
+    let mut replacement = investigation_record_wire(&original);
+    replacement.version = u32::MAX;
+    let envelope = replace_serialized_investigation(
+        build_save(&registry, &state).expect("cold-case fixture should save"),
+        &original,
+        &replacement,
+    );
+    state = restore_save(&registry, envelope)
+        .expect("max-version active originated case should remain structurally valid");
+    state.advance_clock(SimDuration::from_minutes(121));
+
+    let outcome = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+        .expect("finite-rail case must not block other cold-case lifecycle work");
+    assert_eq!(outcome.suspended, vec![ordinary]);
+    assert!(outcome.closed.is_empty());
+    let exhausted_record = state
+        .legal()
+        .get_investigation(exhausted)
+        .expect("finite-rail case should persist");
+    assert_eq!(exhausted_record.status(), InvestigationStatus::Active);
+    assert_eq!(exhausted_record.version(), u32::MAX);
+    assert!(matches!(
+        validate_transition_investigation(&state, exhausted, InvestigationTransition::Suspend,),
+        Err(InvestigationError::VersionCapacity(_))
+    ));
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(ordinary)
+            .expect("representable cold case should persist")
+            .status(),
+        InvestigationStatus::Suspended
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("finite-rail cold-case state should remain registry-valid");
     validate_invariants(&state);
 }
 

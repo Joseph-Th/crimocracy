@@ -123,6 +123,38 @@ fn replace_serialized_evidence(
         .expect("same-layout evidence corruption must remain decodable")
 }
 
+fn replace_serialized_prosecution_case_version(
+    envelope: SaveEnvelope,
+    original: &crate::legal::ProsecutionCaseRecord,
+    version: u32,
+) -> SaveEnvelope {
+    let mut replacement = original.clone();
+    replacement.version = version;
+    let original_bytes = bincode::serialize(original).expect("prosecution case should serialize");
+    let replacement_bytes =
+        bincode::serialize(&replacement).expect("replacement prosecution case should serialize");
+    assert_eq!(
+        replacement_bytes.len(),
+        original_bytes.len(),
+        "version-only prosecution corruption must preserve wire size"
+    );
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "serialized prosecution case must appear exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes)
+        .expect("same-layout prosecution corruption must remain decodable")
+}
+
 #[derive(Clone, Serialize)]
 struct ArrestRecordWire {
     id: ArrestId,
@@ -573,6 +605,91 @@ fn open_case(fixture: &mut Fixture) -> ProsecutionCaseId {
         .expect("prosecution case should commit")
 }
 
+fn open_unstaffed_case(
+    fixture: &mut Fixture,
+    criminal: OrganizationId,
+    name: &str,
+) -> ProsecutionCaseId {
+    let defendant = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: format!("{name} Defendant"),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("additional defendant should validate");
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: format!("{name} investigation"),
+            subjects: BTreeSet::from([EntityRef::Character(defendant)]),
+        },
+    )
+    .expect("additional source investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("additional source investigation should commit");
+    let first = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        investigation,
+        defendant,
+        EvidenceKind::Document,
+    );
+    let second = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        investigation,
+        defendant,
+        EvidenceKind::KnownAssociation,
+    );
+    let evidence = BTreeSet::from([first, second]);
+    let arrest = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: defendant,
+            investigation,
+            evidence: evidence.clone(),
+        },
+    )
+    .expect("additional arrest should validate")
+    .commit(&mut fixture.state)
+    .expect("additional arrest should commit");
+    let opening_prosecutor = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: format!("{name} Opening Prosecutor"),
+            organization: Some(fixture.office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(55))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("temporary opening prosecutor should validate");
+    let case = validate_open_prosecution_case(
+        &fixture.state,
+        ProsecutionCaseDraft {
+            arrest,
+            prosecutor_office: fixture.office,
+            prosecutor: opening_prosecutor,
+            evidence,
+        },
+    )
+    .expect("additional prosecution case should validate")
+    .commit(&mut fixture.state)
+    .expect("additional prosecution case should commit");
+    detain_character(fixture, opening_prosecutor, name);
+    case
+}
+
 #[test]
 fn prosecution_rejects_defendant_as_their_own_prosecutor() {
     let registry = build_registry();
@@ -977,89 +1094,8 @@ fn autonomous_prosecution_staffing_updates_cached_workload_between_same_pass_cas
         .organization()
         .expect("fixture defendant should belong to the criminal organization");
 
-    let mut make_unstaffed_case = |name: &str| {
-        let defendant = insert_character(
-            &mut fixture.state,
-            CharacterDraft {
-                name: format!("{name} Defendant"),
-                organization: Some(criminal),
-                supervisor: None,
-                autonomy: AutonomyLevel::Guided,
-                capabilities: BTreeMap::new(),
-                traits: BTreeSet::new(),
-                drives: BTreeMap::new(),
-            },
-        )
-        .expect("additional defendant should validate");
-        let investigation = validate_open_investigation(
-            &fixture.state,
-            InvestigationDraft {
-                owner: fixture.police,
-                title: format!("{name} investigation"),
-                subjects: BTreeSet::from([EntityRef::Character(defendant)]),
-            },
-        )
-        .expect("additional source investigation should validate")
-        .commit(&mut fixture.state)
-        .expect("additional source investigation should commit");
-        let first = add_evidence(
-            &mut fixture.state,
-            fixture.police,
-            investigation,
-            defendant,
-            EvidenceKind::Document,
-        );
-        let second = add_evidence(
-            &mut fixture.state,
-            fixture.police,
-            investigation,
-            defendant,
-            EvidenceKind::KnownAssociation,
-        );
-        let evidence = BTreeSet::from([first, second]);
-        let arrest = validate_arrest(
-            &fixture.registry,
-            &fixture.state,
-            ArrestDraft {
-                character: defendant,
-                investigation,
-                evidence: evidence.clone(),
-            },
-        )
-        .expect("additional arrest should validate")
-        .commit(&mut fixture.state)
-        .expect("additional arrest should commit");
-        let opening_prosecutor = insert_character(
-            &mut fixture.state,
-            CharacterDraft {
-                name: format!("{name} Opening Prosecutor"),
-                organization: Some(fixture.office),
-                supervisor: None,
-                autonomy: AutonomyLevel::Broad,
-                capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(55))]),
-                traits: BTreeSet::new(),
-                drives: BTreeMap::new(),
-            },
-        )
-        .expect("temporary opening prosecutor should validate");
-        let case = validate_open_prosecution_case(
-            &fixture.state,
-            ProsecutionCaseDraft {
-                arrest,
-                prosecutor_office: fixture.office,
-                prosecutor: opening_prosecutor,
-                evidence,
-            },
-        )
-        .expect("additional prosecution case should validate")
-        .commit(&mut fixture.state)
-        .expect("additional prosecution case should commit");
-        detain_character(&mut fixture, opening_prosecutor, name);
-        case
-    };
-
-    let first = make_unstaffed_case("First cached-load");
-    let second = make_unstaffed_case("Second cached-load");
+    let first = open_unstaffed_case(&mut fixture, criminal, "First cached-load");
+    let second = open_unstaffed_case(&mut fixture, criminal, "Second cached-load");
     let staffed = apply_autonomous_prosecution_staffing(&mut fixture.state)
         .expect("same-pass prosecution staffing should resolve");
     assert_eq!(
@@ -1068,6 +1104,129 @@ fn autonomous_prosecution_staffing_updates_cached_workload_between_same_pass_cas
         "the first assignment must increment the cached lead workload before the second case is ranked"
     );
     validate_state(&fixture.state).expect("cached prosecution staffing state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_prosecution_staffing_preserves_post_assignment_version_headroom() {
+    let mut fixture = fixture();
+    let backup = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Atomic Backup Prosecutor".to_owned(),
+            organization: Some(fixture.office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(70))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("backup prosecutor should validate");
+    let criminal = fixture
+        .state
+        .world()
+        .get_character(fixture.defendant)
+        .expect("fixture defendant should persist")
+        .organization()
+        .expect("fixture defendant should belong to the criminal organization");
+    let first = open_unstaffed_case(&mut fixture, criminal, "First atomic staffing");
+    let second = open_unstaffed_case(&mut fixture, criminal, "Second atomic staffing");
+    let second_record = fixture
+        .state
+        .legal()
+        .get_prosecution_case(second)
+        .expect("second unstaffed case should persist")
+        .clone();
+    let envelope =
+        build_save(&fixture.registry, &fixture.state).expect("unstaffed cases should save");
+    let corrupted =
+        replace_serialized_prosecution_case_version(envelope, &second_record, u32::MAX - 1);
+    fixture.state = restore_save(&fixture.registry, corrupted)
+        .expect("near-terminal reviewing prosecution case should remain structurally valid");
+    let staffed = apply_autonomous_prosecution_staffing(&mut fixture.state)
+        .expect("finite-rail case should not block representable prosecution staffing");
+    assert_eq!(
+        staffed,
+        vec![(first, fixture.lead)],
+        "only the representable reviewing case should receive a prosecutor"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(first)
+            .expect("representable case should persist")
+            .assigned_prosecutor(),
+        Some(fixture.lead)
+    );
+    let exhausted = fixture
+        .state
+        .legal()
+        .get_prosecution_case(second)
+        .expect("finite-rail case should persist");
+    assert_eq!(exhausted.assigned_prosecutor(), None);
+    assert_eq!(exhausted.version(), u32::MAX - 1);
+    assert!(matches!(
+        validate_assign_prosecutor(&fixture.state, second, backup),
+        Err(ProsecutionStaffingError::VersionCapacity(_))
+    ));
+    assert!(
+        fixture
+            .state
+            .legal()
+            .reviewing_prosecution_cases_for_prosecutor(backup)
+            .all(|case| case.id() != second)
+    );
+    validate_state(&fixture.state)
+        .expect("finite-rail prosecution staffing state should stay valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn supplemental_referral_preserves_one_revision_for_resolution_or_recusal() {
+    let mut fixture = fixture();
+    let case = open_case(&mut fixture);
+    let original = fixture
+        .state
+        .legal()
+        .get_prosecution_case(case)
+        .expect("reviewing prosecution case should persist")
+        .clone();
+    let envelope = build_save(&fixture.registry, &fixture.state)
+        .expect("reviewing prosecution case should save");
+    fixture.state = restore_save(
+        &fixture.registry,
+        replace_serialized_prosecution_case_version(envelope, &original, u32::MAX - 1),
+    )
+    .expect("near-terminal staffed prosecution case should remain structurally valid");
+
+    let error = match validate_supplement_prosecution_case(
+        &fixture.state,
+        ProsecutionReferralDraft {
+            prosecution_case: case,
+            evidence: BTreeSet::from([fixture.supplemental_evidence]),
+        },
+    ) {
+        Ok(_) => {
+            panic!("a supplemental referral must not consume the final prosecution-case revision")
+        }
+        Err(error) => error,
+    };
+    let ProsecutionError::VersionCapacity(error) = error else {
+        panic!("unexpected supplemental headroom error: {error:?}");
+    };
+    assert_eq!(error.record_kind(), "prosecution case");
+    let record = fixture
+        .state
+        .legal()
+        .get_prosecution_case(case)
+        .expect("rejected prosecution case should persist");
+    assert_eq!(record.version(), u32::MAX - 1);
+    assert_eq!(record.assigned_prosecutor(), Some(fixture.lead));
+    assert_eq!(record.evidence(), &arrest_evidence_set(&fixture));
+    validate_state(&fixture.state)
+        .expect("rejected supplemental referral should leave valid state");
     validate_invariants(&fixture.state);
 }
 

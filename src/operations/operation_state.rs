@@ -53,6 +53,10 @@ pub struct OperationState {
     authorized_by_start: BTreeMap<SimTime, BTreeSet<OperationId>>,
     #[serde(skip)]
     in_progress_by_resolution_due: BTreeMap<SimTime, BTreeSet<OperationId>>,
+    /// Every non-terminal operation carrying a hard completion deadline, keyed by the earliest
+    /// deadline. Unlike resolution timing, decision pauses never shift this authored boundary.
+    #[serde(skip)]
+    active_by_completion_deadline: BTreeMap<SimTime, BTreeSet<OperationId>>,
     /// Successful property/cash takes per target business and operation kind as
     /// (resolved_at, operation_id). Different kinds represent different replenishment
     /// channels, so a burglary cannot deplete a later smuggling payment merely because both
@@ -74,6 +78,7 @@ impl OperationState {
         self.by_discovered_information.clear();
         self.authorized_by_start.clear();
         self.in_progress_by_resolution_due.clear();
+        self.active_by_completion_deadline.clear();
         self.successful_takes_by_business_kind.clear();
         for record in self.records.values() {
             let id = record.id();
@@ -92,6 +97,12 @@ impl OperationState {
                 for participant in record.participants() {
                     self.active_by_participant
                         .entry(participant)
+                        .or_default()
+                        .insert(id);
+                }
+                if let Some(deadline) = record.completion_deadline() {
+                    self.active_by_completion_deadline
+                        .entry(deadline)
                         .or_default()
                         .insert(id);
                 }
@@ -225,6 +236,24 @@ impl OperationState {
             .collect()
     }
 
+    /// In-progress or decision-paused operations whose hard completion deadline has fully passed,
+    /// preserving natural (deadline, operation id) order without rescanning every active record
+    /// each simulation minute.
+    pub(crate) fn find_running_past_completion_deadline(&self, now: SimTime) -> Vec<OperationId> {
+        self.active_by_completion_deadline
+            .range(..now)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .filter(|id| {
+                self.records.get(id).is_some_and(|record| {
+                    matches!(
+                        record.status(),
+                        OperationStatus::InProgress | OperationStatus::AwaitingDecision
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn insert(&mut self, record: OperationRecord) {
         let id = record.id();
         // Guard before any index mutation so a duplicate ID cannot pollute derived state in
@@ -256,6 +285,12 @@ impl OperationState {
             .entry(record.scheduled_for())
             .or_default()
             .insert(id);
+        if let Some(deadline) = record.completion_deadline() {
+            self.active_by_completion_deadline
+                .entry(deadline)
+                .or_default()
+                .insert(id);
+        }
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -575,12 +610,16 @@ impl OperationState {
     }
 
     fn set_status(&mut self, id: OperationId, next: OperationStatus) {
-        let (previous, participants) = {
+        let (previous, participants, completion_deadline) = {
             let record = self
                 .records
                 .get(&id)
                 .expect("validated operation disappeared before status commit");
-            (record.status(), record.participants())
+            (
+                record.status(),
+                record.participants(),
+                record.completion_deadline(),
+            )
         };
         if let Some(ids) = self.by_status.get_mut(&previous) {
             ids.remove(&id);
@@ -603,6 +642,11 @@ impl OperationState {
                     .or_default()
                     .insert(id);
             }
+        }
+        if matches!(next, OperationStatus::Completed | OperationStatus::Aborted)
+            && let Some(deadline) = completion_deadline
+        {
+            Self::remove_schedule_index(&mut self.active_by_completion_deadline, deadline, id);
         }
         let record = self
             .records
@@ -676,6 +720,17 @@ impl OperationState {
         if active {
             expected.active_participant_links += participants.len();
         }
+
+        let deadline_indexed = record.completion_deadline().is_some_and(|deadline| {
+            self.active_by_completion_deadline
+                .get(&deadline)
+                .is_some_and(|ids| ids.contains(&record.id()))
+        });
+        let should_index_deadline = active && record.completion_deadline().is_some();
+        if deadline_indexed != should_index_deadline {
+            return false;
+        }
+        expected.active_deadlines += usize::from(should_index_deadline);
 
         let authorized = record.status() == OperationStatus::Authorized;
         if self
@@ -770,7 +825,15 @@ impl OperationState {
             .values()
             .map(BTreeSet::len)
             .sum();
-        indexed_in_progress == expected.in_progress
+        if indexed_in_progress != expected.in_progress {
+            return false;
+        }
+        let indexed_active_deadlines: usize = self
+            .active_by_completion_deadline
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        indexed_active_deadlines == expected.active_deadlines
     }
 }
 
@@ -781,6 +844,7 @@ struct OperationIndexExpectations {
     active_participant_links: usize,
     authorized: usize,
     in_progress: usize,
+    active_deadlines: usize,
     takes: usize,
     discovered_links: usize,
 }

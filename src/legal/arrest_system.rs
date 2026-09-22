@@ -204,6 +204,20 @@ pub struct ValidatedArrest {
 }
 
 impl ValidatedArrest {
+    fn id_budget_excluding_duplicate_operation_preemptions(
+        &self,
+        seen_operations: &mut BTreeSet<OperationId>,
+    ) -> Vec<(IdKind, u32)> {
+        let mut budget = vec![(IdKind::Arrest, 1)];
+        for preemption in &self.operation_preemptions {
+            if seen_operations.insert(preemption.abort.operation()) {
+                budget.extend(preemption.abort.id_budget());
+            }
+        }
+        budget.extend(self.counsel_representation_ends.id_budget());
+        budget
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<ArrestId, ArrestError> {
         crate::core::time::ensure_time_current(state.now(), self.validated_at)
             .map_err(|(expected, found)| ArrestError::StaleArrestTime { expected, found })?;
@@ -902,10 +916,17 @@ pub(crate) fn apply_due_custody_releases(
     // The chronology index groups by arrest time. Preserve the custody pass's canonical
     // arrest-id order so this optimization cannot alter observable tick ordering.
     due.sort_unstable();
-    for arrest in &due {
-        // IDs came from the authoritative detained index in this same pass. A rejection here
-        // is therefore broken current state, not an ordinary race to ignore.
-        validate_release_arrest(state, *arrest)?.commit(state)?;
+    let releases = due
+        .iter()
+        .copied()
+        .map(|arrest| validate_release_arrest(state, arrest))
+        .collect::<Result<Vec<_>, _>>()?;
+    for release in releases {
+        // Every due record was prevalidated before the first release. Release touches only its
+        // own arrest record, so no earlier release can stale a later token in this cohort.
+        release
+            .commit(state)
+            .expect("prevalidated due custody release must remain current");
     }
     Ok(due)
 }
@@ -971,18 +992,41 @@ pub fn apply_autonomous_evidence_arrests(
             candidate.investigation,
         )
     });
+    // Keep only the strongest deterministic case for each character before any validation or
+    // allocation. Once one case arrests them, every weaker same-minute candidate would become an
+    // ordinary AlreadyDetained no-op.
+    candidates.dedup_by_key(|candidate| candidate.character);
+
+    // Prevalidate every distinct arrestee and reserve the complete artifact budget before custody
+    // becomes authoritative for anyone. Different arrestees may share one active operation; the
+    // first detention aborts it, so count that abort's artifacts once rather than pessimistically
+    // reserving one duplicate debrief per participant.
+    let mut id_budget = Vec::new();
+    let mut seen_preempted_operations = BTreeSet::new();
+    for candidate in &candidates {
+        let validated = validate_arrest(
+            registry,
+            state,
+            ArrestDraft {
+                character: candidate.character,
+                investigation: candidate.investigation,
+                evidence: candidate.evidence.clone(),
+            },
+        )?;
+        id_budget.extend(
+            validated.id_budget_excluding_duplicate_operation_preemptions(
+                &mut seen_preempted_operations,
+            ),
+        );
+    }
+    state.ids.reserve_many(&id_budget)?;
+
     let mut arrests = Vec::new();
     for candidate in candidates {
-        if state
-            .legal
-            .active_arrest_for_character(candidate.character)
-            .is_some()
-        {
-            continue;
-        }
-        // The draft is assembled from current case/evidence state. Responsibility preemption is
-        // part of the validated custody transaction, so validation or allocation failure is
-        // exceptional and must surface rather than being mistaken for "not enough evidence yet".
+        // Revalidate against the post-earlier-arrest state so a shared operation already aborted
+        // by another participant simply disappears from this character's preemption set. The
+        // complete allocator budget and every candidate's independent legal dependencies were
+        // already proven before the first custody mutation.
         let arrest = validate_arrest(
             registry,
             state,

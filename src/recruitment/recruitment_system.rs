@@ -1,5 +1,13 @@
 //! Relationship-gated recruitment decisions with causal factors, cooldowns, and atomic accepted membership changes.
 
+mod planning;
+
+pub(crate) use planning::{RecruitmentFactorContext, decide_recruitment_attempt};
+use planning::{
+    decide_recruitment_attempt_with_approval, validate_plan_definition,
+    validate_plan_state_snapshot,
+};
+
 use crate::core::id::{
     ArrestId, CharacterId, DecisionRequestId, IdExhaustionError, IdKind, InformationId,
     OrganizationId, RecruitmentAttemptId,
@@ -19,16 +27,10 @@ use crate::recruitment::artifacts::{
     validate_recruitment_history_event, validate_recruitment_member_report,
     validate_recruitment_outcome_information,
 };
-use crate::recruitment::scoring::{
-    candidate_pressure_information_ids, resolve_perceived_legal_pressure_at,
-    resolve_perceived_legal_pressure_from_ids, resolve_recruitment_factors_from_context,
-    resolve_recruitment_margin, resolve_recruitment_outcome,
-};
 use crate::recruitment::{
-    RecruitmentApproach, RecruitmentAuthority, RecruitmentDraft, RecruitmentFactors,
-    RecruitmentOutcome, RecruitmentPolicySource, RecruitmentRecordContextParts,
-    RecruitmentRecordParts, RecruitmentRecordResolutionParts, RecruitmentRelationshipSnapshot,
-    build_recruitment_record, build_recruitment_relationship_snapshot,
+    RecruitmentAuthority, RecruitmentDraft, RecruitmentFactors, RecruitmentOutcome,
+    RecruitmentPolicySource, RecruitmentRecordContextParts, RecruitmentRecordParts,
+    RecruitmentRecordResolutionParts, RecruitmentRelationshipSnapshot, build_recruitment_record,
 };
 use crate::registry::{RecruitmentDefinition, Registry};
 use crate::reports::report_system::{ReportError, ValidatedReport};
@@ -315,7 +317,7 @@ pub fn find_recruitment_candidates(
             Some(target_organization),
             Some(recruiter),
         ) {
-            if candidate_reassignment_is_temporarily_blocked(error) {
+            if candidate_reassignment_is_unavailable(error) {
                 continue;
             }
             return Err(error.into());
@@ -325,12 +327,11 @@ pub fn find_recruitment_candidates(
     Ok(candidates)
 }
 
-/// Reassignment failures that describe a currently unavailable prospect rather than broken
-/// world state. Candidate discovery is a query, so routine workload/custody/leadership bindings
-/// exclude a prospect without turning the whole discovery pass into an error. Every structural,
-/// hierarchy, identity, or impossible business-only error propagates instead of being silently
-/// erased by a blanket `is_err()` filter.
-fn candidate_reassignment_is_temporarily_blocked(error: WorldError) -> bool {
+/// Reassignment failures that describe an unavailable prospect rather than broken world state.
+/// Candidate discovery is a query, so routine workload/custody/leadership bindings and a
+/// permanently exhausted candidate version exclude only that prospect. Direct recruitment still
+/// returns the typed capacity error when a caller explicitly names the candidate.
+fn candidate_reassignment_is_unavailable(error: WorldError) -> bool {
     match error {
         WorldError::ActiveOperationAssignment { .. }
         | WorldError::ActiveMandateAssignment { .. }
@@ -341,7 +342,8 @@ fn candidate_reassignment_is_temporarily_blocked(error: WorldError) -> bool {
         | WorldError::ActiveInstitutionalContactHandler { .. }
         | WorldError::ActiveInstitutionalContactAssignment { .. }
         | WorldError::DirectReportAssignment { .. }
-        | WorldError::PendingRecruitmentApprovalAssignment { .. } => true,
+        | WorldError::PendingRecruitmentApprovalAssignment { .. }
+        | WorldError::VersionCapacity(_) => true,
         WorldError::EmptyName
         | WorldError::MissingOrganization(_)
         | WorldError::MissingCharacter(_)
@@ -361,109 +363,8 @@ fn candidate_reassignment_is_temporarily_blocked(error: WorldError) -> bool {
         | WorldError::StaleCharacter { .. }
         | WorldError::InvalidPlayerOrganization(_)
         | WorldError::PlayerOrganizationAlreadyDesignated { .. }
-        | WorldError::IdExhaustion(_)
-        | WorldError::VersionCapacity(_) => false,
+        | WorldError::IdExhaustion(_) => false,
     }
-}
-
-pub(crate) fn decide_recruitment_attempt(
-    registry: &Registry,
-    state: &AppState,
-    draft: RecruitmentDraft,
-) -> Result<RecruitmentPlan, RecruitmentError> {
-    decide_recruitment_attempt_with_approval(registry, state, draft, None)
-}
-
-fn decide_recruitment_attempt_with_approval(
-    registry: &Registry,
-    state: &AppState,
-    draft: RecruitmentDraft,
-    allowed_recruitment_approval: Option<DecisionRequestId>,
-) -> Result<RecruitmentPlan, RecruitmentError> {
-    let (candidate, recruiter) =
-        validate_recruitment_request(registry, state, draft, allowed_recruitment_approval)?;
-    let recruiter_relationship = state
-        .social
-        .get_relationship(draft.candidate, draft.recruiter)
-        .expect("validated recruitment relationship must exist");
-    let incumbent_relationship = candidate.supervisor().map(|supervisor| {
-        let relationship = state.social.get_relationship(draft.candidate, supervisor);
-        build_recruitment_relationship_snapshot(
-            draft.candidate,
-            supervisor,
-            relationship.map(|record| record.dimensions()),
-            relationship.map(|record| record.version()),
-        )
-    });
-    let recruiter_relationship = build_recruitment_relationship_snapshot(
-        draft.candidate,
-        draft.recruiter,
-        Some(recruiter_relationship.dimensions()),
-        Some(recruiter_relationship.version()),
-    );
-    let pressure_information_max_age = registry.recruitment().perceived_legal_pressure_max_age();
-    let pressure_information_snapshot = candidate_pressure_information_ids(
-        state,
-        draft.candidate,
-        state.now(),
-        pressure_information_max_age,
-    );
-    let (pressure_information, perceived_legal_pressure) =
-        resolve_perceived_legal_pressure_from_ids(
-            registry.information_quality(),
-            registry.recruitment(),
-            state,
-            &pressure_information_snapshot,
-            state.now(),
-        );
-    // The candidate weighs the outfit's demonstrated underworld competence, resolved through
-    // the canonical reputation surface; the frozen value rides inside the plan's factors.
-    let organization_competence = crate::reputation::reputation_system::resolve_score(
-        registry,
-        state.reputation(),
-        draft.target_organization,
-        crate::reputation::AudienceKind::Underworld,
-        crate::reputation::ReputationDimension::Competence,
-    );
-    let factors = resolve_recruitment_factors_from_context(RecruitmentFactorContext {
-        definition: registry.recruitment(),
-        candidate,
-        recruiter,
-        approach: draft.approach,
-        recruiter_relationship,
-        incumbent_relationship,
-        perceived_legal_pressure,
-        organization_competence,
-        had_previous_organization: candidate.organization().is_some(),
-    })
-    .expect("validated recruitment must retain a candidate-to-recruiter relationship snapshot");
-    let margin = resolve_recruitment_margin(registry.recruitment(), factors, draft.approach);
-    let outcome = resolve_recruitment_outcome(margin);
-    Ok(RecruitmentPlan {
-        draft,
-        context: RecruitmentPlanContext {
-            previous_organization: candidate.organization(),
-            previous_supervisor: candidate.supervisor(),
-            occurred_at: state.now(),
-            factors,
-            margin,
-            outcome,
-            pressure_information,
-        },
-        dependencies: RecruitmentPlanDependencies {
-            expected_candidate_version: candidate.version(),
-            expected_recruiter_version: recruiter.version(),
-            recruiter_relationship,
-            incumbent_relationship,
-            pressure_information_snapshot,
-            pressure_information_max_age,
-            expected_latest_attempt: state
-                .recruitment
-                .latest_attempt_for(draft.candidate, draft.target_organization)
-                .map(|attempt| attempt.id()),
-            reputation_baseline: registry.reputation().baseline(),
-        },
-    })
 }
 
 pub fn validate_recruitment_attempt(
@@ -636,15 +537,11 @@ fn validate_recruitment_plan_with_authority(
         RecruitmentAuthority::ApprovedDecision { decision, .. } => Some(*decision),
         RecruitmentAuthority::ExecutiveApproval | RecruitmentAuthority::Delegated { .. } => None,
     };
-    let reassignment = if plan.context.outcome == RecruitmentOutcome::Accepted {
-        Some(validate_recruitment_reassignment(
-            state,
-            plan.draft,
-            approval_decision,
-        )?)
-    } else {
-        None
-    };
+    // Eligibility to make the approach is independent of whether the candidate ultimately
+    // accepts it. Keep the canonical reassignment token even for a refusal so cross-domain
+    // bindings acquired after planning, such as custody or an operation assignment, stale the
+    // attempt instead of allowing an unavailable prospect to participate in the scene.
+    let reassignment = validate_recruitment_reassignment(state, plan.draft, approval_decision)?;
     let history = validate_recruitment_history_event(state, &plan)?;
     let outcome_information = validate_recruitment_outcome_information(state, &plan)?;
     let member_report = validate_recruitment_member_report(state, &plan)?;
@@ -663,7 +560,7 @@ pub struct ValidatedRecruitmentAttempt {
     plan: RecruitmentPlan,
     authority: RecruitmentAuthority,
     delegated_guard: Option<MandateRecruitmentGuard>,
-    reassignment: Option<ValidatedCharacterReassignment>,
+    reassignment: ValidatedCharacterReassignment,
     history: Option<ValidatedHistoryEvent>,
     outcome_information: ValidatedInformation,
     /// Player-facing report to the candidate's organization: the departure notice on an
@@ -672,7 +569,7 @@ pub struct ValidatedRecruitmentAttempt {
 }
 
 impl ValidatedRecruitmentAttempt {
-    fn id_budget(&self) -> Vec<(IdKind, u32)> {
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
         let mut budget = Vec::new();
         if self.history.is_some() {
             budget.push((IdKind::HistoryEvent, 1));
@@ -715,11 +612,16 @@ impl ValidatedRecruitmentAttempt {
             }
         }
         validate_plan_state_snapshot(state, &self.plan)?;
+        // Character versions do not cover every availability dependency. Re-prove the world
+        // owner's complete reassignment preconditions before any recruitment artifact mutates,
+        // even on the refusal path where membership itself will remain unchanged.
+        self.reassignment.ensure_current(state)?;
         let (history_event, resulting_candidate_version) = match self.plan.context.outcome {
             RecruitmentOutcome::Accepted => {
-                self.reassignment
-                    .expect("accepted recruitment must carry a reassignment token")
-                    .commit(state)?;
+                // The full cross-domain reassignment contract was proved immediately above and
+                // nothing mutates before this membership change. Use the owner's preflighted
+                // commit instead of re-walking custody, role, operation, and contact indexes.
+                self.reassignment.commit_preflighted(state);
                 let version = state
                     .world
                     .get_character(self.plan.draft.candidate)
@@ -736,7 +638,6 @@ impl ValidatedRecruitmentAttempt {
                 )
             }
             RecruitmentOutcome::Refused => {
-                debug_assert!(self.reassignment.is_none());
                 debug_assert!(self.history.is_none());
                 (None, self.plan.dependencies.expected_candidate_version)
             }
@@ -962,165 +863,6 @@ fn validate_cooldown(
                 next_eligible_at,
             });
         }
-    }
-    Ok(())
-}
-
-pub(crate) struct RecruitmentFactorContext<'a> {
-    pub definition: &'a RecruitmentDefinition,
-    pub candidate: &'a crate::world::CharacterRecord,
-    pub recruiter: &'a crate::world::CharacterRecord,
-    pub approach: RecruitmentApproach,
-    pub recruiter_relationship: RecruitmentRelationshipSnapshot,
-    pub incumbent_relationship: Option<RecruitmentRelationshipSnapshot>,
-    pub perceived_legal_pressure: u8,
-    /// The recruiting organization's underworld competence reputation as resolved when the
-    /// decision was made. Callers snapshot this from the canonical reputation surface; the
-    /// invariant pass re-derives with each attempt's own frozen value, because impressions
-    /// legitimately move after an attempt and must not retroactively invalidate it.
-    pub organization_competence: u8,
-    pub had_previous_organization: bool,
-}
-
-fn validate_plan_state_snapshot(
-    state: &AppState,
-    plan: &RecruitmentPlan,
-) -> Result<(), RecruitmentError> {
-    crate::core::time::ensure_time_current(state.now(), plan.context.occurred_at)
-        .map_err(|(expected, found)| RecruitmentError::StaleTime { expected, found })?;
-    let candidate = state
-        .world
-        .get_character(plan.draft.candidate)
-        .ok_or(RecruitmentError::MissingCandidate(plan.draft.candidate))?;
-    if candidate.version() != plan.dependencies.expected_candidate_version {
-        return Err(RecruitmentError::StaleCandidate {
-            candidate: plan.draft.candidate,
-            expected: plan.dependencies.expected_candidate_version,
-            found: candidate.version(),
-        });
-    }
-    let recruiter = state
-        .world
-        .get_character(plan.draft.recruiter)
-        .ok_or(RecruitmentError::MissingRecruiter(plan.draft.recruiter))?;
-    if recruiter.version() != plan.dependencies.expected_recruiter_version {
-        return Err(RecruitmentError::StaleRecruiter {
-            recruiter: plan.draft.recruiter,
-            expected: plan.dependencies.expected_recruiter_version,
-            found: recruiter.version(),
-        });
-    }
-    validate_relationship_snapshot(state, plan.dependencies.recruiter_relationship)?;
-    if let Some(snapshot) = plan.dependencies.incumbent_relationship {
-        validate_relationship_snapshot(state, snapshot)?;
-    }
-    if candidate_pressure_information_ids(
-        state,
-        plan.draft.candidate,
-        state.now(),
-        plan.dependencies.pressure_information_max_age,
-    ) != plan.dependencies.pressure_information_snapshot
-    {
-        return Err(RecruitmentError::StalePressureKnowledge {
-            candidate: plan.draft.candidate,
-        });
-    }
-    let expected_competence = plan.context.factors.organization_competence();
-    let found_competence = state
-        .reputation()
-        .get_record(
-            plan.draft.target_organization,
-            crate::reputation::AudienceKind::Underworld,
-        )
-        .map(|record| record.score(crate::reputation::ReputationDimension::Competence))
-        .unwrap_or(plan.dependencies.reputation_baseline);
-    if found_competence != expected_competence {
-        return Err(RecruitmentError::StaleOrganizationCompetence {
-            organization: plan.draft.target_organization,
-            expected: expected_competence,
-            found: found_competence,
-        });
-    }
-    let latest = state
-        .recruitment
-        .latest_attempt_for(plan.draft.candidate, plan.draft.target_organization)
-        .map(|attempt| attempt.id());
-    if latest != plan.dependencies.expected_latest_attempt {
-        return Err(RecruitmentError::StaleRecruitmentHistory {
-            candidate: plan.draft.candidate,
-            organization: plan.draft.target_organization,
-        });
-    }
-    validate_recruitment_request_base(state, plan.draft)?;
-    Ok(())
-}
-
-fn validate_plan_definition(
-    registry: &Registry,
-    state: &AppState,
-    plan: &RecruitmentPlan,
-) -> Result<(), RecruitmentError> {
-    let definition = registry.recruitment();
-    let candidate = state
-        .world
-        .get_character(plan.draft.candidate)
-        .ok_or(RecruitmentError::MissingCandidate(plan.draft.candidate))?;
-    let recruiter = state
-        .world
-        .get_character(plan.draft.recruiter)
-        .ok_or(RecruitmentError::MissingRecruiter(plan.draft.recruiter))?;
-    let (pressure_information, perceived_legal_pressure) = resolve_perceived_legal_pressure_at(
-        registry.information_quality(),
-        definition,
-        state,
-        plan.draft.candidate,
-        plan.context.occurred_at,
-    );
-    if pressure_information != plan.context.pressure_information {
-        return Err(RecruitmentError::StalePressureKnowledge {
-            candidate: plan.draft.candidate,
-        });
-    }
-    let factors = resolve_recruitment_factors_from_context(RecruitmentFactorContext {
-        definition,
-        candidate,
-        recruiter,
-        approach: plan.draft.approach,
-        recruiter_relationship: plan.dependencies.recruiter_relationship,
-        incumbent_relationship: plan.dependencies.incumbent_relationship,
-        perceived_legal_pressure,
-        organization_competence: plan.context.factors.organization_competence(),
-        had_previous_organization: plan.context.previous_organization.is_some(),
-    })
-    .expect("validated recruitment plan must preserve its recruiter relationship");
-    debug_assert_eq!(factors, plan.context.factors);
-    debug_assert_eq!(
-        resolve_recruitment_margin(definition, factors, plan.draft.approach),
-        plan.context.margin
-    );
-    debug_assert_eq!(
-        resolve_recruitment_outcome(plan.context.margin),
-        plan.context.outcome
-    );
-    Ok(())
-}
-
-fn validate_relationship_snapshot(
-    state: &AppState,
-    snapshot: RecruitmentRelationshipSnapshot,
-) -> Result<(), RecruitmentError> {
-    let relationship = state
-        .social
-        .get_relationship(snapshot.from(), snapshot.to());
-    let found = relationship.map(|relationship| relationship.version());
-    let found_dimensions = relationship.map(|relationship| relationship.dimensions());
-    if found != snapshot.version() || found_dimensions != snapshot.dimensions() {
-        return Err(RecruitmentError::StaleRelationship {
-            from: snapshot.from(),
-            to: snapshot.to(),
-            expected: snapshot.version(),
-            found,
-        });
     }
     Ok(())
 }

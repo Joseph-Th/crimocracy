@@ -39,12 +39,14 @@ impl ValidatedIncidentIntake {
             .map_err(|_| InvestigationError::IncidentEvidenceCountOverflow)
     }
 
-    pub(crate) fn has_witness(&self) -> bool {
-        self.draft.witness.is_some()
-    }
-
-    pub(crate) fn requires_new_investigation(&self) -> bool {
-        self.resuming.is_none()
+    pub(crate) fn id_budget(&self) -> Result<Vec<(IdKind, u32)>, InvestigationError> {
+        let mut budget = Vec::with_capacity(3);
+        if self.resuming.is_none() {
+            budget.push((IdKind::Investigation, 1));
+        }
+        budget.push((IdKind::Evidence, self.evidence_count()?));
+        budget.push((IdKind::CaseWitness, u32::from(self.draft.witness.is_some())));
+        Ok(budget)
     }
 
     /// Re-checks the read-only case-routing decision without allocating or mutating. Composite
@@ -149,13 +151,7 @@ impl ValidatedIncidentIntake {
         state: &mut AppState,
     ) -> Result<IncidentIntakeOutcome, InvestigationError> {
         self.ensure_current(state)?;
-        let mut budget = Vec::with_capacity(3);
-        if self.resuming.is_none() {
-            budget.push((IdKind::Investigation, 1));
-        }
-        budget.push((IdKind::Evidence, self.evidence_count()?));
-        budget.push((IdKind::CaseWitness, u32::from(self.draft.witness.is_some())));
-        state.ids.reserve_many(&budget)?;
+        state.ids.reserve_many(&self.id_budget()?)?;
         // The draft is consumed by this commit, so its subject set moves into the record
         // instead of being cloned.
         let subjects = std::mem::take(&mut self.draft.subjects);

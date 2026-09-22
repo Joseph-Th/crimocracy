@@ -22,7 +22,9 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
+use crate::core::version::{
+    VersionCapacityError, ensure_version_can_advance, ensure_version_can_advance_by,
+};
 #[cfg(test)]
 use crate::intelligence::KnowledgeHolder;
 use crate::intelligence::intelligence_system::{IntelligenceError, ValidatedInformation};
@@ -416,7 +418,7 @@ impl ValidatedProsecutionReferral {
                 found: case.version(),
             });
         }
-        ensure_version_can_advance(case.version(), "prosecution case")?;
+        ensure_version_can_advance_by(case.version(), 2, "prosecution case")?;
         let investigation = state
             .legal
             .get_investigation(case.source_investigation())
@@ -490,7 +492,7 @@ pub fn validate_supplement_prosecution_case(
     draft: ProsecutionReferralDraft,
 ) -> Result<ValidatedProsecutionReferral, ProsecutionError> {
     let case = validate_supplement_dependencies(state, &draft)?;
-    ensure_version_can_advance(case.version(), "prosecution case")?;
+    ensure_version_can_advance_by(case.version(), 2, "prosecution case")?;
     let investigation = state
         .legal
         .get_investigation(case.source_investigation())

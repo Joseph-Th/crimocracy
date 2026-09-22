@@ -331,7 +331,12 @@ impl EconomyState {
         );
     }
 
-    fn apply_cycle(&mut self, cycle: BusinessCycleRecord, next_cycle_at: Option<SimTime>) {
+    fn apply_cycle(
+        &mut self,
+        cycle: BusinessCycleRecord,
+        next_cycle_at: Option<SimTime>,
+        suspend_after_settlement: bool,
+    ) {
         let business = cycle.business();
         let old_next_cycle_at = self
             .businesses
@@ -345,12 +350,25 @@ impl EconomyState {
             .get_mut(&business)
             .expect("validated business economy disappeared before cycle commit");
         record.last_cycle_at = Some(cycle.occurred_at());
-        record.next_cycle_at = next_cycle_at;
+        record.next_cycle_at = if suspend_after_settlement {
+            None
+        } else {
+            next_cycle_at
+        };
+        if suspend_after_settlement {
+            record.status = BusinessOperatingStatus::Suspended;
+        }
         // A new operating cycle starts a fresh laundering plausibility window.
         record.laundered_this_cycle = Money::ZERO;
         record.laundering_transactions_this_cycle.clear();
         record.version = advance_version_preflighted(record.version);
-        if let Some(next_cycle_at) = next_cycle_at {
+        if suspend_after_settlement {
+            let inserted = self.suspended.insert(business);
+            debug_assert!(
+                inserted,
+                "active economy must not already be suspended-indexed"
+            );
+        } else if let Some(next_cycle_at) = next_cycle_at {
             self.active_by_next_cycle
                 .entry(next_cycle_at)
                 .or_default()
