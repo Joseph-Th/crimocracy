@@ -3,7 +3,9 @@
 use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
-use crate::core::invariants::{validate_invariants, validate_state};
+use crate::core::invariants::{
+    validate_invariants, validate_state, validate_state_against_registry,
+};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_test_tick as run_tick;
 use crate::core::time::SimDuration;
@@ -14,7 +16,7 @@ use crate::intelligence::{
     InformationDraft, InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
     LegalPersonStatusSignal, Reliability, Specificity,
 };
-use crate::legal::arrest_system::validate_arrest;
+use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
 use crate::legal::witness_system::validate_register_case_witness;
 use crate::legal::{
@@ -48,6 +50,366 @@ struct OpportunityFixture {
     leader: crate::core::id::CharacterId,
     entry_specialist: crate::core::id::CharacterId,
     source: InformationId,
+}
+
+#[test]
+fn sensitive_opportunity_cannot_convert_against_a_different_legal_episode() {
+    let mut fixture = make_fixture();
+    let police = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Episode Match Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let witness_character = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Episode Bound Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("witness fixture should validate");
+    let first_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: police,
+            title: "First witness episode".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Business(fixture.business)]),
+        },
+    )
+    .expect("first witness case should validate")
+    .commit(&mut fixture.state)
+    .expect("first witness case should commit");
+    validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: first_case,
+            witness: witness_character,
+            subject: EntityRef::Business(fixture.business),
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("first witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("first witness registration should commit");
+    let max_age = fixture
+        .registry
+        .get_operation(OperationKind::WitnessPressure)
+        .execution()
+        .max_intelligence_age();
+    let first_status = validate_record_information_with_signal(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(witness_character),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The organization learned the first witness episode.".to_owned(),
+        },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+            investigation: first_case,
+        }),
+    )
+    .expect("first witness-status information should validate")
+    .commit(&mut fixture.state)
+    .expect("first witness-status information should commit");
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            organization: fixture.organization,
+            operation_kind: OperationKind::WitnessPressure,
+            targets: BTreeSet::from([EntityRef::Character(witness_character)]),
+            source_information: BTreeSet::from([first_status]),
+            summary: "The first witness episode presents an opening.".to_owned(),
+            valid_until: Some(SimTime::from_minutes(u64::from(max_age.as_minutes()) + 120)),
+        },
+    )
+    .expect("first witness episode should discover an opening")
+    .commit(&mut fixture.state)
+    .expect("first witness opportunity should commit");
+
+    fixture.state.advance_clock(max_age);
+    let second_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Second witness episode".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Business(fixture.business)]),
+        },
+    )
+    .expect("second witness case should validate")
+    .commit(&mut fixture.state)
+    .expect("second witness case should commit");
+    validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: second_case,
+            witness: witness_character,
+            subject: EntityRef::Business(fixture.business),
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("second witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("second witness registration should commit");
+    validate_record_information_with_signal(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(witness_character),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The organization learned the second witness episode.".to_owned(),
+        },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+            investigation: second_case,
+        }),
+    )
+    .expect("second witness-status information should validate")
+    .commit(&mut fixture.state)
+    .expect("second witness-status information should commit");
+    let operation = validate_authorize_operation(
+        &fixture.registry,
+        &fixture.state,
+        OperationDraft {
+            title: "Pressure only the second witness episode".to_owned(),
+            kind: OperationKind::WitnessPressure,
+            responsible_organization: fixture.organization,
+            leader: fixture.leader,
+            objective: OperationObjective::Frighten {
+                target: EntityRef::Character(witness_character),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(RoleKind::Coordinator, fixture.leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: fixture.state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect("the second learned witness episode should authorize pressure")
+    .commit(&mut fixture.state)
+    .expect("second-episode pressure operation should commit");
+
+    let error = validate_convert_opportunity(&fixture.state, opportunity, operation)
+        .err()
+        .expect("an opening from the first episode must not convert the second-episode operation");
+    assert_eq!(
+        error,
+        OpportunityError::OperationBasisMismatch {
+            operation,
+            opportunity,
+        }
+    );
+    assert_eq!(
+        fixture
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .expect("rejected opportunity should remain persisted")
+            .status(),
+        OpportunityStatus::Open
+    );
+    crate::core::invariants::validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("episode-mismatch rejection should preserve registry-valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn conversion_keeps_discovery_provenance_without_forcing_it_into_execution_intelligence() {
+    let mut fixture = make_fixture();
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(120)),
+    )
+    .expect("target information should discover a burglary opening")
+    .commit(&mut fixture.state)
+    .expect("burglary opportunity should commit");
+    let operation = validate_authorize_operation(
+        &fixture.registry,
+        &fixture.state,
+        OperationDraft {
+            title: "Opportunity-backed burglary".to_owned(),
+            kind: OperationKind::Burglary,
+            responsible_organization: fixture.organization,
+            leader: fixture.leader,
+            objective: OperationObjective::AcquireProperty {
+                target: EntityRef::Business(fixture.business),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, fixture.leader),
+                (RoleKind::EntrySpecialist, fixture.entry_specialist),
+            ]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::from_minutes(10),
+        },
+    )
+    .expect("an opportunity-backed job need not duplicate discovery provenance as execution intel")
+    .commit(&mut fixture.state)
+    .expect("operation should commit");
+
+    validate_convert_opportunity(&fixture.state, opportunity, operation)
+        .expect("shape-matched operation should consume the persisted opportunity provenance")
+        .commit(&mut fixture.state)
+        .expect("conversion should commit");
+    assert!(
+        fixture
+            .state
+            .operations()
+            .get_operation(operation)
+            .expect("converted operation should persist")
+            .intelligence()
+            .is_empty()
+    );
+    assert_eq!(
+        fixture
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .expect("converted opportunity should persist")
+            .source_information(),
+        &BTreeSet::from([fixture.source])
+    );
+    crate::core::invariants::validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("converted opportunity provenance should remain registry-valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn typed_witness_opening_can_convert_without_treating_legal_status_as_execution_intelligence() {
+    let mut fixture = make_fixture();
+    let police = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Witness Conversion Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let witness_character = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Known Opportunity Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("witness fixture should validate");
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Known witness conversion case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Business(fixture.business)]),
+        },
+    )
+    .expect("witness case should validate")
+    .commit(&mut fixture.state)
+    .expect("witness case should commit");
+    validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation,
+            witness: witness_character,
+            subject: EntityRef::Business(fixture.business),
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("witness registration should commit");
+    let witness_status = validate_record_information_with_signal(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(witness_character),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The organization has confirmed this person is an active case witness."
+                .to_owned(),
+        },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+            investigation,
+        }),
+    )
+    .expect("typed witness-status information should validate")
+    .commit(&mut fixture.state)
+    .expect("typed witness-status information should commit");
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            organization: fixture.organization,
+            operation_kind: OperationKind::WitnessPressure,
+            targets: BTreeSet::from([EntityRef::Character(witness_character)]),
+            source_information: BTreeSet::from([witness_status]),
+            summary: "A known active witness is available for pressure.".to_owned(),
+            valid_until: Some(SimTime::from_minutes(120)),
+        },
+    )
+    .expect("typed current witness knowledge should discover a pressure opening")
+    .commit(&mut fixture.state)
+    .expect("witness-pressure opportunity should commit");
+    let operation = validate_authorize_operation(
+        &fixture.registry,
+        &fixture.state,
+        OperationDraft {
+            title: "Pressure known witness".to_owned(),
+            kind: OperationKind::WitnessPressure,
+            responsible_organization: fixture.organization,
+            leader: fixture.leader,
+            objective: OperationObjective::Frighten {
+                target: EntityRef::Character(witness_character),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(RoleKind::Coordinator, fixture.leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::from_minutes(10),
+        },
+    )
+    .expect("legal-status provenance should not be misclassified as execution intelligence")
+    .commit(&mut fixture.state)
+    .expect("witness-pressure operation should commit");
+
+    validate_convert_opportunity(&fixture.state, opportunity, operation)
+        .expect("known-witness opening should convert to the matching authorized operation")
+        .commit(&mut fixture.state)
+        .expect("known-witness conversion should commit");
+    crate::core::invariants::validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("legal-basis opportunity conversion should remain registry-valid");
+    validate_invariants(&fixture.state);
 }
 
 #[derive(Clone, Serialize)]
@@ -483,6 +845,18 @@ fn sensitive_legal_opportunity_sources_require_typed_person_status_from_the_curr
     .expect("unrelated witness case should validate")
     .commit(&mut fixture.state)
     .expect("unrelated witness case should commit");
+    validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: unrelated_witness_case,
+            witness: witness_character,
+            subject: EntityRef::Business(fixture.business),
+            cooperation: WitnessCooperation::Hostile,
+        },
+    )
+    .expect("the unrelated episode may truthfully register the same person")
+    .commit(&mut fixture.state)
+    .expect("unrelated hostile witness registration should commit");
     let wrong_episode_witness = validate_record_information_with_signal(
         &fixture.state,
         InformationDraft {
@@ -501,9 +875,9 @@ fn sensitive_legal_opportunity_sources_require_typed_person_status_from_the_curr
             investigation: unrelated_witness_case,
         }),
     )
-    .expect("typed claims may identify a different persisted case")
+    .expect("typed knowledge may truthfully identify a different witness episode")
     .commit(&mut fixture.state)
-    .expect("wrong-episode test information should commit");
+    .expect("different-episode witness information should commit");
 
     let valid_until = Some(fixture.state.now() + SimDuration::from_minutes(60));
     let before_generic_rejection =
@@ -532,7 +906,7 @@ fn sensitive_legal_opportunity_sources_require_typed_person_status_from_the_curr
         "rejected hidden-state discovery must not mutate authoritative state"
     );
 
-    validate_discover_operation_opportunity(
+    let extraction_opportunity = validate_discover_operation_opportunity(
         &fixture.registry,
         &fixture.state,
         OperationOpportunityDraft {
@@ -547,6 +921,28 @@ fn sensitive_legal_opportunity_sources_require_typed_person_status_from_the_curr
     .expect("episode-bound detention knowledge should support extraction discovery")
     .commit(&mut fixture.state)
     .expect("extraction opportunity should commit");
+    validate_release_arrest(&fixture.state, custody_arrest)
+        .expect("same-minute release after discovery should validate")
+        .commit(&mut fixture.state)
+        .expect("same-minute release after discovery should commit");
+    assert_eq!(
+        fixture
+            .state
+            .opportunities()
+            .get_opportunity(extraction_opportunity)
+            .expect("historical extraction opportunity should persist")
+            .status(),
+        OpportunityStatus::Open
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state).expect(
+        "same-minute release must not retroactively erase a detention fact learned before release",
+    );
+    fixture.state = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("same-minute extraction discovery and release should save"),
+    )
+    .expect("same-minute extraction discovery and release should restore");
 
     let before_wrong_episode_rejection =
         bincode::serialize(&fixture.state).expect("pre-rejection state should serialize");
@@ -710,6 +1106,87 @@ fn discovery_rejects_an_operation_kind_with_no_actionable_target() {
         OpportunityError::NoActionableTarget(OperationKind::Burglary)
     );
     assert_eq!(fixture.state.opportunities().opportunities().count(), 0);
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn discovery_does_not_advertise_cash_work_against_a_shuttered_business() {
+    let mut fixture = make_fixture();
+    let operating = crate::finance::finance_system::insert_account(
+        &mut fixture.state,
+        crate::finance::FinancialAccountDraft {
+            owner: crate::finance::FinancialOwner::Business(fixture.business),
+            kind: crate::finance::AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("opportunity target operating account should validate");
+    let settlement = crate::finance::finance_system::insert_account(
+        &mut fixture.state,
+        crate::finance::FinancialAccountDraft {
+            owner: crate::finance::FinancialOwner::Business(fixture.business),
+            kind: crate::finance::AccountKind::Settlement,
+        },
+    )
+    .expect("opportunity target settlement account should validate");
+    crate::economy::business_economy_system::validate_establish_business_economy(
+        &fixture.registry,
+        &fixture.state,
+        crate::economy::BusinessEconomyDraft {
+            business: fixture.business,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .expect("opportunity target economy should establish")
+    .commit(&mut fixture.state)
+    .expect("opportunity target economy should commit");
+    crate::economy::business_economy_system::validate_suspend_business_economy(
+        &fixture.state,
+        fixture.business,
+    )
+    .expect("opportunity target economy should suspend")
+    .commit(&mut fixture.state)
+    .expect("opportunity target suspension should commit");
+    let source = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Business(fixture.business),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The crew knows who normally handles collections at the target.".to_owned(),
+        },
+    )
+    .expect("cash-opportunity source should validate")
+    .commit(&mut fixture.state)
+    .expect("cash-opportunity source should commit");
+
+    let error = match validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            organization: fixture.organization,
+            operation_kind: OperationKind::Intimidation,
+            targets: BTreeSet::from([EntityRef::Business(fixture.business)]),
+            source_information: BTreeSet::from([source]),
+            summary: "A collection opportunity exists at the target.".to_owned(),
+            valid_until: Some(fixture.state.now() + SimDuration::from_minutes(120)),
+        },
+    ) {
+        Ok(_) => panic!("a shuttered business must not be advertised as a live cash opportunity"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        OpportunityError::NoActionableTarget(OperationKind::Intimidation)
+    );
+    assert_eq!(fixture.state.opportunities().opportunities().count(), 0);
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("rejected shuttered-cash opportunity should preserve valid state");
     validate_invariants(&fixture.state);
 }
 

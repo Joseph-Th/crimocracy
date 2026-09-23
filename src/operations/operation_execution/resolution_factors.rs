@@ -12,7 +12,7 @@ use crate::legal::patrol_system::{
     resolve_patrol_presence_interval_snapshot_with_percent, resolve_patrol_presence_snapshot,
 };
 use crate::operations::operation_intelligence::resolve_information_score;
-use crate::operations::operation_objective::pressureable_witness_targets;
+use crate::operations::operation_objective::pressureable_witness_targets_for_cases;
 use crate::operations::{
     OperationExposureFactors, OperationExposureLevel, OperationKind, OperationObjective,
     OperationObjectiveOutcome, OperationRecord, OperationResolutionFactors,
@@ -130,27 +130,25 @@ pub(super) fn resolve_operation_venue_entities(
             // assets. Anchor the venue to the most-recent case whose cooperation this job can
             // actually affect. If pressureability disappears while the job is in flight, retain
             // the most-recent foreign registration as a durable physical proxy.
-            let pressureable =
-                pressureable_witness_targets(state, record.responsible_organization(), *target)
-                    .into_iter()
-                    .map(|(case_witness, _)| {
-                        state.legal.get_case_witness(case_witness).expect(
-                            "pressureable witness target must reference a persisted registration",
-                        )
-                    })
-                    .max_by_key(|case_witness| (case_witness.registered_at(), case_witness.id()));
-            let selected = pressureable.or_else(|| {
+            let pressureable = pressureable_witness_targets_for_cases(
+                state,
+                record.responsible_organization(),
+                *target,
+                record.witness_pressure_cases(),
+            )
+            .into_iter()
+            .map(|(case_witness, _)| {
                 state
                     .legal
-                    .case_witnesses_for_character(*target)
-                    .filter(|case_witness| {
-                        state
-                            .legal
-                            .get_investigation(case_witness.investigation())
-                            .expect("case-witness index must reference a persisted investigation")
-                            .owner()
-                            != record.responsible_organization()
-                    })
+                    .get_case_witness(case_witness)
+                    .expect("pressureable witness target must reference a persisted registration")
+            })
+            .max_by_key(|case_witness| (case_witness.registered_at(), case_witness.id()));
+            let selected = pressureable.or_else(|| {
+                record
+                    .witness_pressure_cases()
+                    .iter()
+                    .filter_map(|case_witness| state.legal.get_case_witness(*case_witness))
                     .max_by_key(|case_witness| (case_witness.registered_at(), case_witness.id()))
             });
             let Some(case_witness) = selected else {

@@ -252,6 +252,43 @@ pub(crate) fn validate_record_information_with_signal(
     })
 }
 
+/// Canonical composition hook for case-witness registration. The legal owner validates the
+/// registration before calling this helper, but the witness record does not exist yet because
+/// information allocation must be preflighted before the first authoritative mutation.
+///
+/// Keep this narrower than the generic typed-information path: only a first-hand witness fact
+/// observed at the current instant can use the planned-registration exception. Restore and every
+/// later consumer still require the persisted registration through the ordinary semantic check.
+pub(crate) fn validate_record_planned_case_witness_information(
+    state: &AppState,
+    draft: InformationDraft,
+    investigation: crate::core::id::InvestigationId,
+    witness: crate::core::id::CharacterId,
+) -> Result<ValidatedInformation, IntelligenceError> {
+    validate_direct_recording_source_kind(draft.source_kind)?;
+    validate_information_draft(state, &draft)?;
+    let signal = InformationSignal::LegalPersonStatus(
+        crate::intelligence::LegalPersonStatusSignal::CaseWitness { investigation },
+    );
+    if draft.source_kind != InformationSourceKind::DirectObservation
+        || draft.subject != EntityRef::Character(witness)
+        || draft.observed_at != state.now()
+        || !signal.is_compatible(draft.topic, draft.subject)
+        || !is_entity_present(state, EntityRef::Investigation(investigation))
+    {
+        return Err(IntelligenceError::InvalidSignal {
+            signal,
+            topic: draft.topic,
+            subject: draft.subject,
+        });
+    }
+    Ok(ValidatedInformation {
+        draft,
+        signal: Some(signal),
+        derived_from: BTreeSet::new(),
+    })
+}
+
 pub(crate) fn validate_record_system_information_with_signal(
     state: &AppState,
     draft: InformationDraft,
@@ -282,6 +319,7 @@ fn validate_direct_recording_source_kind(
         InformationSourceKind::DirectObservation | InformationSourceKind::StreetRumor => Ok(()),
         InformationSourceKind::Accounting
         | InformationSourceKind::Surveillance
+        | InformationSourceKind::AcquiredRecords
         | InformationSourceKind::AfterAction => {
             Err(IntelligenceError::SystemSourceRequiresOwner(source_kind))
         }
@@ -301,6 +339,7 @@ fn validate_system_recording_source_kind(
     match source_kind {
         InformationSourceKind::Accounting
         | InformationSourceKind::Surveillance
+        | InformationSourceKind::AcquiredRecords
         | InformationSourceKind::AfterAction => Ok(()),
         InformationSourceKind::DirectObservation
         | InformationSourceKind::StreetRumor
@@ -366,12 +405,65 @@ fn validate_information_signal(
     {
         return Err(IntelligenceError::MissingArrest(*arrest));
     }
+    if !information_signal_matches_subject_history(state, draft.subject, draft.observed_at, signal)
+    {
+        return Err(IntelligenceError::InvalidSignal {
+            signal: signal.clone(),
+            topic: draft.topic,
+            subject: draft.subject,
+        });
+    }
     for entity in signal.referenced_entities() {
         if !is_entity_present(state, entity) {
             return Err(IntelligenceError::MissingEntity(entity));
         }
     }
     Ok(())
+}
+
+/// Semantic validation for typed facts that carry a durable legal-episode reference.
+///
+/// Compatibility alone only proves that a legal-person signal names a character. This check
+/// additionally proves that the referenced arrest or witness registration actually belongs to
+/// that character and already existed when the fact was observed. A release in the same minute
+/// remains admissible because cross-domain ordering inside one simulation minute is not persisted.
+pub(crate) fn information_signal_matches_subject_history(
+    state: &AppState,
+    subject: EntityRef,
+    observed_at: crate::core::time::SimTime,
+    signal: &InformationSignal,
+) -> bool {
+    match signal {
+        InformationSignal::LegalPersonStatus(
+            crate::intelligence::LegalPersonStatusSignal::CaseWitness { investigation },
+        ) => {
+            let EntityRef::Character(character) = subject else {
+                return false;
+            };
+            state
+                .legal
+                .case_witness_for(*investigation, character)
+                .is_some_and(|witness| witness.registered_at() <= observed_at)
+        }
+        InformationSignal::LegalPersonStatus(
+            crate::intelligence::LegalPersonStatusSignal::Detained { arrest },
+        ) => {
+            let EntityRef::Character(character) = subject else {
+                return false;
+            };
+            state.legal.get_arrest(*arrest).is_some_and(|record| {
+                record.character() == character
+                    && record.arrested_at() <= observed_at
+                    && record
+                        .released_at()
+                        .is_none_or(|released_at| observed_at <= released_at)
+            })
+        }
+        InformationSignal::CaseActivity(_)
+        | InformationSignal::EnterpriseLocation(_)
+        | InformationSignal::PersonnelPresence { .. }
+        | InformationSignal::PatrolPattern { .. } => true,
+    }
 }
 
 fn validate_internal_transfer_information(

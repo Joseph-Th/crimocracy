@@ -246,7 +246,7 @@ fn property_acquisition_persists_estimated_held_value_with_partial_recovery() {
     .commit(&mut achieved_state)
     .expect("later enterprise account dedication should commit after property liquidation");
 
-    let restored = restore_save(
+    let mut restored = restore_save(
         &registry,
         build_save(&registry, &achieved_state).expect("property disposition state should save"),
     )
@@ -258,6 +258,27 @@ fn property_acquisition_persists_estimated_held_value_with_partial_recovery() {
         .expect("property disposition should survive save restoration");
     assert_eq!(restored_disposition.realized_value().cents(), 32_148);
     assert_eq!(restored_disposition.venue(), resale_venue);
+    let restored_report = validate_organization_financial_report(
+        &restored,
+        organization,
+        SimTime::ZERO,
+        restored.now(),
+    )
+    .expect("restored property-disposition financial report should validate")
+    .commit(&mut restored)
+    .expect("restored property-disposition financial report should commit");
+    let restored_report = restored
+        .reports()
+        .get_report(restored_report)
+        .expect("restored property-disposition financial report should persist");
+    assert!(
+        restored_report.entries()[0].summary.contains(
+            "Held operation property at period end: 0 operation(s), estimated value $0.00"
+        )
+    );
+    assert!(restored_report.entries()[0].summary.contains(
+        "Liquidated operation property during period: 1 disposition(s), realized cash $321.48"
+    ));
     validate_state_against_registry(&registry, &restored)
         .expect("restored property disposition should remain registry-valid");
     validate_invariants(&restored);

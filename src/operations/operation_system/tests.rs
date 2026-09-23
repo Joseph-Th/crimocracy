@@ -129,6 +129,88 @@ fn make_test_operation_state() -> (Registry, AppState, OrganizationId, Character
     )
 }
 
+#[test]
+fn cash_operation_rejects_an_explicitly_suspended_business() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let EntityRef::Business(business) = target else {
+        panic!("fixture target should be a business");
+    };
+    let operating = crate::finance::finance_system::insert_account(
+        &mut state,
+        crate::finance::FinancialAccountDraft {
+            owner: crate::finance::FinancialOwner::Business(business),
+            kind: crate::finance::AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("cash-target operating account should validate");
+    let settlement = crate::finance::finance_system::insert_account(
+        &mut state,
+        crate::finance::FinancialAccountDraft {
+            owner: crate::finance::FinancialOwner::Business(business),
+            kind: crate::finance::AccountKind::Settlement,
+        },
+    )
+    .expect("cash-target settlement account should validate");
+    crate::economy::business_economy_system::validate_establish_business_economy(
+        &registry,
+        &state,
+        crate::economy::BusinessEconomyDraft {
+            business,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .expect("cash-target economy should establish")
+    .commit(&mut state)
+    .expect("cash-target economy should commit");
+    crate::economy::business_economy_system::validate_suspend_business_economy(&state, business)
+        .expect("cash-target economy should suspend")
+        .commit(&mut state)
+        .expect("cash-target suspension should commit");
+
+    let error = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, EntityRef::Business(business)),
+    )
+    .expect_err("a shuttered business cannot fund a new cash operation");
+    assert_eq!(
+        error,
+        OperationError::InactiveObjectiveTarget(EntityRef::Business(business))
+    );
+    validate_state(&state).expect("rejected cash operation must leave valid state");
+    validate_invariants(&state);
+}
+
+#[test]
+fn surveillance_rejects_supported_world_shape_when_target_does_not_exist() {
+    let (registry, state, organization, leader, _) = make_test_operation_state();
+    let missing = EntityRef::Character(crate::core::id::CharacterId::from_raw(u32::MAX));
+    let draft = OperationDraft {
+        title: "Nonexistent surveillance target".to_owned(),
+        kind: OperationKind::Surveillance,
+        responsible_organization: organization,
+        leader,
+        objective: OperationObjective::GatherInformation { target: missing },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: SimTime::ZERO,
+    };
+
+    assert_eq!(
+        validate_authorize_operation(&registry, &state, draft)
+            .expect_err("supported surveillance target shape must still reference a real entity"),
+        OperationError::MissingEntity(missing)
+    );
+    assert_eq!(state.operations().operations().count(), 0);
+    validate_state_against_registry(&registry, &state)
+        .expect("missing surveillance target rejection must preserve valid state");
+    validate_invariants(&state);
+}
+
 fn make_test_draft(
     organization: OrganizationId,
     leader: CharacterId,

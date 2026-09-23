@@ -64,10 +64,10 @@ pub(crate) fn apply_cold_case_decay(
         // the institution has already committed resources even if the old inactivity deadline
         // was present in the index snapshot. Defer explicitly; every other transition failure
         // below is exceptional and must surface.
-        if state
-            .legal
-            .work_for_investigation(investigation)
-            .any(|work| work.status() == crate::legal::InvestigationWorkStatus::Scheduled)
+        if record
+            .lead_investigator()
+            .and_then(|lead| state.legal.scheduled_work_for_investigator(lead))
+            .is_some_and(|work| work.investigation() == investigation)
         {
             continue;
         }

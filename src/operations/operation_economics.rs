@@ -349,7 +349,7 @@ pub(crate) fn held_cash_clause(kind: OperationKind, cents: i64) -> String {
 /// delivery payment as unreplaced physical stock.
 pub(crate) fn depleted_take_clause(kind: OperationKind) -> &'static str {
     match kind {
-        OperationKind::Burglary | OperationKind::Hijacking | OperationKind::DocumentTheft => {
+        OperationKind::Burglary | OperationKind::Hijacking => {
             "The take came in lighter than usual; this target has not fully replaced stock from a recent score."
         }
         OperationKind::Robbery | OperationKind::Intimidation => {
@@ -363,6 +363,7 @@ pub(crate) fn depleted_take_clause(kind: OperationKind) -> &'static str {
         }
         OperationKind::Surveillance
         | OperationKind::WitnessPressure
+        | OperationKind::DocumentTheft
         | OperationKind::Extraction
         | OperationKind::Sabotage
         | OperationKind::Arson => {

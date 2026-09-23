@@ -24,6 +24,7 @@ use crate::legal::{
     EvidenceStrength, IncidentEvidenceDraft, IncidentIntakeDraft, InvestigationDraft,
     JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow,
 };
+use crate::operations::information_acquisition::InformationAcquisitionError;
 use crate::operations::operation_execution::{
     OperationResolutionError, OperationResolutionRandomness, decide_operation_resolution,
     resolve_intelligence_factors, validate_operation_resolution_plan,
@@ -780,9 +781,11 @@ fn organization_surveillance_resolution_stales_when_visible_member_is_detained_a
         .expect("detention must stale the organization personnel snapshot");
     assert_eq!(
         error,
-        OperationResolutionError::Surveillance(SurveillanceError::StaleTarget(
-            EntityRef::Organization(rival)
-        ))
+        OperationResolutionError::InformationAcquisition(
+            InformationAcquisitionError::Surveillance(SurveillanceError::StaleTarget(
+                EntityRef::Organization(rival)
+            ))
+        )
     );
     assert_eq!(
         fixture
@@ -933,9 +936,11 @@ fn surveillance_resolution_rejects_target_change_after_planning() {
         .expect("target change must stale surveillance resolution");
     assert_eq!(
         error,
-        OperationResolutionError::Surveillance(SurveillanceError::StaleTarget(
-            EntityRef::Character(target)
-        ))
+        OperationResolutionError::InformationAcquisition(
+            InformationAcquisitionError::Surveillance(SurveillanceError::StaleTarget(
+                EntityRef::Character(target)
+            ))
+        )
     );
     assert_eq!(
         fixture
@@ -1519,7 +1524,7 @@ fn police_org_surveillance_without_notified_case_produces_personnel_and_survives
             .summary()
             .contains("did not identify a recurring active affiliate")
     );
-    assert!(resolution.surveillance_signatures().contains(&(
+    assert!(resolution.discovery_signatures().contains(&(
         observation.topic(),
         observation.subject(),
         observation.signal().cloned(),
@@ -1637,7 +1642,7 @@ fn organization_surveillance_carries_visible_member_ids_and_excludes_detainees()
     assert!(!observation.summary().contains(member_names[1]));
     assert!(observation.summary().contains(member_names[2]));
     assert!(observation.summary().contains(member_names[3]));
-    assert!(resolution.surveillance_signatures().contains(&(
+    assert!(resolution.discovery_signatures().contains(&(
         observation.topic(),
         observation.subject(),
         observation.signal().cloned(),

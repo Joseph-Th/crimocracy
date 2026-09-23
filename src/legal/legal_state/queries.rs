@@ -39,6 +39,28 @@ impl LegalState {
                     .expect("informant pair index must reference an informant")
             })
     }
+    pub(crate) fn next_unattempted_reviewable_evidence(
+        &self,
+        investigation: InvestigationId,
+    ) -> Option<EvidenceId> {
+        self.indexes
+            .work
+            .unattempted_reviewable_evidence_by_investigation
+            .get(&investigation)
+            .and_then(|evidence| evidence.first())
+            .map(|(_, evidence)| *evidence)
+    }
+    pub(in crate::legal) fn investigation_evidence_staffing_summary(
+        &self,
+        investigation: InvestigationId,
+    ) -> crate::legal::records::InvestigationEvidenceStaffingSummary {
+        self.indexes
+            .evidence
+            .staffing_summary_by_investigation
+            .get(&investigation)
+            .copied()
+            .unwrap_or_default()
+    }
     pub(crate) fn informants_for_handler(
         &self,
         handler: OrganizationId,

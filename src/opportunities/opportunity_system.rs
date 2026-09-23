@@ -8,10 +8,11 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
-use crate::intelligence::{
-    InformationRecord, InformationSignal, KnowledgeHolder, LegalPersonStatusSignal,
+use crate::intelligence::{InformationSignal, KnowledgeHolder, LegalPersonStatusSignal};
+use crate::operations::operation_basis_knowledge::{
+    source_information_is_usable_for_operation_basis, source_information_proves_operation_basis,
 };
-use crate::operations::operation_intelligence::resolve_information_score;
+use crate::operations::operation_objective::pressureable_witness_targets_for_cases;
 use crate::operations::operation_scheduling::resolve_operation_earliest_start;
 use crate::operations::operation_system::is_actionable_opportunity_target;
 use crate::operations::{OperationKind, OperationStatus};
@@ -29,13 +30,6 @@ use thiserror::Error;
 pub enum OpportunityError {
     #[error("opportunity summary must not be empty")]
     EmptySummary,
-    #[error(
-        "operation {operation} cites none of the information that discovered opportunity {opportunity}"
-    )]
-    OperationLacksSourceIntelligence {
-        operation: crate::core::id::OperationId,
-        opportunity: OpportunityId,
-    },
     #[error("opportunity organization {0} does not exist")]
     MissingOrganization(OrganizationId),
     #[error("opportunity organization {0} is not a criminal organization")]
@@ -152,6 +146,13 @@ pub enum OpportunityError {
     },
     #[error("operation {operation} must target exactly one entity covered by the opportunity")]
     OperationTargetsMismatch { operation: OperationId },
+    #[error(
+        "operation {operation} does not act on the same learned legal episode that created opportunity {opportunity}"
+    )]
+    OperationBasisMismatch {
+        operation: OperationId,
+        opportunity: OpportunityId,
+    },
     #[error("operation {operation} is already linked to opportunity {opportunity}")]
     OperationAlreadyLinked {
         operation: OperationId,
@@ -313,8 +314,12 @@ fn validate_discovery_state(
                 subject: information.subject(),
             });
         }
-        if source_information_is_usable(registry, draft.operation_kind, information, discovered_at)
-        {
+        if source_information_is_usable_for_operation_basis(
+            registry,
+            draft.operation_kind,
+            information,
+            discovered_at,
+        ) {
             covered_targets.insert(information.subject());
         }
     }
@@ -341,9 +346,10 @@ fn validate_discovery_state(
                 .get_information(*source)
                 .is_some_and(|information| {
                     information.subject() == *target
-                        && source_information_proves_operation_basis(
+                        && source_information_proves_actionable_basis(
                             registry,
                             state,
+                            draft.organization,
                             draft.operation_kind,
                             *target,
                             information,
@@ -383,45 +389,25 @@ fn validate_discovery_state(
     Ok(())
 }
 
-/// Whether a source is still usable at discovery under the operation kind's authored
-/// intelligence-age contract. Historical information remains persisted but cannot manufacture a
-/// fresh opportunity after its planning value reaches zero.
-pub(crate) fn source_information_is_usable(
-    registry: &Registry,
-    operation_kind: OperationKind,
-    information: &InformationRecord,
-    discovered_at: SimTime,
-) -> bool {
-    let max_age = u64::from(
-        registry
-            .get_operation(operation_kind)
-            .execution()
-            .max_intelligence_age()
-            .as_minutes(),
-    );
-    resolve_information_score(
-        registry.information_quality(),
-        information,
-        discovered_at,
-        max_age,
-    ) > 0
-}
-
-/// Sensitive actionability must be learned, not inferred from hidden legal truth. Generic
-/// operation kinds need only usable information about their target; witness pressure and
-/// extraction additionally require a typed legal-person fact bound to the relevant episode.
-pub(crate) fn source_information_proves_operation_basis(
+fn source_information_proves_actionable_basis(
     registry: &Registry,
     state: &AppState,
+    organization: OrganizationId,
     operation_kind: OperationKind,
     target: EntityRef,
-    information: &InformationRecord,
-    discovered_at: SimTime,
+    information: &crate::intelligence::InformationRecord,
+    at: SimTime,
 ) -> bool {
-    if !source_information_is_usable(registry, operation_kind, information, discovered_at) {
+    if !source_information_proves_operation_basis(
+        registry,
+        state,
+        operation_kind,
+        target,
+        information,
+        at,
+    ) {
         return false;
     }
-
     match operation_kind {
         OperationKind::WitnessPressure => {
             let EntityRef::Character(character) = target else {
@@ -433,10 +419,20 @@ pub(crate) fn source_information_proves_operation_basis(
             else {
                 return false;
             };
-            state
+            let Some(case_witness) = state
                 .legal
                 .case_witness_for(*investigation, character)
-                .is_some_and(|witness| witness.registered_at() <= information.observed_at())
+                .map(|witness| witness.id())
+            else {
+                return false;
+            };
+            !pressureable_witness_targets_for_cases(
+                state,
+                organization,
+                character,
+                &BTreeSet::from([case_witness]),
+            )
+            .is_empty()
         }
         OperationKind::Extraction => {
             let EntityRef::Character(character) = target else {
@@ -448,17 +444,10 @@ pub(crate) fn source_information_proves_operation_basis(
             else {
                 return false;
             };
-            state.legal.get_arrest(*arrest).is_some_and(|arrest| {
-                arrest.character() == character
-                    && arrest.arrested_at() <= information.observed_at()
-                    && arrest
-                        .released_at()
-                        .is_none_or(|released_at| information.observed_at() < released_at)
-                    && arrest.arrested_at() <= discovered_at
-                    && arrest
-                        .released_at()
-                        .is_none_or(|released_at| discovered_at < released_at)
-            })
+            state
+                .legal
+                .active_arrest_for_character(character)
+                .is_some_and(|active| active.id() == *arrest)
         }
         OperationKind::Burglary
         | OperationKind::Robbery
@@ -637,6 +626,12 @@ fn validate_conversion_match(
             operation: operation.id(),
         });
     }
+    if !operation_matches_opportunity_basis(state, opportunity, operation) {
+        return Err(OpportunityError::OperationBasisMismatch {
+            operation: operation.id(),
+            opportunity: opportunity.id(),
+        });
+    }
     if state.now() > operation.scheduled_for() {
         return Err(OpportunityError::OperationSchedulePassed {
             operation: operation.id(),
@@ -688,18 +683,10 @@ fn validate_conversion_match(
             operation: operation.id(),
         });
     }
-    // Conversion preserves the discovery provenance chain: the operation must actually cite
-    // information the opportunity was discovered through, not merely match its shape.
-    if !operation
-        .intelligence()
-        .iter()
-        .any(|information| opportunity.source_information().contains(information))
-    {
-        return Err(OpportunityError::OperationLacksSourceIntelligence {
-            operation: operation.id(),
-            opportunity: opportunity.id(),
-        });
-    }
+    // Discovery provenance remains owned by the opportunity record. Operation intelligence is a
+    // different concern: it contains only facts the authored operation kind can use to improve
+    // execution. Requiring those sets to overlap would strand legitimate openings whose basis is
+    // not itself an execution modifier, such as learned custody or witness status.
     // The opportunity window is meaningful: conversion may only bind work whose planned earliest
     // start is inside the window. Begin-time validation rechecks the converted opportunity, so a
     // later crew delay cannot carry the operation past this viability boundary after conversion.
@@ -717,6 +704,74 @@ fn validate_conversion_match(
         });
     }
     Ok(())
+}
+
+/// Sensitive legal openings are episode-specific. Discovery provenance remains separate from
+/// execution intelligence, but conversion must not repurpose knowledge of one arrest or witness
+/// registration into an operation against a later unrelated episode involving the same person.
+pub(crate) fn operation_matches_opportunity_basis(
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+    operation: &crate::operations::OperationRecord,
+) -> bool {
+    match operation.kind() {
+        OperationKind::Extraction => {
+            let Some(arrest) = operation.extraction_arrest() else {
+                return false;
+            };
+            opportunity.source_information().iter().any(|information| {
+                state
+                    .intelligence
+                    .get_information(*information)
+                    .is_some_and(|record| {
+                        matches!(
+                            record.signal(),
+                            Some(InformationSignal::LegalPersonStatus(
+                                LegalPersonStatusSignal::Detained {
+                                    arrest: learned_arrest
+                                }
+                            )) if *learned_arrest == arrest
+                        )
+                    })
+            })
+        }
+        OperationKind::WitnessPressure => {
+            let pinned_investigations: BTreeSet<_> = operation
+                .witness_pressure_cases()
+                .iter()
+                .filter_map(|case_witness| {
+                    state
+                        .legal
+                        .get_case_witness(*case_witness)
+                        .map(|witness| witness.investigation())
+                })
+                .collect();
+            !pinned_investigations.is_empty()
+                && opportunity.source_information().iter().any(|information| {
+                    state
+                        .intelligence
+                        .get_information(*information)
+                        .is_some_and(|record| {
+                            matches!(
+                                record.signal(),
+                                Some(InformationSignal::LegalPersonStatus(
+                                    LegalPersonStatusSignal::CaseWitness { investigation }
+                                )) if pinned_investigations.contains(investigation)
+                            )
+                        })
+                })
+        }
+        OperationKind::Burglary
+        | OperationKind::Robbery
+        | OperationKind::Hijacking
+        | OperationKind::Smuggling
+        | OperationKind::Intimidation
+        | OperationKind::Surveillance
+        | OperationKind::DocumentTheft
+        | OperationKind::GamblingEvent
+        | OperationKind::Sabotage
+        | OperationKind::Arson => true,
+    }
 }
 
 struct ValidatedOpportunityExpiry {

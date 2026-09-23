@@ -10,6 +10,13 @@ use crate::intelligence::{
     CaseActivitySignal, EnterpriseLocationSignal, LegalPersonStatusSignal, PatrolIntervalSignal,
     Reliability, Specificity,
 };
+use crate::legal::arrest_system::validate_arrest;
+use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+use crate::legal::witness_system::validate_register_case_witness;
+use crate::legal::{
+    Admissibility, ArrestDraft, CaseWitnessDraft, EvidenceDraft, EvidenceKind, EvidenceReliability,
+    EvidenceStrength, InvestigationDraft, WitnessCooperation,
+};
 use crate::reports::report_system::{ReportError, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::world_system::{
@@ -240,6 +247,156 @@ fn typed_signal_rejects_incompatible_topic_without_mutation() {
         }
     );
     assert_eq!(state.intelligence().information().count(), 0);
+    validate_invariants(&state);
+}
+
+#[test]
+fn legal_person_signals_must_match_their_subject_and_episode() {
+    let (registry, mut state, organization, suspect) = make_transfer_fixture();
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Typed Signal Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let witness = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Typed Signal Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("witness fixture should validate");
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Typed signal case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(suspect)]),
+        },
+    )
+    .expect("investigation should validate")
+    .commit(&mut state)
+    .expect("investigation should commit");
+    validate_register_case_witness(
+        &state,
+        CaseWitnessDraft {
+            investigation,
+            witness,
+            subject: EntityRef::Character(suspect),
+            cooperation: WitnessCooperation::Reluctant,
+        },
+    )
+    .expect("witness registration should validate")
+    .commit(&mut state)
+    .expect("witness registration should commit");
+    let strong = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(suspect),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("strong evidence should validate")
+    .commit(&mut state)
+    .expect("strong evidence should commit");
+    let corroborating = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(suspect),
+            origin: None,
+            kind: EvidenceKind::Fingerprint,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .expect("corroborating evidence should validate")
+    .commit(&mut state)
+    .expect("corroborating evidence should commit");
+    let arrest = validate_arrest(
+        &registry,
+        &state,
+        ArrestDraft {
+            character: suspect,
+            investigation,
+            evidence: BTreeSet::from([strong, corroborating]),
+        },
+    )
+    .expect("arrest should validate")
+    .commit(&mut state)
+    .expect("arrest should commit");
+    let information_count = state.intelligence().information().count();
+
+    let wrong_witness_subject = validate_record_information_with_signal(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(suspect),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "This subject was not the registered witness.".to_owned(),
+        },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+            investigation,
+        }),
+    )
+    .err()
+    .expect("witness signal must identify the actual registered witness");
+    assert!(matches!(
+        wrong_witness_subject,
+        IntelligenceError::InvalidSignal { .. }
+    ));
+
+    let wrong_detention_subject = validate_record_information_with_signal(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(witness),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "This subject was not the arrested person.".to_owned(),
+        },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::Detained { arrest }),
+    )
+    .err()
+    .expect("detention signal must identify the arrest's actual character");
+    assert!(matches!(
+        wrong_detention_subject,
+        IntelligenceError::InvalidSignal { .. }
+    ));
+    assert_eq!(
+        state.intelligence().information().count(),
+        information_count,
+        "rejected semantic mismatches must not create knowledge"
+    );
+    validate_state(&state).expect("semantic-signal rejection should preserve valid state");
     validate_invariants(&state);
 }
 

@@ -6,9 +6,6 @@ use crate::core::id::{CharacterId, OperationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::enterprises::EnterpriseStatus;
 use crate::intelligence::KnowledgeHolder;
-use crate::operations::operation_objective::{
-    has_active_foreign_witness_case, has_pressureable_witness_case,
-};
 use crate::operations::{
     ACTIVE_ASSIGNMENT_STATUSES, OperationBusinessTargetOwnership, OperationKind,
     OperationObjective, OperationObjectiveKind,
@@ -72,9 +69,24 @@ pub(crate) fn is_valid_operation_objective(
     }
     match objective {
         OperationObjective::AcquireProperty { target } => matches!(target, EntityRef::Business(_)),
-        OperationObjective::GatherInformation { target } => {
-            crate::operations::surveillance_integration::is_supported_surveillance_target(*target)
-        }
+        OperationObjective::GatherInformation { target } => match kind {
+            OperationKind::Surveillance => {
+                crate::operations::surveillance_integration::is_supported_surveillance_target(
+                    *target,
+                )
+            }
+            OperationKind::DocumentTheft => matches!(target, EntityRef::Business(_)),
+            OperationKind::Burglary
+            | OperationKind::Robbery
+            | OperationKind::Hijacking
+            | OperationKind::Smuggling
+            | OperationKind::Intimidation
+            | OperationKind::WitnessPressure
+            | OperationKind::GamblingEvent
+            | OperationKind::Extraction
+            | OperationKind::Sabotage
+            | OperationKind::Arson => false,
+        },
         OperationObjective::ObtainCash { target }
         | OperationObjective::DisruptBusiness { target } => {
             matches!(target, EntityRef::Business(_))
@@ -102,12 +114,10 @@ pub(crate) fn is_actionable_opportunity_target(
         .is_ok()
 }
 
-// Field actions may reference concrete world subjects and locations, never control-plane
-// records such as operations, investigations, evidence, accounts, decisions, or mandates.
-// Historical intelligence and after-action records may refer to inactive entities, so the
-// general `is_entity_present` check remains existence-only. Action objectives have a stricter
-// contract: their concrete world subjects must still be actionable when the operation is
-// authorized.
+// Most field actions reference concrete world subjects and locations. Surveillance is the
+// deliberate exception: it may also observe a known operation, investigation, or enterprise,
+// while evidence, accounts, decisions, and mandates remain non-world administrative records.
+// Action objectives apply the stricter liveness/knowledge contract owned by each objective kind.
 fn validate_active_field_objective_targets(
     registry: &Registry,
     state: &AppState,
@@ -124,24 +134,38 @@ fn validate_active_field_objective_targets(
                 responsible_organization,
                 kind,
                 *target,
-            )
+            )?;
+            let EntityRef::Business(business) = *target else {
+                return Err(OperationError::InvalidObjectiveTarget {
+                    objective: objective.kind(),
+                    target: *target,
+                });
+            };
+            validate_cash_target_not_suspended(state, business)
         }
-        // Witness pressure is only meaningful against a character who is actually a named
-        // witness on an active case run by another authority; anything else would resolve
-        // with nothing to coerce.
+        // Authorization proves only what the organization knows: a fresh typed witness episode.
+        // Hidden case closure, cooperation changes, or custody are practical execution facts and
+        // are deliberately rechecked by the begin-time objective blocker instead of acting as a
+        // free information oracle here.
         OperationObjective::Frighten { target } => {
-            validate_active_field_objective_target(state, *target)?;
             let EntityRef::Character(character) = *target else {
                 return Err(OperationError::InvalidObjectiveTarget {
                     objective: OperationObjectiveKind::Frighten,
                     target: *target,
                 });
             };
-            if !has_active_foreign_witness_case(state, responsible_organization, character) {
-                return Err(OperationError::TargetNotCaseWitness(character));
-            }
-            if !has_pressureable_witness_case(state, responsible_organization, character) {
-                return Err(OperationError::TargetNotPressureableWitness(character));
+            let _ = state
+                .world
+                .get_character(character)
+                .ok_or(OperationError::MissingEntity(*target))?;
+            let known_cases = crate::operations::operation_basis_knowledge::known_witness_cases(
+                registry,
+                state,
+                responsible_organization,
+                character,
+            );
+            if known_cases.is_empty() {
+                return Err(OperationError::TargetLegalBasisUnknown { kind, character });
             }
             Ok(())
         }
@@ -161,9 +185,33 @@ fn validate_active_field_objective_targets(
                 *target,
             )
         }
-        OperationObjective::GatherInformation { target } => {
-            validate_surveillance_target_knowledge(state, responsible_organization, *target)
-        }
+        OperationObjective::GatherInformation { target } => match kind {
+            OperationKind::Surveillance => {
+                validate_surveillance_target_knowledge(state, responsible_organization, *target)
+            }
+            OperationKind::DocumentTheft => {
+                validate_active_field_objective_target(state, *target)?;
+                validate_business_target_requirement(
+                    registry,
+                    state,
+                    responsible_organization,
+                    kind,
+                    *target,
+                )
+            }
+            OperationKind::Burglary
+            | OperationKind::Robbery
+            | OperationKind::Hijacking
+            | OperationKind::Smuggling
+            | OperationKind::Intimidation
+            | OperationKind::WitnessPressure
+            | OperationKind::GamblingEvent
+            | OperationKind::Extraction
+            | OperationKind::Sabotage
+            | OperationKind::Arson => unreachable!(
+                "gather-information objective kind was validated before target activation"
+            ),
+        },
         // Sabotage targets a business whose premises the crew must physically reach, and one
         // that actually operates. Disrupting a shuttered or economy-less storefront would have
         // no modeled effect, so authorization rejects it up front.
@@ -191,15 +239,26 @@ fn validate_active_field_objective_targets(
             }
             Ok(())
         }
-        // Extraction targets a person who may legitimately be in custody, so the usual
-        // active-field-target check does not apply; custody state is validated separately.
+        // Extraction targets a learned custody episode. Current hidden custody is intentionally
+        // not queried during authorization; a release unknown to the organization becomes an
+        // objective-unavailable abort when the crew actually attempts to begin the operation.
         OperationObjective::FreeDetainee { target } => {
             let _ = state
                 .world
                 .get_character(*target)
                 .ok_or(OperationError::MissingEntity(EntityRef::Character(*target)))?;
-            if state.legal.active_arrest_for_character(*target).is_none() {
-                return Err(OperationError::TargetNotDetained(*target));
+            if crate::operations::operation_basis_knowledge::known_detention_arrest(
+                registry,
+                state,
+                responsible_organization,
+                *target,
+            )
+            .is_none()
+            {
+                return Err(OperationError::TargetLegalBasisUnknown {
+                    kind,
+                    character: *target,
+                });
             }
             // One detainee, one live extraction plan. A second non-terminal extraction against
             // the same custody could only arrive after the first freed the target.
@@ -212,6 +271,26 @@ fn validate_active_field_objective_targets(
             Ok(())
         }
     }
+}
+
+/// Ambient independent businesses need not have detailed operating books, so absence of a
+/// business-economy record is not closure. Once books exist, however, Suspended is an explicit
+/// world fact that the business is not currently operating. Cash-generating operations cannot
+/// mint a till, protection payment, delivery payment, or gambling take from that shuttered state.
+fn validate_cash_target_not_suspended(
+    state: &AppState,
+    business: crate::core::id::BusinessId,
+) -> Result<(), OperationError> {
+    if state
+        .economy
+        .get_business_economy(business)
+        .is_some_and(|economy| economy.status() != crate::economy::BusinessOperatingStatus::Active)
+    {
+        return Err(OperationError::InactiveObjectiveTarget(
+            EntityRef::Business(business),
+        ));
+    }
+    Ok(())
 }
 
 /// Administrative runtime records are not ambient world knowledge. A crew may directly surveil
@@ -237,11 +316,35 @@ fn validate_surveillance_target_knowledge(
             .enterprises
             .get_enterprise(enterprise)
             .is_some_and(|record| record.organization() == organization),
-        EntityRef::Organization(_)
-        | EntityRef::Character(_)
-        | EntityRef::Neighborhood(_)
-        | EntityRef::Business(_)
-        | EntityRef::Evidence(_)
+        EntityRef::Organization(id) => {
+            state
+                .world
+                .get_organization(id)
+                .ok_or(OperationError::MissingEntity(target))?;
+            return Ok(());
+        }
+        EntityRef::Character(id) => {
+            state
+                .world
+                .get_character(id)
+                .ok_or(OperationError::MissingEntity(target))?;
+            return Ok(());
+        }
+        EntityRef::Neighborhood(id) => {
+            state
+                .world
+                .get_neighborhood(id)
+                .ok_or(OperationError::MissingEntity(target))?;
+            return Ok(());
+        }
+        EntityRef::Business(id) => {
+            state
+                .world
+                .get_business(id)
+                .ok_or(OperationError::MissingEntity(target))?;
+            return Ok(());
+        }
+        EntityRef::Evidence(_)
         | EntityRef::FinancialAccount(_)
         | EntityRef::DecisionRequest(_)
         | EntityRef::Mandate(_) => return Ok(()),
@@ -373,8 +476,8 @@ fn validate_active_field_objective_target(
                 return Err(OperationError::InactiveObjectiveTarget(target));
             }
         }
-        // Control-plane records never reach this match: `is_valid_operation_objective` rejects
-        // them before activation checks run, so reaching this arm means a caller skipped that gate.
+        // Surveillance is handled in its own knowledge/existence gate before this helper. Other
+        // objective kinds reject administrative record targets before activation checks run.
         EntityRef::Operation(_)
         | EntityRef::Investigation(_)
         | EntityRef::Evidence(_)

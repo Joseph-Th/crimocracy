@@ -127,12 +127,14 @@ impl ValidatedCaseWitnessRegistration {
             .expect("validated investigation must still exist")
             .lead_investigator();
         let knowledge = match lead {
-            Some(lead) => crate::legal::case_knowledge::prepare_case_witness_knowledge(
-                state,
-                self.draft.investigation,
-                self.draft.witness,
-                lead,
-            )?,
+            Some(lead) => {
+                crate::legal::case_knowledge::prepare_case_witness_knowledge_for_registration(
+                    state,
+                    self.draft.investigation,
+                    self.draft.witness,
+                    lead,
+                )?
+            }
             None => None,
         };
         state.ids.reserve_many(&[

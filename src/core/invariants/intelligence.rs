@@ -4,6 +4,7 @@ use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::InformationId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
+use crate::intelligence::intelligence_system::information_signal_matches_subject_history;
 use crate::intelligence::{
     InformationRecord, InformationSignal, InformationSourceKind, KnowledgeHolder,
     downgraded_reliability_for_contact_derivation, downgraded_specificity_for_contact_derivation,
@@ -45,6 +46,16 @@ fn validate_information(
                 information: information.id(),
             });
         }
+        if !information_signal_matches_subject_history(
+            state,
+            information.subject(),
+            information.observed_at(),
+            signal,
+        ) {
+            return Err(StateValidationError::InvalidInformationSignal {
+                information: information.id(),
+            });
+        }
         if let InformationSignal::LegalPersonStatus(
             crate::intelligence::LegalPersonStatusSignal::Detained { arrest },
         ) = signal
@@ -73,6 +84,7 @@ fn validate_information(
         information.source_kind(),
         InformationSourceKind::Accounting
             | InformationSourceKind::Surveillance
+            | InformationSourceKind::AcquiredRecords
             | InformationSourceKind::AfterAction
     ) && !system_owners.contains(information.source_kind(), information.id())
     {
@@ -87,6 +99,7 @@ fn validate_information(
 struct SystemInformationOwners {
     accounting: BTreeSet<InformationId>,
     surveillance: BTreeSet<InformationId>,
+    acquired_records: BTreeSet<InformationId>,
     after_action: BTreeSet<InformationId>,
 }
 
@@ -95,6 +108,7 @@ impl SystemInformationOwners {
         match kind {
             InformationSourceKind::Accounting => self.accounting.contains(&information),
             InformationSourceKind::Surveillance => self.surveillance.contains(&information),
+            InformationSourceKind::AcquiredRecords => self.acquired_records.contains(&information),
             InformationSourceKind::AfterAction => self.after_action.contains(&information),
             InformationSourceKind::DirectObservation
             | InformationSourceKind::PoliceContact
@@ -161,6 +175,10 @@ fn collect_system_information_owners(state: &AppState) -> SystemInformationOwner
         if operation.kind() == OperationKind::Surveillance {
             owners
                 .surveillance
+                .extend(resolution.discovered_information().iter().copied());
+        } else if operation.kind() == OperationKind::DocumentTheft {
+            owners
+                .acquired_records
                 .extend(resolution.discovered_information().iter().copied());
         }
         owners

@@ -261,6 +261,42 @@ fn validate_authored_operation_plan(
     });
     let objective_target_is_participant = character_objective_target(operation.objective())
         .is_some_and(|target| operation.participants().contains(&target));
+    let legal_basis_is_valid = match (operation.kind(), operation.objective()) {
+        (
+            OperationKind::WitnessPressure,
+            OperationObjective::Frighten {
+                target: EntityRef::Character(character),
+            },
+        ) => {
+            !operation.witness_pressure_cases().is_empty()
+                && operation
+                    .witness_pressure_cases()
+                    .iter()
+                    .all(|case_witness| {
+                        organization_knew_witness_case_at(
+                            registry,
+                            state,
+                            operation.responsible_organization(),
+                            *character,
+                            *case_witness,
+                            operation.authorized_at(),
+                        )
+                    })
+        }
+        (OperationKind::Extraction, OperationObjective::FreeDetainee { target }) => {
+            operation.extraction_arrest().is_some_and(|arrest| {
+                organization_knew_detention_at(
+                    registry,
+                    state,
+                    operation.responsible_organization(),
+                    *target,
+                    arrest,
+                    operation.authorized_at(),
+                )
+            })
+        }
+        _ => true,
+    };
     let responsible_organization_is_criminal = state
         .world
         .get_organization(operation.responsible_organization())
@@ -300,6 +336,7 @@ fn validate_authored_operation_plan(
         || !business_target_is_valid
         || !required_intelligence_is_usable
         || objective_target_is_participant
+        || !legal_basis_is_valid
         || !responsible_organization_is_criminal
     {
         return Err(invalid_operation_definition(operation));
@@ -312,24 +349,11 @@ fn authored_business_target_is_valid(
     operation: &OperationRecord,
     execution: &OperationExecutionDefinition,
 ) -> bool {
-    let business = match operation.objective() {
-        OperationObjective::AcquireProperty {
-            target: EntityRef::Business(business),
-        }
-        | OperationObjective::ObtainCash {
-            target: EntityRef::Business(business),
-        }
-        | OperationObjective::DisruptBusiness {
-            target: EntityRef::Business(business),
-        } => *business,
-        OperationObjective::AcquireProperty { .. }
-        | OperationObjective::ObtainCash { .. }
-        | OperationObjective::Frighten { .. }
-        | OperationObjective::GatherInformation { .. }
-        | OperationObjective::FreeDetainee { .. }
-        | OperationObjective::DisruptBusiness { .. } => {
-            return execution.business_target().is_none();
-        }
+    let Some(ownership) = operation.kind().business_target_ownership() else {
+        return execution.business_target().is_none();
+    };
+    let Some(business) = operation.objective().business_target() else {
+        return false;
     };
     let Some(requirement) = execution.business_target() else {
         return false;
@@ -349,11 +373,7 @@ fn authored_business_target_is_valid(
         crate::world::BusinessOwner::Organization(operation.responsible_organization()),
         operation.authorized_at(),
     );
-    match operation
-        .kind()
-        .business_target_ownership()
-        .expect("business-target operation kind must define ownership semantics")
-    {
+    match ownership {
         // Same-minute transfer ordering is not persisted. For a foreign target it is enough that
         // sponsor ownership was not certain for the whole timestamp; for a sponsor-hosted venue,
         // sponsor ownership must have been possible at some point in that timestamp.
@@ -485,23 +505,8 @@ fn resolution_sponsor_ownership_evidence(
     operation: &OperationRecord,
     resolution: &crate::operations::OperationResolutionRecord,
 ) -> Option<BusinessOwnershipEvidence> {
-    let business = match operation.objective() {
-        OperationObjective::AcquireProperty {
-            target: EntityRef::Business(business),
-        }
-        | OperationObjective::ObtainCash {
-            target: EntityRef::Business(business),
-        }
-        | OperationObjective::DisruptBusiness {
-            target: EntityRef::Business(business),
-        } => *business,
-        OperationObjective::AcquireProperty { .. }
-        | OperationObjective::ObtainCash { .. }
-        | OperationObjective::Frighten { .. }
-        | OperationObjective::GatherInformation { .. }
-        | OperationObjective::FreeDetainee { .. }
-        | OperationObjective::DisruptBusiness { .. } => return None,
-    };
+    operation.kind().business_target_ownership()?;
+    let business = operation.objective().business_target()?;
     Some(state.world.business_owner_evidence_at(
         business,
         crate::world::BusinessOwner::Organization(operation.responsible_organization()),

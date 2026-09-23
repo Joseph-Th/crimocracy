@@ -5,8 +5,7 @@
 //! command a free case investigator should receive.
 
 use super::{
-    InvestigationWorkError, is_reviewable_evidence_kind, scheduled_work_for_investigator,
-    validate_schedule_investigation_work,
+    InvestigationWorkError, scheduled_work_for_investigator, validate_schedule_investigation_work,
 };
 use crate::core::id::{CharacterId, EvidenceId, IdKind, InvestigationId, InvestigationWorkId};
 use crate::core::state::AppState;
@@ -249,21 +248,7 @@ fn next_unattempted_review_source(
     state: &AppState,
     investigation: &InvestigationRecord,
 ) -> Result<Option<EvidenceId>, InvestigationWorkError> {
-    let mut oldest = None;
-    for evidence_id in investigation.evidence() {
-        let evidence = state
-            .legal
-            .get_evidence(*evidence_id)
-            .ok_or(InvestigationWorkError::InvalidSourceEvidence(*evidence_id))?;
-        if !is_reviewable_evidence_kind(evidence.kind())
-            || state.legal.evidence_review_attempt(evidence.id()).is_some()
-        {
-            continue;
-        }
-        let candidate = (evidence.discovered_at(), evidence.id());
-        if oldest.is_none_or(|current| candidate < current) {
-            oldest = Some(candidate);
-        }
-    }
-    Ok(oldest.map(|(_, evidence)| evidence))
+    Ok(state
+        .legal
+        .next_unattempted_reviewable_evidence(investigation.id()))
 }

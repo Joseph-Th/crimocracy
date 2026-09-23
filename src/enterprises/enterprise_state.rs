@@ -127,6 +127,23 @@ impl EnterpriseState {
             })
     }
 
+    /// Settled cycles in the inclusive reporting window `[start, end]`, ordered by occurrence
+    /// time then cycle id. This complements the exclusive-lower-bound observation query above.
+    pub(crate) fn cycles_from_through(
+        &self,
+        start: SimTime,
+        end: SimTime,
+    ) -> impl Iterator<Item = &EnterpriseCycleRecord> {
+        self.cycles_by_time
+            .range(start..=end)
+            .flat_map(|(_, ids)| ids.iter())
+            .map(|id| {
+                self.cycles
+                    .get(id)
+                    .expect("enterprise cycle time index must reference a cycle")
+            })
+    }
+
     /// Current operating rackets for one organization in stable enterprise-ID order. This
     /// projection excludes suspended and retired history so current-footprint consumers do not
     /// rescan an organization's lifetime enterprise record on every query.

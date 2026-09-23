@@ -503,20 +503,6 @@ fn resolve_interview_statement_draft(
         ),
     })
 }
-pub(crate) fn is_reviewable_evidence_kind(kind: EvidenceKind) -> bool {
-    matches!(
-        kind,
-        EvidenceKind::Fingerprint
-            | EvidenceKind::RecoveredProperty
-            | EvidenceKind::FinancialRecord
-            | EvidenceKind::Surveillance
-            | EvidenceKind::CommunicationRecord
-            | EvidenceKind::Document
-            | EvidenceKind::Ballistics
-            | EvidenceKind::VehicleDescription
-    )
-}
-
 pub fn validate_investigation_work_resolution_plan(
     registry: &Registry,
     state: &AppState,

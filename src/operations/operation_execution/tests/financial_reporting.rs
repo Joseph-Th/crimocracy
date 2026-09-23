@@ -40,6 +40,29 @@ fn organization_financial_report_accounts_for_held_and_deposited_operation_cash(
             .iter()
             .any(|entry| entry.summary.starts_with("Operation cash proceeds "))
     );
+    state = crate::core::persistence::restore_save(
+        &registry,
+        crate::core::persistence::build_save(&registry, &state)
+            .expect("held operation cash should save"),
+    )
+    .expect("held operation cash should restore with derived financial indexes rebuilt");
+    let restored_held_report =
+        validate_organization_financial_report(&state, organization, SimTime::ZERO, state.now())
+            .expect("restored held-cash financial report should validate")
+            .commit(&mut state)
+            .expect("restored held-cash financial report should commit");
+    assert!(
+        state
+            .reports()
+            .get_report(restored_held_report)
+            .expect("restored held-cash report should persist")
+            .entries()[0]
+            .summary
+            .contains(&format!(
+                "Held operation cash at period end: 1 operation(s), amount {money}, undeposited."
+            )),
+        "restore must rebuild the current held-cash projection from authoritative operations"
+    );
 
     let cash_account = insert_account(
         &mut state,
@@ -121,6 +144,12 @@ fn organization_financial_report_accounts_for_held_and_deposited_operation_cash(
     .expect("later treasury movement should validate")
     .commit(&mut state)
     .expect("later treasury movement should commit");
+    state = crate::core::persistence::restore_save(
+        &registry,
+        crate::core::persistence::build_save(&registry, &state)
+            .expect("ledger history should save before historical report replay"),
+    )
+    .expect("ledger chronology indexes should rebuild from persisted transactions");
     let historical_report =
         validate_organization_financial_report(&state, organization, SimTime::ZERO, deposit_time)
             .expect("historical financial report should validate")

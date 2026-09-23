@@ -52,6 +52,12 @@ struct Fixture {
 fn restore_rejects_representation_predating_its_arrest_anchor() {
     let mut fixture = fixture();
     let representation = retain(&mut fixture, 12_000, None);
+    let representation_information = fixture
+        .state
+        .legal()
+        .get_legal_representation(representation)
+        .expect("representation should persist")
+        .information();
     let retained_at = fixture
         .state
         .legal()
@@ -84,10 +90,10 @@ fn restore_rejects_representation_predating_its_arrest_anchor() {
     assert!(matches!(
         error,
         LoadError::InvalidState(
-            crate::core::invariants::StateValidationError::InvalidLegalRepresentation {
-                representation: invalid
+            crate::core::invariants::StateValidationError::InvalidInformationSignal {
+                information: invalid
             }
-        ) if invalid == representation
+        ) if invalid == representation_information
     ));
 }
 

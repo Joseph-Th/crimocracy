@@ -70,7 +70,7 @@ impl SurveillanceIntelligencePlan {
 
     /// The topic/subject/semantic triples this plan will persist, frozen on the operation's
     /// resolution so later world changes cannot rewrite what the surveillance actually learned.
-    pub(crate) fn surveillance_signatures(
+    pub(crate) fn discovery_signatures(
         &self,
     ) -> BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)> {
         self.observations
@@ -341,7 +341,7 @@ pub(crate) fn is_valid_persisted_surveillance_information(
     // One source of truth for the target→observation table: the resolution froze topic, subject,
     // and typed semantics. Re-deriving from current state would let later changes silently
     // invalidate honest intelligence; omitting semantics would let corrupted saves rewrite facts.
-    resolution.surveillance_signatures().contains(&(
+    resolution.discovery_signatures().contains(&(
         information.topic(),
         information.subject(),
         information.signal().cloned(),

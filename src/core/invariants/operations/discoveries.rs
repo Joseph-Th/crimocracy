@@ -1,4 +1,4 @@
-//! Persisted surveillance-discovery provenance and semantic validation.
+//! Persisted operation-discovery provenance and semantic validation.
 
 use super::*;
 
@@ -11,13 +11,17 @@ pub(super) fn validate_operation_discoveries(
 ) -> Result<(), StateValidationError> {
     actual_signatures.clear();
     match operation.kind() {
-        OperationKind::Surveillance => {
+        OperationKind::Surveillance | OperationKind::DocumentTheft => {
             let OperationObjective::GatherInformation { target } = operation.objective() else {
                 return Err(StateValidationError::InvalidOperationDiscovery {
                     operation: operation.id(),
                 });
             };
-            if !is_supported_surveillance_target(*target) {
+            if (operation.kind() == OperationKind::Surveillance
+                && !is_supported_surveillance_target(*target))
+                || (operation.kind() == OperationKind::DocumentTheft
+                    && !matches!(target, EntityRef::Business(_)))
+            {
                 return Err(StateValidationError::InvalidOperationDiscovery {
                     operation: operation.id(),
                 });
@@ -48,7 +52,6 @@ pub(super) fn validate_operation_discoveries(
         | OperationKind::Smuggling
         | OperationKind::Intimidation
         | OperationKind::WitnessPressure
-        | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
         | OperationKind::Sabotage
@@ -78,17 +81,19 @@ pub(super) fn validate_operation_discoveries(
                 .operation_for_discovered_information(*information_id)
                 .is_none_or(|source| source.id() != operation.id())
             || information.recorded_at() != resolution.resolved_at()
-            || !is_valid_persisted_surveillance_information(operation, information)
+            || !is_valid_persisted_operation_information(operation, information)
         {
             return Err(StateValidationError::InvalidOperationDiscovery {
                 operation: operation.id(),
             });
         }
     }
-    // The resolution record froze the signatures this surveillance actually produced; the
-    // discovered intelligence records must match that set exactly.
-    if operation.kind() == OperationKind::Surveillance
-        && resolution.surveillance_signatures() != actual_signatures
+    // The resolution froze the semantic facts produced by information-acquisition work; the
+    // persisted intelligence records must match that set exactly.
+    if matches!(
+        operation.kind(),
+        OperationKind::Surveillance | OperationKind::DocumentTheft
+    ) && resolution.discovery_signatures() != actual_signatures
     {
         return Err(StateValidationError::InvalidOperationDiscovery {
             operation: operation.id(),

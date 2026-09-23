@@ -223,6 +223,10 @@ pub struct FinanceState {
     accounts_by_owner: BTreeMap<FinancialOwner, BTreeSet<FinancialAccountId>>,
     #[serde(skip)]
     transactions_by_mandate: BTreeMap<MandateId, BTreeSet<LedgerTransactionId>>,
+    /// Per-account ledger chronology. Historical balance reconstruction touches only postings
+    /// that can affect the requested account instead of replaying unrelated campaign finances.
+    #[serde(skip)]
+    transactions_by_account: BTreeMap<FinancialAccountId, BTreeSet<(SimTime, LedgerTransactionId)>>,
     /// Running per-(mandate, period) charged totals, updated at ledger commit. Budget
     /// records retain their original authored window, so this exact-window aggregate is kept
     /// for restore/invariant verification even when a later mandate revision changes cadence.
@@ -244,6 +248,7 @@ impl FinanceState {
     pub(crate) fn rebuild_derived_indexes(&mut self) -> bool {
         self.accounts_by_owner.clear();
         self.transactions_by_mandate.clear();
+        self.transactions_by_account.clear();
         self.budget_used_by_period.clear();
         self.budget_used_by_day.clear();
         for account in self.accounts.values() {
@@ -254,6 +259,12 @@ impl FinanceState {
         }
         let mut budget_cents: BTreeMap<(MandateId, SimTime, SimTime), i128> = BTreeMap::new();
         for transaction in self.transactions.values() {
+            for posting in transaction.postings() {
+                self.transactions_by_account
+                    .entry(posting.account)
+                    .or_default()
+                    .insert((transaction.occurred_at(), transaction.id()));
+            }
             let Some(usage) = transaction.budget_usage() else {
                 continue;
             };
@@ -316,6 +327,24 @@ impl FinanceState {
                 self.accounts
                     .get(id)
                     .expect("financial owner index must reference an account")
+            })
+    }
+
+    pub(crate) fn transactions_for_account_through(
+        &self,
+        account: FinancialAccountId,
+        through: SimTime,
+    ) -> impl Iterator<Item = &LedgerTransactionRecord> {
+        self.transactions_by_account
+            .get(&account)
+            .into_iter()
+            .flat_map(move |transactions| {
+                transactions.range(..=(through, LedgerTransactionId::from_raw(u32::MAX)))
+            })
+            .map(|(_, transaction)| {
+                self.transactions
+                    .get(transaction)
+                    .expect("account transaction index must reference a transaction")
             })
     }
 
@@ -411,6 +440,12 @@ impl FinanceState {
             account_record.balance = *balance;
             account_record.version = advance_version_preflighted(account_record.version);
         }
+        for posting in record.postings() {
+            self.transactions_by_account
+                .entry(posting.account)
+                .or_default()
+                .insert((record.occurred_at(), record.id()));
+        }
         if let Some(usage) = record.budget_usage() {
             self.transactions_by_mandate
                 .entry(usage.mandate())
@@ -478,6 +513,24 @@ impl FinanceState {
     /// budget-backed transactions by the fused finance audit.
     pub(crate) fn indexed_mandate_entries(&self) -> usize {
         self.transactions_by_mandate
+            .values()
+            .map(BTreeSet::len)
+            .sum()
+    }
+
+    pub(crate) fn transaction_is_indexed_for_account(
+        &self,
+        transaction: LedgerTransactionId,
+        occurred_at: SimTime,
+        account: FinancialAccountId,
+    ) -> bool {
+        self.transactions_by_account
+            .get(&account)
+            .is_some_and(|transactions| transactions.contains(&(occurred_at, transaction)))
+    }
+
+    pub(crate) fn indexed_transaction_account_entries(&self) -> usize {
+        self.transactions_by_account
             .values()
             .map(BTreeSet::len)
             .sum()

@@ -27,7 +27,67 @@ pub struct ValidatedEnterpriseStatusChange {
 }
 
 impl ValidatedEnterpriseStatusChange {
+    /// Read-only revalidation used by cross-domain transactions that must suspend a dependent
+    /// enterprise before another owner mutates the infrastructure it relies on.
+    pub(crate) fn ensure_suspension_current(
+        &self,
+        state: &AppState,
+    ) -> Result<(), EnterpriseError> {
+        debug_assert_eq!(self.change, EnterpriseStatusChange::Suspend);
+        let record = state
+            .enterprises
+            .get_enterprise(self.enterprise)
+            .ok_or(EnterpriseError::MissingEnterprise(self.enterprise))?;
+        if record.version() != self.expected_version {
+            return Err(EnterpriseError::StaleEnterprise {
+                enterprise: self.enterprise,
+                expected: self.expected_version,
+                found: record.version(),
+            });
+        }
+        if record.status() != EnterpriseStatus::Active {
+            return Err(EnterpriseError::EnterpriseNotActive(self.enterprise));
+        }
+        ensure_version_can_advance(record.version(), "enterprise")?;
+        Ok(())
+    }
+
+    /// Commit a suspension after a composing owner has revalidated every dependency and reserved
+    /// its own persistent IDs. Suspension allocates no IDs and has no remaining fallible work.
+    /// A prevalidated same-minute cohort may contain the same suspension consequence more than
+    /// once when one enterprise depends on several independently settling businesses. The first
+    /// token owns the state transition; later identical tokens are deliberate no-ops.
+    pub(crate) fn commit_suspension_preflighted(self, state: &mut AppState) {
+        debug_assert_eq!(self.change, EnterpriseStatusChange::Suspend);
+        let record = state
+            .enterprises
+            .get_enterprise(self.enterprise)
+            .expect("prevalidated enterprise suspension must retain its enterprise");
+        if record.status() == EnterpriseStatus::Suspended {
+            debug_assert_eq!(
+                record.version(),
+                self.expected_version + 1,
+                "only the same prevalidated cohort may satisfy a duplicate suspension token"
+            );
+            return;
+        }
+        debug_assert_eq!(record.status(), EnterpriseStatus::Active);
+        debug_assert_eq!(record.version(), self.expected_version);
+        state.enterprises.set_status(
+            self.enterprise,
+            EnterpriseStatus::Suspended,
+            None,
+            None,
+            state.now(),
+        );
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<(), EnterpriseError> {
+        if self.change == EnterpriseStatusChange::Suspend {
+            self.ensure_suspension_current(state)?;
+            self.commit_suspension_preflighted(state);
+            return Ok(());
+        }
         // Version pins are the only staleness guard this token needs: unlike disruption
         // tokens, which freeze a validate-time horizon and must reject a held-across-tick
         // commit, every time-derived value here (next cycle, loss anchor, change instant)

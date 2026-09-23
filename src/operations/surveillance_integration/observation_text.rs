@@ -179,7 +179,7 @@ pub(super) fn business_access_summary(
 ) -> String {
     let access = functions
         .iter()
-        .map(|function| business_function_label(*function))
+        .map(|function| function.description())
         .collect::<Vec<_>>();
     if access.is_empty() {
         format!("Surveillance of {name} identified no specialized operating access.")
@@ -188,29 +188,6 @@ pub(super) fn business_access_summary(
             "Surveillance of {name} confirmed operating access associated with {}.",
             access.join(", ")
         )
-    }
-}
-
-fn business_function_label(function: BusinessFunction) -> &'static str {
-    match function {
-        BusinessFunction::CashIntensive => "heavy cash handling",
-        BusinessFunction::VehicleFleet => "a vehicle fleet",
-        BusinessFunction::Warehousing => "storage space",
-        BusinessFunction::MeetingSpace => "private meeting space",
-        BusinessFunction::CustomerAccess => "regular customer access",
-        BusinessFunction::ResaleMarket => "resale-market access",
-        BusinessFunction::UnionAccess => "union access",
-        BusinessFunction::DistributionInfrastructure => "distribution infrastructure",
-        BusinessFunction::ProfessionalRecords => "professional record handling",
-        BusinessFunction::AlcoholProduction => "alcohol production",
-        BusinessFunction::Nightlife => "nightlife venue",
-        BusinessFunction::Lodging => "lodging rooms",
-        BusinessFunction::SportingVenue => "sporting venue",
-        BusinessFunction::PrintingPress => "printing press",
-        BusinessFunction::FinancialServices => "financial services",
-        BusinessFunction::VehicleWorkshop => "vehicle workshop",
-        BusinessFunction::DockAccess => "dock access",
-        BusinessFunction::RacingWire => "racing wire service",
     }
 }
 

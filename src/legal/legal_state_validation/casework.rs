@@ -1,7 +1,10 @@
 //! Index-consistency checks for investigations, evidence, work, witnesses, and informants.
 
+use crate::core::id::{EvidenceId, InvestigationId};
+use crate::core::time::SimTime;
 use crate::legal::legal_state::LegalState;
 use crate::legal::records::{InvestigationStatus, InvestigationWorkKind, InvestigationWorkStatus};
+use std::collections::{BTreeMap, BTreeSet};
 
 impl LegalState {
     pub(super) fn has_consistent_informant_indexes(&self) -> bool {
@@ -394,6 +397,7 @@ impl LegalState {
     }
 
     pub(super) fn has_consistent_evidence_indexes(&self) -> bool {
+        let mut expected_staffing = BTreeMap::new();
         for evidence in self.evidence.values() {
             if !self
                 .investigations
@@ -401,6 +405,14 @@ impl LegalState {
                 .is_some_and(|investigation| investigation.evidence().contains(&evidence.id()))
             {
                 return false;
+            }
+            if crate::legal::investigation_system::evidence_is_actionable_case_lead(evidence) {
+                expected_staffing
+                    .entry(evidence.investigation())
+                    .or_insert_with(
+                        crate::legal::records::InvestigationEvidenceStaffingSummary::default,
+                    )
+                    .observe_actionable(evidence.strength(), evidence.reliability());
             }
             for source in evidence.derived_from() {
                 if !self
@@ -425,7 +437,7 @@ impl LegalState {
                 }
             }
         }
-        true
+        expected_staffing == self.indexes.evidence.staffing_summary_by_investigation
     }
 
     pub(super) fn has_consistent_investigation_work_indexes(&self) -> bool {
@@ -434,6 +446,7 @@ impl LegalState {
             && self.work_by_investigator_index_is_consistent()
             && self.scheduled_work_investigator_index_is_consistent()
             && self.evidence_review_attempt_index_is_consistent()
+            && self.unattempted_reviewable_evidence_index_is_consistent()
             && self.scheduled_work_due_index_is_consistent()
             && self.scheduled_work_focus_index_is_consistent()
     }
@@ -521,6 +534,29 @@ impl LegalState {
             }
         }
         true
+    }
+
+    fn unattempted_reviewable_evidence_index_is_consistent(&self) -> bool {
+        let mut expected: BTreeMap<InvestigationId, BTreeSet<(SimTime, EvidenceId)>> =
+            BTreeMap::new();
+        for evidence in self.evidence.values().filter(|evidence| {
+            evidence.kind().is_reviewable()
+                && !self
+                    .indexes
+                    .work
+                    .evidence_review_attempt_by_source
+                    .contains_key(&evidence.id())
+        }) {
+            expected
+                .entry(evidence.investigation())
+                .or_default()
+                .insert((evidence.discovered_at(), evidence.id()));
+        }
+        expected
+            == self
+                .indexes
+                .work
+                .unattempted_reviewable_evidence_by_investigation
     }
 
     /// Reverse case-work entries must resolve to work owned by that investigation.

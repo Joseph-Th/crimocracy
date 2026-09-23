@@ -10,7 +10,7 @@ struct OperationInvariantContext {
     after_action_reports: BTreeSet<crate::core::id::ReportId>,
     history_events: BTreeSet<crate::core::id::HistoryEventId>,
     dispositions: dispositions::DispositionInvariantContext,
-    surveillance_signatures: BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)>,
+    discovery_signatures: BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)>,
 }
 
 pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
@@ -176,6 +176,9 @@ fn validate_operation_objective(
     }
     match operation.objective() {
         OperationObjective::FreeDetainee { target } => {
+            if !operation.witness_pressure_cases().is_empty() {
+                return Err(invalid_operation_definition(operation));
+            }
             let arrest_id = operation
                 .extraction_arrest()
                 .ok_or_else(|| invalid_operation_definition(operation))?;
@@ -192,12 +195,32 @@ fn validate_operation_objective(
                 return Err(invalid_operation_definition(operation));
             }
         }
+        OperationObjective::Frighten {
+            target: EntityRef::Character(character),
+        } if operation.kind() == OperationKind::WitnessPressure => {
+            if operation.extraction_arrest().is_some()
+                || operation.witness_pressure_cases().is_empty()
+                || operation
+                    .witness_pressure_cases()
+                    .iter()
+                    .any(|case_witness| {
+                        state
+                            .legal
+                            .get_case_witness(*case_witness)
+                            .is_none_or(|witness| witness.witness() != *character)
+                    })
+            {
+                return Err(invalid_operation_definition(operation));
+            }
+        }
         OperationObjective::AcquireProperty { .. }
         | OperationObjective::ObtainCash { .. }
         | OperationObjective::Frighten { .. }
         | OperationObjective::GatherInformation { .. }
         | OperationObjective::DisruptBusiness { .. } => {
-            if operation.extraction_arrest().is_some() {
+            if operation.extraction_arrest().is_some()
+                || !operation.witness_pressure_cases().is_empty()
+            {
                 return Err(invalid_operation_definition(operation));
             }
         }
@@ -435,7 +458,7 @@ fn validate_completed_operation(
         operation,
         resolution,
         &mut context.discovered_information,
-        &mut context.surveillance_signatures,
+        &mut context.discovery_signatures,
     )?;
     exposure::validate_operation_exposure_links(state, operation, resolution)
 }

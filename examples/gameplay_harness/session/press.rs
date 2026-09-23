@@ -145,7 +145,7 @@ fn learn_initial_case_through_contact(
 fn schedule_witness_pressure(
     scenario: &mut Scenario,
     narrative: bool,
-    metrics: &RunMetrics,
+    metrics: &mut RunMetrics,
 ) -> Result<Option<OperationId>, Box<dyn Error>> {
     // The Press answer to a witnessed job is not only patience: leadership leans once on the
     // shop's owner - public knowledge who that is. Leadership does not send the follow-up
@@ -163,6 +163,7 @@ fn schedule_witness_pressure(
             )
         )
     {
+        let witness = scenario.target_owner;
         let witness_name = match scenario
             .state
             .world()
@@ -179,15 +180,61 @@ fn schedule_witness_pressure(
             crimocracy::world::BusinessOwner::Independent
             | crimocracy::world::BusinessOwner::Organization(_) => "the owner".to_owned(),
         };
+        let witness_source =
+            find_pending_disclosure_sources(&scenario.state, scenario.police_contact)
+                .into_iter()
+                .find(|source| {
+                    scenario
+                        .state
+                        .intelligence()
+                        .get_information(*source)
+                        .is_some_and(|information| {
+                            information.topic() == InformationTopic::LegalActivity
+                                && information.subject() == EntityRef::Character(witness)
+                                && matches!(
+                            information.signal(),
+                            Some(InformationSignal::LegalPersonStatus(
+                                crimocracy::intelligence::LegalPersonStatusSignal::CaseWitness {
+                                    ..
+                                }
+                            ))
+                        )
+                        })
+                });
+        let Some(witness_source) = witness_source else {
+            if narrative {
+                println!(
+                    "[VERIFY]  The contact has not confirmed that {witness_name} is actually on the case as a witness. Do not authorize pressure from ownership or street visibility alone."
+                );
+            }
+            return Ok(None);
+        };
+        let disclosure =
+            validate_contact_disclosure(&scenario.state, scenario.police_contact, witness_source)?
+                .commit(&mut scenario.state)?;
+        metrics.contact_reads += 1;
+        let disclosed_information = scenario
+            .state
+            .contacts()
+            .get_disclosure(disclosure)
+            .expect("witness-status disclosure must persist")
+            .disclosed_information();
+        if narrative {
+            let information = scenario
+                .state
+                .intelligence()
+                .get_information(disclosed_information)
+                .expect("disclosed witness-status information must persist");
+            println!(
+                "[LEARN]   {:?} / {:?}: {}",
+                information.reliability(),
+                information.specificity(),
+                information.summary()
+            );
+        }
         if narrative {
             println!(
-                "[DECIDE]  The after-action says the job was witnessed. Everyone knows who keeps {}: do not follow the failed score immediately, then send Carlo with one quiet word and accept that the follow-up carries its own exposure risk.",
-                scenario
-                    .state
-                    .world()
-                    .get_business(scenario.target)
-                    .expect("target business must persist")
-                    .name(),
+                "[DECIDE]  The after-action says the job was witnessed and the police contact confirms {witness_name} is on the case. Do not follow the failed score immediately; send Carlo with one quiet word only from that learned legal status, and accept that the follow-up carries its own exposure risk."
             );
         }
         // The lull anchor is player-visible reasoning: the crew's own field report places the
@@ -276,7 +323,6 @@ fn schedule_witness_pressure(
                 );
             }
         }
-        let witness = scenario.target_owner;
         pending_witness_pressure = Some(authorize_witness_pressure(
             scenario,
             witness,

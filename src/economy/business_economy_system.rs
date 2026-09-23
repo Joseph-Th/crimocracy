@@ -42,6 +42,7 @@ use crate::economy::{
     BusinessEconomyDraft, BusinessOperatingStatus, OperatingCapitalFloor,
     build_business_economy_record,
 };
+use crate::enterprises::enterprise_execution::EnterpriseError;
 use crate::finance::finance_system::{FinanceError, ValidatedFinancialAccountOpenings};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::intelligence::intelligence_system::IntelligenceError;
@@ -90,8 +91,8 @@ pub enum BusinessEconomyError {
     )]
     StaleEnterpriseDependency {
         business: BusinessId,
-        expected: Option<EnterpriseId>,
-        found: Option<EnterpriseId>,
+        expected: std::collections::BTreeSet<EnterpriseId>,
+        found: std::collections::BTreeSet<EnterpriseId>,
     },
     #[error("business {business} is not due for a cycle until {due_at:?}")]
     CycleNotDue {
@@ -144,6 +145,8 @@ pub enum BusinessEconomyError {
     Finance(#[from] FinanceError),
     #[error(transparent)]
     Intelligence(#[from] IntelligenceError),
+    #[error(transparent)]
+    Enterprise(#[from] EnterpriseError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]

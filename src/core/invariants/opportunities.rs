@@ -5,11 +5,12 @@ use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
+use crate::operations::operation_basis_knowledge::{
+    source_information_is_usable_for_operation_basis, source_information_proves_operation_basis,
+};
 use crate::operations::operation_scheduling::resolve_operation_earliest_start;
 use crate::operations::operation_system::is_valid_operation_objective;
-use crate::opportunities::opportunity_system::{
-    source_information_is_usable, source_information_proves_operation_basis,
-};
+use crate::opportunities::opportunity_system::operation_matches_opportunity_basis;
 use crate::opportunities::{OpportunityRecord, OpportunityResolution};
 use crate::registry::Registry;
 use crate::reports::{ReportKind, ReportRecord};
@@ -97,7 +98,7 @@ pub(super) fn validate_opportunities_against_registry(
                     .get_information(*source)
                     .is_some_and(|information| {
                         information.subject() == *target
-                            && source_information_is_usable(
+                            && source_information_is_usable_for_operation_basis(
                                 registry,
                                 kind,
                                 information,
@@ -419,6 +420,7 @@ fn validate_converted_opportunity(
         || !operation_targets
             .iter()
             .all(|target| context.targets().contains(target))
+        || !operation_matches_opportunity_basis(state, opportunity, operation)
         || state
             .opportunities
             .opportunity_for_operation(operation.id())

@@ -592,16 +592,16 @@ fn operation_proceeds_overflow_proof_matches_runtime_cent_rounding_boundary() {
     let registry = build_registry();
     let business_kind = crate::world::BusinessKind::Retail;
     let mut business = registry.get_business(business_kind).economics().clone();
-    // Document theft pays 125% of modeled gross. This exact gross produces
+    // Hijacking pays 250% of modeled gross. This exact gross produces
     // i64::MAX + 0.5 cents before rounding: truncation would fit, while the runtime's canonical
     // round-half-away rule must reject it as one cent beyond Money's representable range.
-    business.base_gross = Money::from_cents(7_378_697_629_483_820_646);
+    business.base_gross = Money::from_cents(3_689_348_814_741_910_323);
     business.wealth_revenue_per_point = Money::ZERO;
     business.commerce_revenue_per_point = Money::ZERO;
     business.gross_variance_basis_points = 0;
     business.notable_variance_basis_points = 0;
 
-    let operation_kind = OperationKind::DocumentTheft;
+    let operation_kind = OperationKind::Hijacking;
     let operation = registry.get_operation(operation_kind);
     let mut business_first = RegistryBuilder::default();
     business_first
@@ -610,7 +610,7 @@ fn operation_proceeds_overflow_proof_matches_runtime_cent_rounding_boundary() {
     assert!(matches!(
         business_first.register_operation(
             operation_kind,
-            "Document theft",
+            "Hijacking",
             operation.supported_approaches().clone(),
             operation.required_roles().clone(),
             operation.execution().clone(),
@@ -623,7 +623,7 @@ fn operation_proceeds_overflow_proof_matches_runtime_cent_rounding_boundary() {
     operation_first
         .register_operation(
             operation_kind,
-            "Document theft",
+            "Hijacking",
             operation.supported_approaches().clone(),
             operation.required_roles().clone(),
             operation.execution().clone(),

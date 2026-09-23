@@ -1,6 +1,6 @@
 //! Detective staffing policy and canonical lead-assignment transaction.
 
-use super::{InvestigationError, evidence_is_actionable_case_lead};
+use super::InvestigationError;
 use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, IdExhaustionError, IdKind, InvestigationId};
 use crate::core::state::AppState;
@@ -165,26 +165,13 @@ fn investigation_staffing_priority(
         .legal
         .get_investigation(investigation_id)
         .expect("unstaffed-investigation index must reference an investigation");
-    let mut actionable_evidence = 0_usize;
-    let mut best_actionable_assessment = (
-        crate::legal::EvidenceStrength::Weak,
-        crate::legal::EvidenceReliability::Questionable,
-    );
-    for evidence_id in investigation.evidence() {
-        let evidence = state
-            .legal
-            .get_evidence(*evidence_id)
-            .expect("investigation evidence set must reference an evidence record");
-        if evidence_is_actionable_case_lead(evidence) {
-            actionable_evidence += 1;
-            best_actionable_assessment =
-                best_actionable_assessment.max((evidence.strength(), evidence.reliability()));
-        }
-    }
+    let evidence_summary = state
+        .legal
+        .investigation_evidence_staffing_summary(investigation_id);
     InvestigationStaffingPriority {
-        actionable_evidence: Reverse(actionable_evidence),
-        best_strength: Reverse(best_actionable_assessment.0),
-        best_reliability: Reverse(best_actionable_assessment.1),
+        actionable_evidence: Reverse(evidence_summary.actionable_count()),
+        best_strength: Reverse(evidence_summary.best_strength()),
+        best_reliability: Reverse(evidence_summary.best_reliability()),
         evidence_count: Reverse(investigation.evidence().len()),
         last_activity_at: Reverse(investigation.last_activity_at()),
         investigation: investigation_id,

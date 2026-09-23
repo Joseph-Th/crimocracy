@@ -56,19 +56,22 @@ impl LegalState {
         Self::default()
     }
 
-    pub(crate) fn rebuild_derived_indexes(&mut self) {
+    pub(crate) fn rebuild_derived_indexes(&mut self) -> bool {
         self.indexes = LegalIndexes::default();
         self.rebuild_investigation_indexes();
         self.rebuild_evidence_indexes();
         self.rebuild_witness_indexes();
         self.rebuild_informant_indexes();
-        self.rebuild_investigation_work_indexes();
+        if !self.rebuild_investigation_work_indexes() {
+            return false;
+        }
         self.rebuild_jurisdiction_indexes();
         self.rebuild_patrol_indexes();
         self.rebuild_police_response_indexes();
         self.rebuild_arrest_indexes();
         self.rebuild_representation_indexes();
         self.rebuild_prosecution_indexes();
+        true
     }
 
     fn rebuild_investigation_indexes(&mut self) {
@@ -128,6 +131,14 @@ impl LegalState {
 
     fn rebuild_evidence_indexes(&mut self) {
         for evidence in self.evidence.values() {
+            if evidence_is_actionable_case_lead(evidence) {
+                self.indexes
+                    .evidence
+                    .staffing_summary_by_investigation
+                    .entry(evidence.investigation())
+                    .or_default()
+                    .observe_actionable(evidence.strength(), evidence.reliability());
+            }
             for source in evidence.derived_from() {
                 self.indexes
                     .evidence
@@ -190,7 +201,19 @@ impl LegalState {
         }
     }
 
-    fn rebuild_investigation_work_indexes(&mut self) {
+    fn rebuild_investigation_work_indexes(&mut self) -> bool {
+        for evidence in self
+            .evidence
+            .values()
+            .filter(|evidence| evidence.kind().is_reviewable())
+        {
+            self.indexes
+                .work
+                .unattempted_reviewable_evidence_by_investigation
+                .entry(evidence.investigation())
+                .or_default()
+                .insert((evidence.discovered_at(), evidence.id()));
+        }
         for work in self.investigation_work.values() {
             let id = work.id();
             self.indexes
@@ -208,14 +231,40 @@ impl LegalState {
             if work.kind() == InvestigationWorkKind::EvidenceReview
                 && work.status() != InvestigationWorkStatus::Cancelled
             {
-                let evidence = work
-                    .focus()
-                    .evidence_id()
-                    .expect("persisted evidence review must have evidence focus");
-                self.indexes
+                let Some(evidence) = work.focus().evidence_id() else {
+                    return false;
+                };
+                if self
+                    .indexes
                     .work
                     .evidence_review_attempt_by_source
-                    .insert(evidence, id);
+                    .insert(evidence, id)
+                    .is_some()
+                {
+                    return false;
+                }
+                let Some(evidence_record) = self.evidence.get(&evidence) else {
+                    return false;
+                };
+                if evidence_record.investigation() != work.investigation()
+                    || !evidence_record.kind().is_reviewable()
+                {
+                    return false;
+                }
+                if let Some(unattempted) = self
+                    .indexes
+                    .work
+                    .unattempted_reviewable_evidence_by_investigation
+                    .get_mut(&work.investigation())
+                {
+                    unattempted.remove(&(evidence_record.discovered_at(), evidence));
+                    if unattempted.is_empty() {
+                        self.indexes
+                            .work
+                            .unattempted_reviewable_evidence_by_investigation
+                            .remove(&work.investigation());
+                    }
+                }
             }
             if work.status() == InvestigationWorkStatus::Scheduled {
                 self.indexes
@@ -234,6 +283,7 @@ impl LegalState {
                     .insert((work.investigation(), work.kind(), work.focus()), id);
             }
         }
+        true
     }
 
     fn rebuild_jurisdiction_indexes(&mut self) {

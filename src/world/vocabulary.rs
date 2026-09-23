@@ -208,6 +208,34 @@ pub enum BusinessFunction {
     RacingWire,
 }
 
+impl BusinessFunction {
+    /// Canonical player-facing description of a concrete business capability. Keeping this
+    /// vocabulary beside the enum prevents surveillance, records, enterprise, and report
+    /// surfaces from inventing competing labels for the same modeled capability.
+    pub(crate) const fn description(self) -> &'static str {
+        match self {
+            Self::CashIntensive => "heavy cash handling",
+            Self::VehicleFleet => "a vehicle fleet",
+            Self::Warehousing => "storage space",
+            Self::MeetingSpace => "private meeting space",
+            Self::CustomerAccess => "regular customer access",
+            Self::ResaleMarket => "resale-market access",
+            Self::UnionAccess => "union access",
+            Self::DistributionInfrastructure => "distribution infrastructure",
+            Self::ProfessionalRecords => "professional record handling",
+            Self::AlcoholProduction => "alcohol production",
+            Self::Nightlife => "nightlife venue",
+            Self::Lodging => "lodging rooms",
+            Self::SportingVenue => "sporting venue",
+            Self::PrintingPress => "printing press",
+            Self::FinancialServices => "financial services",
+            Self::VehicleWorkshop => "vehicle workshop",
+            Self::DockAccess => "dock access",
+            Self::RacingWire => "racing wire service",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BusinessOwner {
     Independent,

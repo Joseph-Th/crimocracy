@@ -34,19 +34,19 @@ use crate::intelligence::intelligence_system::IntelligenceError;
 use crate::legal::WitnessCooperation;
 use crate::legal::investigation_system::InvestigationError;
 use crate::legal::patrol_system::PatrolPresenceSnapshot;
+use crate::operations::information_acquisition::{
+    InformationAcquisitionError, OperationInformationPlan, decide_operation_information,
+    operation_information_after_action_clause, persisted_operation_information_after_action_clause,
+    validate_operation_information_plan_snapshot,
+};
 use crate::operations::operation_economics::{
     CashProceedsPlan, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE, depleted_take_clause,
     downgrade_empty_take_outcome, held_cash_clause, held_property_clause, resolve_cash_proceeds,
     resolve_property_proceeds,
 };
 use crate::operations::operation_objective::{
-    blocker_clause, effective_objective_outcome, pressureable_witness_targets,
+    blocker_clause, effective_objective_outcome, pressureable_witness_targets_for_cases,
     resolve_objective_blocker,
-};
-use crate::operations::surveillance_integration::{
-    SurveillanceError, SurveillanceIntelligencePlan, decide_surveillance_intelligence,
-    persisted_surveillance_after_action_clause, surveillance_after_action_clause,
-    validate_surveillance_plan_snapshot,
 };
 use crate::operations::{
     OperationExposureFactors, OperationExposureLevel, OperationKind, OperationObjective,
@@ -143,7 +143,7 @@ pub(crate) enum OperationResolutionError {
     #[error(transparent)]
     Report(#[from] ReportError),
     #[error(transparent)]
-    Surveillance(#[from] SurveillanceError),
+    InformationAcquisition(#[from] InformationAcquisitionError),
     #[error(transparent)]
     Witness(#[from] crate::legal::witness_system::WitnessError),
     #[error(transparent)]
@@ -251,7 +251,7 @@ struct OperationResolutionOutcomePlan {
     /// meaningful: the target left custody before the crew reached the objective, which forces
     /// the objective to fail instead of making the simulation tick uncommittable.
     extraction_arrest: Option<ArrestId>,
-    surveillance: Option<SurveillanceIntelligencePlan>,
+    information_acquisition: Option<OperationInformationPlan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,7 +373,12 @@ pub(crate) fn decide_operation_resolution(
             },
         ) = (record.kind(), record.objective())
     {
-        pressureable_witness_targets(state, record.responsible_organization(), *character)
+        pressureable_witness_targets_for_cases(
+            state,
+            record.responsible_organization(),
+            *character,
+            record.witness_pressure_cases(),
+        )
     } else {
         Vec::new()
     };
@@ -401,8 +406,8 @@ pub(crate) fn decide_operation_resolution(
         property_proceeds_plan.proceeds.as_ref(),
         cash_proceeds_plan.proceeds.as_ref(),
     );
-    let surveillance =
-        decide_surveillance_intelligence(registry, state, record, objective_outcome)?;
+    let information_acquisition =
+        decide_operation_information(registry, state, record, objective_outcome)?;
     // Every after-action summary leads with the operation title so executive-brief entries stay
     // identifiable when several operations resolve into the same brief window.
     let missing_intelligence_topics =
@@ -421,8 +426,8 @@ pub(crate) fn decide_operation_resolution(
             missing_intelligence_topics: &missing_intelligence_topics,
             property_proceeds_plan: &property_proceeds_plan,
             cash_proceeds_plan: &cash_proceeds_plan,
-            surveillance_clause: surveillance_after_action_clause(
-                surveillance.as_ref(),
+            information_clause: operation_information_after_action_clause(
+                information_acquisition.as_ref(),
                 objective_outcome,
             ),
             objective_blocker,
@@ -449,7 +454,7 @@ pub(crate) fn decide_operation_resolution(
             property_proceeds_plan,
             cash_proceeds_plan,
             extraction_arrest,
-            surveillance,
+            information_acquisition,
         },
         narrative: OperationResolutionNarrative {
             summary,
@@ -466,7 +471,7 @@ struct AfterActionNarrativeContext<'a> {
     missing_intelligence_topics: &'a [crate::intelligence::InformationTopic],
     property_proceeds_plan: &'a PropertyProceedsPlan,
     cash_proceeds_plan: &'a CashProceedsPlan,
-    surveillance_clause: Option<String>,
+    information_clause: Option<String>,
     objective_blocker: Option<OperationObjectiveBlocker>,
 }
 
@@ -502,7 +507,7 @@ fn compose_after_action_summary(
         summary.push(' ');
         summary.push_str(depleted_take_clause(record.kind()));
     }
-    if let Some(clause) = context.surveillance_clause {
+    if let Some(clause) = context.information_clause {
         summary.push(' ');
         summary.push_str(&clause);
     }
@@ -560,7 +565,8 @@ pub(crate) fn render_persisted_after_action_summary(
             .into_iter()
             .filter_map(|(topic, score)| (score == 0).then_some(topic))
             .collect::<Vec<_>>();
-    let surveillance_clause = persisted_surveillance_after_action_clause(state, record).ok()?;
+    let information_clause =
+        persisted_operation_information_after_action_clause(state, record).ok()?;
     Some(compose_after_action_summary(
         record,
         execution,
@@ -572,7 +578,7 @@ pub(crate) fn render_persisted_after_action_summary(
             missing_intelligence_topics: &missing_intelligence_topics,
             property_proceeds_plan: &property_proceeds_plan,
             cash_proceeds_plan: &cash_proceeds_plan,
-            surveillance_clause,
+            information_clause,
             objective_blocker: resolution.objective_blocker(),
         },
     ))
@@ -668,14 +674,13 @@ fn validate_plan_snapshot(
     crate::core::time::ensure_time_current(state.now(), plan.snapshot.resolved_at).map_err(
         |(expected, found)| OperationResolutionError::StaleResolutionTime { expected, found },
     )?;
-    // Surveillance owns a richer target snapshot than the generic venue/police derivation.
-    // Check it first so a changed observed organization, enterprise selection, or other
-    // surveillance-specific dependency reports the precise target-staleness error rather than a
-    // secondary police-context change caused by the same target mutation.
-    if let Some(surveillance) = &plan.outcome.surveillance {
-        validate_surveillance_plan_snapshot(
+    // Information-acquisition operations own richer target snapshots than the generic
+    // venue/police derivation. Check those first so target-specific staleness is reported
+    // precisely rather than surfacing as a secondary police-context change.
+    if let Some(information_acquisition) = &plan.outcome.information_acquisition {
+        validate_operation_information_plan_snapshot(
             state,
-            surveillance,
+            information_acquisition,
             off_window_patrol_presence_percent,
         )?;
     }
@@ -707,7 +712,12 @@ fn validate_plan_snapshot(
             },
         ) = (record.kind(), record.objective())
     {
-        pressureable_witness_targets(state, record.responsible_organization(), *character)
+        pressureable_witness_targets_for_cases(
+            state,
+            record.responsible_organization(),
+            *character,
+            record.witness_pressure_cases(),
+        )
     } else {
         Vec::new()
     };

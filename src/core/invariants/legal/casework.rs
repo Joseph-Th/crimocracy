@@ -5,7 +5,6 @@ use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{CaseWitnessId, EvidenceId};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
-use crate::legal::investigation_work_execution::is_reviewable_evidence_kind;
 use crate::legal::witness_system::{
     resolve_witness_reliability, resolve_witness_strength, witness_subject_is_case_relevant,
 };
@@ -272,7 +271,7 @@ fn validate_work_focus(
                 && state.legal.get_evidence(source).is_some_and(|evidence| {
                     evidence.investigation() == work.investigation()
                         && evidence.discovered_at() <= work.scheduled_at()
-                        && is_reviewable_evidence_kind(evidence.kind())
+                        && evidence.kind().is_reviewable()
                 })
         }
         (

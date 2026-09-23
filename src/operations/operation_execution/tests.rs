@@ -20,10 +20,12 @@ use crate::decisions::{
 use crate::finance::finance_system::insert_account;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
 use crate::history::HistoryEventKind;
-use crate::intelligence::intelligence_system::validate_record_information;
+use crate::intelligence::intelligence_system::{
+    validate_record_information, validate_record_information_with_signal,
+};
 use crate::intelligence::{
-    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    InformationDraft, InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
+    LegalPersonStatusSignal, Reliability, Specificity,
 };
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
 use crate::legal::jurisdiction_system::validate_set_jurisdiction;
@@ -66,6 +68,60 @@ use std::collections::{BTreeMap, BTreeSet};
 mod financial_reporting;
 mod police_response;
 mod property_economics;
+
+fn record_known_witness_status(
+    state: &mut AppState,
+    organization: OrganizationId,
+    witness: CharacterId,
+    investigation: crate::core::id::InvestigationId,
+) {
+    validate_record_information_with_signal(
+        state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(witness),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The organization confirmed this person is an active case witness.".to_owned(),
+        },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+            investigation,
+        }),
+    )
+    .expect("typed witness-status knowledge should validate")
+    .commit(state)
+    .expect("typed witness-status knowledge should commit");
+}
+
+fn record_known_detention_status(
+    state: &mut AppState,
+    organization: OrganizationId,
+    detainee: CharacterId,
+    arrest: crate::core::id::ArrestId,
+) {
+    validate_record_information_with_signal(
+        state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(detainee),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The organization confirmed this person is currently detained.".to_owned(),
+        },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::Detained { arrest }),
+    )
+    .expect("typed detention-status knowledge should validate")
+    .commit(state)
+    .expect("typed detention-status knowledge should commit");
+}
 
 #[derive(Clone, Copy, Serialize)]
 struct OperationCashProceedsRecordWire {
@@ -919,8 +975,10 @@ fn make_exposed_operation_fixture_with_constraints(
         },
     )
     .expect("exposure business should validate");
-    if kind == OperationKind::Sabotage {
-        // DisruptBusiness authorization requires an operating economy on the target.
+    if matches!(kind, OperationKind::Sabotage | OperationKind::Intimidation) {
+        // These fixtures exercise target-economy liveness after authorization. Sabotage requires
+        // operating books up front; Intimidation may target an ambient business without books,
+        // but giving it explicit books lets the test distinguish Active from shuttered.
         let operating = insert_account(
             &mut state,
             FinancialAccountDraft {
@@ -928,7 +986,7 @@ fn make_exposed_operation_fixture_with_constraints(
                 kind: AccountKind::LegitimateOperating,
             },
         )
-        .expect("sabotage operating account should validate");
+        .expect("target operating account should validate");
         let settlement = insert_account(
             &mut state,
             FinancialAccountDraft {
@@ -936,7 +994,7 @@ fn make_exposed_operation_fixture_with_constraints(
                 kind: AccountKind::Settlement,
             },
         )
-        .expect("sabotage settlement account should validate");
+        .expect("target settlement account should validate");
         crate::economy::business_economy_system::validate_establish_business_economy(
             &registry,
             &state,
@@ -946,9 +1004,9 @@ fn make_exposed_operation_fixture_with_constraints(
                 settlement_account: settlement,
             },
         )
-        .expect("sabotage target economy should establish")
+        .expect("target economy should establish")
         .commit(&mut state)
-        .expect("sabotage target economy should commit");
+        .expect("target economy should commit");
     }
     let leader = insert_character(
         &mut state,
@@ -1207,6 +1265,128 @@ fn sabotage_target_suspended_mid_execution_records_practical_objective_failure()
     validate_state_against_registry(&registry, &state)
         .expect("mid-execution practical failure should remain registry-valid");
     validate_invariants(&state);
+}
+
+#[test]
+fn cash_operation_of_suspended_target_aborts_before_start() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, false, Vec::new());
+    let business = {
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("authorized intimidation should persist");
+        let OperationObjective::ObtainCash {
+            target: EntityRef::Business(business),
+        } = record.objective()
+        else {
+            panic!("intimidation fixture must target business cash");
+        };
+        *business
+    };
+    crate::economy::business_economy_system::validate_suspend_business_economy(&state, business)
+        .expect("active cash target should suspend")
+        .commit(&mut state)
+        .expect("cash-target suspension should commit");
+
+    let outcome = run_tick(&registry, &mut state);
+    assert!(outcome.started_operations.is_empty());
+    assert!(outcome.resolved_operations.is_empty());
+    assert_eq!(outcome.aborted_operations, vec![operation]);
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("cancelled intimidation should persist");
+    assert_eq!(record.status(), OperationStatus::Aborted);
+    assert!(record.resolution().is_none());
+    let abort = record
+        .abort_record()
+        .expect("shuttered cash objective should persist its abort cause");
+    assert_eq!(
+        abort.cause(),
+        OperationAbortCause::ObjectiveUnavailable(OperationObjectiveBlocker::TargetEconomyInactive)
+    );
+    let summary = state
+        .reports()
+        .get_report(abort.artifacts().report())
+        .expect("cash-target cancellation report should persist")
+        .entries()[0]
+        .summary
+        .clone();
+    assert!(summary.contains("target business was no longer operating"));
+    validate_state_against_registry(&registry, &state)
+        .expect("pre-start cash-target closure should remain registry-valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn cash_target_suspended_mid_execution_records_practical_failure_without_proceeds() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, false, Vec::new());
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let business = {
+        let record = state
+            .operations()
+            .get_operation(operation)
+            .expect("started intimidation should persist");
+        let OperationObjective::ObtainCash {
+            target: EntityRef::Business(business),
+        } = record.objective()
+        else {
+            panic!("intimidation fixture must target business cash");
+        };
+        *business
+    };
+    crate::economy::business_economy_system::validate_suspend_business_economy(&state, business)
+        .expect("active cash target should suspend during execution")
+        .commit(&mut state)
+        .expect("mid-execution cash-target suspension should commit");
+
+    run_until_operation_resolved(&registry, &mut state, operation);
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("resolved intimidation should persist");
+    let resolution = record
+        .resolution()
+        .expect("started intimidation should persist a practical result");
+    assert_eq!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Failed
+    );
+    assert_eq!(
+        resolution.objective_blocker(),
+        Some(OperationObjectiveBlocker::TargetEconomyInactive)
+    );
+    assert!(
+        resolution.cash_proceeds().is_none(),
+        "a shuttered business cannot produce operation cash"
+    );
+    let summary = state
+        .reports()
+        .get_report(resolution.after_action_report())
+        .expect("cash-target after-action report should persist")
+        .entries()[0]
+        .summary
+        .clone();
+    assert!(summary.contains("no active cash-generating business to collect from"));
+    crate::economy::business_economy_system::validate_resume_business_economy(
+        &registry, &state, business,
+    )
+    .expect("later business recovery should validate")
+    .commit(&mut state)
+    .expect("later business recovery should commit");
+    validate_state_against_registry(&registry, &state)
+        .expect("later recovery must not invalidate the historical cash-target blocker");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state)
+            .expect("recovered business with historical cash-target failure should save"),
+    )
+    .expect("historical cash-target blocker should survive later recovery and restore");
+    validate_invariants(&state);
+    validate_invariants(&restored);
 }
 
 #[test]
@@ -1574,6 +1754,7 @@ fn detained_witness_cannot_be_pressured_and_in_flight_detention_blocks_the_effec
         .expect("pressure target should register as a witness")
         .commit(&mut state)
         .expect("witness registration should commit");
+        record_known_witness_status(&mut state, crew, witness, investigation);
     }
 
     detain_pressure_test_character(
@@ -1598,16 +1779,38 @@ fn detained_witness_cannot_be_pressured_and_in_flight_detention_blocks_the_effec
         contingencies: Vec::new(),
         scheduled_for,
     };
-    let error = validate_authorize_operation(
+    let mut hidden_detention_state = state.clone();
+    let hidden_detention_pressure = validate_authorize_operation(
         &registry,
-        &state,
+        &hidden_detention_state,
         pressure_draft(already_detained, SimTime::from_minutes(1)),
     )
-    .expect_err("a detained witness is not an available field-intimidation target");
+    .expect(
+        "learned witness status should authorize without using hidden custody as an information oracle",
+    )
+    .commit(&mut hidden_detention_state)
+    .expect("knowledge-backed pressure operation should commit");
+    let hidden_tick = run_tick(&registry, &mut hidden_detention_state);
     assert_eq!(
-        error,
-        OperationError::InactiveObjectiveTarget(EntityRef::Character(already_detained))
+        hidden_tick.aborted_operations,
+        vec![hidden_detention_pressure],
+        "begin-time objective viability must block pressure against a witness who is secretly detained"
     );
+    let hidden_record = hidden_detention_state
+        .operations()
+        .get_operation(hidden_detention_pressure)
+        .expect("blocked pressure operation should persist");
+    assert_eq!(hidden_record.status(), OperationStatus::Aborted);
+    assert_eq!(
+        hidden_record.abort_record().map(|abort| abort.cause()),
+        Some(OperationAbortCause::ObjectiveUnavailable(
+            OperationObjectiveBlocker::NoPressureableWitnessCase,
+        ))
+    );
+    assert!(hidden_record.started_at().is_none());
+    validate_state_against_registry(&registry, &hidden_detention_state)
+        .expect("hidden-custody start rejection should remain registry-valid");
+    validate_invariants(&hidden_detention_state);
 
     let pressure = validate_authorize_operation(
         &registry,
@@ -1772,6 +1975,7 @@ fn statemented_witness_blocks_late_pressure_without_retroactively_weakening_test
     .expect("statementless witness should be registerable")
     .commit(&mut state)
     .expect("witness registration should commit");
+    record_known_witness_status(&mut state, crew, witness, investigation);
     let pressure_draft = || OperationDraft {
         title: "Pressure the witness".to_owned(),
         kind: OperationKind::WitnessPressure,
@@ -1814,20 +2018,6 @@ fn statemented_witness_blocks_late_pressure_without_retroactively_weakening_test
     assert_eq!(
         statement_record.cooperation(),
         WitnessCooperation::Reluctant
-    );
-
-    let redundant_error = validate_authorize_operation(
-        &registry,
-        &state,
-        OperationDraft {
-            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
-            ..pressure_draft()
-        },
-    )
-    .expect_err("completed testimony leaves no modeled cooperation effect for a new pressure job");
-    assert_eq!(
-        redundant_error,
-        OperationError::TargetNotPressureableWitness(witness)
     );
 
     let due_at = state
@@ -1901,13 +2091,48 @@ fn statemented_witness_blocks_late_pressure_without_retroactively_weakening_test
             .summary()
             .contains("no witness cooperation the crew could still affect")
     );
+    let late_pressure = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+            ..pressure_draft()
+        },
+    )
+    .expect(
+        "learned witness status should remain authorizable without revealing that police already took a statement",
+    )
+    .commit(&mut state)
+    .expect("late knowledge-backed pressure operation should commit");
+    let late_tick = run_tick(&registry, &mut state);
+    assert_eq!(late_tick.aborted_operations, vec![late_pressure]);
+    let late_record = state
+        .operations()
+        .get_operation(late_pressure)
+        .expect("late blocked pressure operation should persist");
+    assert_eq!(
+        late_record.abort_record().map(|abort| abort.cause()),
+        Some(OperationAbortCause::ObjectiveUnavailable(
+            OperationObjectiveBlocker::NoPressureableWitnessCase,
+        ))
+    );
+    assert!(late_record.started_at().is_none());
+    assert_eq!(
+        state
+            .legal()
+            .get_case_witness(case_witness)
+            .expect("witness should persist after late blocked pressure")
+            .cooperation(),
+        WitnessCooperation::Reluctant,
+        "a second blocked field operation must not rewrite completed testimony or witness cooperation"
+    );
     validate_state_against_registry(&registry, &state)
         .expect("statemented-witness pressure state should remain registry-valid");
     validate_invariants(&state);
 }
 
 #[test]
-fn validated_witness_pressure_rejects_when_pressureable_case_set_changes() {
+fn validated_witness_pressure_does_not_expand_into_a_later_unknown_case() {
     let registry = build_registry();
     let mut state = AppState::new(0x517A_7E12);
     let crew = insert_organization(
@@ -1986,28 +2211,34 @@ fn validated_witness_pressure_rejects_when_pressureable_case_set_changes() {
     .expect("first witness registration should validate")
     .commit(&mut state)
     .expect("first witness registration should commit");
-    let pressure = validate_authorize_operation(
-        &registry,
-        &state,
-        OperationDraft {
-            title: "Freeze witness targets".to_owned(),
-            kind: OperationKind::WitnessPressure,
-            responsible_organization: crew,
-            leader,
-            objective: OperationObjective::Frighten {
-                target: EntityRef::Character(witness),
-            },
-            approach: OperationApproach::Covert,
-            roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
-            intelligence: BTreeSet::new(),
-            constraints: Vec::new(),
-            contingencies: Vec::new(),
-            scheduled_for: SimTime::from_minutes(1),
+    let pressure_draft = || OperationDraft {
+        title: "Freeze witness targets".to_owned(),
+        kind: OperationKind::WitnessPressure,
+        responsible_organization: crew,
+        leader,
+        objective: OperationObjective::Frighten {
+            target: EntityRef::Character(witness),
         },
-    )
-    .expect("pressure operation should validate")
-    .commit(&mut state)
-    .expect("pressure operation should commit");
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: SimTime::from_minutes(1),
+    };
+    assert_eq!(
+        validate_authorize_operation(&registry, &state, pressure_draft())
+            .expect_err("hidden witness status must not be queryable through authorization"),
+        OperationError::TargetLegalBasisUnknown {
+            kind: OperationKind::WitnessPressure,
+            character: witness,
+        }
+    );
+    record_known_witness_status(&mut state, crew, witness, first_investigation);
+    let pressure = validate_authorize_operation(&registry, &state, pressure_draft())
+        .expect("pressure operation should validate")
+        .commit(&mut state)
+        .expect("pressure operation should commit");
     state.advance_clock(SimDuration::ONE_MINUTE);
     apply_transition(&registry, &mut state, pressure, OperationTransition::Begin)
         .expect("pressure operation should begin");
@@ -2043,8 +2274,9 @@ fn validated_witness_pressure_rejects_when_pressureable_case_set_changes() {
     let validated = validate_operation_resolution_plan(&registry, &state, plan)
         .expect("fresh pressure resolution should validate");
 
-    // Add a second live case for the same witness after validation. The old resolution token
-    // must not silently intimidate only the case it happened to observe earlier.
+    // Add a second live case for the same witness after validation. The operation was never
+    // authorized from knowledge of this case, so the later hidden registration must not join
+    // the pressure target set or stale the already-decided resolution.
     let second_investigation = validate_open_investigation(
         &state,
         InvestigationDraft {
@@ -2068,52 +2300,16 @@ fn validated_witness_pressure_rejects_when_pressureable_case_set_changes() {
     .expect("late witness registration should validate")
     .commit(&mut state)
     .expect("late witness registration should commit");
-    let id_counters_before = (
-        state.ids.next_raw(IdKind::Information),
-        state.ids.next_raw(IdKind::HistoryEvent),
-        state.ids.next_raw(IdKind::Report),
-    );
-    let error = validated
+    validated
         .commit(&mut state)
-        .expect_err("changed witness-target set must stale the whole operation resolution");
-    assert_eq!(
-        error,
-        OperationResolutionError::StaleObjectiveContext {
-            operation: pressure,
-        }
-    );
-    assert_eq!(
-        (
-            state.ids.next_raw(IdKind::Information),
-            state.ids.next_raw(IdKind::HistoryEvent),
-            state.ids.next_raw(IdKind::Report),
-        ),
-        id_counters_before,
-        "stale witness-target rejection must not consume resolution artifact IDs"
-    );
-    assert_eq!(
-        state
-            .operations()
-            .get_operation(pressure)
-            .expect("rejected resolution must leave the operation present")
-            .status(),
-        OperationStatus::InProgress
-    );
-    assert!(
-        state
-            .operations()
-            .get_operation(pressure)
-            .expect("rejected resolution must leave the operation present")
-            .resolution()
-            .is_none()
-    );
+        .expect("a later unknown witness case must not rewrite the authorized pressure target");
     assert_eq!(
         state
             .legal()
             .get_case_witness(first_case_witness)
             .expect("first witness registration should persist")
             .cooperation(),
-        WitnessCooperation::Reluctant
+        WitnessCooperation::Hostile
     );
     assert_eq!(
         state
@@ -2123,6 +2319,16 @@ fn validated_witness_pressure_rejects_when_pressureable_case_set_changes() {
             .cooperation(),
         WitnessCooperation::Cooperative
     );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(pressure)
+            .expect("resolved pressure operation should persist")
+            .status(),
+        OperationStatus::Completed
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("knowledge-scoped witness pressure should remain registry-valid");
     validate_invariants(&state);
 }
 
@@ -3907,6 +4113,32 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     .expect("evidence-backed arrest should validate")
     .commit(&mut state)
     .expect("arrest should commit");
+    let unknown_custody_error = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Unknown custody extraction".to_owned(),
+            kind: OperationKind::Extraction,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::FreeDetainee { target: detainee },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Driver, driver)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect_err("hidden detention must not be queryable through extraction authorization");
+    assert_eq!(
+        unknown_custody_error,
+        OperationError::TargetLegalBasisUnknown {
+            kind: OperationKind::Extraction,
+            character: detainee,
+        }
+    );
+    record_known_detention_status(&mut state, crew, detainee, arrest);
 
     // A free-detainee objective against someone not in custody must be rejected.
     let free_error = validate_authorize_operation(
@@ -3929,7 +4161,10 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     .expect_err("extraction requires a detained target");
     assert!(matches!(
       free_error,
-      OperationError::TargetNotDetained(character) if character == leader
+      OperationError::TargetLegalBasisUnknown {
+          kind: OperationKind::Extraction,
+          character,
+      } if character == leader
     ));
 
     // A plan that cannot finish before the current custody window ends is knowingly obsolete
@@ -4052,6 +4287,51 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     validate_state_against_registry(&registry, &released_before_start)
         .expect("pre-start custody-loss abort should remain registry-valid");
     validate_invariants(&released_before_start);
+
+    // Historical extraction authorization must remain inside the pinned arrest episode. A
+    // corrupted save cannot move authorization after release while retaining older detention
+    // knowledge and otherwise-plausible abort chronology.
+    let original = released_before_start
+        .operations()
+        .get_operation(cancelled_extraction)
+        .expect("cancelled extraction should persist")
+        .clone();
+    let mut corrupted_operation = original.clone();
+    corrupted_operation.command.authorized_at = SimTime::from_minutes(1);
+    let original_bytes =
+        bincode::serialize(&original).expect("cancelled extraction should serialize");
+    let corrupted_bytes =
+        bincode::serialize(&corrupted_operation).expect("corrupted extraction should serialize");
+    assert_eq!(
+        corrupted_bytes.len(),
+        original_bytes.len(),
+        "fixed-width authorization-time corruption must preserve operation wire size"
+    );
+    let envelope = build_save(&registry, &released_before_start)
+        .expect("canonical released-before-start extraction should save");
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "cancelled extraction operation must occur once in the save"
+    );
+    envelope_bytes[matches[0]..matches[0] + corrupted_bytes.len()]
+        .copy_from_slice(&corrupted_bytes);
+    let corrupted: SaveEnvelope = bincode::deserialize(&envelope_bytes)
+        .expect("same-layout authorization-time corruption should decode");
+    assert!(matches!(
+        restore_save(&registry, corrupted),
+        Err(crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidOperationDefinition {
+                operation
+            }
+        )) if operation == cancelled_extraction
+    ));
 
     // If an already-running extraction is delayed until the custody cap, mandatory release is the
     // first same-minute lifecycle action. The operation then records a practical failure instead
@@ -4256,6 +4536,7 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     .expect("evidence-backed renewed arrest should validate")
     .commit(&mut state)
     .expect("evidence-backed renewed arrest should commit");
+    record_known_detention_status(&mut state, crew, detainee, rearrest);
     let stale_authorization = validate_authorize_operation(
         &registry,
         &state,
@@ -4308,12 +4589,13 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     .expect("replacement custody should validate from newly developed evidence")
     .commit(&mut state)
     .expect("replacement custody should commit");
+    record_known_detention_status(&mut state, crew, detainee, replacement_arrest);
     let stale_error = stale_authorization
         .commit(&mut state)
         .expect_err("authorization must not retarget itself to replacement custody");
     assert_eq!(
         stale_error,
-        OperationError::StaleExtractionCustody {
+        OperationError::StaleExtractionBasis {
             character: detainee,
             expected: rearrest,
             found: Some(replacement_arrest),
@@ -4583,6 +4865,7 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
         .map(|witness| witness.witness())
         .collect();
     assert_eq!(witnesses, vec![owner]);
+    record_known_witness_status(&mut state, crew, owner, investigation);
 
     // Witness pressure against that same witness is now authorizable while the crew's
     // exposed leader is still free: authorizing it before testimony lands also books
@@ -4955,6 +5238,7 @@ fn witness_pressure_prefers_case_geography_over_character_organization_footprint
     .expect("civilian witness should register on the case")
     .commit(&mut state)
     .expect("civilian witness registration should commit");
+    record_known_witness_status(&mut state, crew, witness, investigation);
     let newer_investigation = validate_open_investigation(
         &state,
         InvestigationDraft {
@@ -4978,6 +5262,7 @@ fn witness_pressure_prefers_case_geography_over_character_organization_footprint
     .expect("civilian witness should register on the later case")
     .commit(&mut state)
     .expect("later civilian witness registration should commit");
+    record_known_witness_status(&mut state, crew, witness, newer_investigation);
     let pressure = validate_authorize_operation(
         &registry,
         &state,

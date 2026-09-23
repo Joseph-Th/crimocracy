@@ -1131,11 +1131,13 @@ fn later_subject_promotion_preserves_historical_testimony_but_ends_witness_role(
         }
     );
     assert!(
-        !crate::operations::operation_objective::has_pressureable_witness_case(
+        crate::operations::operation_objective::pressureable_witness_targets_for_cases(
             &fixture.state,
             fixture.criminal,
             fixture.witness,
-        ),
+            &BTreeSet::from([case_witness]),
+        )
+        .is_empty(),
         "counter-play must not treat a newly arrest-eligible subject as a pressureable witness"
     );
 

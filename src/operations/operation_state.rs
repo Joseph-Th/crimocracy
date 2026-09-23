@@ -64,6 +64,25 @@ pub struct OperationState {
     #[serde(skip)]
     successful_takes_by_business_kind:
         BTreeMap<(BusinessId, OperationKind), BTreeSet<(SimTime, OperationId)>>,
+    /// Completed operations that produced held property or cash, keyed by organization and
+    /// resolution chronology. Financial reporting uses this sparse projection instead of
+    /// rescanning every operation the organization has ever authored.
+    #[serde(skip)]
+    financial_resolutions_by_organization:
+        BTreeMap<OrganizationId, BTreeSet<(SimTime, OperationId)>>,
+    /// Property-liquidation events keyed by organization and disposition chronology.
+    #[serde(skip)]
+    property_dispositions_by_organization:
+        BTreeMap<OrganizationId, BTreeSet<(SimTime, OperationId)>>,
+    /// Cash-deposit events keyed by organization and disposition chronology.
+    #[serde(skip)]
+    cash_dispositions_by_organization: BTreeMap<OrganizationId, BTreeSet<(SimTime, OperationId)>>,
+    /// Current unresolved property proceeds, kept sparse for recurring current-state reports.
+    #[serde(skip)]
+    held_property_by_organization: BTreeMap<OrganizationId, BTreeSet<OperationId>>,
+    /// Current unresolved cash proceeds, kept sparse for recurring current-state reports.
+    #[serde(skip)]
+    held_cash_by_organization: BTreeMap<OrganizationId, BTreeSet<OperationId>>,
 }
 
 impl OperationState {
@@ -80,6 +99,11 @@ impl OperationState {
         self.in_progress_by_resolution_due.clear();
         self.active_by_completion_deadline.clear();
         self.successful_takes_by_business_kind.clear();
+        self.financial_resolutions_by_organization.clear();
+        self.property_dispositions_by_organization.clear();
+        self.cash_dispositions_by_organization.clear();
+        self.held_property_by_organization.clear();
+        self.held_cash_by_organization.clear();
         for record in self.records.values() {
             let id = record.id();
             self.by_organization
@@ -134,8 +158,152 @@ impl OperationState {
                         .or_default()
                         .insert((resolution.resolved_at(), id));
                 }
+                if record.status() == OperationStatus::Completed
+                    && resolution_has_positive_take(resolution)
+                {
+                    let organization = record.responsible_organization();
+                    self.financial_resolutions_by_organization
+                        .entry(organization)
+                        .or_default()
+                        .insert((resolution.resolved_at(), id));
+                    if resolution.property_proceeds().is_some() {
+                        if let Some(disposition) = record.property_disposition() {
+                            self.property_dispositions_by_organization
+                                .entry(organization)
+                                .or_default()
+                                .insert((disposition.disposed_at(), id));
+                        } else {
+                            self.held_property_by_organization
+                                .entry(organization)
+                                .or_default()
+                                .insert(id);
+                        }
+                    }
+                    if resolution.cash_proceeds().is_some() {
+                        if let Some(disposition) = record.cash_disposition() {
+                            self.cash_dispositions_by_organization
+                                .entry(organization)
+                                .or_default()
+                                .insert((disposition.disposed_at(), id));
+                        } else {
+                            self.held_cash_by_organization
+                                .entry(organization)
+                                .or_default()
+                                .insert(id);
+                        }
+                    }
+                }
             }
         }
+    }
+
+    pub(crate) fn financial_resolutions_for_organization_through(
+        &self,
+        organization: OrganizationId,
+        through: SimTime,
+    ) -> impl Iterator<Item = &OperationRecord> {
+        self.financial_resolutions_by_organization
+            .get(&organization)
+            .into_iter()
+            .flat_map(move |events| events.range(..=(through, OperationId::from_raw(u32::MAX))))
+            .map(|(_, operation)| {
+                self.records
+                    .get(operation)
+                    .expect("financial-resolution index must reference an operation")
+            })
+    }
+
+    pub(crate) fn financial_resolutions_for_organization_from_through(
+        &self,
+        organization: OrganizationId,
+        from: SimTime,
+        through: SimTime,
+    ) -> impl Iterator<Item = &OperationRecord> {
+        self.financial_resolutions_by_organization
+            .get(&organization)
+            .into_iter()
+            .flat_map(move |events| {
+                events.range(
+                    (from, OperationId::from_raw(0))..=(through, OperationId::from_raw(u32::MAX)),
+                )
+            })
+            .map(|(_, operation)| {
+                self.records
+                    .get(operation)
+                    .expect("financial-resolution index must reference an operation")
+            })
+    }
+
+    pub(crate) fn property_dispositions_for_organization_from_through(
+        &self,
+        organization: OrganizationId,
+        from: SimTime,
+        through: SimTime,
+    ) -> impl Iterator<Item = &OperationRecord> {
+        self.property_dispositions_by_organization
+            .get(&organization)
+            .into_iter()
+            .flat_map(move |events| {
+                events.range(
+                    (from, OperationId::from_raw(0))..=(through, OperationId::from_raw(u32::MAX)),
+                )
+            })
+            .map(|(_, operation)| {
+                self.records
+                    .get(operation)
+                    .expect("property-disposition index must reference an operation")
+            })
+    }
+
+    pub(crate) fn cash_dispositions_for_organization_from_through(
+        &self,
+        organization: OrganizationId,
+        from: SimTime,
+        through: SimTime,
+    ) -> impl Iterator<Item = &OperationRecord> {
+        self.cash_dispositions_by_organization
+            .get(&organization)
+            .into_iter()
+            .flat_map(move |events| {
+                events.range(
+                    (from, OperationId::from_raw(0))..=(through, OperationId::from_raw(u32::MAX)),
+                )
+            })
+            .map(|(_, operation)| {
+                self.records
+                    .get(operation)
+                    .expect("cash-disposition index must reference an operation")
+            })
+    }
+
+    pub(crate) fn held_property_for_organization(
+        &self,
+        organization: OrganizationId,
+    ) -> impl Iterator<Item = &OperationRecord> {
+        self.held_property_by_organization
+            .get(&organization)
+            .into_iter()
+            .flatten()
+            .map(|operation| {
+                self.records
+                    .get(operation)
+                    .expect("held-property index must reference an operation")
+            })
+    }
+
+    pub(crate) fn held_cash_for_organization(
+        &self,
+        organization: OrganizationId,
+    ) -> impl Iterator<Item = &OperationRecord> {
+        self.held_cash_by_organization
+            .get(&organization)
+            .into_iter()
+            .flatten()
+            .map(|operation| {
+                self.records
+                    .get(operation)
+                    .expect("held-cash index must reference an operation")
+            })
     }
 
     pub fn get_operation(&self, id: OperationId) -> Option<&OperationRecord> {
@@ -506,6 +674,25 @@ impl OperationState {
                 .or_default()
                 .insert((resolution.resolved_at(), id));
         }
+        if resolution_has_positive_take(resolution) {
+            let organization = record.responsible_organization();
+            self.financial_resolutions_by_organization
+                .entry(organization)
+                .or_default()
+                .insert((resolution.resolved_at(), id));
+            if resolution.property_proceeds().is_some() {
+                self.held_property_by_organization
+                    .entry(organization)
+                    .or_default()
+                    .insert(id);
+            }
+            if resolution.cash_proceeds().is_some() {
+                self.held_cash_by_organization
+                    .entry(organization)
+                    .or_default()
+                    .insert(id);
+            }
+        }
         self.set_status(id, OperationStatus::Completed);
     }
 
@@ -527,9 +714,9 @@ impl OperationState {
         let window_minutes = u64::from(window.as_minutes());
         let lower_bound = SimTime::from_minutes(at_minutes.saturating_sub(window_minutes));
         // Once a complete window exists, excluding `(lower_bound, MAX)` excludes every take at
-        // the exact lower timestamp, not merely operation ID zero (real IDs start at one). Before
-        // then the conceptual lower bound is before campaign time zero, so the range must be
-        // unbounded below or a legitimate minute-zero take would disappear early.
+        // the exact lower timestamp, not merely operation ID zero (persistent IDs start at one).
+        // Before then the conceptual lower bound is before campaign time zero, so the range must
+        // be unbounded below or a legitimate minute-zero take would disappear early.
         let lower_key = (lower_bound, OperationId::from_raw(u32::MAX));
         let lower_range_bound = if at_minutes >= window_minutes {
             std::ops::Bound::Excluded(&lower_key)
@@ -556,6 +743,12 @@ impl OperationState {
         id: OperationId,
         disposition: OperationPropertyDispositionRecord,
     ) {
+        let organization = self
+            .records
+            .get(&id)
+            .expect("validated operation disappeared before property disposition commit")
+            .responsible_organization();
+        let disposed_at = disposition.disposed_at();
         let record = self
             .records
             .get_mut(&id)
@@ -578,6 +771,16 @@ impl OperationState {
         );
         record.runtime.property_disposition = Some(disposition);
         record.runtime.version = advance_version_preflighted(record.runtime.version);
+        if let Some(ids) = self.held_property_by_organization.get_mut(&organization) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.held_property_by_organization.remove(&organization);
+            }
+        }
+        self.property_dispositions_by_organization
+            .entry(organization)
+            .or_default()
+            .insert((disposed_at, id));
     }
 
     pub(super) fn set_cash_disposition(
@@ -585,6 +788,12 @@ impl OperationState {
         id: OperationId,
         disposition: OperationCashDispositionRecord,
     ) {
+        let organization = self
+            .records
+            .get(&id)
+            .expect("validated operation disappeared before cash disposition commit")
+            .responsible_organization();
+        let disposed_at = disposition.disposed_at();
         let record = self
             .records
             .get_mut(&id)
@@ -607,6 +816,16 @@ impl OperationState {
         );
         record.runtime.cash_disposition = Some(disposition);
         record.runtime.version = advance_version_preflighted(record.runtime.version);
+        if let Some(ids) = self.held_cash_by_organization.get_mut(&organization) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                self.held_cash_by_organization.remove(&organization);
+            }
+        }
+        self.cash_dispositions_by_organization
+            .entry(organization)
+            .or_default()
+            .insert((disposed_at, id));
     }
 
     fn set_status(&mut self, id: OperationId, next: OperationStatus) {
@@ -788,6 +1007,65 @@ impl OperationState {
             return false;
         }
         expected.takes += usize::from(should_index);
+
+        let financial = record.status() == OperationStatus::Completed
+            && resolution_has_positive_take(resolution);
+        let organization = record.responsible_organization();
+        let resolution_financial_indexed = self
+            .financial_resolutions_by_organization
+            .get(&organization)
+            .is_some_and(|events| events.contains(&(resolution.resolved_at(), record.id())));
+        if resolution_financial_indexed != financial {
+            return false;
+        }
+        expected.financial_resolutions += usize::from(financial);
+
+        let property_held = financial
+            && resolution.property_proceeds().is_some()
+            && record.property_disposition().is_none();
+        let property_held_indexed = self
+            .held_property_by_organization
+            .get(&organization)
+            .is_some_and(|ids| ids.contains(&record.id()));
+        if property_held_indexed != property_held {
+            return false;
+        }
+        expected.held_property += usize::from(property_held);
+        let property_disposed = financial && record.property_disposition().is_some();
+        let property_disposition_indexed =
+            record.property_disposition().is_some_and(|disposition| {
+                self.property_dispositions_by_organization
+                    .get(&organization)
+                    .is_some_and(|events| {
+                        events.contains(&(disposition.disposed_at(), record.id()))
+                    })
+            });
+        if property_disposition_indexed != property_disposed {
+            return false;
+        }
+        expected.property_dispositions += usize::from(property_disposed);
+
+        let cash_held = financial
+            && resolution.cash_proceeds().is_some()
+            && record.cash_disposition().is_none();
+        let cash_held_indexed = self
+            .held_cash_by_organization
+            .get(&organization)
+            .is_some_and(|ids| ids.contains(&record.id()));
+        if cash_held_indexed != cash_held {
+            return false;
+        }
+        expected.held_cash += usize::from(cash_held);
+        let cash_disposed = financial && record.cash_disposition().is_some();
+        let cash_disposition_indexed = record.cash_disposition().is_some_and(|disposition| {
+            self.cash_dispositions_by_organization
+                .get(&organization)
+                .is_some_and(|events| events.contains(&(disposition.disposed_at(), record.id())))
+        });
+        if cash_disposition_indexed != cash_disposed {
+            return false;
+        }
+        expected.cash_dispositions += usize::from(cash_disposed);
         true
     }
 
@@ -814,6 +1092,46 @@ impl OperationState {
             .map(BTreeSet::len)
             .sum();
         if indexed_takes != expected.takes {
+            return false;
+        }
+        let indexed_financial_resolutions: usize = self
+            .financial_resolutions_by_organization
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_financial_resolutions != expected.financial_resolutions {
+            return false;
+        }
+        let indexed_property_dispositions: usize = self
+            .property_dispositions_by_organization
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_property_dispositions != expected.property_dispositions {
+            return false;
+        }
+        let indexed_cash_dispositions: usize = self
+            .cash_dispositions_by_organization
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_cash_dispositions != expected.cash_dispositions {
+            return false;
+        }
+        let indexed_held_property: usize = self
+            .held_property_by_organization
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_held_property != expected.held_property {
+            return false;
+        }
+        let indexed_held_cash: usize = self
+            .held_cash_by_organization
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_held_cash != expected.held_cash {
             return false;
         }
         let indexed_authorized: usize = self.authorized_by_start.values().map(BTreeSet::len).sum();
@@ -847,6 +1165,11 @@ struct OperationIndexExpectations {
     active_deadlines: usize,
     takes: usize,
     discovered_links: usize,
+    financial_resolutions: usize,
+    property_dispositions: usize,
+    cash_dispositions: usize,
+    held_property: usize,
+    held_cash: usize,
 }
 
 fn resolution_has_positive_take(resolution: &crate::operations::OperationResolutionRecord) -> bool {

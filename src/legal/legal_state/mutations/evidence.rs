@@ -28,6 +28,10 @@ impl LegalState {
     ) {
         let investigation_id = record.investigation();
         let evidence_id = record.id();
+        let reviewable_key = record
+            .kind()
+            .is_reviewable()
+            .then_some((record.discovered_at(), evidence_id));
         let actionable_character = if evidence_is_actionable_case_lead(&record) {
             record.subject().as_character()
         } else {
@@ -90,6 +94,22 @@ impl LegalState {
         }
         investigation.evidence.insert(record.id());
         investigation.version = advance_version_preflighted(investigation.version);
+        if evidence_is_actionable_case_lead(&record) {
+            self.indexes
+                .evidence
+                .staffing_summary_by_investigation
+                .entry(investigation_id)
+                .or_default()
+                .observe_actionable(record.strength(), record.reliability());
+        }
+        if let Some(key) = reviewable_key {
+            self.indexes
+                .work
+                .unattempted_reviewable_evidence_by_investigation
+                .entry(investigation_id)
+                .or_default()
+                .insert(key);
+        }
         for source in record.derived_from() {
             self.indexes
                 .evidence

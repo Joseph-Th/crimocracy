@@ -38,6 +38,10 @@ impl LegalState {
                 .focus()
                 .evidence_id()
                 .expect("scheduled evidence review must have evidence focus");
+            let evidence_record = self
+                .evidence
+                .get(&evidence)
+                .expect("validated evidence review must reference persisted evidence");
             let previous_review = self
                 .indexes
                 .work
@@ -47,6 +51,30 @@ impl LegalState {
                 previous_review.is_none(),
                 "Ownership Exclusivity: evidence received multiple live/completed review attempts"
             );
+            let removed = self
+                .indexes
+                .work
+                .unattempted_reviewable_evidence_by_investigation
+                .get_mut(&record.investigation())
+                .is_some_and(|unattempted| {
+                    unattempted.remove(&(evidence_record.discovered_at(), evidence))
+                });
+            debug_assert!(
+                removed,
+                "validated evidence review must consume an unattempted reviewable source"
+            );
+            if self
+                .indexes
+                .work
+                .unattempted_reviewable_evidence_by_investigation
+                .get(&record.investigation())
+                .is_some_and(BTreeSet::is_empty)
+            {
+                self.indexes
+                    .work
+                    .unattempted_reviewable_evidence_by_investigation
+                    .remove(&record.investigation());
+            }
         }
         self.indexes
             .work
@@ -283,6 +311,16 @@ impl LegalState {
                 Some(id),
                 "cancelled evidence review must own the source's attempt slot"
             );
+            let evidence_record = self
+                .evidence
+                .get(&evidence)
+                .expect("cancelled evidence review must retain its source evidence");
+            self.indexes
+                .work
+                .unattempted_reviewable_evidence_by_investigation
+                .entry(focus_key.0)
+                .or_default()
+                .insert((evidence_record.discovered_at(), evidence));
         }
         {
             let record = self

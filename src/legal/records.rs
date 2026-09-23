@@ -43,8 +43,8 @@ pub(crate) use casework::{
     InvestigationWorkRuntime,
 };
 pub(in crate::legal) use casework::{
-    EvidenceIndexes, InformantIndexes, InvestigationIndexes, InvestigationWorkIndexes,
-    WitnessIndexes,
+    EvidenceIndexes, InformantIndexes, InvestigationEvidenceStaffingSummary, InvestigationIndexes,
+    InvestigationWorkIndexes, WitnessIndexes,
 };
 pub(in crate::legal) use custody::ArrestIndexes;
 pub(in crate::legal) use policing::{JurisdictionIndexes, PatrolIndexes, PoliceResponseIndexes};

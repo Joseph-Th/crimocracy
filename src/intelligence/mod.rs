@@ -35,6 +35,7 @@ pub enum InformationSourceKind {
     LegalContact,
     Accounting,
     Surveillance,
+    AcquiredRecords,
     StreetRumor,
     AfterAction,
     InternalReport,

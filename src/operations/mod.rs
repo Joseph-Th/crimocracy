@@ -2,9 +2,12 @@
 //! authorization and lifecycle, `operation_execution` owns deterministic resolution,
 //! `operation_scheduling` owns timing and due-work projections, `operation_state` owns
 //! storage, and the remaining siblings own abort, objective, economics, intelligence,
-//! surveillance, police-response, and disposition facets.
+//! information-acquisition, surveillance, police-response, and disposition facets.
 
+pub(crate) mod document_theft_integration;
+pub(crate) mod information_acquisition;
 pub(crate) mod operation_abort;
+pub(crate) mod operation_basis_knowledge;
 pub(crate) mod operation_economics;
 pub(crate) mod operation_execution;
 pub(crate) mod operation_intelligence;
@@ -20,9 +23,9 @@ pub use operation_state::OperationState;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    ArrestId, BusinessId, CharacterId, DecisionRequestId, EvidenceId, FinancialAccountId,
-    HistoryEventId, InformationId, InvestigationId, LedgerTransactionId, NeighborhoodId,
-    OperationId, OpportunityId, OrganizationId, PoliceResponseId, ReportId,
+    ArrestId, BusinessId, CaseWitnessId, CharacterId, DecisionRequestId, EvidenceId,
+    FinancialAccountId, HistoryEventId, InformationId, InvestigationId, LedgerTransactionId,
+    NeighborhoodId, OperationId, OpportunityId, OrganizationId, PoliceResponseId, ReportId,
 };
 use crate::core::time::SimTime;
 use crate::finance::Money;
@@ -53,13 +56,11 @@ impl OperationKind {
     /// not maintain their own parallel kind-to-objective table.
     pub(crate) const fn objective_kind(self) -> OperationObjectiveKind {
         match self {
-            Self::Burglary | Self::Hijacking | Self::DocumentTheft => {
-                OperationObjectiveKind::AcquireProperty
-            }
+            Self::Burglary | Self::Hijacking => OperationObjectiveKind::AcquireProperty,
             Self::Robbery | Self::Smuggling | Self::Intimidation | Self::GamblingEvent => {
                 OperationObjectiveKind::ObtainCash
             }
-            Self::Surveillance => OperationObjectiveKind::GatherInformation,
+            Self::Surveillance | Self::DocumentTheft => OperationObjectiveKind::GatherInformation,
             Self::WitnessPressure => OperationObjectiveKind::Frighten,
             Self::Extraction => OperationObjectiveKind::FreeDetainee,
             Self::Sabotage | Self::Arson => OperationObjectiveKind::DisruptBusiness,
@@ -229,6 +230,32 @@ impl OperationObjective {
             | Self::GatherInformation { target }
             | Self::DisruptBusiness { target } => vec![*target],
             Self::FreeDetainee { target } => vec![EntityRef::Character(*target)],
+        }
+    }
+
+    /// Concrete business named by this objective shape, independent of the operation kind using
+    /// it. Callers that need ownership or authored business-target semantics must also consult the
+    /// kind, because surveillance can observe a business without being a business-target action.
+    pub(crate) const fn business_target(&self) -> Option<BusinessId> {
+        let target = match self {
+            Self::AcquireProperty { target }
+            | Self::ObtainCash { target }
+            | Self::GatherInformation { target }
+            | Self::DisruptBusiness { target } => target,
+            Self::Frighten { .. } | Self::FreeDetainee { .. } => return None,
+        };
+        match target {
+            EntityRef::Business(business) => Some(*business),
+            EntityRef::Organization(_)
+            | EntityRef::Character(_)
+            | EntityRef::Neighborhood(_)
+            | EntityRef::Operation(_)
+            | EntityRef::Investigation(_)
+            | EntityRef::Evidence(_)
+            | EntityRef::FinancialAccount(_)
+            | EntityRef::DecisionRequest(_)
+            | EntityRef::Mandate(_)
+            | EntityRef::Enterprise(_) => None,
         }
     }
 
@@ -702,10 +729,10 @@ pub struct OperationResolutionRecord {
     /// committed. Persisting the exact IDs makes after-action provenance explicit rather than
     /// re-identifying records later from matching prose and timestamps.
     participant_information: BTreeMap<CharacterId, InformationId>,
-    /// Topic/subject/semantic triples actually produced by a surveillance resolution. Persisted
-    /// because sightline conditions and the exact typed facts observed at that minute are not
-    /// re-derivable after later state changes.
-    surveillance_signatures: BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)>,
+    /// Topic/subject/semantic triples actually produced by an information-acquisition resolution.
+    /// Persisted because the exact facts recovered at that minute are not re-derivable after later
+    /// target, financial, or institutional changes.
+    discovery_signatures: BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)>,
     after_action_information: InformationId,
     after_action_report: ReportId,
     history_event: HistoryEventId,
@@ -756,10 +783,10 @@ impl OperationResolutionRecord {
         &self.participant_information
     }
 
-    pub fn surveillance_signatures(
+    pub fn discovery_signatures(
         &self,
     ) -> &BTreeSet<(InformationTopic, EntityRef, Option<InformationSignal>)> {
-        &self.surveillance_signatures
+        &self.discovery_signatures
     }
 
     pub fn after_action_information(&self) -> InformationId {
@@ -790,6 +817,10 @@ struct OperationCommand {
     /// Exact custody relationship an extraction was authorized against. A later re-arrest is a
     /// different legal event and must not silently become the target of an already-planned job.
     extraction_arrest: Option<ArrestId>,
+    /// Exact witness registrations the sponsoring organization knew about when this operation was
+    /// authorized. Whether those registrations remain practically pressureable is hidden legal
+    /// state and is rechecked at execution rather than leaked through authorization.
+    witness_pressure_cases: BTreeSet<CaseWitnessId>,
     approach: OperationApproach,
     roles: BTreeMap<RoleKind, CharacterId>,
     intelligence: BTreeSet<InformationId>,
@@ -848,6 +879,10 @@ impl OperationRecord {
 
     pub fn extraction_arrest(&self) -> Option<ArrestId> {
         self.command.extraction_arrest
+    }
+
+    pub fn witness_pressure_cases(&self) -> &BTreeSet<CaseWitnessId> {
+        &self.command.witness_pressure_cases
     }
 
     pub fn approach(&self) -> OperationApproach {

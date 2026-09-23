@@ -202,6 +202,11 @@ pub struct EconomyState {
     by_settlement_account: BTreeMap<FinancialAccountId, BusinessId>,
     #[serde(skip)]
     cycles_by_business: BTreeMap<BusinessId, BTreeSet<BusinessCycleId>>,
+    /// Settled cycle ids keyed by authoritative occurrence time. Derived from `cycles` and
+    /// rebuilt after restore so bounded reports never need to walk each business's lifetime
+    /// settlement history.
+    #[serde(skip)]
+    cycles_by_time: BTreeMap<SimTime, BTreeSet<BusinessCycleId>>,
 }
 
 impl EconomyState {
@@ -214,6 +219,7 @@ impl EconomyState {
         self.suspended.clear();
         self.by_settlement_account.clear();
         self.cycles_by_business.clear();
+        self.cycles_by_time.clear();
         for record in self.businesses.values() {
             self.by_settlement_account
                 .insert(record.settlement_account(), record.business());
@@ -231,6 +237,10 @@ impl EconomyState {
         for cycle in self.cycles.values() {
             self.cycles_by_business
                 .entry(cycle.business())
+                .or_default()
+                .insert(cycle.id());
+            self.cycles_by_time
+                .entry(cycle.occurred_at())
                 .or_default()
                 .insert(cycle.id());
         }
@@ -255,6 +265,23 @@ impl EconomyState {
             .into_iter()
             .flatten()
             .map(|id| self.cycles.get(id).expect("indexed cycle must exist"))
+    }
+
+    /// Settled business cycles in the inclusive reporting window `[start, end]`, ordered by
+    /// occurrence time then cycle id.
+    pub(crate) fn cycles_from_through(
+        &self,
+        start: SimTime,
+        end: SimTime,
+    ) -> impl Iterator<Item = &BusinessCycleRecord> {
+        self.cycles_by_time
+            .range(start..=end)
+            .flat_map(|(_, ids)| ids.iter())
+            .map(|id| {
+                self.cycles
+                    .get(id)
+                    .expect("business cycle time index must reference a cycle")
+            })
     }
 
     /// The most recent settled cycle for a business, in O(log n): settlement order is
@@ -376,6 +403,10 @@ impl EconomyState {
         }
         self.cycles_by_business
             .entry(business)
+            .or_default()
+            .insert(cycle.id());
+        self.cycles_by_time
+            .entry(cycle.occurred_at())
             .or_default()
             .insert(cycle.id());
         let previous = self.cycles.insert(cycle.id(), cycle);
@@ -609,6 +640,10 @@ impl EconomyState {
                 .cycles_by_business
                 .get(&cycle.business())
                 .is_some_and(|ids| ids.contains(&cycle.id()))
+                || !self
+                    .cycles_by_time
+                    .get(&cycle.occurred_at())
+                    .is_some_and(|ids| ids.contains(&cycle.id()))
             {
                 return false;
             }
@@ -627,11 +662,31 @@ impl EconomyState {
                 }
             }
         }
+        for (time, ids) in &self.cycles_by_time {
+            if ids.is_empty() {
+                return false;
+            }
+            for id in ids {
+                if !self
+                    .cycles
+                    .get(id)
+                    .is_some_and(|cycle| cycle.occurred_at() == *time)
+                {
+                    return false;
+                }
+            }
+        }
         self.cycles_by_business
             .values()
             .map(BTreeSet::len)
             .sum::<usize>()
             == self.cycles.len()
+            && self
+                .cycles_by_time
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
+                == self.cycles.len()
     }
 }
 

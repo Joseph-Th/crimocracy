@@ -757,7 +757,7 @@ fn hosted_enterprise_watch_bounds_patrol_knowledge_by_outcome() {
             }
             assert!(is_valid_persisted_surveillance_information(record, police));
         } else {
-            assert!(resolution.surveillance_signatures().is_empty());
+            assert!(resolution.discovery_signatures().is_empty());
         }
         restore_save(
             &fixture.registry,
@@ -851,9 +851,11 @@ fn direct_enterprise_watch_rejects_changed_patrol_snapshot() {
         matches!(error,
             OperationResolutionError::StalePoliceDeploymentContext { operation: id } if id == operation
         ) || error
-            == OperationResolutionError::Surveillance(SurveillanceError::StaleTarget(
-                EntityRef::Enterprise(enterprise)
-            ))
+            == OperationResolutionError::InformationAcquisition(
+                InformationAcquisitionError::Surveillance(SurveillanceError::StaleTarget(
+                    EntityRef::Enterprise(enterprise)
+                ))
+            )
     );
     assert_eq!(validated.commit(&mut fixture.state).unwrap_err(), error);
     assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
@@ -950,9 +952,11 @@ fn organization_surveillance_stales_when_enterprise_selection_changes() {
                 .unwrap();
         }
         let before = bincode::serialize(&fixture.state).unwrap();
-        let expected = OperationResolutionError::Surveillance(SurveillanceError::StaleTarget(
-            EntityRef::Organization(rival),
-        ));
+        let expected = OperationResolutionError::InformationAcquisition(
+            InformationAcquisitionError::Surveillance(SurveillanceError::StaleTarget(
+                EntityRef::Organization(rival),
+            )),
+        );
         assert_eq!(
             validate_operation_resolution_plan(&fixture.registry, &fixture.state, plan).err(),
             Some(expected.clone())
@@ -1033,8 +1037,10 @@ fn organization_surveillance_stales_when_first_enterprise_is_established_after_p
     let before = bincode::serialize(&fixture.state).unwrap();
     assert_eq!(
         validate_operation_resolution_plan(&fixture.registry, &fixture.state, plan).err(),
-        Some(OperationResolutionError::Surveillance(
-            SurveillanceError::StaleTarget(EntityRef::Organization(rival))
+        Some(OperationResolutionError::InformationAcquisition(
+            InformationAcquisitionError::Surveillance(SurveillanceError::StaleTarget(
+                EntityRef::Organization(rival)
+            ))
         ))
     );
     assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);

@@ -19,6 +19,10 @@ use crate::intelligence::{
     InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
     Specificity,
 };
+use crate::operations::information_acquisition::is_valid_persisted_operation_information;
+use crate::operations::operation_basis_knowledge::{
+    organization_knew_detention_at, organization_knew_witness_case_at,
+};
 use crate::operations::operation_economics::{
     downgrade_empty_take_outcome, resolve_cash_proceeds, resolve_property_proceeds,
 };
@@ -41,9 +45,7 @@ use crate::operations::operation_system::{
 };
 use crate::operations::police_response_integration::resolve_police_arrival_delay;
 use crate::operations::property_disposition::resolve_property_liquidation_value;
-use crate::operations::surveillance_integration::{
-    is_supported_surveillance_target, is_valid_persisted_surveillance_information,
-};
+use crate::operations::surveillance_integration::is_supported_surveillance_target;
 use crate::operations::{
     OperationAbortCause, OperationAbortPhase, OperationBusinessTargetOwnership,
     OperationConstraint, OperationContingency, OperationKind, OperationObjective,

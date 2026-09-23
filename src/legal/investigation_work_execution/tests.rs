@@ -6,7 +6,7 @@ use crate::core::entity::EntityRef;
 use crate::core::invariants::{
     validate_invariants, validate_state, validate_state_against_registry,
 };
-use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_test_tick as run_tick;
 use crate::legal::arrest_system::validate_arrest;
 use crate::legal::investigation_system::{
@@ -97,6 +97,42 @@ fn run_until_work_resolved(registry: &Registry, state: &mut AppState, work: Inve
         );
     }
     panic!("fixture work {work} did not resolve by its due time {due_at:?}");
+}
+
+#[test]
+fn restore_rejects_malformed_evidence_review_focus_without_panicking() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let work = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        review_draft(&fixture, fixture.first_evidence),
+    )
+    .expect("canonical evidence review should validate")
+    .commit(&mut fixture.state)
+    .expect("canonical evidence review should schedule");
+    let original = fixture
+        .state
+        .legal()
+        .get_investigation_work(work)
+        .expect("scheduled evidence review should persist")
+        .clone();
+    let mut corrupted = original.clone();
+    corrupted.identity.focus =
+        InvestigationWorkFocus::witness(crate::core::id::CaseWitnessId::from_raw(u32::MAX));
+    let envelope =
+        build_save(&registry, &fixture.state).expect("canonical evidence-review state should save");
+    let corrupted_envelope =
+        replace_serialized_record(envelope, &original, &corrupted, "investigation work");
+
+    let error = restore_save(&registry, corrupted_envelope)
+        .expect_err("malformed evidence-review focus must fail restore without panicking");
+    assert_eq!(error, LoadError::InvalidDerivedIndexRebuild);
 }
 
 fn rating(value: u8) -> Rating {

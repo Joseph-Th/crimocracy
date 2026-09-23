@@ -3,8 +3,8 @@
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    BusinessCycleId, BusinessId, EnterpriseCycleId, EnterpriseId, FinancialAccountId,
-    InformationId, OperationId, OrganizationId,
+    BusinessCycleId, BusinessId, EnterpriseCycleId, EnterpriseId, InformationId, OperationId,
+    OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -15,11 +15,10 @@ use crate::enterprises::enterprise_reporting::{
     EnterpriseReportingError, resolve_organization_enterprise_financial_summary,
 };
 use crate::finance::{FinancialOwner, Money};
-use crate::operations::OperationStatus;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::BusinessOwner;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -210,35 +209,37 @@ fn resolve_organization_liquid_cash(
     }
 
     // A historical report must not mix current materialized balances with an earlier reporting
-    // window. Account ownership and kind are immutable, so replay postings into this owner's
-    // liquid accounts through the requested end minute. Ledger chronology is globally monotone.
-    let mut balances: BTreeMap<FinancialAccountId, Money> = state
+    // window. Account ownership and kind are immutable, so replay only each owned liquid
+    // account's indexed transaction chronology through the requested end minute.
+    let accounts = state
         .finance()
         .accounts_for(owner)
         .filter(|account| account.kind().is_liquid())
-        .map(|account| (account.id(), Money::ZERO))
-        .collect();
-    for transaction in state.finance().transactions() {
-        if transaction.occurred_at() > period_end {
-            break;
-        }
-        for posting in transaction.postings() {
-            let Some(balance) = balances.get_mut(&posting.account) else {
-                continue;
-            };
-            *balance = balance
+        .map(|account| account.id())
+        .collect::<Vec<_>>();
+    let mut total = Money::ZERO;
+    for account in accounts {
+        let mut balance = Money::ZERO;
+        for transaction in state
+            .finance()
+            .transactions_for_account_through(account, period_end)
+        {
+            let posting = transaction
+                .postings()
+                .iter()
+                .find(|posting| posting.account == account)
+                .expect("account transaction index must correspond to one ledger posting");
+            balance = balance
                 .checked_add(posting.amount)
                 .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
         }
-    }
-    balances
-        .into_values()
-        .filter(|balance| *balance > Money::ZERO)
-        .try_fold(Money::ZERO, |total, balance| {
-            total
+        if balance > Money::ZERO {
+            total = total
                 .checked_add(balance)
-                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)
-        })
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+        }
+    }
+    Ok(total)
 }
 
 fn resolve_operation_financial_summary(
@@ -248,34 +249,76 @@ fn resolve_operation_financial_summary(
     period_end: SimTime,
 ) -> Result<OperationFinancialSummary, OrganizationFinancialReportError> {
     let mut summary = OperationFinancialSummary::default();
-    for operation in state.operations().operations_for_organization(recipient) {
-        accumulate_operation_resolution(&mut summary, operation, period_start, period_end)?;
-        accumulate_property_disposition(&mut summary, operation, period_start, period_end)?;
-        accumulate_cash_disposition(&mut summary, operation, period_start, period_end)?;
+    if period_end == state.now() {
+        for operation in state.operations().held_property_for_organization(recipient) {
+            let proceeds = operation
+                .resolution()
+                .and_then(|resolution| resolution.property_proceeds())
+                .expect("held-property index must reference persisted property proceeds");
+            summary.held_property_count = summary
+                .held_property_count
+                .checked_add(1)
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+            summary.held_property_value = summary
+                .held_property_value
+                .checked_add(proceeds.estimated_value())
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+        }
+        for operation in state.operations().held_cash_for_organization(recipient) {
+            let proceeds = operation
+                .resolution()
+                .and_then(|resolution| resolution.cash_proceeds())
+                .expect("held-cash index must reference persisted cash proceeds");
+            summary.held_cash_count = summary
+                .held_cash_count
+                .checked_add(1)
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+            summary.held_cash_value = summary
+                .held_cash_value
+                .checked_add(proceeds.amount())
+                .ok_or(OrganizationFinancialReportError::ArithmeticOverflow)?;
+        }
+    } else {
+        // Historical holdings are reconstructed from sparse financial resolutions only. A
+        // disposition after the requested end leaves the proceeds held at that historical instant.
+        for operation in state
+            .operations()
+            .financial_resolutions_for_organization_through(recipient, period_end)
+        {
+            let resolution = operation
+                .resolution()
+                .expect("financial-resolution index must reference a completed resolution");
+            accumulate_held_operation_proceeds(&mut summary, operation, resolution, period_end)?;
+        }
+    }
+    for operation in state
+        .operations()
+        .financial_resolutions_for_organization_from_through(recipient, period_start, period_end)
+    {
+        accumulate_operation_resolution_notable(&mut summary, operation)?;
+    }
+    for operation in state
+        .operations()
+        .property_dispositions_for_organization_from_through(recipient, period_start, period_end)
+    {
+        accumulate_property_disposition(&mut summary, operation)?;
+    }
+    for operation in state
+        .operations()
+        .cash_dispositions_for_organization_from_through(recipient, period_start, period_end)
+    {
+        accumulate_cash_disposition(&mut summary, operation)?;
     }
     Ok(summary)
 }
 
-fn accumulate_operation_resolution(
+fn accumulate_operation_resolution_notable(
     summary: &mut OperationFinancialSummary,
     operation: &crate::operations::OperationRecord,
-    period_start: SimTime,
-    period_end: SimTime,
 ) -> Result<(), OrganizationFinancialReportError> {
-    let Some(resolution) = operation.resolution() else {
-        return Ok(());
-    };
-    // Held value and notable chronology read the same completed-operation gate: an abort path
-    // can never inflate held proceeds that the chronology itself would not recognize.
-    if operation.status() == OperationStatus::Completed && resolution.resolved_at() <= period_end {
-        accumulate_held_operation_proceeds(summary, operation, resolution, period_end)?;
-    }
-    if operation.status() != OperationStatus::Completed
-        || resolution.resolved_at() < period_start
-        || resolution.resolved_at() > period_end
-    {
-        return Ok(());
-    }
+    let resolution = operation
+        .resolution()
+        .expect("financial-resolution index must reference a completed resolution");
     if resolution.property_proceeds().is_some() {
         summary.notable.push((
             resolution.resolved_at(),
@@ -337,15 +380,10 @@ fn accumulate_held_operation_proceeds(
 fn accumulate_property_disposition(
     summary: &mut OperationFinancialSummary,
     operation: &crate::operations::OperationRecord,
-    period_start: SimTime,
-    period_end: SimTime,
 ) -> Result<(), OrganizationFinancialReportError> {
-    let Some(disposition) = operation.property_disposition() else {
-        return Ok(());
-    };
-    if disposition.disposed_at() < period_start || disposition.disposed_at() > period_end {
-        return Ok(());
-    }
+    let disposition = operation
+        .property_disposition()
+        .expect("property-disposition index must reference a persisted disposition");
     summary.property_disposition_count = summary
         .property_disposition_count
         .checked_add(1)
@@ -367,15 +405,10 @@ fn accumulate_property_disposition(
 fn accumulate_cash_disposition(
     summary: &mut OperationFinancialSummary,
     operation: &crate::operations::OperationRecord,
-    period_start: SimTime,
-    period_end: SimTime,
 ) -> Result<(), OrganizationFinancialReportError> {
-    let Some(disposition) = operation.cash_disposition() else {
-        return Ok(());
-    };
-    if disposition.disposed_at() < period_start || disposition.disposed_at() > period_end {
-        return Ok(());
-    }
+    let disposition = operation
+        .cash_disposition()
+        .expect("cash-disposition index must reference a persisted disposition");
     summary.cash_deposit_count = summary
         .cash_deposit_count
         .checked_add(1)
@@ -401,37 +434,25 @@ fn collect_notable_business_cycles(
     period_end: SimTime,
 ) -> Result<Vec<(SimTime, NotableFinancialItem)>, OrganizationFinancialReportError> {
     let mut items = Vec::new();
-    // Historical-ownership-indexed scan: every business the recipient ever owned can carry
-    // organization-owned cycles inside the window (including one transferred mid-period),
-    // so the world-wide business list is never walked here.
-    for business in state
-        .world
-        .businesses_ever_owned_by_organization(recipient)
-        .filter(|business| {
-            state
-                .economy()
-                .get_business_economy(business.id())
-                .is_some()
+    for cycle in state
+        .economy()
+        .cycles_from_through(period_start, period_end)
+        .filter(|cycle| {
+            cycle.owner() == BusinessOwner::Organization(recipient)
+                && cycle.attention() == AttentionClass::Notable
         })
     {
-        for cycle in state.economy().cycles_for(business.id()).filter(|cycle| {
-            cycle.occurred_at() >= period_start
-                && cycle.occurred_at() <= period_end
-                && cycle.owner() == BusinessOwner::Organization(recipient)
-                && cycle.attention() == AttentionClass::Notable
-        }) {
-            let information = cycle
-                .information()
-                .ok_or(OrganizationFinancialReportError::MissingNotableInformation)?;
-            items.push((
-                cycle.occurred_at(),
-                NotableFinancialItem::Business {
-                    cycle: cycle.id(),
-                    business: business.id(),
-                    information,
-                },
-            ));
-        }
+        let information = cycle
+            .information()
+            .ok_or(OrganizationFinancialReportError::MissingNotableInformation)?;
+        items.push((
+            cycle.occurred_at(),
+            NotableFinancialItem::Business {
+                cycle: cycle.id(),
+                business: cycle.business(),
+                information,
+            },
+        ));
     }
     Ok(items)
 }
@@ -443,28 +464,29 @@ fn collect_notable_enterprise_cycles(
     period_end: SimTime,
 ) -> Result<Vec<(SimTime, NotableFinancialItem)>, OrganizationFinancialReportError> {
     let mut items = Vec::new();
-    for enterprise in state.enterprises().enterprises_for_organization(recipient) {
-        for cycle in state
+    for cycle in state
+        .enterprises()
+        .cycles_from_through(period_start, period_end)
+        .filter(|cycle| cycle.attention() == AttentionClass::Notable)
+    {
+        let enterprise = state
             .enterprises()
-            .cycles_for(enterprise.id())
-            .filter(|cycle| {
-                cycle.occurred_at() >= period_start
-                    && cycle.occurred_at() <= period_end
-                    && cycle.attention() == AttentionClass::Notable
-            })
-        {
-            let information = cycle
-                .information()
-                .ok_or(OrganizationFinancialReportError::MissingNotableInformation)?;
-            items.push((
-                cycle.occurred_at(),
-                NotableFinancialItem::Enterprise {
-                    cycle: cycle.id(),
-                    enterprise: enterprise.id(),
-                    information,
-                },
-            ));
+            .get_enterprise(cycle.enterprise())
+            .expect("enterprise cycle must reference its persisted enterprise");
+        if enterprise.organization() != recipient {
+            continue;
         }
+        let information = cycle
+            .information()
+            .ok_or(OrganizationFinancialReportError::MissingNotableInformation)?;
+        items.push((
+            cycle.occurred_at(),
+            NotableFinancialItem::Enterprise {
+                cycle: cycle.id(),
+                enterprise: cycle.enterprise(),
+                information,
+            },
+        ));
     }
     Ok(items)
 }

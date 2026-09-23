@@ -14,6 +14,7 @@ use crate::core::id::InvestigationId;
 use crate::core::state::AppState;
 use crate::intelligence::intelligence_system::{
     ValidatedInformation, validate_record_information_with_signal,
+    validate_record_planned_case_witness_information,
 };
 use crate::intelligence::{
     CaseActivitySignal, InformationDraft, InformationSignal, InformationSourceKind,
@@ -152,6 +153,57 @@ pub(crate) fn prepare_case_witness_knowledge(
         InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
             investigation,
         }),
+    )
+    .map(Some)
+}
+
+/// Registration-time counterpart to the persisted-witness helper. The canonical witness
+/// transaction has already validated the pending registration but deliberately has not inserted
+/// it yet, so this path prevalidates only that exact same-minute fact before the transaction's
+/// aggregate ID reservation.
+pub(crate) fn prepare_case_witness_knowledge_for_registration(
+    state: &AppState,
+    investigation: InvestigationId,
+    witness: CharacterId,
+    lead: CharacterId,
+) -> Result<Option<ValidatedInformation>, crate::intelligence::intelligence_system::IntelligenceError>
+{
+    let record = state
+        .legal
+        .get_investigation(investigation)
+        .expect("case-witness knowledge must reference a persisted investigation");
+    let owner = record.owner();
+    let organization = state
+        .world
+        .get_organization(owner)
+        .expect("investigation owner must reference a persisted organization");
+    if organization.kind() != OrganizationKind::LawEnforcement {
+        return Ok(None);
+    }
+    let witness_name = state
+        .world
+        .get_character(witness)
+        .expect("case witness must reference a persisted character")
+        .name()
+        .to_owned();
+    validate_record_planned_case_witness_information(
+        state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(lead),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: Some(EntityRef::Organization(owner)),
+            subject: EntityRef::Character(witness),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: format!(
+                "Case witness identified: {witness_name} is registered in case \"{}\".",
+                record.title()
+            ),
+        },
+        investigation,
+        witness,
     )
     .map(Some)
 }

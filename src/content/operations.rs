@@ -379,23 +379,12 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
                 liquidation_min_recovery_basis_points: LIQUIDATION_MIN_RECOVERY_BASIS_POINTS,
                 liquidation_max_recovery_basis_points: LIQUIDATION_MAX_RECOVERY_BASIS_POINTS,
             }),
-            OperationKind::DocumentTheft => Some(OperationPropertyProceedsDefinition {
-                business_gross_basis_points: 12_500,
-                partial_recovery_basis_points: 5_000,
-                recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
-                immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
-                liquidation_recovery_basis_points: 4_000,
-                liquidation_police_neutral_rating: LIQUIDATION_POLICE_NEUTRAL_RATING,
-                liquidation_police_adjustment_basis_points_per_point:
-                    LIQUIDATION_POLICE_ADJUSTMENT_BASIS_POINTS_PER_POINT,
-                liquidation_min_recovery_basis_points: LIQUIDATION_MIN_RECOVERY_BASIS_POINTS,
-                liquidation_max_recovery_basis_points: LIQUIDATION_MAX_RECOVERY_BASIS_POINTS,
-            }),
             OperationKind::Robbery
             | OperationKind::Smuggling
             | OperationKind::Intimidation
             | OperationKind::Surveillance
             | OperationKind::WitnessPressure
+            | OperationKind::DocumentTheft
             | OperationKind::GamblingEvent
             | OperationKind::Extraction
             | OperationKind::Sabotage

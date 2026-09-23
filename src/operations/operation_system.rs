@@ -5,10 +5,10 @@ mod objective_validation;
 mod start;
 
 use authorization_validation::{
-    resolve_current_extraction_arrest, validate_authorization_constraints,
+    resolve_known_extraction_arrest, validate_authorization_constraints,
     validate_authorization_contingencies, validate_authorization_intelligence,
     validate_authorization_participants, validate_deadline_execution_window,
-    validate_extraction_custody_current, validate_extraction_custody_window,
+    validate_extraction_basis_current, validate_extraction_custody_window,
     validate_representable_operation_window,
 };
 use objective_validation::validate_operation_objective;
@@ -19,7 +19,8 @@ pub(crate) use start::validate_begin_operation;
 
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
-    ArrestId, CharacterId, IdExhaustionError, InformationId, OperationId, OrganizationId,
+    ArrestId, CaseWitnessId, CharacterId, IdExhaustionError, InformationId, OperationId,
+    OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -28,6 +29,7 @@ use crate::history::history_system::HistoryError;
 use crate::intelligence::KnowledgeHolder;
 use crate::intelligence::intelligence_system::IntelligenceError;
 use crate::operations::operation_abort::validate_authority_abort_operation;
+use crate::operations::operation_basis_knowledge::known_witness_cases;
 use crate::operations::operation_scheduling::{
     find_busy_participant, projected_operation_window, resolve_operation_earliest_start,
 };
@@ -121,8 +123,13 @@ pub enum OperationError {
     },
     #[error("property-acquisition objective target {0:?} is not a business")]
     InvalidPropertyTarget(EntityRef),
-    #[error("extraction target character {0} is not currently detained")]
-    TargetNotDetained(crate::core::id::CharacterId),
+    #[error(
+        "organization lacks current learned legal-status basis for {kind:?} against character {character}"
+    )]
+    TargetLegalBasisUnknown {
+        kind: OperationKind,
+        character: crate::core::id::CharacterId,
+    },
     #[error(
         "detainee {character} is already the extraction target of non-terminal operation {operation}"
     )]
@@ -131,13 +138,17 @@ pub enum OperationError {
         operation: OperationId,
     },
     #[error(
-        "extraction custody for character {character} changed after authorization validation; expected arrest {expected}, found {found:?}"
+        "learned extraction basis for character {character} changed after authorization validation; expected arrest {expected}, found {found:?}"
     )]
-    StaleExtractionCustody {
+    StaleExtractionBasis {
         character: CharacterId,
         expected: ArrestId,
         found: Option<ArrestId>,
     },
+    #[error(
+        "known witness-case basis for character {character} changed after authorization validation"
+    )]
+    StaleWitnessPressureBasis { character: CharacterId },
     #[error(
         "extraction for detainee {character} would finish at {planned_end:?}, but custody ends at {custody_ends_at:?} and must still be active through completion"
     )]
@@ -146,10 +157,6 @@ pub enum OperationError {
         planned_end: SimTime,
         custody_ends_at: SimTime,
     },
-    #[error("character {0} is not a named witness on any active case")]
-    TargetNotCaseWitness(crate::core::id::CharacterId),
-    #[error("character {0} has no active witness cooperation left for intimidation to reduce")]
-    TargetNotPressureableWitness(crate::core::id::CharacterId),
     #[error("objective {objective:?} cannot target administrative entity {target:?}")]
     InvalidObjectiveTarget {
         objective: OperationObjectiveKind,
@@ -179,7 +186,7 @@ pub enum OperationError {
     DeadlineLeavesNoExecutionWindow,
     #[error("plan lacks usable required {0:?} intelligence at its earliest planned start")]
     MissingRequiredIntelligenceTopic(crate::intelligence::InformationTopic),
-    #[error("business {0} has no active operating economy to disrupt")]
+    #[error("business {0} has no active operating economy for this operation")]
     TargetWithoutOperatingEconomy(crate::core::id::BusinessId),
     #[error("business {business} is owned by the sponsoring organization")]
     SelfTargetedBusiness {
@@ -289,6 +296,7 @@ pub struct ValidatedOperation<'registry> {
     draft: OperationDraft,
     expected_participant_versions: BTreeMap<CharacterId, u32>,
     extraction_arrest: Option<ArrestId>,
+    witness_pressure_cases: BTreeSet<CaseWitnessId>,
     registry: &'registry Registry,
 }
 
@@ -365,7 +373,13 @@ impl<'registry> ValidatedOperation<'registry> {
         // and the authored operation definition is static. Entity existence needs no separate
         // re-check: entity records are append-only, so anything validated at authorization still
         // exists at commit.
-        validate_extraction_custody_current(state, &self.draft.objective, self.extraction_arrest)?;
+        validate_extraction_basis_current(
+            self.registry,
+            state,
+            self.draft.responsible_organization,
+            &self.draft.objective,
+            self.extraction_arrest,
+        )?;
         validate_operation_objective(
             self.registry,
             state,
@@ -373,6 +387,24 @@ impl<'registry> ValidatedOperation<'registry> {
             self.draft.responsible_organization,
             &self.draft.objective,
         )?;
+        let current_witness_pressure_cases =
+            resolve_witness_pressure_cases(self.registry, state, &self.draft)?;
+        if current_witness_pressure_cases != self.witness_pressure_cases {
+            let character = match self.draft.objective {
+                crate::operations::OperationObjective::Frighten {
+                    target: EntityRef::Character(character),
+                } => character,
+                crate::operations::OperationObjective::AcquireProperty { .. }
+                | crate::operations::OperationObjective::ObtainCash { .. }
+                | crate::operations::OperationObjective::Frighten { .. }
+                | crate::operations::OperationObjective::GatherInformation { .. }
+                | crate::operations::OperationObjective::FreeDetainee { .. }
+                | crate::operations::OperationObjective::DisruptBusiness { .. } => unreachable!(
+                    "witness pressure case set is non-empty only for character frighten"
+                ),
+            };
+            return Err(OperationError::StaleWitnessPressureBasis { character });
+        }
         validate_extraction_custody_window(
             self.registry,
             state,
@@ -422,6 +454,7 @@ impl<'registry> ValidatedOperation<'registry> {
                 leader,
                 objective,
                 extraction_arrest: self.extraction_arrest,
+                witness_pressure_cases: self.witness_pressure_cases,
                 approach,
                 roles,
                 intelligence,
@@ -499,7 +532,13 @@ pub fn validate_authorize_operation<'registry>(
         draft.responsible_organization,
         &draft.objective,
     )?;
-    let extraction_arrest = resolve_current_extraction_arrest(state, &draft.objective)?;
+    let extraction_arrest = resolve_known_extraction_arrest(
+        registry,
+        state,
+        draft.responsible_organization,
+        &draft.objective,
+    )?;
+    let witness_pressure_cases = resolve_witness_pressure_cases(registry, state, &draft)?;
     let mut expected_participant_versions = BTreeMap::from([(draft.leader, leader.version())]);
 
     let definition = registry.get_operation(draft.kind);
@@ -556,8 +595,33 @@ pub fn validate_authorize_operation<'registry>(
         draft,
         expected_participant_versions,
         extraction_arrest,
+        witness_pressure_cases,
         registry,
     })
+}
+
+fn resolve_witness_pressure_cases(
+    registry: &Registry,
+    state: &AppState,
+    draft: &OperationDraft,
+) -> Result<BTreeSet<CaseWitnessId>, OperationError> {
+    let (
+        OperationKind::WitnessPressure,
+        crate::operations::OperationObjective::Frighten {
+            target: EntityRef::Character(character),
+        },
+    ) = (draft.kind, &draft.objective)
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let known = known_witness_cases(registry, state, draft.responsible_organization, *character);
+    if known.is_empty() {
+        return Err(OperationError::TargetLegalBasisUnknown {
+            kind: OperationKind::WitnessPressure,
+            character: *character,
+        });
+    }
+    Ok(known)
 }
 
 /// Validates that resuming a decision-blocked operation at `resumed_at` does not double-book any

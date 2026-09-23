@@ -261,6 +261,25 @@ pub enum EvidenceKind {
     ForensicAnalysis,
 }
 
+impl EvidenceKind {
+    /// Evidence types that can produce additional analytical value through canonical detective
+    /// review. Keeping this semantic on the evidence vocabulary gives validation, scheduling,
+    /// derived indexes, and restore reconstruction one source of truth.
+    pub(crate) const fn is_reviewable(self) -> bool {
+        matches!(
+            self,
+            Self::Fingerprint
+                | Self::RecoveredProperty
+                | Self::FinancialRecord
+                | Self::Surveillance
+                | Self::CommunicationRecord
+                | Self::Document
+                | Self::Ballistics
+                | Self::VehicleDescription
+        )
+    }
+}
+
 /// Ordered weakest to strongest so assessments can be compared against gates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EvidenceStrength {
@@ -644,6 +663,54 @@ pub(in crate::legal) struct InvestigationIndexes {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(in crate::legal) struct EvidenceIndexes {
     pub(in crate::legal) derived_evidence_by_source: BTreeMap<EvidenceId, BTreeSet<EvidenceId>>,
+    /// Monotonic evidence summary used to rank unstaffed active cases without rescanning each
+    /// case's complete evidence history every simulation minute.
+    pub(in crate::legal) staffing_summary_by_investigation:
+        BTreeMap<InvestigationId, InvestigationEvidenceStaffingSummary>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::legal) struct InvestigationEvidenceStaffingSummary {
+    actionable_count: usize,
+    best_strength: EvidenceStrength,
+    best_reliability: EvidenceReliability,
+}
+
+impl Default for InvestigationEvidenceStaffingSummary {
+    fn default() -> Self {
+        Self {
+            actionable_count: 0,
+            best_strength: EvidenceStrength::Weak,
+            best_reliability: EvidenceReliability::Questionable,
+        }
+    }
+}
+
+impl InvestigationEvidenceStaffingSummary {
+    pub(in crate::legal) fn observe_actionable(
+        &mut self,
+        strength: EvidenceStrength,
+        reliability: EvidenceReliability,
+    ) {
+        self.actionable_count = self
+            .actionable_count
+            .checked_add(1)
+            .expect("persisted evidence count cannot exceed usize capacity");
+        (self.best_strength, self.best_reliability) =
+            (self.best_strength, self.best_reliability).max((strength, reliability));
+    }
+
+    pub(in crate::legal) fn actionable_count(self) -> usize {
+        self.actionable_count
+    }
+
+    pub(in crate::legal) fn best_strength(self) -> EvidenceStrength {
+        self.best_strength
+    }
+
+    pub(in crate::legal) fn best_reliability(self) -> EvidenceReliability {
+        self.best_reliability
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -684,6 +751,11 @@ pub(in crate::legal) struct InvestigationWorkIndexes {
     /// one-attempt rule for direct commands and avoids rescanning casework history every minute.
     pub(in crate::legal) evidence_review_attempt_by_source:
         BTreeMap<EvidenceId, InvestigationWorkId>,
+    /// Reviewable evidence that has not consumed a real review attempt, ordered by substantive
+    /// discovery time and then evidence id. Autonomous scheduling reads the first entry instead
+    /// of rescanning an active case's complete evidence history every simulation minute.
+    pub(in crate::legal) unattempted_reviewable_evidence_by_investigation:
+        BTreeMap<InvestigationId, BTreeSet<(SimTime, EvidenceId)>>,
     pub(in crate::legal) scheduled_work_by_due_at: BTreeMap<SimTime, BTreeSet<InvestigationWorkId>>,
     pub(in crate::legal) scheduled_work_by_focus: BTreeMap<
         (

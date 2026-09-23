@@ -23,6 +23,7 @@ struct FinanceValidationScratch {
     account_ids: Vec<crate::core::id::FinancialAccountId>,
     derived_balance_cents: Vec<i64>,
     derived_account_versions: Vec<u32>,
+    expected_account_entries: usize,
     expected_mandate_entries: usize,
     derived_budget_totals: BTreeMap<BudgetPeriodKey, i64>,
     derived_budget_day_totals: BTreeMap<BudgetDayKey, i64>,
@@ -100,6 +101,7 @@ fn initialize_ledger_scratch(state: &AppState) -> FinanceValidationScratch {
         account_ids: Vec::with_capacity(account_count),
         derived_balance_cents: Vec::with_capacity(account_count),
         derived_account_versions: Vec::with_capacity(account_count),
+        expected_account_entries: 0,
         expected_mandate_entries: 0,
         derived_budget_totals: BTreeMap::new(),
         derived_budget_day_totals: BTreeMap::new(),
@@ -131,6 +133,16 @@ fn validate_transaction(
         return Err(StateValidationError::FutureTimestamp {
             context: "ledger transaction",
         });
+    }
+    for posting in transaction.postings() {
+        if !state.finance.transaction_is_indexed_for_account(
+            transaction.id(),
+            transaction.occurred_at(),
+            posting.account,
+        ) {
+            return Err(finance_index_error());
+        }
+        scratch.expected_account_entries += 1;
     }
     if let Some(previous_at) = scratch.last_transaction_time
         && transaction.occurred_at() < previous_at
@@ -321,6 +333,9 @@ fn validate_finance_aggregates(
     state: &AppState,
     scratch: &FinanceValidationScratch,
 ) -> Result<(), StateValidationError> {
+    if state.finance.indexed_transaction_account_entries() != scratch.expected_account_entries {
+        return Err(finance_index_error());
+    }
     if state.finance.indexed_mandate_entries() != scratch.expected_mandate_entries {
         return Err(finance_index_error());
     }

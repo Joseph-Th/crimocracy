@@ -15,10 +15,12 @@ use crimocracy::finance::{
 };
 use crimocracy::intelligence::intelligence_system::validate_record_information;
 use crimocracy::intelligence::{
-    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
-    Specificity,
+    InformationDraft, InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
+    LegalPersonStatusSignal, Reliability, Specificity,
 };
-use crimocracy::legal::investigation_system::validate_incident_intake;
+use crimocracy::legal::investigation_system::{
+    validate_assign_investigator, validate_incident_intake,
+};
 use crimocracy::legal::jurisdiction_system::resolve_case_intake_authority;
 use crimocracy::legal::legal_representation_system::validate_retain_legal_representation;
 use crimocracy::legal::prosecution_system::{
@@ -53,7 +55,10 @@ use crimocracy::world::{
     OrganizationKind, PolicyKind, PolicySetting, TraitKind,
 };
 use crimocracy::{
-    contacts::contact_system::{InstitutionalContactDraft, validate_establish_contact},
+    contacts::contact_system::{
+        InstitutionalContactDraft, find_pending_disclosure_sources, validate_contact_disclosure,
+        validate_establish_contact,
+    },
     legal::arrest_system::validate_arrest,
     legal::investigation_system::{validate_add_evidence, validate_open_investigation},
 };
@@ -750,6 +755,18 @@ pub fn run_legal_foundation_check(registry: &Registry, detail: bool) -> Result<(
             drives: BTreeMap::new(),
         },
     )?;
+    let detective = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Harbor Detective".to_owned(),
+            organization: Some(police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::Investigation, rating(86))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )?;
 
     validate_set_relationship(
         &state,
@@ -775,6 +792,30 @@ pub fn run_legal_foundation_check(registry: &Registry, detail: bool) -> Result<(
         },
     )?
     .commit(&mut state)?;
+    validate_set_relationship(
+        &state,
+        handler,
+        detective,
+        RelationshipDimensions {
+            trust: level(70),
+            respect: level(75),
+            fear: level(0),
+            affection: level(0),
+            dependence: level(30),
+            resentment: level(0),
+            debt: level(15),
+        },
+    )?
+    .commit(&mut state)?;
+    let police_contact = validate_establish_contact(
+        &state,
+        InstitutionalContactDraft {
+            sponsor,
+            handler,
+            contact: detective,
+        },
+    )?
+    .commit(&mut state)?;
 
     let investigation = validate_open_investigation(
         &state,
@@ -785,6 +826,7 @@ pub fn run_legal_foundation_check(registry: &Registry, detail: bool) -> Result<(
         },
     )?
     .commit(&mut state)?;
+    validate_assign_investigator(&state, investigation, detective)?.commit(&mut state)?;
     let evidence = validate_add_evidence(
         &state,
         EvidenceDraft {
@@ -986,6 +1028,26 @@ pub fn run_legal_foundation_check(registry: &Registry, detail: bool) -> Result<(
         },
     )?
     .commit(&mut state)?;
+    let witness_source = find_pending_disclosure_sources(&state, police_contact)
+        .into_iter()
+        .find(|source| {
+            state
+                .intelligence()
+                .get_information(*source)
+                .is_some_and(|information| {
+                    information.subject() == EntityRef::Character(shopkeeper)
+                        && matches!(
+                            information.signal(),
+                            Some(InformationSignal::LegalPersonStatus(
+                                LegalPersonStatusSignal::CaseWitness {
+                                    investigation: learned_case
+                                }
+                            )) if *learned_case == investigation
+                        )
+                })
+        })
+        .ok_or("police contact did not expose the registered witness status")?;
+    validate_contact_disclosure(&state, police_contact, witness_source)?.commit(&mut state)?;
     let pressure = validate_authorize_operation(
         registry,
         &state,

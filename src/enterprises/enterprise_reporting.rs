@@ -1,7 +1,7 @@
 //! Read-only financial aggregation over enterprise cycle history; ledger-backed cycle records remain the source of truth.
 
 use crate::core::attention::AttentionClass;
-use crate::core::id::OrganizationId;
+use crate::core::id::{EnterpriseId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::enterprises::{EnterpriseKind, EnterpriseRecord};
@@ -81,6 +81,7 @@ fn resolve_summary<'a>(
 ) -> Result<EnterpriseFinancialSummary, EnterpriseReportingError> {
     let mut totals = EnterpriseFinancialTotals::default();
     let mut by_kind = BTreeMap::new();
+    let mut candidate_kinds = BTreeMap::<EnterpriseId, EnterpriseKind>::new();
     for enterprise in enterprises {
         if enterprise.established_at() > period_end
             || enterprise
@@ -89,31 +90,35 @@ fn resolve_summary<'a>(
         {
             continue;
         }
+        candidate_kinds.insert(enterprise.id(), enterprise.kind());
         increment_enterprise_count(&mut totals)?;
         let kind_totals = by_kind.entry(enterprise.kind()).or_default();
         increment_enterprise_count(kind_totals)?;
-        for cycle in state
-            .enterprises()
-            .cycles_for(enterprise.id())
-            .filter(|cycle| {
-                cycle.occurred_at() >= period_start && cycle.occurred_at() <= period_end
-            })
-        {
-            add_cycle(
-                &mut totals,
-                cycle.gross_revenue(),
-                cycle.operating_cost(),
-                cycle.net_cash(),
-                cycle.attention(),
-            )?;
-            add_cycle(
-                kind_totals,
-                cycle.gross_revenue(),
-                cycle.operating_cost(),
-                cycle.net_cash(),
-                cycle.attention(),
-            )?;
-        }
+    }
+    for cycle in state
+        .enterprises()
+        .cycles_from_through(period_start, period_end)
+    {
+        let Some(kind) = candidate_kinds.get(&cycle.enterprise()).copied() else {
+            continue;
+        };
+        let kind_totals = by_kind
+            .get_mut(&kind)
+            .expect("a counted enterprise must have its kind bucket");
+        add_cycle(
+            &mut totals,
+            cycle.gross_revenue(),
+            cycle.operating_cost(),
+            cycle.net_cash(),
+            cycle.attention(),
+        )?;
+        add_cycle(
+            kind_totals,
+            cycle.gross_revenue(),
+            cycle.operating_cost(),
+            cycle.net_cash(),
+            cycle.attention(),
+        )?;
     }
     Ok(EnterpriseFinancialSummary {
         period_start,

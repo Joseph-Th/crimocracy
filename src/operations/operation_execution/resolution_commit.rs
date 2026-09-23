@@ -28,8 +28,8 @@ use crate::legal::jurisdiction_system::{
     CaseIntakeAuthoritySnapshot, CaseIntakeAuthoritySnapshotError,
     validate_case_intake_authority_snapshot,
 };
-use crate::operations::surveillance_integration::{
-    SurveillanceIntelligencePlan, validate_surveillance_information,
+use crate::operations::information_acquisition::{
+    OperationInformationPlan, validate_operation_information,
 };
 use crate::operations::{OperationExposureRecord, OperationObjective, OperationResolutionRecord};
 use crate::registry::Registry;
@@ -42,7 +42,7 @@ pub(crate) struct ValidatedOperationResolution {
     off_window_patrol_presence_percent: u8,
     incident: Option<ValidatedIncidentIntake>,
     incident_authority: Option<CaseIntakeAuthoritySnapshot>,
-    surveillance_information: Vec<ValidatedInformation>,
+    acquired_information: Vec<ValidatedInformation>,
     information: ValidatedInformation,
     history: ValidatedHistoryEvent,
     report: ValidatedReport,
@@ -59,10 +59,10 @@ impl ValidatedOperationResolution {
         self,
         state: &mut AppState,
     ) -> Result<OperationId, OperationResolutionError> {
-        let surveillance_information_count = u32::try_from(self.surveillance_information.len())
-            .expect("surveillance information count must fit u32");
+        let acquired_information_count = u32::try_from(self.acquired_information.len())
+            .expect("acquired information count must fit u32");
         let mut budget = vec![
-            (IdKind::Information, 1 + surveillance_information_count),
+            (IdKind::Information, 1 + acquired_information_count),
             (IdKind::HistoryEvent, 1),
             (IdKind::Report, 1),
         ];
@@ -157,7 +157,7 @@ impl ValidatedOperationResolution {
             evidence,
         };
         let discovered_information = self
-            .surveillance_information
+            .acquired_information
             .into_iter()
             .map(|information| {
                 information
@@ -165,12 +165,12 @@ impl ValidatedOperationResolution {
                     .expect("resolution information IDs were preflighted before mutation")
             })
             .collect::<BTreeSet<_>>();
-        let surveillance_signatures = self
+        let discovery_signatures = self
             .plan
             .outcome
-            .surveillance
+            .information_acquisition
             .as_ref()
-            .map(SurveillanceIntelligencePlan::surveillance_signatures)
+            .map(OperationInformationPlan::discovery_signatures)
             .unwrap_or_default();
         let after_action_information = self
             .information
@@ -211,7 +211,7 @@ impl ValidatedOperationResolution {
                 extraction_arrest,
                 discovered_information,
                 participant_information,
-                surveillance_signatures,
+                discovery_signatures,
                 after_action_information,
                 after_action_report,
                 history_event,
@@ -249,12 +249,12 @@ pub(crate) fn validate_operation_resolution_plan(
         .expect("validated resolution operation must exist");
     ensure_version_can_advance(record.version(), "operation")?;
     let effects = validate_resolution_effects(registry, state, record, &plan.outcome)?;
-    let surveillance_information = match &plan.outcome.surveillance {
-        Some(surveillance) => validate_surveillance_information(
+    let acquired_information = match &plan.outcome.information_acquisition {
+        Some(information_acquisition) => validate_operation_information(
             state,
             record.responsible_organization(),
             record.id(),
-            surveillance,
+            information_acquisition,
         )?,
         None => Vec::new(),
     };
@@ -333,7 +333,7 @@ pub(crate) fn validate_operation_resolution_plan(
         off_window_patrol_presence_percent,
         incident,
         incident_authority,
-        surveillance_information,
+        acquired_information,
         information,
         history,
         report,

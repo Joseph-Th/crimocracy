@@ -11,6 +11,9 @@ use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::ensure_version_can_advance;
 use crate::economy::{BusinessCycleRecord, BusinessOperatingStatus};
+use crate::enterprises::enterprise_execution::{
+    EnterpriseError, ValidatedEnterpriseStatusChange, validate_suspend_enterprise,
+};
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::finance::finance_system::{
     ValidatedLedgerTransaction, validate_record_business_transaction,
@@ -24,6 +27,7 @@ use crate::intelligence::{
 };
 use crate::registry::{BusinessEconomicsDefinition, Registry};
 use crate::world::{BusinessOwner, NeighborhoodProfile};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BusinessCycleSnapshot {
@@ -36,18 +40,12 @@ struct BusinessCycleSnapshot {
     /// either the authored cadence lies beyond the finite clock or this settlement consumed the
     /// final economy version. The economy remains operational but unscheduled.
     next_cycle_at: Option<SimTime>,
-    /// Whether this settlement reaches the authored consecutive-loss threshold. At that point
-    /// active enterprise infrastructure may require the otherwise-closing front to remain open.
+    /// Whether this settlement reaches the authored consecutive-loss threshold.
     loss_threshold_reached: bool,
-    /// Deterministic active enterprise dependency observed when the loss threshold was reached.
-    /// This is pinned because enterprise lifecycle changes independently from business versions.
-    blocking_enterprise: Option<EnterpriseId>,
-}
-
-impl BusinessCycleSnapshot {
-    fn suspends_after_settlement(&self) -> bool {
-        self.loss_threshold_reached && self.blocking_enterprise.is_none()
-    }
+    /// Exact active rackets that depend on this business when the loss threshold is reached.
+    /// They are suspended through their canonical lifecycle before the front closes. Pinning the
+    /// complete set prevents a held cycle plan from missing a newly established dependency.
+    dependent_enterprises: BTreeSet<EnterpriseId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,16 +130,17 @@ pub fn decide_business_cycle(
     };
     let trailing_losing_cycles =
         count_trailing_losing_cycles(state, business, economics.losing_cycles_before_suspension());
-    // A losing settlement that reaches the authored consecutive-loss threshold suspends the
-    // economy unless an active racket currently depends on this business as live infrastructure.
-    // In that case the front stays open and keeps realizing its legitimate losses until the
-    // racket is suspended or retired; silently closing it would invalidate active enterprise
-    // requirements across domain ownership boundaries.
+    // A losing settlement that reaches the authored consecutive-loss threshold closes the
+    // legitimate business. Active rackets using the front are dependencies of that infrastructure,
+    // not vetoes over its economic failure, so validation below suspends those rackets atomically
+    // before the business economy closes.
     let loss_threshold_reached = net_cash < Money::ZERO
         && trailing_losing_cycles + 1 >= u32::from(economics.losing_cycles_before_suspension());
-    let blocking_enterprise = loss_threshold_reached
-        .then(|| active_enterprise_dependency(state, business))
-        .flatten();
+    let dependent_enterprises = if loss_threshold_reached {
+        active_enterprise_dependencies(state, business)
+    } else {
+        BTreeSet::new()
+    };
     // Settling work that is due now must not fail only because its *next* recurrence is
     // unrepresentable. `None` is the existing exhausted-recurrence shape for both finite clock
     // and finite version rails. A non-suspending cycle from MAX-1 consumes the final economy
@@ -163,7 +162,7 @@ pub fn decide_business_cycle(
             // rapid one-per-minute backlog when work resumes.
             next_cycle_at,
             loss_threshold_reached,
-            blocking_enterprise,
+            dependent_enterprises,
         },
         economics: BusinessCycleEconomics {
             gross_revenue,
@@ -206,6 +205,15 @@ pub(super) fn active_enterprise_dependency(
     state: &AppState,
     business: BusinessId,
 ) -> Option<EnterpriseId> {
+    active_enterprise_dependencies(state, business)
+        .into_iter()
+        .next()
+}
+
+fn active_enterprise_dependencies(
+    state: &AppState,
+    business: BusinessId,
+) -> BTreeSet<EnterpriseId> {
     state
         .enterprises()
         .enterprises_supported_by_business(business)
@@ -216,7 +224,7 @@ pub(super) fn active_enterprise_dependency(
         )
         .filter(|enterprise| enterprise.status() == EnterpriseStatus::Active)
         .map(|enterprise| enterprise.id())
-        .min()
+        .collect()
 }
 
 fn validate_business_cycle_enterprise_dependency(
@@ -226,11 +234,11 @@ fn validate_business_cycle_enterprise_dependency(
     if !snapshot.loss_threshold_reached {
         return Ok(());
     }
-    let found = active_enterprise_dependency(state, snapshot.business);
-    if found != snapshot.blocking_enterprise {
+    let found = active_enterprise_dependencies(state, snapshot.business);
+    if found != snapshot.dependent_enterprises {
         return Err(BusinessEconomyError::StaleEnterpriseDependency {
             business: snapshot.business,
-            expected: snapshot.blocking_enterprise,
+            expected: snapshot.dependent_enterprises.clone(),
             found,
         });
     }
@@ -241,6 +249,8 @@ pub struct ValidatedBusinessCycle {
     plan: BusinessCyclePlan,
     ledger: Option<ValidatedLedgerTransaction>,
     information: Option<ValidatedInformation>,
+    enterprise_suspensions: Vec<ValidatedEnterpriseStatusChange>,
+    suspend_business_after_settlement: bool,
 }
 
 impl ValidatedBusinessCycle {
@@ -306,10 +316,16 @@ impl ValidatedBusinessCycle {
         if let Some(ledger) = &self.ledger {
             ledger.ensure_current(state)?;
         }
+        for suspension in &self.enterprise_suspensions {
+            suspension.ensure_suspension_current(state)?;
+        }
         Ok(())
     }
 
     pub(crate) fn commit_preflighted(self, state: &mut AppState) -> BusinessCycleId {
+        for suspension in self.enterprise_suspensions {
+            suspension.commit_suspension_preflighted(state);
+        }
         let transaction = self.ledger.map(|ledger| ledger.commit_preflighted(state));
         let information = self.information.map(|information| {
             information
@@ -343,7 +359,7 @@ impl ValidatedBusinessCycle {
                 },
             },
             self.plan.snapshot.next_cycle_at,
-            self.plan.snapshot.suspends_after_settlement(),
+            self.suspend_business_after_settlement,
         );
         cycle
     }
@@ -417,6 +433,24 @@ pub fn validate_business_cycle_plan(
             },
         )?)
     };
+    let mut enterprise_suspensions = Vec::new();
+    let mut suspend_business_after_settlement = plan.snapshot.loss_threshold_reached;
+    if suspend_business_after_settlement {
+        for enterprise in &plan.snapshot.dependent_enterprises {
+            match validate_suspend_enterprise(state, *enterprise) {
+                Ok(suspension) => enterprise_suspensions.push(suspension),
+                // A terminal enterprise version cannot transition again. Preserve the finite
+                // version rail by leaving both sides active rather than making routine business
+                // settlement fail forever at this extreme campaign boundary.
+                Err(EnterpriseError::VersionCapacity(_)) => {
+                    enterprise_suspensions.clear();
+                    suspend_business_after_settlement = false;
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     let information = match (
         plan.economics.attention,
         resolve_accounting_holder(plan.snapshot.owner),
@@ -444,13 +478,23 @@ pub fn validate_business_cycle_plan(
                     crate::finance::helpers::describe_gross_variance(
                         plan.economics.variance_basis_points
                     ),
-                    if plan.snapshot.suspends_after_settlement() {
+                    if suspend_business_after_settlement
+                        && !plan.snapshot.dependent_enterprises.is_empty()
+                    {
+                        format!(
+                            " Repeated losses have suspended operations and {} dependent criminal enterprise{} until the front can be restored.",
+                            plan.snapshot.dependent_enterprises.len(),
+                            if plan.snapshot.dependent_enterprises.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )
+                    } else if suspend_business_after_settlement {
                         " Repeated losses have suspended operations until the business is resumed."
                             .to_owned()
-                    } else if let Some(enterprise) = plan.snapshot.blocking_enterprise {
-                        format!(
-                            " Repeated losses would normally suspend operations, but active enterprise {enterprise} requires this business to remain open."
-                        )
+                    } else if !plan.snapshot.dependent_enterprises.is_empty() {
+                        " Repeated losses reached the suspension threshold, but a terminal enterprise lifecycle version prevents a safe dependency shutdown.".to_owned()
                     } else {
                         String::new()
                     }
@@ -466,6 +510,8 @@ pub fn validate_business_cycle_plan(
         plan,
         ledger,
         information,
+        enterprise_suspensions,
+        suspend_business_after_settlement,
     })
 }
 

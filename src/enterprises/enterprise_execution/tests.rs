@@ -15,7 +15,8 @@ use crate::delegation::delegation_system::{
 use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
 use crate::economy::business_economy_system::{
     BusinessEconomyError, decide_business_cycle, validate_business_cycle_plan,
-    validate_establish_business_economy, validate_suspend_business_economy,
+    validate_disrupt_business_economy, validate_establish_business_economy,
+    validate_suspend_business_economy,
 };
 use crate::economy::{BusinessEconomyDraft, BusinessOperatingStatus};
 use crate::enterprises::EnterpriseKind;
@@ -2413,7 +2414,7 @@ fn held_business_suspension_rechecks_active_enterprise_dependency() {
 }
 
 #[test]
-fn active_racket_keeps_losing_front_open_until_dependency_is_released() {
+fn chronic_front_losses_suspend_dependent_racket_and_business_together() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture_with_inputs(
         OrganizationKind::Criminal,
@@ -2477,8 +2478,7 @@ fn active_racket_keeps_losing_front_open_until_dependency_is_released() {
     let threshold = usize::from(business_definition.losing_cycles_before_suspension());
     let downside = -i16::try_from(business_definition.gross_variance_basis_points())
         .expect("authored hospitality variance must fit i16");
-    let mut last_cycle = None;
-    for _ in 0..threshold {
+    for _ in 0..threshold.saturating_sub(1) {
         fixture
             .state
             .advance_clock(SimDuration::from_minutes(1_440));
@@ -2490,7 +2490,6 @@ fn active_racket_keeps_losing_front_open_until_dependency_is_released() {
         .expect("loss-leading front cycle should validate")
         .commit(&mut fixture.state)
         .expect("loss-leading front cycle should commit");
-        last_cycle = Some(cycle);
         assert!(
             fixture
                 .state
@@ -2509,23 +2508,21 @@ fn active_racket_keeps_losing_front_open_until_dependency_is_released() {
                 .get_business_economy(venue)
                 .map(|economy| economy.status()),
             Some(BusinessOperatingStatus::Active),
-            "a strategically required front must stay open despite the ordinary loss cutoff"
+            "the front remains active below its authored chronic-loss threshold"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .enterprises()
+                .get_enterprise(enterprise)
+                .map(|enterprise| enterprise.status()),
+            Some(EnterpriseStatus::Active)
         );
     }
-    let last_information = fixture
-        .state
-        .economy()
-        .get_cycle(last_cycle.expect("threshold cycle should settle"))
-        .and_then(|cycle| cycle.information())
-        .and_then(|information| fixture.state.intelligence().get_information(information))
-        .expect("threshold loss should produce accountant information");
-    assert!(
-        last_information
-            .summary()
-            .contains("requires this business to remain open"),
-        "the accountant should explain why the ordinary loss suspension was overridden"
-    );
 
+    // Freeze the threshold settlement while the racket still depends on the front. Releasing
+    // that dependency before commit must stale the whole cross-domain plan rather than silently
+    // applying a different lifecycle consequence.
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
@@ -2546,18 +2543,26 @@ fn active_racket_keeps_losing_front_open_until_dependency_is_released() {
         error,
         BusinessEconomyError::StaleEnterpriseDependency {
             business: venue,
-            expected: Some(enterprise),
-            found: None,
+            expected: BTreeSet::from([enterprise]),
+            found: BTreeSet::new(),
         }
     );
-    validate_business_cycle_plan(
+
+    // Restore the dependency and re-decide at the same due instant. The legitimate front is the
+    // infrastructure dependency, so hitting its real failure threshold suspends the racket first
+    // and then closes the business in one validated settlement.
+    validate_resume_enterprise(&registry, &fixture.state, enterprise)
+        .expect("active host should allow the suspended racket to resume")
+        .commit(&mut fixture.state)
+        .expect("racket resumption should commit");
+    let threshold_cycle = validate_business_cycle_plan(
         &fixture.state,
         decide_business_cycle(&registry, &fixture.state, venue, downside)
-            .expect("released loss-leading front cycle should re-decide"),
+            .expect("threshold front cycle should re-decide"),
     )
-    .expect("released loss-leading front cycle should validate")
+    .expect("threshold front cycle should validate")
     .commit(&mut fixture.state)
-    .expect("released loss-leading front cycle should commit");
+    .expect("threshold front cycle should suspend its dependent racket and commit");
     assert_eq!(
         fixture
             .state
@@ -2565,11 +2570,209 @@ fn active_racket_keeps_losing_front_open_until_dependency_is_released() {
             .get_business_economy(venue)
             .map(|economy| economy.status()),
         Some(BusinessOperatingStatus::Suspended),
-        "once no live racket depends on it, the already-loss-making front should close normally"
+        "a racket must not make a chronically failing legitimate front economically immortal"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .map(|enterprise| enterprise.status()),
+        Some(EnterpriseStatus::Suspended),
+        "the racket must suspend when the legitimate infrastructure it depends on fails"
+    );
+    let information = fixture
+        .state
+        .economy()
+        .get_cycle(threshold_cycle)
+        .and_then(|cycle| cycle.information())
+        .and_then(|information| fixture.state.intelligence().get_information(information))
+        .expect("threshold loss should produce accountant information");
+    assert!(
+        information
+            .summary()
+            .contains("1 dependent criminal enterprise"),
+        "the accountant should explain the cross-domain consequence"
     );
     validate_state_against_registry(&registry, &fixture.state)
-        .expect("released front and suspended racket should remain registry-valid");
+        .expect("failed front and suspended racket should remain registry-valid");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state)
+            .expect("failed front and dependent-racket suspension should save"),
+    )
+    .expect("failed front and dependent-racket suspension should restore");
     validate_invariants(&fixture.state);
+    validate_invariants(&restored);
+}
+
+#[test]
+fn same_minute_front_failures_suspend_shared_racket_only_once() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture_with_inputs(
+        OrganizationKind::Criminal,
+        AutonomyLevel::Delegated,
+        NeighborhoodProfile {
+            economy: NeighborhoodEconomyProfile {
+                wealth: rating(5),
+                commercial_activity: rating(5),
+                // Keep the illicit route healthy while its low-commerce, heavily policed
+                // legitimate fronts fail. This isolates infrastructure failure from the
+                // enterprise's independent chronic-loss lifecycle.
+                illicit_demand: rating(100),
+            },
+            institutions: NeighborhoodInstitutionProfile {
+                police_presence: rating(95),
+            },
+        },
+        Some(rating(100)),
+    );
+    let (transport, retail) = alcohol_support_network(&registry, &mut fixture);
+    establish_business_economy_for_enterprise_business(&registry, &mut fixture, transport);
+    establish_business_economy_for_enterprise_business(&registry, &mut fixture, retail);
+    let enterprise = establish_alcohol_distribution(
+        &registry,
+        &mut fixture,
+        BTreeSet::from([transport, retail]),
+    )
+    .expect("two-front alcohol network should establish");
+
+    let threshold = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .losing_cycles_before_suspension();
+    assert_eq!(
+        threshold,
+        registry
+            .get_business(BusinessKind::Transportation)
+            .economics()
+            .losing_cycles_before_suspension(),
+        "shared-front fixture requires one common failure boundary"
+    );
+
+    for cycle_index in 0..usize::from(threshold) {
+        // Refresh sabotage at the start of each operating window. The disruption horizon is
+        // inclusive and lasts 2,880 minutes, so a hit at minute zero ends at 2,879 rather than
+        // covering the settlement exactly at minute 2,880.
+        for business in [transport, retail] {
+            validate_disrupt_business_economy(&registry, &fixture.state, business)
+                .expect("front disruption should validate for this operating window")
+                .commit(&mut fixture.state)
+                .expect("front disruption should commit for this operating window");
+        }
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        let enterprise_version_before = fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("shared racket should persist")
+            .version();
+        let mut validated = Vec::new();
+        let mut id_budget = Vec::new();
+        for business in [transport, retail] {
+            let variance_limit = registry
+                .get_business(
+                    fixture
+                        .state
+                        .world()
+                        .get_business(business)
+                        .expect("support business should persist")
+                        .kind(),
+                )
+                .economics()
+                .gross_variance_basis_points();
+            let plan = decide_business_cycle(
+                &registry,
+                &fixture.state,
+                business,
+                -i16::try_from(variance_limit).expect("business variance must fit i16"),
+            )
+            .expect("same-minute failing front should decide");
+            let cycle = validate_business_cycle_plan(&fixture.state, plan)
+                .expect("same-minute failing front should validate");
+            id_budget.extend(cycle.id_budget());
+            validated.push(cycle);
+        }
+        fixture
+            .state
+            .ids
+            .reserve_many(&id_budget)
+            .expect("same-minute business cohort artifact budget should fit");
+        let cycles: Vec<_> = validated
+            .into_iter()
+            .map(|cycle| cycle.commit_preflighted(&mut fixture.state))
+            .collect();
+        assert_eq!(
+            cycles.len(),
+            2,
+            "both support businesses should settle on the same daily boundary"
+        );
+        assert!(
+            cycles.iter().all(|cycle| {
+                fixture
+                    .state
+                    .economy()
+                    .get_cycle(*cycle)
+                    .expect("same-minute business cycle should persist")
+                    .net_cash()
+                    < Money::ZERO
+            }),
+            "disrupted low-commerce fronts must lose money on every threshold-building cycle"
+        );
+        if cycle_index + 1 < usize::from(threshold) {
+            assert_eq!(
+                fixture
+                    .state
+                    .enterprises()
+                    .get_enterprise(enterprise)
+                    .expect("shared racket should persist")
+                    .status(),
+                EnterpriseStatus::Active
+            );
+        } else {
+            assert_eq!(
+                fixture
+                    .state
+                    .enterprises()
+                    .get_enterprise(enterprise)
+                    .expect("shared racket should persist")
+                    .status(),
+                EnterpriseStatus::Suspended
+            );
+            assert_eq!(
+                fixture
+                    .state
+                    .enterprises()
+                    .get_enterprise(enterprise)
+                    .expect("shared racket should persist")
+                    .version(),
+                enterprise_version_before + 1,
+                "two prevalidated failing fronts must share one enterprise suspension transition"
+            );
+        }
+    }
+    for business in [transport, retail] {
+        assert_eq!(
+            fixture
+                .state
+                .economy()
+                .get_business_economy(business)
+                .expect("failed front economy should persist")
+                .status(),
+            BusinessOperatingStatus::Suspended
+        );
+    }
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("shared dependency suspension should remain registry-valid");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("shared dependency suspension should save"),
+    )
+    .expect("shared dependency suspension should restore");
+    validate_invariants(&fixture.state);
+    validate_invariants(&restored);
 }
 
 #[test]

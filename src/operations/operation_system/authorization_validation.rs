@@ -182,7 +182,9 @@ pub(super) fn validate_deadline_execution_window(
     Ok(())
 }
 
-/// Rejects an extraction that cannot finish before the target's currently modeled custody ends.
+/// Rejects an extraction that cannot finish before the known custody episode's authored maximum
+/// detention boundary. Early release is a hidden execution fact unless the organization later
+/// learns it, so this check deliberately uses only the pinned episode's arrest time.
 pub(super) fn validate_extraction_custody_window(
     registry: &Registry,
     state: &AppState,
@@ -221,23 +223,34 @@ pub(super) fn validate_extraction_custody_window(
     Ok(())
 }
 
-/// Pins an extraction plan to one custody event rather than whichever arrest is active later.
-pub(super) fn resolve_current_extraction_arrest(
+/// Pins an extraction plan to the freshest detention episode the organization has actually
+/// learned about rather than whichever arrest happens to be active in hidden legal state.
+pub(super) fn resolve_known_extraction_arrest(
+    registry: &Registry,
     state: &AppState,
+    organization: crate::core::id::OrganizationId,
     objective: &OperationObjective,
 ) -> Result<Option<ArrestId>, OperationError> {
     let OperationObjective::FreeDetainee { target } = objective else {
         return Ok(None);
     };
-    state
-        .legal
-        .active_arrest_for_character(*target)
-        .map(|arrest| Some(arrest.id()))
-        .ok_or(OperationError::TargetNotDetained(*target))
+    crate::operations::operation_basis_knowledge::known_detention_arrest(
+        registry,
+        state,
+        organization,
+        *target,
+    )
+    .map(Some)
+    .ok_or(OperationError::TargetLegalBasisUnknown {
+        kind: crate::operations::OperationKind::Extraction,
+        character: *target,
+    })
 }
 
-pub(super) fn validate_extraction_custody_current(
+pub(super) fn validate_extraction_basis_current(
+    registry: &Registry,
     state: &AppState,
+    organization: crate::core::id::OrganizationId,
     objective: &OperationObjective,
     expected: Option<ArrestId>,
 ) -> Result<(), OperationError> {
@@ -246,12 +259,14 @@ pub(super) fn validate_extraction_custody_current(
         return Ok(());
     };
     let expected = expected.expect("validated extraction must retain its custody link");
-    let found = state
-        .legal
-        .active_arrest_for_character(*target)
-        .map(|arrest| arrest.id());
+    let found = crate::operations::operation_basis_knowledge::known_detention_arrest(
+        registry,
+        state,
+        organization,
+        *target,
+    );
     if found != Some(expected) {
-        return Err(OperationError::StaleExtractionCustody {
+        return Err(OperationError::StaleExtractionBasis {
             character: *target,
             expected,
             found,

@@ -57,21 +57,32 @@ pub(crate) fn resolve_objective_blocker(
     state: &AppState,
     operation: &OperationRecord,
 ) -> Option<OperationObjectiveBlocker> {
+    if operation.kind().business_target_ownership().is_some()
+        && let Some(business) = operation.objective().business_target()
+        && business_target_ownership_mismatch(state, operation, business)
+    {
+        return Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch);
+    }
     match operation.objective() {
         OperationObjective::AcquireProperty {
-            target: EntityRef::Business(business),
-        } => business_target_ownership_mismatch(state, operation, *business)
-            .then_some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch),
+            target: EntityRef::Business(_),
+        }
+        | OperationObjective::GatherInformation {
+            target: EntityRef::Business(_),
+        } => None,
         OperationObjective::ObtainCash {
             target: EntityRef::Business(business),
-        } => business_target_ownership_mismatch(state, operation, *business)
-            .then_some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch),
+        } => state
+            .economy
+            .get_business_economy(*business)
+            .is_some_and(|economy| {
+                economy.status() != crate::economy::BusinessOperatingStatus::Active
+            })
+            .then_some(OperationObjectiveBlocker::TargetEconomyInactive),
         OperationObjective::DisruptBusiness {
             target: EntityRef::Business(business),
         } => {
-            if business_target_ownership_mismatch(state, operation, *business) {
-                Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch)
-            } else if !state
+            if !state
                 .economy
                 .get_business_economy(*business)
                 .is_some_and(|economy| {
@@ -85,9 +96,14 @@ pub(crate) fn resolve_objective_blocker(
         }
         OperationObjective::Frighten {
             target: EntityRef::Character(character),
-        } => pressureable_witness_targets(state, operation.responsible_organization(), *character)
-            .is_empty()
-            .then_some(OperationObjectiveBlocker::NoPressureableWitnessCase),
+        } => pressureable_witness_targets_for_cases(
+            state,
+            operation.responsible_organization(),
+            *character,
+            operation.witness_pressure_cases(),
+        )
+        .is_empty()
+        .then_some(OperationObjectiveBlocker::NoPressureableWitnessCase),
         OperationObjective::FreeDetainee { target } => operation
             .extraction_arrest()
             .and_then(|arrest| state.legal.get_arrest(arrest))
@@ -116,8 +132,16 @@ pub(crate) fn blocker_clause(
         {
             "The gambling venue left the sponsoring organization's control before the event could pay out, so there was no authorized house operation left to run."
         }
+        OperationObjectiveBlocker::TargetBusinessOwnershipMismatch
+            if kind == OperationKind::DocumentTheft =>
+        {
+            "The target business came under the sponsoring organization's ownership before the crew reached the records, so stealing its own files would no longer acquire outside information."
+        }
         OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
             "The target came under the sponsoring organization's ownership before the crew reached the objective, so taking or damaging it would have meant hitting its own assets."
+        }
+        OperationObjectiveBlocker::TargetEconomyInactive if operation_cash_kind(kind) => {
+            "The target was no longer operating when the crew reached the objective, so there was no active cash-generating business to collect from."
         }
         OperationObjectiveBlocker::TargetEconomyInactive => {
             "The target was no longer operating when the crew reached the objective, so there was no active business to disrupt."
@@ -131,35 +155,15 @@ pub(crate) fn blocker_clause(
     }
 }
 
-pub(crate) fn has_active_foreign_witness_case(
-    state: &AppState,
-    responsible_organization: OrganizationId,
-    character: CharacterId,
-) -> bool {
-    state
-        .legal
-        .case_witnesses_for_character(character)
-        .any(|witness| {
-            active_foreign_case(state, responsible_organization, witness.investigation())
-        })
-}
-
-pub(crate) fn has_pressureable_witness_case(
-    state: &AppState,
-    responsible_organization: OrganizationId,
-    character: CharacterId,
-) -> bool {
-    !pressureable_witness_targets(state, responsible_organization, character).is_empty()
-}
-
 /// Exact witness registrations whose future cooperation can still be reduced by a field
 /// intimidation. Existing testimony stores the cooperation snapshot used when it was recorded,
 /// and police custody makes the character physically unavailable, so neither state has a
 /// remaining modeled pressure effect.
-pub(crate) fn pressureable_witness_targets(
+pub(crate) fn pressureable_witness_targets_for_cases(
     state: &AppState,
     responsible_organization: OrganizationId,
     character: CharacterId,
+    cases: &std::collections::BTreeSet<CaseWitnessId>,
 ) -> Vec<(CaseWitnessId, WitnessCooperation)> {
     // A detained witness is not physically available to a field intimidation operation.
     // If custody begins after authorization, this same predicate feeds the existing
@@ -171,6 +175,7 @@ pub(crate) fn pressureable_witness_targets(
     state
         .legal
         .case_witnesses_for_character(character)
+        .filter(|witness| cases.contains(&witness.id()))
         .filter(|witness| witness.witness() == character)
         .filter(|witness| {
             active_foreign_case(state, responsible_organization, witness.investigation())
@@ -223,25 +228,15 @@ pub(crate) fn blocker_matches_objective(
     match blocker {
         OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
             operation.kind().business_target_ownership().is_some()
-                && matches!(
-                    operation.objective(),
-                    OperationObjective::AcquireProperty {
-                        target: EntityRef::Business(_)
-                    } | OperationObjective::ObtainCash {
-                        target: EntityRef::Business(_)
-                    } | OperationObjective::DisruptBusiness {
-                        target: EntityRef::Business(_)
-                    }
-                )
+                && operation.objective().business_target().is_some()
         }
         OperationObjectiveBlocker::TargetEconomyInactive => matches!(
-            (operation.kind(), operation.objective()),
-            (
-                OperationKind::Sabotage | OperationKind::Arson,
-                OperationObjective::DisruptBusiness {
-                    target: EntityRef::Business(_)
-                }
-            )
+            operation.objective(),
+            OperationObjective::ObtainCash {
+                target: EntityRef::Business(_)
+            } | OperationObjective::DisruptBusiness {
+                target: EntityRef::Business(_)
+            }
         ),
         OperationObjectiveBlocker::NoPressureableWitnessCase => matches!(
             (operation.kind(), operation.objective()),
@@ -260,4 +255,14 @@ pub(crate) fn blocker_matches_objective(
             )
         ),
     }
+}
+
+const fn operation_cash_kind(kind: OperationKind) -> bool {
+    matches!(
+        kind,
+        OperationKind::Robbery
+            | OperationKind::Smuggling
+            | OperationKind::Intimidation
+            | OperationKind::GamblingEvent
+    )
 }

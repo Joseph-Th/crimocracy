@@ -30,7 +30,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 110;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 111;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -227,7 +227,9 @@ impl AppState {
         self.operations.rebuild_derived_indexes();
         self.opportunities.rebuild_derived_indexes();
         self.recruitment.rebuild_derived_indexes();
-        self.legal.rebuild_derived_indexes();
+        if !self.legal.rebuild_derived_indexes() {
+            return false;
+        }
         self.reports.rebuild_derived_indexes();
         true
     }

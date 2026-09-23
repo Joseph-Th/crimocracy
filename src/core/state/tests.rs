@@ -546,7 +546,7 @@ fn make_test_scenario() -> TestScenario {
             kind: OperationKind::DocumentTheft,
             responsible_organization: player,
             leader: lieutenant,
-            objective: OperationObjective::AcquireProperty {
+            objective: OperationObjective::GatherInformation {
                 target: EntityRef::Business(garage),
             },
             approach: OperationApproach::Covert,

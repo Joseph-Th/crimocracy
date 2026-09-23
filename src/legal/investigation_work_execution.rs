@@ -21,7 +21,6 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 mod resolution;
-pub(crate) use resolution::is_reviewable_evidence_kind;
 pub use resolution::{
     InvestigationWorkRandomness, InvestigationWorkResolutionPlan,
     ValidatedInvestigationWorkResolution, decide_investigation_work_resolution,
@@ -533,7 +532,7 @@ fn resolve_review_source(
     if evidence.investigation() != draft.investigation {
         return Err(InvestigationWorkError::InvalidSourceEvidence(evidence_id));
     }
-    if !is_reviewable_evidence_kind(evidence.kind()) {
+    if !evidence.kind().is_reviewable() {
         return Err(InvestigationWorkError::InvalidFocus);
     }
     if let Some(derived) = state
