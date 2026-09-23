@@ -407,10 +407,19 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     }
 
     if detail {
+        println!("\n--- RECON SELF-HEAT PROBE ---");
+    }
+    let self_heat_probe = run_recon_self_heat_probe(&registry, primary_seeds, detail)?;
+    if !detail {
+        println!("[PROBE PASS] reconnaissance self-heat");
+    }
+
+    if detail {
         print_experience_readout(
             &rush,
             &press,
             &recon,
+            self_heat_probe,
             true,
             rival_probe.actionable_intervention && rival_probe.material_economic_impact,
             violence_probe.visible_violence_created_fear
@@ -554,6 +563,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
                     "visible_violence_created_fear": violence_probe.visible_violence_created_fear,
                     "fear_changed_later_intimidation": violence_probe.fear_changed_later_intimidation,
                 },
+                "recon_self_heat": self_heat_probe,
                 "personnel_retention": retention_observed,
                 "legal_foundation": true,
             },
@@ -605,10 +615,10 @@ mod tests {
         choose_lower_risk_start_from_patrol_signal, format_avg_dollars, format_day_minute,
         format_patrol_windows, parse_options, patrol_intervals_from_signal, play_session,
         run_enforcement_attention_probe, run_opportunity_portfolio_probe,
-        run_organizational_capacity_probe, stamp, validate_batch_strategy_coverage,
-        validate_branch_financial_isolation, validate_press_witness_counterplay,
-        validate_run_metrics, validate_second_act_evidence, validate_sensitivity_profile_coverage,
-        validate_strategy_evidence,
+        run_organizational_capacity_probe, run_recon_self_heat_probe, stamp,
+        validate_batch_strategy_coverage, validate_branch_financial_isolation,
+        validate_press_witness_counterplay, validate_run_metrics, validate_second_act_evidence,
+        validate_sensitivity_profile_coverage, validate_strategy_evidence,
     };
     use crimocracy::core::time::{SimDuration, SimTime};
     use crimocracy::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
@@ -624,6 +634,19 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn controlled_recon_self_heat_probe_experiences_the_case_it_created() {
+        let registry = crimocracy::build_registry();
+        assert!(
+            run_recon_self_heat_probe(
+                &registry,
+                EvaluationSeeds::new(DEFAULT_WORLD_SEED, DEFAULT_POLICY_SEED),
+                false,
+            )
+            .expect("controlled self-heat probe should run through production")
+        );
     }
 
     #[test]
@@ -1236,6 +1259,37 @@ mod tests {
             )
             .is_err(),
             "timing standdown without actually learning anything must not satisfy the experiment"
+        );
+
+        let green_scout = super::Aggregate {
+            samples,
+            achieved: 1,
+            opening_standdowns: samples - 1,
+            opening_scout_findings_total: samples * 2,
+            ..super::Aggregate::default()
+        };
+        validate_sensitivity_profile_coverage(
+            ScenarioProfile::GreenScout,
+            samples,
+            &fast,
+            &fast,
+            &green_scout,
+        )
+        .expect("green scout must isolate capability risk without relying on timing expiry");
+        let free_information = super::Aggregate {
+            opening_standdowns: 0,
+            ..green_scout
+        };
+        assert!(
+            validate_sensitivity_profile_coverage(
+                ScenarioProfile::GreenScout,
+                samples,
+                &fast,
+                &fast,
+                &free_information,
+            )
+            .is_err(),
+            "a low-skill scout that never pays a visible casing-risk cost would erase the treatment"
         );
     }
 

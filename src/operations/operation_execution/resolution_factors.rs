@@ -521,18 +521,17 @@ fn resolve_stealth_average(
     state: &AppState,
     record: &crate::operations::OperationRecord,
 ) -> Rating {
-    let participants = record.participants();
-    let total = participants.iter().fold(0_u32, |total, character| {
+    let total = record.participant_ids().fold(0_u32, |total, character| {
         total
             + state
                 .world
-                .get_character(*character)
+                .get_character(character)
                 .and_then(|record| record.capability(CapabilityKind::Stealth))
                 .map(|rating| u32::from(rating.value()))
                 .unwrap_or(0)
     });
-    let count =
-        u32::try_from(participants.len()).expect("operation participant count must fit u32");
+    let count = u32::try_from(record.participant_count())
+        .expect("operation participant count must fit u32");
     let average = total
         .checked_div(count)
         .expect("operation always has at least its leader as a participant");
@@ -595,7 +594,7 @@ fn find_most_exposed_participant(
     state: &AppState,
     record: &crate::operations::OperationRecord,
 ) -> Option<CharacterId> {
-    record.participants().into_iter().min_by_key(|character| {
+    record.participant_ids().min_by_key(|character| {
         let stealth = state
             .world
             .get_character(*character)

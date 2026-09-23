@@ -267,6 +267,7 @@ pub enum ScenarioProfile {
     FleetingWindow,
     VeteranCrew,
     ThinCrew,
+    GreenScout,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -430,19 +431,22 @@ impl FixtureVariation {
             (
                 ScenarioProfile::NightTrap
                 | ScenarioProfile::VeteranCrew
-                | ScenarioProfile::ThinCrew,
+                | ScenarioProfile::ThinCrew
+                | ScenarioProfile::GreenScout,
                 Self::Clockwork,
             ) => [(120, 120, 90), (1_320, 120, 70)],
             (
                 ScenarioProfile::NightTrap
                 | ScenarioProfile::VeteranCrew
-                | ScenarioProfile::ThinCrew,
+                | ScenarioProfile::ThinCrew
+                | ScenarioProfile::GreenScout,
                 Self::Crowded,
             ) => [(90, 150, 84), (1_260, 150, 76)],
             (
                 ScenarioProfile::NightTrap
                 | ScenarioProfile::VeteranCrew
-                | ScenarioProfile::ThinCrew,
+                | ScenarioProfile::ThinCrew
+                | ScenarioProfile::GreenScout,
                 Self::Quiet,
             ) => [(60, 180, 76), (1_200, 150, 64)],
         }
@@ -450,11 +454,12 @@ impl FixtureVariation {
 }
 
 impl ScenarioProfile {
-    pub const SENSITIVITY_SET: [Self; 4] = [
+    pub const SENSITIVITY_SET: [Self; 5] = [
         Self::LatePatrol,
         Self::FleetingWindow,
         Self::VeteranCrew,
         Self::ThinCrew,
+        Self::GreenScout,
     ];
 
     pub fn label(self) -> &'static str {
@@ -464,6 +469,7 @@ impl ScenarioProfile {
             Self::FleetingWindow => "FLEETING WINDOW",
             Self::VeteranCrew => "VETERAN CREW",
             Self::ThinCrew => "THIN CREW",
+            Self::GreenScout => "GREEN SCOUT",
         }
     }
 
@@ -483,6 +489,9 @@ impl ScenarioProfile {
             }
             Self::ThinCrew => {
                 "A marginal crew tests whether poor capability makes caution, partial outcomes, failure, and standing down meaningful rather than cosmetic."
+            }
+            Self::GreenScout => {
+                "Only the scout is inexperienced while the burglary crew stays baseline, isolating whether reconnaissance strength is earned by personnel capability rather than being an automatic dominant action."
             }
         }
     }
@@ -508,7 +517,7 @@ impl ScenarioProfile {
                 FixtureVariation::Crowded => 12,
                 FixtureVariation::Quiet => 8,
             },
-            Self::NightTrap | Self::VeteranCrew | Self::ThinCrew => {
+            Self::NightTrap | Self::VeteranCrew | Self::ThinCrew | Self::GreenScout => {
                 variation.neighborhood_police_presence()
             }
         }
@@ -518,7 +527,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 95,
             Self::ThinCrew => 60,
-            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 78,
+            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow | Self::GreenScout => 78,
         }
     }
 
@@ -526,7 +535,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 96,
             Self::ThinCrew => 62,
-            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 82,
+            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow | Self::GreenScout => 82,
         }
     }
 
@@ -534,7 +543,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 92,
             Self::ThinCrew => 58,
-            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 76,
+            Self::NightTrap | Self::LatePatrol | Self::FleetingWindow | Self::GreenScout => 76,
         }
     }
 
@@ -542,6 +551,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 94,
             Self::ThinCrew => 72,
+            Self::GreenScout => 58,
             Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 90,
         }
     }
@@ -550,6 +560,7 @@ impl ScenarioProfile {
         match self {
             Self::VeteranCrew => 92,
             Self::ThinCrew => 66,
+            Self::GreenScout => 52,
             Self::NightTrap | Self::LatePatrol | Self::FleetingWindow => 84,
         }
     }
@@ -724,6 +735,15 @@ pub struct RunMetrics {
     pub opening_scout: Option<OperationId>,
     pub opening_scout_terminal_minute: Option<u64>,
     pub opening_opportunity_valid_until_minute: Option<u64>,
+    /// Player-visible opening decision budget. These fields make the information/time tradeoff
+    /// explicit in artifacts instead of forcing evaluators to reverse-engineer authored timing.
+    pub opening_decision_minute: Option<u64>,
+    pub opening_opportunity_window_minutes: Option<u64>,
+    pub opening_burglary_duration_minutes: Option<u32>,
+    pub opening_surveillance_duration_minutes: Option<u32>,
+    /// Minutes remaining before opportunity expiry after a full scout starting on the next tick.
+    /// Negative means full casing cannot finish before the score closes.
+    pub opening_scout_time_slack_minutes: Option<i64>,
     pub opening_casing_assessment: Option<CasingAssessment>,
     pub opening_stood_down: bool,
     pub opening_standdown_reason: Option<OpeningStanddownReason>,

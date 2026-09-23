@@ -1542,6 +1542,20 @@ pub fn print_convergence_observation(
             press.investigations,
             recon.investigations,
         );
+        return;
+    }
+    if profile == ScenarioProfile::GreenScout {
+        let risk_standdowns = recon
+            .opening_standdowns
+            .saturating_sub(recon.opening_timing_standdowns);
+        println!(
+            "[OBSERVATION] {}: only the scout is downgraded; the burglary crew, opportunity window, and police environment stay at baseline. RECON learned {:.1} findings/run but stood down from casing risk in {}/{} runs, with {} timing stand-downs. Information is therefore not a free button: acquiring it is itself field work whose value depends on who you trust to gather it.",
+            profile.label(),
+            recon.opening_scout_findings_total as f64 / recon.samples.max(1) as f64,
+            risk_standdowns,
+            recon.samples,
+            recon.opening_timing_standdowns,
+        );
     }
 }
 
@@ -1553,6 +1567,7 @@ pub fn print_experience_readout(
     rush: &RunMetrics,
     press: &RunMetrics,
     recon: &RunMetrics,
+    self_heat_demonstrated: bool,
     racket_demonstrated: bool,
     rival_leverage_demonstrated: bool,
     reputation_leverage_demonstrated: bool,
@@ -1669,9 +1684,10 @@ pub fn print_experience_readout(
     );
     checkpoint(
         "own heat",
-        recon.self_heat_check_required
+        (recon.self_heat_check_required
             && recon.self_heat_case_active != Some(false)
-            && recon.second_burglary.is_none(),
+            && recon.second_burglary.is_none())
+            || self_heat_demonstrated,
         "casing carries risk both ways: when the crew's own casing reports exposure, leadership asks its standing police contact whether a file exists and stands down unless the channel explicitly says the matter is shelved",
     );
     checkpoint(

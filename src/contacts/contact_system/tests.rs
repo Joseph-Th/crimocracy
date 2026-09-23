@@ -78,6 +78,69 @@ fn resentment_alone_does_not_create_an_institutional_contact_channel() {
 }
 
 #[test]
+fn established_contact_becomes_unusable_when_current_relationship_basis_collapses() {
+    let mut fixture = make_fixture(OrganizationKind::LawEnforcement);
+    let contact = establish(&mut fixture);
+    let source_character = fixture.source;
+    let source = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(source_character),
+        InformationTopic::LegalActivity,
+    );
+    assert_eq!(
+        find_pending_disclosure_sources(&fixture.state, contact),
+        vec![source]
+    );
+
+    validate_set_relationship(
+        &fixture.state,
+        fixture.handler,
+        fixture.source,
+        resentment_only_relationship(),
+    )
+    .expect("relationship collapse should be a valid social revision")
+    .commit(&mut fixture.state)
+    .expect("collapsed relationship should persist");
+
+    assert!(
+        find_pending_disclosure_sources(&fixture.state, contact).is_empty(),
+        "historical establishment provenance must not keep a dead channel actionable"
+    );
+    let error = match validate_contact_disclosure(&fixture.state, contact, source) {
+        Ok(_) => panic!("a contact with no current sustaining relationship must not disclose"),
+        Err(error) => error,
+    };
+    assert_eq!(error, ContactError::RelationshipUnavailable(contact));
+    assert_eq!(
+        fixture
+            .state
+            .contacts()
+            .get_contact(contact)
+            .expect("dormant contact history should persist")
+            .status(),
+        ContactStatus::Active,
+        "relationship loss makes the channel unusable without rewriting contact history"
+    );
+
+    validate_set_relationship(
+        &fixture.state,
+        fixture.handler,
+        fixture.source,
+        relationship(45, 10),
+    )
+    .expect("restored social basis should validate")
+    .commit(&mut fixture.state)
+    .expect("restored social basis should persist");
+    assert_eq!(
+        find_pending_disclosure_sources(&fixture.state, contact),
+        vec![source],
+        "repairing the current relationship should make the still-active channel usable again"
+    );
+    validate_state(&fixture.state).expect("dormant and restored contact state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn pending_contact_sources_rank_observation_time_before_late_transfer_time() {
     let mut fixture = make_fixture(OrganizationKind::LawEnforcement);
     let contact = establish(&mut fixture);

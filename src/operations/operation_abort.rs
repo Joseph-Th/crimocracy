@@ -262,7 +262,7 @@ impl ValidatedOperationAbort {
             });
         }
         if let OperationAbortCause::ParticipantDetained(character) = self.cause
-            && !record.participants().contains(&character)
+            && !record.has_participant(character)
         {
             return Err(OperationError::InvalidAbortCause {
                 operation: self.operation,
@@ -402,16 +402,14 @@ fn resolve_abort_phase(
             Ok(OperationAbortPhase::InProgress)
         }
         (OperationStatus::InProgress, OperationAbortCause::ParticipantDetained(character))
-            if record.participants().contains(&character) =>
+            if record.has_participant(character) =>
         {
             Ok(OperationAbortPhase::InProgress)
         }
         (
             OperationStatus::AwaitingDecision,
             OperationAbortCause::ParticipantDetained(character),
-        ) if record.participants().contains(&character) => {
-            Ok(OperationAbortPhase::AwaitingDecision)
-        }
+        ) if record.has_participant(character) => Ok(OperationAbortPhase::AwaitingDecision),
         (OperationStatus::AwaitingDecision, OperationAbortCause::Decision(decision))
             if state.decisions.pending_for_operation(operation) == Some(decision) =>
         {

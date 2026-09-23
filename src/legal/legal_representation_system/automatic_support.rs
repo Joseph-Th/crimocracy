@@ -314,6 +314,9 @@ fn validate_best_usable_automatic_counsel(
         if contact.status() != ContactStatus::Active
             || contact.kind() != ContactKind::Legal
             || !crate::contacts::contact_system::are_channel_endpoints_available(state, contact)
+            || !crate::contacts::contact_system::has_current_contact_relationship_basis(
+                state, contact,
+            )
         {
             continue;
         }

@@ -71,7 +71,7 @@ impl ValidatedOperationResolution {
             .get_operation(self.plan.snapshot.operation)
             .expect("resolution plan operation must exist");
         let participant_count =
-            u32::try_from(operation.participants().len()).expect("participant count must fit u32");
+            u32::try_from(operation.participant_count()).expect("participant count must fit u32");
         budget.push((IdKind::Information, participant_count));
         if let Some(incident) = self.incident.as_ref() {
             budget.extend(incident.id_budget()?);

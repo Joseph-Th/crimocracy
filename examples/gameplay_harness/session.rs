@@ -909,6 +909,50 @@ pub(crate) fn run_initial_burglary(
         .get_opportunity(opportunity)
         .and_then(|record| record.valid_until())
         .map(|deadline| deadline.as_minutes());
+    let decision_minute = scenario.state.now().as_minutes();
+    let valid_until = metrics
+        .opening_opportunity_valid_until_minute
+        .expect("opening harness opportunity always has an authored deadline");
+    let burglary_duration = scenario
+        .registry
+        .get_operation(OperationKind::Burglary)
+        .execution()
+        .duration()
+        .as_minutes();
+    let surveillance_duration = scenario
+        .registry
+        .get_operation(OperationKind::Surveillance)
+        .execution()
+        .duration()
+        .as_minutes();
+    let scout_finishes = decision_minute
+        .saturating_add(1)
+        .saturating_add(u64::from(surveillance_duration));
+    metrics.opening_decision_minute = Some(decision_minute);
+    metrics.opening_opportunity_window_minutes = Some(valid_until.saturating_sub(decision_minute));
+    metrics.opening_burglary_duration_minutes = Some(burglary_duration);
+    metrics.opening_surveillance_duration_minutes = Some(surveillance_duration);
+    metrics.opening_scout_time_slack_minutes = Some(
+        i64::try_from(valid_until).expect("harness minute must fit i64")
+            - i64::try_from(scout_finishes).expect("harness minute must fit i64"),
+    );
+    if narrative {
+        let slack = metrics
+            .opening_scout_time_slack_minutes
+            .expect("opening choice-window slack was just captured");
+        println!(
+            "[CHOICE]  Opening window: {}m remain; burglary takes {}m; full casing takes {}m and would {} {}m before the score closes. Live postures are move now with a standing pre-entry abort, move now and accept a later police-response decision, scout first for actionable timing, or decline the score.",
+            valid_until.saturating_sub(decision_minute),
+            burglary_duration,
+            surveillance_duration,
+            if slack >= 0 {
+                "finish with"
+            } else {
+                "overrun by"
+            },
+            slack.unsigned_abs(),
+        );
+    }
     let Some(plan) = prepare_initial_burglary_plan(scenario, strategy, narrative, metrics)? else {
         return Ok(None);
     };

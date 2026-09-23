@@ -1116,6 +1116,62 @@ pub fn run_legal_foundation_check(registry: &Registry, detail: bool) -> Result<(
     Ok(())
 }
 
+/// Controlled player-visible proof that reconnaissance can create its own institutional heat.
+/// Select the authored CROWDED fixture rather than scanning for a favorable outcome: the treatment
+/// is a weak scout in a high-pressure district, and the acting RECON policy still sees only its
+/// own casing result plus whatever the standing police contact actually discloses.
+pub fn run_recon_self_heat_probe(
+    registry: &Registry,
+    seeds: EvaluationSeeds,
+    detail: bool,
+) -> Result<bool, Box<dyn Error>> {
+    let crowded_world = (0_u64..3)
+        .map(|offset| seeds.world.wrapping_add(offset))
+        .find(|seed| FixtureVariation::from_seed(*seed) == FixtureVariation::Crowded)
+        .expect("three consecutive seeds must contain the three authored fixture variations");
+    let probe_seeds = EvaluationSeeds::new(crowded_world, seeds.policy);
+    let metrics = play_session(
+        registry,
+        Strategy::Recon,
+        ScenarioProfile::GreenScout,
+        probe_seeds,
+        SessionRunMode::Batch,
+    )?;
+    validate_run_metrics(&metrics, false)?;
+    validate_strategy_evidence(ScenarioProfile::GreenScout, &metrics)?;
+
+    let demonstrated = metrics.variation == Some(FixtureVariation::Crowded)
+        && metrics.opening_scout.is_some()
+        && metrics.discovered_surveillance_information > 0
+        && metrics.contact_reads > 0
+        && metrics.opening_stood_down
+        && metrics.opening_standdown_reason == Some(OpeningStanddownReason::CasingRisk)
+        && metrics.opening_casing_assessment == Some(CasingAssessment::Active)
+        && metrics.burglary.is_none();
+    if !demonstrated {
+        return Err(format!(
+            "controlled reconnaissance self-heat treatment lost its player-visible consequence chain: {metrics:?}"
+        )
+        .into());
+    }
+
+    if detail {
+        println!(
+            "[SELF-HEAT] GREEN SCOUT / CROWDED: casing ended at minute {}, produced {} useful finding(s), exposed the scout enough to trigger {} police-contact read(s), and the contact confirmed an active file. RECON stood down before authorizing the burglary.",
+            metrics
+                .opening_scout_terminal_minute
+                .expect("demonstrated self-heat scout must have a terminal minute"),
+            metrics.discovered_surveillance_information,
+            metrics.contact_reads,
+        );
+        println!(
+            "[READ] Reconnaissance is not a free preview. Looking can create the same institutional pressure the player was trying to avoid, and the correct response can be to abandon an otherwise live score."
+        );
+    }
+
+    Ok(true)
+}
+
 pub fn run_strategy_batch(
     registry: &Registry,
     profile: ScenarioProfile,
@@ -1339,6 +1395,20 @@ pub fn persist_run_artifact(
         "property_realized_cash_cents": metrics.property_realized_cash_cents,
         "liquidation_minute": metrics.liquidation_minute,
     });
+    let opening_choice = serde_json::json!({
+        "decision_minute": metrics.opening_decision_minute,
+        "opportunity_window_minutes": metrics.opening_opportunity_window_minutes,
+        "burglary_duration_minutes": metrics.opening_burglary_duration_minutes,
+        "surveillance_duration_minutes": metrics.opening_surveillance_duration_minutes,
+        "scout_time_slack_minutes": metrics.opening_scout_time_slack_minutes,
+        "selected_posture": metrics.strategy.map(|strategy| strategy.label()),
+        "alternatives": [
+            "move now with standing pre-entry abort",
+            "move now and accept a later police-response decision",
+            "scout first for actionable timing",
+            "decline the score"
+        ],
+    });
     let information_and_legal = serde_json::json!({
         "opening_surveillance_information_count": metrics.discovered_surveillance_information,
         "planning_information_count": metrics.planning_information_count,
@@ -1440,6 +1510,7 @@ pub fn persist_run_artifact(
     });
     let player_visible = serde_json::json!({
         "operation": operation,
+        "opening_choice": opening_choice,
         "information_and_legal": information_and_legal,
         "personnel": personnel,
         "counterplay_and_custody": counterplay_and_custody,
@@ -1462,8 +1533,30 @@ pub fn run_opportunity_portfolio_probe(
     seeds: EvaluationSeeds,
     detail: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
-    let valid_until = Some(SimTime::from_minutes(180));
+    // Isolate portfolio scarcity from the NIGHT TRAP police shock. LATE PATROL keeps the
+    // immediate window operationally live, so the selected burglary holds the specialist for
+    // its authored duration instead of an early standing abort reopening the other score.
+    let mut scenario = build_scenario(registry, seeds, ScenarioProfile::LatePatrol)?;
+    let selected_at = SimTime::from_minutes(130);
+    let burglary_minutes = u64::from(
+        registry
+            .get_operation(OperationKind::Burglary)
+            .execution()
+            .duration()
+            .as_minutes(),
+    );
+    // Put the shared deadline just before the selected job releases the one entry specialist.
+    // Both opportunities are initially legal, but once one is chosen the other genuinely
+    // becomes unreachable through the same scarce specialist instead of being abandoned by
+    // harness fiat while there is still time to start it.
+    let deadline = SimTime::from_minutes(
+        selected_at
+            .as_minutes()
+            .checked_add(burglary_minutes)
+            .and_then(|minute| minute.checked_sub(5))
+            .expect("authored portfolio timing must not overflow"),
+    );
+    let valid_until = Some(deadline);
     let primary_opportunity = validate_discover_operation_opportunity(
         scenario.registry,
         &scenario.state,
@@ -1495,9 +1588,12 @@ pub fn run_opportunity_portfolio_probe(
     .commit(&mut scenario.state)?;
     if detail {
         println!(
-            "[PORTFOLIO] Two burglary opportunities are open until minute 180: {} (street rumor) and {} (direct, precise observation).",
+            "[PORTFOLIO] Two burglary opportunities are open until minute {} under the low-immediate-pressure LATE PATROL control: {} (street rumor) and {} (direct, precise observation). One entry specialist can start either at minute {}, but the {}m burglary keeps that specialist busy past the shared deadline, so only one score fits the window.",
+            deadline.as_minutes(),
             scenario.variation.target_name(),
             scenario.variation.alternate_target_name(),
+            selected_at.as_minutes(),
+            burglary_minutes,
         );
     }
 
@@ -1512,7 +1608,7 @@ pub fn run_opportunity_portfolio_probe(
         Strategy::Rush,
         target,
         &title,
-        SimTime::from_minutes(130),
+        selected_at,
         intelligence,
         entry_specialist,
     )?;
@@ -1526,12 +1622,15 @@ pub fn run_opportunity_portfolio_probe(
     };
     run_until_operation_terminal(&mut scenario, selected_operation, false, &mut metrics)?;
     metrics.burglary_terminal_minute = Some(scenario.state.now().as_minutes());
-    run_until(
-        &mut scenario,
-        SimTime::from_minutes(181),
-        false,
-        &mut metrics,
-    )?;
+    let terminal_minute = metrics
+        .burglary_terminal_minute
+        .expect("selected portfolio operation just reached terminal");
+    if terminal_minute <= deadline.as_minutes() {
+        return Err(
+            "portfolio probe no longer proves scarcity: selected job released its specialist before the deferred opportunity expired"
+                .into(),
+        );
+    }
     let selected_operation_record = scenario
         .state
         .operations()
@@ -1625,9 +1724,11 @@ pub fn run_opportunity_portfolio_probe(
     }
     if detail {
         println!(
-            "[PORTFOLIO] Selected {} from player-visible source quality, converted it into {}, left the weaker opportunity to expire, and dismissed a decoy through the canonical lifecycle.",
+            "[PORTFOLIO] Selected {} from player-visible source quality, converted it into {}, and kept the entry specialist occupied through minute {} while the weaker opportunity expired at minute {}. The lost score is a real time/capacity cost, not arbitrary harness inaction. A later decoy was dismissed through the canonical lifecycle.",
             scenario.variation.alternate_target_name(),
             terminal_label(&metrics),
+            terminal_minute,
+            deadline.as_minutes(),
         );
     }
     Ok(())

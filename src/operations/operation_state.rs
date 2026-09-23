@@ -118,7 +118,7 @@ impl OperationState {
                 record.status(),
                 OperationStatus::Completed | OperationStatus::Aborted
             ) {
-                for participant in record.participants() {
+                for participant in record.participant_ids() {
                     self.active_by_participant
                         .entry(participant)
                         .or_default()
@@ -439,7 +439,7 @@ impl OperationState {
             .entry(record.responsible_organization())
             .or_default()
             .insert(id);
-        for participant in record.participants() {
+        for participant in record.participant_ids() {
             self.active_by_participant
                 .entry(participant)
                 .or_default()
@@ -836,7 +836,7 @@ impl OperationState {
                 .expect("validated operation disappeared before status commit");
             (
                 record.status(),
-                record.participants(),
+                record.participant_ids().collect::<Vec<_>>(),
                 record.completion_deadline(),
             )
         };

@@ -62,6 +62,8 @@ pub enum LegalRepresentationError {
     },
     #[error("institutional contact {0} is not a legal-services channel")]
     ContactNotLegal(ContactId),
+    #[error("institutional contact {0} no longer has a usable current relationship")]
+    ContactRelationshipUnavailable(ContactId),
     #[error("contact handler {0} does not exist")]
     MissingHandler(CharacterId),
     #[error("contact handler {handler} is not available to sponsor {sponsor}")]
@@ -438,6 +440,11 @@ fn validate_representation_dependencies(
     }
     if contact.kind() != ContactKind::Legal {
         return Err(LegalRepresentationError::ContactNotLegal(draft.contact));
+    }
+    if !crate::contacts::contact_system::has_current_contact_relationship_basis(state, contact) {
+        return Err(LegalRepresentationError::ContactRelationshipUnavailable(
+            draft.contact,
+        ));
     }
 
     let handler = state

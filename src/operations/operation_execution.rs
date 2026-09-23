@@ -6,7 +6,9 @@ mod resolution_commit;
 mod resolution_effects;
 mod resolution_factors;
 
-use narrative::{build_after_action_summary, outcome_label};
+#[cfg(test)]
+use narrative::build_after_action_summary;
+use narrative::{build_operation_after_action_summary, outcome_label};
 pub(crate) use resolution_commit::validate_operation_resolution_plan;
 
 pub(crate) use resolution_factors::{
@@ -481,7 +483,8 @@ fn compose_after_action_summary(
     context: AfterActionNarrativeContext<'_>,
 ) -> String {
     let mut summary = format!("{}: ", record.title());
-    summary.push_str(&build_after_action_summary(
+    summary.push_str(&build_operation_after_action_summary(
+        record.kind(),
         context.objective_outcome,
         context.tactical_outcome,
         context.factors,

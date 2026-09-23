@@ -97,6 +97,56 @@ fn record_known_witness_status(
     .expect("typed witness-status knowledge should commit");
 }
 
+#[test]
+fn achieved_surveillance_after_action_leads_with_findings_not_missing_recon_boilerplate() {
+    let factors = OperationResolutionFactors {
+        role_capability_average: Rating::try_new(90).expect("fixture rating should be valid"),
+        leader_capability: Some(Rating::try_new(90).expect("fixture rating should be valid")),
+        intelligence_quality: Rating::try_new(0).expect("fixture rating should be valid"),
+        intelligence_adjustment: 0,
+        intelligence_topics_covered: 0,
+        intelligence_topics_relevant: 5,
+        target_police_presence: Some(
+            Rating::try_new(20).expect("fixture police presence should be valid"),
+        ),
+        police_response_arrived: false,
+        approach_adjustment: -5,
+        business_fear_adjustment: 0,
+        time_pressure: 0,
+        variance: 0,
+    };
+    let summary = build_operation_after_action_summary(
+        OperationKind::Surveillance,
+        OperationObjectiveOutcome::Achieved,
+        OperationObjectiveOutcome::Achieved,
+        factors,
+        OperationExposureLevel::None,
+        65,
+        &[
+            InformationTopic::Personnel,
+            InformationTopic::Schedule,
+            InformationTopic::PoliceActivity,
+        ],
+    );
+
+    assert!(!summary.contains("Planning intelligence covered"));
+    assert!(!summary.contains("Missing usable planning intelligence"));
+
+    let partial = build_operation_after_action_summary(
+        OperationKind::Surveillance,
+        OperationObjectiveOutcome::Partial,
+        OperationObjectiveOutcome::Partial,
+        factors,
+        OperationExposureLevel::Trace,
+        65,
+        &[InformationTopic::Personnel],
+    );
+    assert!(
+        partial.contains("Planning intelligence covered 0 of 5 relevant areas"),
+        "when the scout underperforms, missing planning information remains useful causal feedback"
+    );
+}
+
 fn record_known_detention_status(
     state: &mut AppState,
     organization: OrganizationId,

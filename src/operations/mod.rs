@@ -901,6 +901,29 @@ impl OperationRecord {
         participants
     }
 
+    /// Allocation-free participant traversal for order-insensitive canonical runtime work.
+    /// Authorization guarantees one character cannot occupy two distinct roles; the leader may
+    /// also fill one role, so filter that one duplicate from the role values. Callers whose
+    /// observable result depends on participant ordering must use the sorted participant set.
+    pub(crate) fn participant_ids(&self) -> impl Iterator<Item = CharacterId> + '_ {
+        let leader = self.command.leader;
+        std::iter::once(leader).chain(
+            self.command
+                .roles
+                .values()
+                .copied()
+                .filter(move |participant| *participant != leader),
+        )
+    }
+
+    pub(crate) fn has_participant(&self, character: CharacterId) -> bool {
+        self.command.leader == character || self.command.roles.values().any(|id| *id == character)
+    }
+
+    pub(crate) fn participant_count(&self) -> usize {
+        self.participant_ids().count()
+    }
+
     pub fn intelligence(&self) -> &BTreeSet<InformationId> {
         &self.command.intelligence
     }

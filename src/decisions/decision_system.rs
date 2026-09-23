@@ -211,7 +211,7 @@ impl ValidatedOperationDecisionCancellation {
         if operation.status() != OperationStatus::AwaitingDecision
             || state.decisions.pending_for_operation(self.operation) != Some(self.decision)
             || decision.context().operation() != Some(self.operation)
-            || !operation.participants().contains(&self.character)
+            || !operation.has_participant(self.character)
         {
             return Err(DecisionError::InvalidDetentionCancellation {
                 decision: self.decision,
@@ -253,7 +253,7 @@ pub(crate) fn validate_cancel_operation_decision_for_detention(
         .decisions
         .get_decision(decision_id)
         .ok_or(DecisionError::MissingDecision(decision_id))?;
-    if !operation_record.participants().contains(&character)
+    if !operation_record.has_participant(character)
         || decision.context().operation() != Some(operation)
     {
         return Err(DecisionError::InvalidDetentionCancellation {

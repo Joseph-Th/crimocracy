@@ -776,6 +776,138 @@ fn retain(
     .expect("legal representation should commit")
 }
 
+#[test]
+fn legal_retainer_rejects_contact_whose_current_relationship_basis_collapsed() {
+    let mut fx = fixture();
+    validate_set_relationship(
+        &fx.state,
+        fx.handler,
+        fx.counsel,
+        RelationshipDimensions::zero(),
+    )
+    .expect("relationship collapse should validate")
+    .commit(&mut fx.state)
+    .expect("relationship collapse should commit");
+
+    let error = match validate_retain_legal_representation(
+        &fx.state,
+        representation_draft(&fx, 12_000, None),
+    ) {
+        Ok(_) => panic!("a dormant legal contact must not support a new retainer"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        LegalRepresentationError::ContactRelationshipUnavailable(fx.contact)
+    );
+    assert!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(fx.arrest)
+            .is_none()
+    );
+    validate_state(&fx.state).expect("dormant contact state should remain valid");
+    validate_invariants(&fx.state);
+}
+
+#[test]
+fn held_legal_retainer_token_rechecks_current_contact_relationship_before_payment() {
+    let mut fx = fixture();
+    let payer_before = fx
+        .state
+        .finance()
+        .get_account(fx.payer)
+        .expect("payer should persist")
+        .balance();
+    let validated =
+        validate_retain_legal_representation(&fx.state, representation_draft(&fx, 12_000, None))
+            .expect("retainer should validate while the contact relationship is live");
+
+    validate_set_relationship(
+        &fx.state,
+        fx.handler,
+        fx.counsel,
+        RelationshipDimensions::zero(),
+    )
+    .expect("relationship collapse should validate")
+    .commit(&mut fx.state)
+    .expect("relationship collapse should commit");
+
+    let error = validated
+        .commit(&mut fx.state)
+        .expect_err("held retainer token must recheck live contact usability");
+    assert_eq!(
+        error,
+        LegalRepresentationError::ContactRelationshipUnavailable(fx.contact)
+    );
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(fx.payer)
+            .expect("payer should persist")
+            .balance(),
+        payer_before,
+        "relationship staleness must be detected before payment mutation"
+    );
+    assert!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(fx.arrest)
+            .is_none()
+    );
+    validate_state(&fx.state).expect("rejected held retainer should leave valid state");
+    validate_invariants(&fx.state);
+}
+
+#[test]
+fn automatic_legal_support_treats_dormant_contact_as_unavailable() {
+    let mut fx = fixture();
+    validate_set_policy(
+        &fx.registry,
+        &fx.state,
+        fx.sponsor,
+        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+    )
+    .expect("automatic legal-support policy should validate")
+    .commit(&fx.registry, &mut fx.state)
+    .expect("automatic legal-support policy should commit");
+    let payer_before = fx
+        .state
+        .finance()
+        .get_account(fx.payer)
+        .expect("payer should persist")
+        .balance();
+    validate_set_relationship(
+        &fx.state,
+        fx.handler,
+        fx.counsel,
+        RelationshipDimensions::zero(),
+    )
+    .expect("relationship collapse should validate")
+    .commit(&mut fx.state)
+    .expect("relationship collapse should commit");
+
+    let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
+        .expect("a dormant contact is ordinary counsel unavailability");
+    assert!(outcome.retained.is_empty());
+    assert_eq!(
+        fx.state
+            .finance()
+            .get_account(fx.payer)
+            .expect("payer should persist")
+            .balance(),
+        payer_before
+    );
+    assert!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(fx.arrest)
+            .is_none()
+    );
+    validate_state(&fx.state).expect("dormant automatic-support state should remain valid");
+    validate_invariants(&fx.state);
+}
+
 fn arrest_draft_for_character(
     fixture: &mut Fixture,
     character: CharacterId,

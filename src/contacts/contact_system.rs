@@ -69,6 +69,8 @@ pub enum ContactError {
     MissingContactRecord(ContactId),
     #[error("institutional contact {0} is not active")]
     ContactNotActive(ContactId),
+    #[error("institutional contact {0} no longer has a usable current relationship")]
+    RelationshipUnavailable(ContactId),
     #[error(
         "institutional contact {contact} supports active legal representation {representation}"
     )]
@@ -525,6 +527,9 @@ fn validate_disclosure_source(
     if !are_channel_endpoints_available(state, contact) {
         return Err(detention_error(state, contact));
     }
+    if !has_current_contact_relationship_basis(state, contact) {
+        return Err(ContactError::RelationshipUnavailable(contact.id()));
+    }
     let information = state
         .intelligence
         .get_information(source)
@@ -560,7 +565,10 @@ pub fn find_pending_disclosure_sources(
     let Some(record) = state.contacts().get_contact(contact) else {
         return Vec::new();
     };
-    if record.status() != ContactStatus::Active || !are_channel_endpoints_available(state, record) {
+    if record.status() != ContactStatus::Active
+        || !are_channel_endpoints_available(state, record)
+        || !has_current_contact_relationship_basis(state, record)
+    {
         return Vec::new();
     }
     let topics = disclosable_topics(record.kind());
@@ -721,6 +729,23 @@ pub(crate) fn has_contact_relationship_basis(dimensions: RelationshipDimensions)
     ]
     .into_iter()
     .any(|level| level.value() > 0)
+}
+
+/// Whether the contact still has a live social basis in either direction. Establishment stores
+/// relationship snapshots as historical provenance, but those snapshots must not grant permanent
+/// future access after both current social edges lose every sustaining dimension.
+pub(crate) fn has_current_contact_relationship_basis(
+    state: &AppState,
+    contact: &InstitutionalContactRecord,
+) -> bool {
+    state
+        .social()
+        .get_relationship(contact.handler(), contact.contact())
+        .is_some_and(|relationship| has_contact_relationship_basis(relationship.dimensions()))
+        || state
+            .social()
+            .get_relationship(contact.contact(), contact.handler())
+            .is_some_and(|relationship| has_contact_relationship_basis(relationship.dimensions()))
 }
 
 #[cfg(test)]

@@ -5,12 +5,17 @@
 use std::error::Error;
 
 use crimocracy::core::entity::EntityRef;
-use crimocracy::core::id::BusinessId;
+use crimocracy::core::id::{BusinessId, InformationId};
 use crimocracy::core::time::SimDuration;
 use crimocracy::economy::BusinessEconomyDraft;
 use crimocracy::economy::business_economy_system::validate_establish_business_economy;
 use crimocracy::finance::finance_system::insert_account;
 use crimocracy::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+use crimocracy::intelligence::intelligence_system::validate_record_information;
+use crimocracy::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
+};
 use crimocracy::operations::operation_system::validate_authorize_operation;
 use crimocracy::operations::{
     OperationApproach, OperationConstraint, OperationDraft, OperationExposureLevel, OperationKind,
@@ -22,7 +27,7 @@ use crimocracy::reputation::reputation_system::resolve_score;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    EvaluationSeeds, RunMetrics, Scenario, ScenarioProfile, build_scenario,
+    EvaluationSeeds, RunMetrics, Scenario, ScenarioProfile, build_scenario, format_cents,
     run_until_operation_terminal, validate_harness_state,
 };
 
@@ -34,6 +39,7 @@ struct BranchEvidence {
     second_outcome: OperationObjectiveOutcome,
     second_margin: i16,
     second_business_fear_adjustment: i8,
+    second_cash_cents: i64,
     second_summary: String,
 }
 
@@ -53,8 +59,30 @@ pub fn run_violence_leverage_probe(
     let alternate_target = scenario.alternate_target;
     establish_probe_business_economy(&mut scenario, target)?;
     establish_probe_business_economy(&mut scenario, alternate_target)?;
-    let covert = run_branch(scenario.clone(), OperationApproach::Covert)?;
-    let violent = run_branch(scenario, OperationApproach::Violent)?;
+    let follow_up_intelligence = validate_record_information(
+        &scenario.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(scenario.player),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: Some(EntityRef::Character(scenario.scout)),
+            subject: EntityRef::Business(alternate_target),
+            observed_at: scenario.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: format!(
+                "{} has a directly observed staffing pattern useful for a collection attempt.",
+                scenario.variation.alternate_target_name()
+            ),
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    let covert = run_branch(
+        scenario.clone(),
+        OperationApproach::Covert,
+        follow_up_intelligence,
+    )?;
+    let violent = run_branch(scenario, OperationApproach::Violent, follow_up_intelligence)?;
     let baseline = registry.reputation().baseline();
 
     let visible_violence_created_fear =
@@ -63,7 +91,10 @@ pub fn run_violence_leverage_probe(
         && covert.second_business_fear_adjustment == 0
         && violent.second_margin > covert.second_margin
         && violent.second_margin
-            == covert.second_margin - i16::from(violent.second_business_fear_adjustment);
+            == covert.second_margin - i16::from(violent.second_business_fear_adjustment)
+        && covert.second_outcome == OperationObjectiveOutcome::Partial
+        && violent.second_outcome == OperationObjectiveOutcome::Achieved
+        && violent.second_cash_cents > covert.second_cash_cents;
     if !visible_violence_created_fear || !fear_changed_later_intimidation {
         return Err(format!(
             "violence/reputation treatment lost its causal contrast: covert={covert:?}, violent={violent:?}"
@@ -80,11 +111,13 @@ pub fn run_violence_leverage_probe(
             violent.first_exposure,
         );
         println!(
-            "[FOLLOW-UP] The same opportunistic collection under a short deadline resolved {:?} at margin {} with neutral standing versus {:?} at margin {} after visible violence. The persisted fear adjustment improved the later margin by {} point(s). Whether that crosses an outcome threshold depends on the rest of the situation; no exact standing score informed the decision.",
+            "[FOLLOW-UP] The same prepared collection under a genuinely tight deadline resolved {:?} at margin {} for {} with neutral standing versus {:?} at margin {} for {} after visible violence. The persisted fear adjustment improved the later margin by {} point(s), enough to cross the achieved threshold in this borderline situation. No exact standing score informed the decision.",
             covert.second_outcome,
             covert.second_margin,
+            format_cents(covert.second_cash_cents),
             violent.second_outcome,
             violent.second_margin,
+            format_cents(violent.second_cash_cents),
             -violent.second_business_fear_adjustment,
         );
         println!("[LEARN] {}", violent.second_summary);
@@ -133,6 +166,7 @@ fn establish_probe_business_economy(
 fn run_branch(
     mut scenario: Scenario<'_>,
     first_approach: OperationApproach,
+    follow_up_intelligence: InformationId,
 ) -> Result<BranchEvidence, Box<dyn Error>> {
     let first = validate_authorize_operation(
         scenario.registry,
@@ -186,11 +220,16 @@ fn run_branch(
             objective: OperationObjective::ObtainCash {
                 target: EntityRef::Business(scenario.alternate_target),
             },
-            approach: OperationApproach::Opportunistic,
+            // Use the coercive posture this reputation is meant to support. It is one point
+            // easier than Opportunistic but carries more exposure, placing the neutral branch
+            // at margin 4 and letting the existing one-point fear edge decide the threshold.
+            approach: OperationApproach::Intimidating,
             roles: BTreeMap::from([(RoleKind::Coordinator, scenario.lieutenant)]),
-            intelligence: BTreeSet::new(),
+            intelligence: BTreeSet::from([follow_up_intelligence]),
             constraints: vec![OperationConstraint::CompleteBy(
-                second_scheduled_for + SimDuration::from_minutes(14),
+                // One precise relevant fact offsets most of this compression, leaving a
+                // borderline collection where the one-point fear edge can actually matter.
+                second_scheduled_for + SimDuration::from_minutes(13),
             )],
             contingencies: Vec::new(),
             scheduled_for: second_scheduled_for,
@@ -207,6 +246,10 @@ fn run_branch(
     let second_outcome = second_resolution.objective_outcome();
     let second_margin = second_resolution.execution_margin();
     let second_business_fear_adjustment = second_resolution.factors().business_fear_adjustment();
+    let second_cash_cents = second_resolution
+        .cash_proceeds()
+        .map(|proceeds| proceeds.amount().cents())
+        .unwrap_or_default();
     let second_summary = scenario
         .state
         .intelligence()
@@ -223,6 +266,7 @@ fn run_branch(
         second_outcome,
         second_margin,
         second_business_fear_adjustment,
+        second_cash_cents,
         second_summary,
     })
 }

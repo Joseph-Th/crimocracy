@@ -2,7 +2,7 @@
 
 use super::OperationResolutionFactors;
 use crate::intelligence::InformationTopic;
-use crate::operations::{OperationExposureLevel, OperationObjectiveOutcome};
+use crate::operations::{OperationExposureLevel, OperationKind, OperationObjectiveOutcome};
 use crate::world::QualitativeBand;
 
 /// Composes the after-action narrative from the resolution factors. The report leads with the
@@ -13,6 +13,7 @@ use crate::world::QualitativeBand;
 /// thin planning intelligence. Practical blockers may make the effective objective fail even after
 /// tactical success, so execution commentary follows the tactical outcome while the headline keeps
 /// the effective objective result. Luck commentary is kept only when it explains tactical loss.
+#[cfg(test)]
 pub(super) fn build_after_action_summary(
     outcome: OperationObjectiveOutcome,
     tactical_outcome: OperationObjectiveOutcome,
@@ -21,10 +22,57 @@ pub(super) fn build_after_action_summary(
     high_police_presence_threshold: u8,
     missing_intelligence_topics: &[InformationTopic],
 ) -> String {
+    build_after_action_summary_with_intelligence_context(
+        outcome,
+        tactical_outcome,
+        factors,
+        exposure,
+        high_police_presence_threshold,
+        missing_intelligence_topics,
+        true,
+    )
+}
+
+/// Successful surveillance should lead with what the scout learned, not generic boilerplate
+/// listing the information the scout was sent out to obtain. Thin planning intelligence still
+/// matters when surveillance itself underperforms, where it can explain a partial or failed job.
+pub(super) fn build_operation_after_action_summary(
+    kind: OperationKind,
+    outcome: OperationObjectiveOutcome,
+    tactical_outcome: OperationObjectiveOutcome,
+    factors: OperationResolutionFactors,
+    exposure: OperationExposureLevel,
+    high_police_presence_threshold: u8,
+    missing_intelligence_topics: &[InformationTopic],
+) -> String {
+    let include_intelligence_context = kind != OperationKind::Surveillance
+        || tactical_outcome != OperationObjectiveOutcome::Achieved;
+    build_after_action_summary_with_intelligence_context(
+        outcome,
+        tactical_outcome,
+        factors,
+        exposure,
+        high_police_presence_threshold,
+        missing_intelligence_topics,
+        include_intelligence_context,
+    )
+}
+
+fn build_after_action_summary_with_intelligence_context(
+    outcome: OperationObjectiveOutcome,
+    tactical_outcome: OperationObjectiveOutcome,
+    factors: OperationResolutionFactors,
+    exposure: OperationExposureLevel,
+    high_police_presence_threshold: u8,
+    missing_intelligence_topics: &[InformationTopic],
+    include_intelligence_context: bool,
+) -> String {
     let mut parts = vec![format!("Objective {}.", outcome_label(outcome))];
     push_execution_quality(&mut parts, tactical_outcome, &factors);
     push_police_context(&mut parts, &factors, high_police_presence_threshold);
-    push_intelligence_context(&mut parts, &factors, missing_intelligence_topics);
+    if include_intelligence_context {
+        push_intelligence_context(&mut parts, &factors, missing_intelligence_topics);
+    }
     push_execution_modifiers(&mut parts, &factors);
     push_variance_context(&mut parts, tactical_outcome, &factors);
     push_exposure_context(&mut parts, exposure);

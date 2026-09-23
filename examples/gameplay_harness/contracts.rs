@@ -192,6 +192,21 @@ pub fn validate_sensitivity_profile_coverage(
                 });
             }
         }
+        ScenarioProfile::GreenScout => {
+            let risk_standdowns = recon
+                .opening_standdowns
+                .saturating_sub(recon.opening_timing_standdowns);
+            let scout_skill_has_visible_cost = recon.opening_scout_findings_total > 0
+                && recon.opening_timing_standdowns == 0
+                && risk_standdowns > 0
+                && recon.unresolved == 0;
+            if !scout_skill_has_visible_cost {
+                return Err(HarnessContractError::MissingBatchEvidence {
+                    profile,
+                    evidence: "the green-scout treatment must keep the burglary crew at baseline while showing that weaker reconnaissance can still learn useful facts yet force at least one risk-driven stand-down; the ordinary opportunity window must remain open so skill, not timing, explains the restraint",
+                });
+            }
+        }
         ScenarioProfile::NightTrap | ScenarioProfile::VeteranCrew | ScenarioProfile::ThinCrew => {}
     }
     Ok(())
@@ -311,7 +326,10 @@ pub fn validate_batch_strategy_coverage(
 ) -> Result<(), HarnessContractError> {
     let expects_night_trap_pressure = matches!(
         profile,
-        ScenarioProfile::NightTrap | ScenarioProfile::VeteranCrew | ScenarioProfile::ThinCrew
+        ScenarioProfile::NightTrap
+            | ScenarioProfile::VeteranCrew
+            | ScenarioProfile::ThinCrew
+            | ScenarioProfile::GreenScout
     );
     if samples < MIN_SAMPLES_FOR_VARIATION_CONTRACT || !expects_night_trap_pressure {
         return Ok(());
