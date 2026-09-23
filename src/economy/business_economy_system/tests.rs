@@ -2709,6 +2709,47 @@ fn autonomous_business_recovery_never_overrides_player_owned_suspension() {
 }
 
 #[test]
+fn autonomous_business_recovery_skips_unschedulable_terminal_horizon() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    validate_suspend_business_economy(&fixture.state, fixture.business)
+        .expect("ordinary business should suspend")
+        .commit(&mut fixture.state)
+        .expect("ordinary business suspension should commit");
+    let last_day_boundary = u64::MAX - (u64::MAX % crate::core::time::DAY_MINUTES);
+    fixture
+        .state
+        .set_now_for_test(SimTime::from_minutes(last_day_boundary));
+    let before = bincode::serialize(&fixture.state).expect("fixture state should serialize");
+
+    let direct_error =
+        match validate_resume_business_economy(&registry, &fixture.state, fixture.business) {
+            Ok(_) => panic!("direct resume must still report the unrepresentable recurrence"),
+            Err(error) => error,
+        };
+    assert_eq!(direct_error, BusinessEconomyError::SimulationTimeOverflow);
+    let resumed = apply_due_autonomous_business_lifecycle(&registry, &mut fixture.state)
+        .expect("terminal clock capacity is a valid no-action autonomous state");
+    assert!(resumed.is_empty());
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("terminal state should serialize"),
+        before,
+        "autonomous recovery must not mutate a business whose next cycle cannot be represented"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .expect("suspended business economy should persist")
+            .status(),
+        BusinessOperatingStatus::Suspended
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn tick_surfaces_autonomous_business_recovery() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture();

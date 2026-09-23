@@ -110,7 +110,12 @@ pub(crate) fn apply_automatic_legal_support(
     id_budget.extend(endings.iter().flat_map(
         crate::legal::legal_representation_system::ValidatedLegalRepresentationEnd::id_budget,
     ));
-    state.ids.reserve_many(&id_budget)?;
+    if state.ids.reserve_many(&id_budget).is_err() {
+        // Automatic support is one fully planned governance cohort. At a finite persistence rail,
+        // conclude and retain nothing rather than letting a canonical tick fail after earlier
+        // phases have committed. Direct retention/end commands keep their typed exhaustion errors.
+        return Ok(AutomaticLegalSupportOutcome::default());
+    }
 
     for ending in endings {
         ending.commit_preflighted(state);
@@ -142,17 +147,16 @@ pub(crate) fn apply_automatic_legal_support(
 fn validate_inactive_automatic_representation_endings(
     state: &AppState,
 ) -> Result<Vec<super::ValidatedLegalRepresentationEnd>, LegalRepresentationError> {
-    let concluded: Vec<LegalRepresentationId> = state
-        .legal
-        .active_automatic_policy_representations()
-        .filter(|record| {
-            state
-                .legal
-                .get_arrest(record.arrest())
-                .is_none_or(|arrest| arrest.status() != ArrestStatus::Detained)
-        })
-        .map(|record| record.id())
-        .collect();
+    let mut concluded = Vec::new();
+    for record in state.legal.active_automatic_policy_representations() {
+        let arrest = state
+            .legal
+            .get_arrest(record.arrest())
+            .ok_or(LegalRepresentationError::MissingArrest(record.arrest()))?;
+        if arrest.status() != ArrestStatus::Detained {
+            concluded.push(record.id());
+        }
+    }
     concluded
         .into_iter()
         .map(|representation| {
@@ -181,7 +185,9 @@ fn plan_automatic_legal_support_retentions(
         else {
             continue;
         };
-        let Some(counsel) = resolve_best_usable_automatic_counsel(state, candidate)? else {
+        let Some(counsel) =
+            resolve_best_usable_automatic_counsel(state, candidate, fee, &projection)?
+        else {
             continue;
         };
 
@@ -382,6 +388,19 @@ fn resolve_automatic_support_payer_accounts(
 }
 
 impl AutomaticSupportFinanceProjection {
+    fn account_has_posting_headroom(
+        &self,
+        account: &crate::finance::FinancialAccountRecord,
+    ) -> bool {
+        automatic_account_has_posting_headroom(
+            account.version(),
+            self.account_advances
+                .get(&account.id())
+                .copied()
+                .unwrap_or(0),
+        )
+    }
+
     fn balance(&self, account: &crate::finance::FinancialAccountRecord) -> Money {
         self.balances
             .get(&account.id())
@@ -390,6 +409,9 @@ impl AutomaticSupportFinanceProjection {
     }
 
     fn spendable_balance(&self, account: &crate::finance::FinancialAccountRecord) -> Money {
+        if !self.account_has_posting_headroom(account) {
+            return Money::ZERO;
+        }
         let balance = self.balance(account);
         if account.kind().is_liquid() && balance > Money::ZERO {
             balance
@@ -492,9 +514,17 @@ impl AutomaticSupportFinanceProjection {
     }
 }
 
+pub(super) fn automatic_account_has_posting_headroom(version: u32, planned_advances: u32) -> bool {
+    version
+        .checked_add(planned_advances)
+        .is_some_and(|projected_version| projected_version < u32::MAX)
+}
+
 fn resolve_best_usable_automatic_counsel(
     state: &AppState,
     candidate: AutomaticLegalSupportCandidate,
+    fee: Money,
+    projection: &AutomaticSupportFinanceProjection,
 ) -> Result<Option<AutomaticCounselSelection>, LegalRepresentationError> {
     // Legal contacts are broader than retained counsel: prosecutors and legal authorities also
     // expose Legal channels. Rank every currently viable LegalServices lawyer by actual legal
@@ -527,7 +557,10 @@ fn resolve_best_usable_automatic_counsel(
         let Some(provider_account) = state
             .finance
             .accounts_for(FinancialOwner::Organization(contact.institution()))
-            .find(|account| account.kind() == AccountKind::LegitimateOperating)
+            .filter(|account| account.kind() == AccountKind::LegitimateOperating)
+            .filter(|account| projection.account_has_posting_headroom(account))
+            .filter(|account| projection.balance(account).checked_add(fee).is_some())
+            .min_by_key(|account| account.id())
         else {
             continue;
         };

@@ -53,6 +53,18 @@ pub(super) fn validate_enterprise_environment(
     Ok(())
 }
 
+pub(super) fn validate_enterprise_account_posting_headroom(
+    state: &AppState,
+    account: FinancialAccountId,
+) -> Result<(), EnterpriseError> {
+    let account = state
+        .finance
+        .get_account(account)
+        .ok_or(EnterpriseError::MissingAccount(account))?;
+    ensure_version_can_advance(account.version(), "financial account")?;
+    Ok(())
+}
+
 pub(crate) fn can_authority_cover_location(
     scope: ResponsibilityScope,
     location: EnterpriseLocation,
@@ -554,13 +566,15 @@ fn is_enterprise_inquiry_evidence(
     evidence: &crate::legal::EvidenceRecord,
     enterprise: EnterpriseId,
 ) -> bool {
-    let Some(_record) = state.enterprises.get_enterprise(enterprise) else {
-        return false;
-    };
     state
+        .enterprises
+        .get_enterprise(enterprise)
+        .expect("enterprise inquiry evidence must reference a persisted enterprise");
+    let owner = state
         .world
         .get_organization(investigation.owner())
-        .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
+        .expect("persisted investigation must reference its owning organization");
+    owner.kind() == OrganizationKind::LawEnforcement
         && investigation
             .subjects()
             .contains(&EntityRef::Enterprise(enterprise))

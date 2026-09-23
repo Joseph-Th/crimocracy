@@ -1,5 +1,6 @@
 //! Enterprise establishment validation and atomic commit.
 
+use super::support::validate_enterprise_account_posting_headroom;
 use super::*;
 
 pub struct ValidatedEnterpriseEstablishment {
@@ -66,20 +67,27 @@ impl ValidatedEnterpriseEstablishment {
             &self.draft.supporting_businesses,
         )?;
         match &self.account_openings {
-            Some(openings) => validate_enterprise_accounts_with_planned_settlement(
-                state,
-                self.draft.organization,
-                self.draft.cash_account,
-                self.draft.settlement_account,
-                openings,
-            )?,
-            None => validate_enterprise_accounts(
-                state,
-                self.draft.organization,
-                self.draft.cash_account,
-                self.draft.settlement_account,
-                None,
-            )?,
+            Some(openings) => {
+                validate_enterprise_accounts_with_planned_settlement(
+                    state,
+                    self.draft.organization,
+                    self.draft.cash_account,
+                    self.draft.settlement_account,
+                    openings,
+                )?;
+                validate_enterprise_account_posting_headroom(state, self.draft.cash_account)?;
+            }
+            None => {
+                validate_enterprise_accounts(
+                    state,
+                    self.draft.organization,
+                    self.draft.cash_account,
+                    self.draft.settlement_account,
+                    None,
+                )?;
+                validate_enterprise_account_posting_headroom(state, self.draft.cash_account)?;
+                validate_enterprise_account_posting_headroom(state, self.draft.settlement_account)?;
+            }
         }
         let established_at = state.now();
         let next_cycle_at = established_at
@@ -172,20 +180,27 @@ fn validate_establish_enterprise_with_optional_openings(
         &draft.supporting_businesses,
     )?;
     match &account_openings {
-        Some(openings) => validate_enterprise_accounts_with_planned_settlement(
-            state,
-            draft.organization,
-            draft.cash_account,
-            draft.settlement_account,
-            openings,
-        )?,
-        None => validate_enterprise_accounts(
-            state,
-            draft.organization,
-            draft.cash_account,
-            draft.settlement_account,
-            None,
-        )?,
+        Some(openings) => {
+            validate_enterprise_accounts_with_planned_settlement(
+                state,
+                draft.organization,
+                draft.cash_account,
+                draft.settlement_account,
+                openings,
+            )?;
+            validate_enterprise_account_posting_headroom(state, draft.cash_account)?;
+        }
+        None => {
+            validate_enterprise_accounts(
+                state,
+                draft.organization,
+                draft.cash_account,
+                draft.settlement_account,
+                None,
+            )?;
+            validate_enterprise_account_posting_headroom(state, draft.cash_account)?;
+            validate_enterprise_account_posting_headroom(state, draft.settlement_account)?;
+        }
     }
     let cycle_duration = definition.economics().cycle();
     state

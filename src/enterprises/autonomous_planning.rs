@@ -26,8 +26,6 @@ pub(crate) enum AutonomousEnterpriseError {
     Finance(#[from] FinanceError),
     #[error(transparent)]
     Enterprise(#[from] EnterpriseError),
-    #[error("working-capital reservations overflowed for account {account}")]
-    WorkingCapitalOverflow { account: FinancialAccountId },
 }
 
 pub(crate) type ObservedDistrictPressure = BTreeMap<(OrganizationId, NeighborhoodId), u32>;
@@ -120,10 +118,19 @@ pub(crate) fn reserve_working_capital(
     account: FinancialAccountId,
     amount: Money,
 ) -> Result<(), AutonomousEnterpriseError> {
+    debug_assert!(
+        amount >= Money::ZERO,
+        "enterprise working-capital requirements must be nonnegative"
+    );
     let current = reservations.get(&account).copied().unwrap_or(Money::ZERO);
+    // This is a planning claim, not authoritative money. If many live rackets share one account,
+    // their combined runway can exceed i64 even though every enterprise and the account itself are
+    // individually valid. Saturating means "more reserved than any account can fund", which is
+    // exactly the only fact later candidate selection needs and avoids turning scale into a tick
+    // failure.
     let reserved = current
         .checked_add(amount)
-        .ok_or(AutonomousEnterpriseError::WorkingCapitalOverflow { account })?;
+        .unwrap_or(Money::from_cents(i64::MAX));
     reservations.insert(account, reserved);
     Ok(())
 }
@@ -132,6 +139,9 @@ pub(crate) fn available_working_capital(
     account: &FinancialAccountRecord,
     reservations: &BTreeMap<FinancialAccountId, Money>,
 ) -> Money {
+    if account.version() == u32::MAX {
+        return Money::ZERO;
+    }
     let reserved = reservations
         .get(&account.id())
         .copied()
@@ -143,4 +153,23 @@ pub(crate) fn available_working_capital(
     spendable
         .checked_sub(reserved)
         .expect("positive balance above a nonnegative reservation must subtract safely")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn working_capital_projection_saturates_when_shared_claims_exceed_money_range() {
+        let account = FinancialAccountId::from_raw(1);
+        let mut reservations = BTreeMap::new();
+        reserve_working_capital(&mut reservations, account, Money::from_cents(i64::MAX - 5))
+            .expect("first representable reservation should succeed");
+        reserve_working_capital(&mut reservations, account, Money::from_cents(10))
+            .expect("projection overflow should saturate rather than fail autonomous planning");
+        assert_eq!(
+            reservations.get(&account).copied(),
+            Some(Money::from_cents(i64::MAX))
+        );
+    }
 }

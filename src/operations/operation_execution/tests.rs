@@ -731,6 +731,33 @@ fn make_intelligence_operation_fixture_with_reports(
     (registry, state, operation)
 }
 
+#[test]
+fn canonical_tick_leaves_due_operation_authorized_when_police_response_ids_are_exhausted() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_business_operation_fixture(true);
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::PoliceResponse, u32::MAX);
+    let before_version = state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized operation should persist")
+        .version();
+
+    let outcome = run_tick(&registry, &mut state);
+    assert!(outcome.started_operations.is_empty());
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("terminally blocked operation should persist");
+    assert_eq!(record.status(), OperationStatus::Authorized);
+    assert_eq!(record.version(), before_version);
+    assert_eq!(record.police_response(), None);
+    assert!(state.legal().police_responses().next().is_none());
+    validate_state(&state).expect("terminal begin no-op should remain valid");
+    validate_invariants(&state);
+}
+
 fn make_exposed_business_operation_fixture(
     assign_jurisdiction: bool,
 ) -> (

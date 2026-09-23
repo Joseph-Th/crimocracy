@@ -1075,7 +1075,7 @@ fn investigator_assignment_information_id_exhaustion_is_atomic() {
 }
 
 #[test]
-fn autonomous_staffing_surfaces_allocator_failure_instead_of_erasing_the_case() {
+fn autonomous_staffing_allocator_exhaustion_is_terminal_noop_without_erasing_the_case() {
     let registry = build_registry();
     let mut state = AppState::new(0x1D_A070);
     let police = insert_organization(
@@ -1112,9 +1112,9 @@ fn autonomous_staffing_surfaces_allocator_failure_instead_of_erasing_the_case() 
     state
         .ids
         .set_next_raw_for_test(IdKind::Information, u32::MAX);
-    let error = apply_autonomous_investigator_staffing(&mut state)
-        .expect_err("autonomous staffing must surface its canonical allocation failure");
-    assert!(matches!(error, InvestigationError::IdExhaustion(_)));
+    let staffed = apply_autonomous_investigator_staffing(&mut state)
+        .expect("staffing allocator exhaustion is a terminal autonomous no-op");
+    assert!(staffed.is_empty());
     let record = state
         .legal()
         .get_investigation(investigation)
@@ -1127,7 +1127,7 @@ fn autonomous_staffing_surfaces_allocator_failure_instead_of_erasing_the_case() 
             .count(),
         0
     );
-    validate_state(&state).expect("failed autonomous staffing must leave state valid");
+    validate_state(&state).expect("terminally blocked autonomous staffing must leave state valid");
     validate_invariants(&state);
 }
 
@@ -1940,7 +1940,7 @@ fn autonomous_staffing_prioritizes_developed_case_over_creation_order() {
 }
 
 #[test]
-fn autonomous_investigator_staffing_batch_rejects_information_exhaustion_atomically() {
+fn autonomous_investigator_staffing_information_exhaustion_is_terminal_noop_atomically() {
     let registry = build_registry();
     let mut state = AppState::new(0x57AF_A70C);
     let police = insert_organization(
@@ -1991,15 +1991,9 @@ fn autonomous_investigator_staffing_batch_rejects_information_exhaustion_atomica
     let before =
         bincode::serialize(&state).expect("pre-exhaustion staffing state should serialize");
 
-    let error = apply_autonomous_investigator_staffing(&mut state)
-        .expect_err("two staffing assignments require both activity-knowledge IDs up front");
-    assert_eq!(
-        error,
-        InvestigationError::IdExhaustion(crate::core::id::IdExhaustionError::Exhausted {
-            kind: "information",
-            next: u32::MAX - 1,
-        })
-    );
+    let staffed = apply_autonomous_investigator_staffing(&mut state)
+        .expect("staffing knowledge exhaustion is a terminal autonomous no-op");
+    assert!(staffed.is_empty());
     assert_eq!(
         bincode::serialize(&state).expect("rejected staffing state should serialize"),
         before,
@@ -3487,7 +3481,7 @@ fn cold_case_decay_defers_originated_case_with_scheduled_work() {
 }
 
 #[test]
-fn cold_case_decay_surfaces_knowledge_id_exhaustion_without_partial_suspension() {
+fn cold_case_decay_knowledge_id_exhaustion_is_terminal_noop() {
     let registry = build_registry();
     let mut state = AppState::new(0xC01D_A70C);
     let police = insert_organization(
@@ -3584,9 +3578,9 @@ fn cold_case_decay_surfaces_knowledge_id_exhaustion_without_partial_suspension()
     state
         .ids
         .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX);
-    let error = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
-        .expect_err("cold-case decay must surface case-knowledge allocator exhaustion");
-    assert!(matches!(error, InvestigationError::IdExhaustion(_)));
+    let suspended = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+        .expect("cold-case knowledge exhaustion is a terminal autonomous no-op");
+    assert!(suspended.is_empty());
     let after = state
         .legal()
         .get_investigation(investigation)
@@ -3599,7 +3593,7 @@ fn cold_case_decay_surfaces_knowledge_id_exhaustion_without_partial_suspension()
 }
 
 #[test]
-fn cold_case_decay_batch_rejects_allocator_exhaustion_atomically() {
+fn cold_case_decay_allocator_exhaustion_is_terminal_noop_atomically() {
     let registry = build_registry();
     let mut state = AppState::new(0xC01D_BA7C);
     let police = insert_organization(
@@ -3651,15 +3645,9 @@ fn cold_case_decay_batch_rejects_allocator_exhaustion_atomically() {
     let before =
         bincode::serialize(&state).expect("pre-exhaustion cold-case state should serialize");
 
-    let error = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
-        .expect_err("two due shelves must reserve both knowledge IDs before mutation");
-    assert_eq!(
-        error,
-        InvestigationError::IdExhaustion(crate::core::id::IdExhaustionError::Exhausted {
-            kind: "information",
-            next: u32::MAX - 1,
-        })
-    );
+    let suspended = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+        .expect("cold-case knowledge exhaustion is a terminal autonomous no-op");
+    assert!(suspended.is_empty());
     assert_eq!(
         bincode::serialize(&state).expect("rejected cold-case state should serialize"),
         before,

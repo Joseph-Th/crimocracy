@@ -34,9 +34,7 @@ use crate::legal::{
     InvestigationDraft,
 };
 use crate::recruitment::RecruitmentApproach;
-use crate::recruitment::autonomous_recruitment::{
-    AutonomousRecruitmentError, apply_due_autonomous_recruitment,
-};
+use crate::recruitment::autonomous_recruitment::apply_due_autonomous_recruitment;
 use crate::recruitment::scoring::recruitment_relationship_support;
 use crate::reports::ReportKind;
 use crate::reputation::AudienceKind;
@@ -61,6 +59,116 @@ struct Fixture {
     incumbent: CharacterId,
     recruiter: CharacterId,
     candidate: CharacterId,
+}
+
+#[test]
+fn autonomous_recruitment_skips_terminal_cooldown_without_failing_daily_pass() {
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(100, 100, 0, 100, 100, 0, 0),
+    )
+    .expect("strong incumbent attachment should validate")
+    .commit(&mut fixture.state)
+    .expect("strong incumbent attachment should commit");
+
+    let fallback = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Terminal-Horizon Fallback Prospect".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("fallback prospect should validate");
+    validate_set_relationship(
+        &fixture.state,
+        fallback,
+        fixture.recruiter,
+        relationship(65, 70, 0, 40, 10, 0, 15),
+    )
+    .expect("fallback recruitment relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("fallback recruitment relationship should commit");
+
+    let cadence = u64::from(
+        fixture
+            .registry
+            .recruitment()
+            .autonomous_attempt_cadence()
+            .as_minutes(),
+    );
+    let terminal_boundary = u64::MAX - (u64::MAX % cadence);
+    fixture
+        .state
+        .set_now_for_test(SimTime::from_minutes(terminal_boundary));
+    let draft = RecruitmentDraft {
+        approach: RecruitmentApproach::Advancement,
+        ..protection_draft(&fixture)
+    };
+    let attempt = validate_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+        .expect("terminal-boundary recruitment attempt should validate")
+        .commit(&mut fixture.state)
+        .expect("terminal-boundary recruitment attempt should commit");
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .get_attempt(attempt)
+            .expect("terminal-boundary attempt should persist")
+            .outcome(),
+        RecruitmentOutcome::Refused
+    );
+    assert_eq!(
+        decide_recruitment_attempt(&fixture.registry, &fixture.state, draft)
+            .expect_err("explicit retry must retain its typed terminal cooldown error"),
+        RecruitmentError::SimulationTimeOverflow
+    );
+    assert_eq!(
+        find_recruitment_candidates(
+            &fixture.registry,
+            &fixture.state,
+            fixture.target,
+            fixture.recruiter,
+        )
+        .expect("query discovery should omit the terminal route and retain viable prospects"),
+        vec![fallback]
+    );
+    let attempts_before = fixture.state.recruitment().attempts().count();
+
+    let outcome = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state)
+        .expect("terminal cooldown should skip only that route, not fail autonomous recruitment");
+    assert_eq!(outcome.attempts.len(), 1);
+    assert!(outcome.approval_requests.is_empty());
+    let fallback_attempt = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[0])
+        .expect("fallback autonomous attempt should persist");
+    assert_eq!(fallback_attempt.candidate(), fallback);
+    assert_eq!(
+        fixture.state.recruitment().attempts().count(),
+        attempts_before + 1,
+        "the blocked prospect must be skipped while the manager still acts on one viable fallback"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .latest_attempt_for(fixture.candidate, fixture.target)
+            .map(|record| record.id()),
+        Some(attempt),
+        "terminally blocked prospect must not receive a second attempt"
+    );
+    validate_state(&fixture.state).expect("terminal recruitment state should remain valid");
+    validate_invariants(&fixture.state);
 }
 
 fn detain_recruitment_character(
@@ -841,7 +949,7 @@ fn guided_manager_with_personnel_mandate_does_not_attempt_autonomous_recruitment
 }
 
 #[test]
-fn failed_delegated_autonomous_recruitment_is_atomic() {
+fn delegated_autonomous_recruitment_allocator_exhaustion_is_terminal_noop() {
     let registry = build_registry();
     let mut fixture = fixture();
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
@@ -852,17 +960,10 @@ fn failed_delegated_autonomous_recruitment_is_atomic() {
         .state
         .ids
         .set_next_raw_for_test(crate::core::id::IdKind::RecruitmentAttempt, u32::MAX);
-    let error = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
-        .expect_err("attempt allocator exhaustion must reject autonomous recruitment");
-    assert!(matches!(
-        error,
-        AutonomousRecruitmentError::Recruitment(RecruitmentError::IdExhaustion(
-            crate::core::id::IdExhaustionError::Exhausted {
-                kind: "recruitment attempt",
-                ..
-            }
-        ))
-    ));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("attempt allocator exhaustion is a terminal autonomous no-op");
+    assert!(outcome.attempts.is_empty());
+    assert!(outcome.approval_requests.is_empty());
     assert_eq!(fixture.state.recruitment().attempts().count(), 0);
     assert_eq!(
         fixture
@@ -879,7 +980,7 @@ fn failed_delegated_autonomous_recruitment_is_atomic() {
 }
 
 #[test]
-fn delegated_autonomous_recruitment_batch_rejects_allocator_exhaustion_atomically() {
+fn delegated_autonomous_recruitment_batch_exhaustion_is_terminal_noop_atomically() {
     let registry = build_registry();
     let mut fixture = fixture();
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
@@ -958,17 +1059,10 @@ fn delegated_autonomous_recruitment_batch_rejects_allocator_exhaustion_atomicall
     let before =
         bincode::serialize(&fixture.state).expect("two-manager recruitment state should serialize");
 
-    let error = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
-        .expect_err("the complete delegated recruitment cohort must preflight attempt IDs");
-    assert!(matches!(
-        error,
-        AutonomousRecruitmentError::Recruitment(RecruitmentError::IdExhaustion(
-            crate::core::id::IdExhaustionError::Exhausted {
-                kind: "recruitment attempt",
-                ..
-            }
-        ))
-    ));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("delegated attempt-ID exhaustion is a terminal autonomous no-op");
+    assert!(outcome.attempts.is_empty());
+    assert!(outcome.approval_requests.is_empty());
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected recruitment cohort should serialize"),
         before,
@@ -1059,19 +1153,10 @@ fn approval_required_autonomous_recruitment_batch_preflights_decision_ids() {
     let before =
         bincode::serialize(&fixture.state).expect("two-manager approval state should serialize");
 
-    let error = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
-        .expect_err("the complete approval cohort must fit before any request or pitch commits");
-    assert!(matches!(
-        error,
-        AutonomousRecruitmentError::Decision(
-            crate::decisions::decision_system::DecisionError::IdExhaustion(
-                crate::core::id::IdExhaustionError::Exhausted {
-                    kind: "decision request",
-                    ..
-                }
-            )
-        )
-    ));
+    let outcome = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect("approval decision-ID exhaustion is a terminal autonomous no-op");
+    assert!(outcome.attempts.is_empty());
+    assert!(outcome.approval_requests.is_empty());
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected approval cohort should serialize"),
         before,
@@ -3066,16 +3151,16 @@ fn refused_recruitment_near_clock_horizon_reports_cooldown_overflow_instead_of_p
             .expect_err("unrepresentable cooldown endpoint must reject cleanly"),
         RecruitmentError::SimulationTimeOverflow
     );
-    assert_eq!(
+    assert!(
         find_recruitment_candidates(
             &fixture.registry,
             &fixture.state,
             fixture.target,
             fixture.recruiter,
         )
-        .expect_err("candidate discovery must not hide an unrepresentable cooldown endpoint"),
-        RecruitmentError::SimulationTimeOverflow,
-        "query-style candidate filtering may suppress only a real cooldown, not arithmetic failure"
+        .expect("candidate discovery should treat the terminally blocked prospect as unavailable")
+        .is_empty(),
+        "an unrepresentable cooldown endpoint is not an actionable prospect"
     );
     assert_eq!(
         fixture

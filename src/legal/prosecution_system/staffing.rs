@@ -201,14 +201,13 @@ fn validate_prosecutor_assignment_dependencies(
     {
         return Err(ProsecutionStaffingError::ProsecutorIsCaseWitness { case, prosecutor });
     }
-    if state
+    let source_investigation = state
         .legal
         .get_investigation(case_record.source_investigation())
-        .is_some_and(|investigation| {
-            investigation
-                .subjects()
-                .contains(&EntityRef::Character(prosecutor))
-        })
+        .expect("validated prosecution case must retain its source investigation");
+    if source_investigation
+        .subjects()
+        .contains(&EntityRef::Character(prosecutor))
     {
         return Err(ProsecutionStaffingError::ProsecutorIsCaseSubject { case, prosecutor });
     }
@@ -321,17 +320,16 @@ fn prosecutor_conflicts_with_case(
     case: &ProsecutionCaseRecord,
     prosecutor: CharacterId,
 ) -> bool {
+    let source_investigation = state
+        .legal
+        .get_investigation(case.source_investigation())
+        .expect("reviewing prosecution case must retain its source investigation");
     prosecutor == case.defendant()
         || state
             .legal
             .case_witness_for(case.source_investigation(), prosecutor)
             .is_some()
-        || !state
-            .legal
-            .get_investigation(case.source_investigation())
-            .is_some_and(|investigation| {
-                !investigation
-                    .subjects()
-                    .contains(&EntityRef::Character(prosecutor))
-            })
+        || source_investigation
+            .subjects()
+            .contains(&EntityRef::Character(prosecutor))
 }

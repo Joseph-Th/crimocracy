@@ -115,12 +115,20 @@ pub(super) fn resolve_operation_venue_entities(
     record: &OperationRecord,
 ) -> Vec<EntityRef> {
     match record.objective() {
-        OperationObjective::FreeDetainee { target } => record
-            .extraction_arrest()
-            .and_then(|arrest| state.legal.get_arrest(arrest))
-            .and_then(|arrest| state.legal.get_investigation(arrest.investigation()))
-            .map(|investigation| vec![EntityRef::Organization(investigation.owner())])
-            .unwrap_or_else(|| vec![EntityRef::Character(*target)]),
+        OperationObjective::FreeDetainee { .. } => {
+            let arrest_id = record
+                .extraction_arrest()
+                .expect("validated extraction operation must retain its pinned arrest");
+            let arrest = state
+                .legal
+                .get_arrest(arrest_id)
+                .expect("validated extraction arrest reference must resolve");
+            let investigation = state
+                .legal
+                .get_investigation(arrest.investigation())
+                .expect("validated extraction arrest must reference a persisted investigation");
+            vec![EntityRef::Organization(investigation.owner())]
+        }
         OperationObjective::Frighten {
             target: EntityRef::Character(target),
         } if record.kind() == OperationKind::WitnessPressure => {
@@ -148,7 +156,12 @@ pub(super) fn resolve_operation_venue_entities(
                 record
                     .witness_pressure_cases()
                     .iter()
-                    .filter_map(|case_witness| state.legal.get_case_witness(*case_witness))
+                    .map(|case_witness| {
+                        state
+                            .legal
+                            .get_case_witness(*case_witness)
+                            .expect("validated witness-pressure operation must retain every pinned registration")
+                    })
                     .max_by_key(|case_witness| (case_witness.registered_at(), case_witness.id()))
             });
             let Some(case_witness) = selected else {
@@ -292,16 +305,20 @@ fn collect_target_entity_neighborhoods(
             collect_enterprise_target_neighborhood(state, id, neighborhoods)
         }
         EntityRef::Operation(id) => {
-            if let Some(operation) = state.operations.get_operation(id) {
-                queue.push(EntityRef::Organization(
-                    operation.responsible_organization(),
-                ));
-            }
+            let operation = state
+                .operations
+                .get_operation(id)
+                .expect("validated operation target must reference a persisted operation");
+            queue.push(EntityRef::Organization(
+                operation.responsible_organization(),
+            ));
         }
         EntityRef::Investigation(id) => {
-            if let Some(investigation) = state.legal.get_investigation(id) {
-                queue.push(EntityRef::Organization(investigation.owner()));
-            }
+            let investigation = state
+                .legal
+                .get_investigation(id)
+                .expect("validated investigation target must reference a persisted case");
+            queue.push(EntityRef::Organization(investigation.owner()));
         }
         // Unsupported surveillance targets can never reach this derivation validated.
         EntityRef::Evidence(_)
@@ -316,9 +333,11 @@ fn collect_business_target_neighborhood(
     business: crate::core::id::BusinessId,
     neighborhoods: &mut BTreeSet<NeighborhoodId>,
 ) {
-    if let Some(business) = state.world.get_business(business) {
-        neighborhoods.insert(business.neighborhood());
-    }
+    let business = state
+        .world
+        .get_business(business)
+        .expect("validated business target must reference a persisted business");
+    neighborhoods.insert(business.neighborhood());
 }
 
 fn collect_organization_target_neighborhoods(
@@ -327,6 +346,10 @@ fn collect_organization_target_neighborhoods(
     queue: &mut Vec<EntityRef>,
     neighborhoods: &mut BTreeSet<NeighborhoodId>,
 ) {
+    state
+        .world
+        .get_organization(organization)
+        .expect("validated organization target must reference a persisted organization");
     for business in state.world.businesses_owned_by_organization(organization) {
         neighborhoods.insert(business.neighborhood());
     }
@@ -350,11 +373,11 @@ fn collect_character_target_neighborhoods(
     queue: &mut Vec<EntityRef>,
     neighborhoods: &mut BTreeSet<NeighborhoodId>,
 ) {
-    if let Some(organization) = state
+    let character_record = state
         .world
         .get_character(character)
-        .and_then(|record| record.organization())
-    {
+        .expect("validated character target must reference a persisted character");
+    if let Some(organization) = character_record.organization() {
         // Reuse organization resolution rather than duplicating only its business half here.
         // Institutional characters also operate inside their authority's jurisdiction.
         queue.push(EntityRef::Organization(organization));
@@ -372,9 +395,10 @@ fn collect_enterprise_target_neighborhood(
     enterprise: crate::core::id::EnterpriseId,
     neighborhoods: &mut BTreeSet<NeighborhoodId>,
 ) {
-    let Some(enterprise) = state.enterprises.get_enterprise(enterprise) else {
-        return;
-    };
+    let enterprise = state
+        .enterprises
+        .get_enterprise(enterprise)
+        .expect("validated enterprise target must reference a persisted enterprise");
     match enterprise.location() {
         EnterpriseLocation::Neighborhood(neighborhood) => {
             neighborhoods.insert(neighborhood);
@@ -400,9 +424,10 @@ pub(crate) fn resolve_investigation_target_neighborhoods(
 ) -> BTreeSet<NeighborhoodId> {
     match investigation.origin() {
         Some(EntityRef::Operation(origin)) => {
-            let Some(operation) = state.operations.get_operation(origin) else {
-                return BTreeSet::new();
-            };
+            let operation = state
+                .operations
+                .get_operation(origin)
+                .expect("operation-originated investigation must retain its source operation");
             if let Some(neighborhood) = operation
                 .resolution()
                 .and_then(|resolution| resolution.exposure().neighborhood())
@@ -522,11 +547,13 @@ fn resolve_stealth_average(
     record: &crate::operations::OperationRecord,
 ) -> Rating {
     let total = record.participant_ids().fold(0_u32, |total, character| {
+        let participant = state
+            .world
+            .get_character(character)
+            .expect("validated operation participant must reference a persisted character");
         total
-            + state
-                .world
-                .get_character(character)
-                .and_then(|record| record.capability(CapabilityKind::Stealth))
+            + participant
+                .capability(CapabilityKind::Stealth)
                 .map(|rating| u32::from(rating.value()))
                 .unwrap_or(0)
     });
@@ -583,10 +610,14 @@ pub(crate) fn has_police_response_arrived_by(
     operation: &crate::operations::OperationRecord,
     at: SimTime,
 ) -> bool {
-    operation
-        .police_response()
-        .and_then(|response| state.legal.get_police_response(response))
-        .and_then(|response| response.arrived_at())
+    let Some(response) = operation.police_response() else {
+        return false;
+    };
+    state
+        .legal
+        .get_police_response(response)
+        .expect("operation police-response link must reference a persisted response")
+        .arrived_at()
         .is_some_and(|arrived_at| arrived_at <= at)
 }
 
@@ -595,10 +626,12 @@ fn find_most_exposed_participant(
     record: &crate::operations::OperationRecord,
 ) -> Option<CharacterId> {
     record.participant_ids().min_by_key(|character| {
-        let stealth = state
+        let participant = state
             .world
             .get_character(*character)
-            .and_then(|record| record.capability(CapabilityKind::Stealth))
+            .expect("validated operation participant must reference a persisted character");
+        let stealth = participant
+            .capability(CapabilityKind::Stealth)
             .map(Rating::value)
             .unwrap_or(0);
         (stealth, *character)

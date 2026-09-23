@@ -11,8 +11,7 @@ use crate::enterprises::autonomous_planning::{
     AutonomousEnterpriseError, resolve_observed_district_case_count,
 };
 use crate::enterprises::enterprise_execution::{
-    can_authority_cover_location, enterprise_location_is_occupied,
-    resolve_enterprise_financial_projection,
+    can_authority_cover_location, resolve_enterprise_financial_projection,
 };
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation};
 use crate::finance::Money;
@@ -167,7 +166,18 @@ fn build_ranked_candidate(
     location: EnterpriseLocation,
     supporting_businesses: BTreeSet<BusinessId>,
 ) -> Result<Option<AutonomousExpansionPlan>, AutonomousEnterpriseError> {
-    if enterprise_location_is_occupied(economics.state, kind, location) {
+    if economics.occupied_locations.contains(&(kind, location)) {
+        return Ok(None);
+    }
+    // Autonomous governance cannot create work whose first recurrence is already outside the
+    // representable simulation horizon. Direct establishment still reports the typed overflow;
+    // the daily AI pass simply treats that terminal rail as no actionable expansion.
+    if economics
+        .state
+        .now()
+        .checked_add(economics.registry.get_enterprise(kind).economics().cycle())
+        .is_none()
+    {
         return Ok(None);
     }
     let observed_active_cases = resolve_observed_district_case_count(

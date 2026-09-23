@@ -42,21 +42,33 @@ impl NeighborhoodInfluenceSummary {
     /// ties between two or more organizations — have no leader, because territory is
     /// contested rather than shared by default.
     pub fn economic_leader(&self) -> Option<OrganizationId> {
-        let mut best_count = 0;
-        let mut leader = None;
-        for standing in &self.standings {
-            let count = standing.active_enterprises;
-            match count.cmp(&best_count) {
-                std::cmp::Ordering::Greater => {
-                    best_count = count;
-                    leader = Some(standing.organization);
-                }
-                std::cmp::Ordering::Equal => leader = None,
-                std::cmp::Ordering::Less => {}
-            }
-        }
-        leader
+        unique_economic_leader(
+            self.standings
+                .iter()
+                .map(|standing| (standing.organization, standing.active_enterprises)),
+        )
     }
+}
+
+/// Shared strict-leader rule for authoritative and projected district influence. Keeping this
+/// tie behavior in one owner prevents autonomous same-day projections from drifting away from
+/// the read-only territory summary they model.
+pub(crate) fn unique_economic_leader(
+    standings: impl IntoIterator<Item = (OrganizationId, u32)>,
+) -> Option<OrganizationId> {
+    let mut best_count = 0;
+    let mut leader = None;
+    for (organization, count) in standings {
+        match count.cmp(&best_count) {
+            std::cmp::Ordering::Greater => {
+                best_count = count;
+                leader = Some(organization);
+            }
+            std::cmp::Ordering::Equal => leader = None,
+            std::cmp::Ordering::Less => {}
+        }
+    }
+    leader
 }
 
 /// Resolves who holds sway in a district from canonical records alone. Deterministic:

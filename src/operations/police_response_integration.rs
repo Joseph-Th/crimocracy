@@ -39,6 +39,8 @@ pub(crate) enum PoliceResponseIntegrationError {
     #[error(transparent)]
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
+    Operation(#[from] crate::operations::operation_system::OperationError),
+    #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
 }
 
@@ -52,7 +54,7 @@ pub(crate) enum PoliceResponseStartError {
     PoliceResponse(#[from] PoliceResponseError),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PoliceResponseProcessingOutcome {
     pub(crate) arrived: Vec<PoliceResponseId>,
     pub(crate) decisions: Vec<DecisionRequestOutcome>,
@@ -165,6 +167,48 @@ pub(crate) fn decide_operation_police_response_start(
 pub(crate) fn apply_due_police_response_arrivals(
     state: &mut AppState,
 ) -> Result<PoliceResponseProcessingOutcome, PoliceResponseIntegrationError> {
+    match apply_due_police_response_arrivals_strict(state) {
+        Ok(outcome) => Ok(outcome),
+        Err(error) if police_response_arrival_is_terminally_blocked(&error) => {
+            Ok(PoliceResponseProcessingOutcome::default())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn police_response_arrival_is_terminally_blocked(error: &PoliceResponseIntegrationError) -> bool {
+    use crate::decisions::decision_system::DecisionError;
+    use crate::legal::police_response_system::PoliceResponseError;
+    use crate::operations::operation_system::OperationError;
+
+    let operation_capacity = |error: &OperationError| {
+        matches!(
+            error,
+            OperationError::IdExhaustion(_) | OperationError::VersionCapacity(_)
+        )
+    };
+    match error {
+        PoliceResponseIntegrationError::IdExhaustion(_)
+        | PoliceResponseIntegrationError::Intelligence(IntelligenceError::IdExhaustion(_))
+        | PoliceResponseIntegrationError::PoliceResponse(
+            PoliceResponseError::IdExhaustion(_) | PoliceResponseError::VersionCapacity(_),
+        ) => true,
+        PoliceResponseIntegrationError::Operation(error) => operation_capacity(error),
+        PoliceResponseIntegrationError::Decision(
+            DecisionError::IdExhaustion(_) | DecisionError::VersionCapacity(_),
+        ) => true,
+        PoliceResponseIntegrationError::Decision(DecisionError::Operation(error)) => {
+            operation_capacity(error)
+        }
+        PoliceResponseIntegrationError::PoliceResponse(_)
+        | PoliceResponseIntegrationError::Decision(_)
+        | PoliceResponseIntegrationError::Intelligence(_) => false,
+    }
+}
+
+fn apply_due_police_response_arrivals_strict(
+    state: &mut AppState,
+) -> Result<PoliceResponseProcessingOutcome, PoliceResponseIntegrationError> {
     let due = find_due_police_responses(state);
     let mut planned = Vec::with_capacity(due.len());
     let mut batch_budget = Vec::new();
@@ -233,15 +277,13 @@ pub(crate) fn apply_due_police_response_arrivals(
 
         let arrival = validate_police_response_arrival(state, response_id)?;
         let abort = if should_abort_before_entry {
-            Some(
-                validate_police_arrival_abort_operation(state, operation_id, response_id)
-                    .expect("due pre-entry response must satisfy the authored abort contingency"),
-            )
+            Some(validate_police_arrival_abort_operation(
+                state,
+                operation_id,
+                response_id,
+            )?)
         } else if autonomous_leadership_abort {
-            Some(
-                validate_authority_abort_operation(state, operation_id)
-                    .expect("non-player leadership exception must remain abortable"),
-            )
+            Some(validate_authority_abort_operation(state, operation_id)?)
         } else {
             None
         };

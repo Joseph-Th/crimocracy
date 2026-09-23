@@ -951,6 +951,40 @@ fn delayed_begin_rejects_resolution_beyond_clock_horizon_without_starting_operat
 }
 
 #[test]
+fn canonical_tick_leaves_terminal_horizon_operation_authorized() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let operation = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, target),
+    )
+    .expect("ordinary operation should authorize")
+    .commit(&mut state)
+    .expect("ordinary operation should persist authorized");
+    let duration = u64::from(
+        registry
+            .get_operation(OperationKind::Intimidation)
+            .execution()
+            .duration()
+            .as_minutes(),
+    );
+    assert!(duration > 1);
+    state.set_now_for_test(SimTime::from_minutes(u64::MAX - duration + 1));
+
+    let outcome = run_tick(&registry, &mut state);
+    assert!(outcome.started_operations.is_empty());
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("terminal-horizon operation should persist");
+    assert_eq!(record.status(), OperationStatus::Authorized);
+    assert!(record.started_at().is_none());
+    assert!(record.resolution_due_at().is_none());
+    validate_state(&state).expect("terminal-horizon authorized operation should remain valid");
+    validate_invariants(&state);
+}
+
+#[test]
 fn invalid_terminal_transition_leaves_operation_unchanged() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let operation = validate_authorize_operation(

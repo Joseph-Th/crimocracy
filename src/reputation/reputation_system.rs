@@ -14,8 +14,16 @@ use crate::reputation::{
     AudienceKind, ReputationDimension, ReputationRecord, ReputationScore, ReputationState,
 };
 use crate::world::OrganizationKind;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
+
+pub(crate) type OperationReputationEvent = (
+    OrganizationId,
+    OperationKind,
+    OperationApproach,
+    OperationObjectiveOutcome,
+    OperationExposureLevel,
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ReputationError {
@@ -104,6 +112,99 @@ pub struct AppliedStandingShift {
     pub delta: i8,
 }
 
+/// Read-only score projection for the tick's reputation cluster. It starts from the exact
+/// post-decay scores that the authoritative phase will produce, then applies consequence deltas
+/// in the same stable order without mutating state. The simulation owner uses it only to prove
+/// the exact count of player-facing Standing reports before the first reputation mutation.
+pub(crate) struct ReputationPhaseProjection {
+    baseline: u8,
+    scores: BTreeMap<(OrganizationId, AudienceKind), u8>,
+}
+
+impl ReputationPhaseProjection {
+    pub(crate) fn after_daily_decay(registry: &Registry, state: &AppState) -> Self {
+        let baseline = registry.reputation().baseline();
+        let scores = state
+            .reputation()
+            .records()
+            .filter_map(|record| {
+                let score = daily_decay_target_score(registry, state.now(), record);
+                (score != baseline).then_some(((record.organization(), record.audience()), score))
+            })
+            .collect();
+        Self { baseline, scores }
+    }
+
+    pub(crate) fn apply_operation_consequences(
+        &mut self,
+        registry: &Registry,
+        state: &AppState,
+        event: OperationReputationEvent,
+    ) -> Result<usize, ReputationError> {
+        let (organization, kind, approach, objective_outcome, exposure_level) = event;
+        let responsible = state
+            .world()
+            .get_organization(organization)
+            .ok_or(ReputationError::MissingOrganization(organization))?;
+        if responsible.kind() != OrganizationKind::Criminal {
+            return Ok(0);
+        }
+        Ok(operation_consequence_deltas(
+            registry,
+            kind,
+            approach,
+            objective_outcome,
+            exposure_level,
+        )
+        .into_iter()
+        .filter(|(audience, delta)| self.apply_shift(organization, *audience, *delta))
+        .count())
+    }
+
+    pub(crate) fn apply_racket_inquiry_consequences(
+        &mut self,
+        registry: &Registry,
+        state: &AppState,
+        organization: OrganizationId,
+    ) -> Result<usize, ReputationError> {
+        let responsible = state
+            .world()
+            .get_organization(organization)
+            .ok_or(ReputationError::MissingOrganization(organization))?;
+        if responsible.kind() != OrganizationKind::Criminal {
+            return Ok(0);
+        }
+        Ok(usize::from(self.apply_shift(
+            organization,
+            AudienceKind::Police,
+            registry.reputation().racket_inquiry_police_fear(),
+        )))
+    }
+
+    fn apply_shift(
+        &mut self,
+        organization: OrganizationId,
+        audience: AudienceKind,
+        delta: i8,
+    ) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        let key = (organization, audience);
+        let current = self.scores.get(&key).copied().unwrap_or(self.baseline);
+        let next = shifted_score(current, delta);
+        if next == current {
+            return false;
+        }
+        if next == self.baseline {
+            self.scores.remove(&key);
+        } else {
+            self.scores.insert(key, next);
+        }
+        true
+    }
+}
+
 /// Deterministic consequence pass over an operation that reached terminal resolution this
 /// tick. Non-surveillance success builds underworld competence; surveillance rewards knowledge,
 /// not public standing. For every kind, witnessed exposure raises police fear and visible
@@ -128,9 +229,31 @@ pub(crate) fn apply_operation_reputation_consequences(
     if responsible.kind() != OrganizationKind::Criminal {
         return Ok(Vec::new());
     }
-    let config = registry.reputation();
-    let mut shifts = Vec::new();
+    let shifts =
+        operation_consequence_deltas(registry, kind, approach, objective_outcome, exposure_level)
+            .into_iter()
+            .filter_map(|(audience, delta)| {
+                resolve_shift(registry, state, organization, audience, delta)
+            })
+            .collect();
+    commit_consequence_shifts(
+        registry,
+        state,
+        organization,
+        "Word travels after the job:",
+        shifts,
+    )
+}
 
+fn operation_consequence_deltas(
+    registry: &Registry,
+    kind: OperationKind,
+    approach: OperationApproach,
+    objective_outcome: OperationObjectiveOutcome,
+    exposure_level: OperationExposureLevel,
+) -> Vec<(AudienceKind, i8)> {
+    let config = registry.reputation();
+    let mut deltas = Vec::with_capacity(4);
     let competence_delta = match kind {
         OperationKind::Surveillance => 0,
         OperationKind::Burglary
@@ -149,52 +272,24 @@ pub(crate) fn apply_operation_reputation_consequences(
             OperationObjectiveOutcome::Failed => 0,
         },
     };
-    shifts.extend(resolve_shift(
-        registry,
-        state,
-        organization,
-        AudienceKind::Underworld,
-        competence_delta,
-    ));
-
+    deltas.push((AudienceKind::Underworld, competence_delta));
     let police_fear = match exposure_level {
         OperationExposureLevel::None | OperationExposureLevel::Trace => 0,
         OperationExposureLevel::Witnessed => config.witnessed_exposure_police_fear(),
         OperationExposureLevel::Identifying => config.identifying_exposure_police_fear(),
     };
-    shifts.extend(resolve_shift(
-        registry,
-        state,
-        organization,
-        AudienceKind::Police,
-        police_fear,
-    ));
-
+    deltas.push((AudienceKind::Police, police_fear));
     if approach == OperationApproach::Violent
         && !matches!(
             exposure_level,
             OperationExposureLevel::None | OperationExposureLevel::Trace
         )
     {
-        // Visible violence frightens the street as well as its shops: residents who saw it
-        // carry the same fear business owners do.
-        for audience in [AudienceKind::Businesses, AudienceKind::Residents] {
-            shifts.extend(resolve_shift(
-                registry,
-                state,
-                organization,
-                audience,
-                config.violent_businesses_fear(),
-            ));
-        }
+        let fear = config.violent_businesses_fear();
+        deltas.push((AudienceKind::Businesses, fear));
+        deltas.push((AudienceKind::Residents, fear));
     }
-    commit_consequence_shifts(
-        registry,
-        state,
-        organization,
-        "Word travels after the job:",
-        shifts,
-    )
+    deltas
 }
 
 /// Deterministic consequence pass over a racket that drew a dedicated racket inquiry this
@@ -241,15 +336,19 @@ fn resolve_shift(
         return None;
     }
     let current = resolve_score(registry, &state.reputation, organization, audience);
-    let proposed = i32::from(current) + i32::from(delta);
-    let next = u8::try_from(proposed.clamp(0, 100))
-        .expect("clamped reputation arithmetic stays inside the score range");
+    let next = shifted_score(current, delta);
     let applied_delta =
         i8::try_from(i16::from(next) - i16::from(current)).expect("bounded score delta fits i8");
     (next != current).then_some(AppliedStandingShift {
         audience,
         delta: applied_delta,
     })
+}
+
+fn shifted_score(current: u8, delta: i8) -> u8 {
+    let proposed = i32::from(current) + i32::from(delta);
+    u8::try_from(proposed.clamp(0, 100))
+        .expect("clamped reputation arithmetic stays inside the score range")
 }
 
 /// Player-facing labels for the standing audiences, exhaustive so a new audience must be
@@ -382,32 +481,14 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
     // Snapshot the touched impressions first: mutation goes through the canonical path,
     // which cannot run while the records map is borrowed for iteration.
     let touched: Vec<ReputationRecord> = state.reputation().records().copied().collect();
-    let step = i8::try_from(i64::from(registry.reputation().daily_decay_step()))
-        .expect("authored decay step fits i8");
-    let baseline = registry.reputation().baseline();
     let mut adjusted = 0_usize;
     for record in touched {
         let organization = record.organization();
         let audience = record.audience();
         let current = record.score();
-        let age = state
-            .now()
-            .as_minutes()
-            .checked_sub(record.changed_at().as_minutes())
-            .expect("reputation chronology must not place a change in the future");
-        if age < crate::core::time::DAY_MINUTES {
-            continue;
-        }
-        let current_i = i64::from(current);
-        let drifted = if current_i > i64::from(baseline) {
-            (current_i - i64::from(step)).max(i64::from(baseline))
-        } else if current_i < i64::from(baseline) {
-            (current_i + i64::from(step)).min(i64::from(baseline))
-        } else {
-            current_i
-        };
-        if drifted != current_i {
-            let change = drifted - current_i;
+        let drifted = daily_decay_target_score(registry, state.now(), &record);
+        if drifted != current {
+            let change = i16::from(drifted) - i16::from(current);
             let change = i8::try_from(change).expect("one-step drift fits i8");
             apply_delta(registry, state, organization, audience, change)
                 .expect("decay touches only existing world organizations");
@@ -415,6 +496,35 @@ pub(crate) fn apply_daily_reputation_decay(registry: &Registry, state: &mut AppS
         }
     }
     adjusted
+}
+
+fn daily_decay_target_score(
+    registry: &Registry,
+    now: crate::core::time::SimTime,
+    record: &ReputationRecord,
+) -> u8 {
+    let current = record.score();
+    if !crate::core::time::is_day_boundary(now) {
+        return current;
+    }
+    let age = now
+        .as_minutes()
+        .checked_sub(record.changed_at().as_minutes())
+        .expect("reputation chronology must not place a change in the future");
+    if age < crate::core::time::DAY_MINUTES {
+        return current;
+    }
+    let step = i16::from(registry.reputation().daily_decay_step());
+    let baseline = i16::from(registry.reputation().baseline());
+    let current = i16::from(current);
+    let drifted = if current > baseline {
+        (current - step).max(baseline)
+    } else if current < baseline {
+        (current + step).min(baseline)
+    } else {
+        current
+    };
+    u8::try_from(drifted).expect("bounded reputation decay stays inside score range")
 }
 
 impl ReputationRecord {

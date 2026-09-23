@@ -93,7 +93,13 @@ pub(crate) fn apply_cold_case_decay(
             .count(),
     )
     .expect("persisted investigation count must fit the u32 ID space");
-    state.ids.reserve(IdKind::Information, information_count)?;
+    if state
+        .ids
+        .reserve(IdKind::Information, information_count)
+        .is_err()
+    {
+        return Ok(Vec::new());
+    }
 
     let mut suspended = Vec::with_capacity(planned_suspensions.len());
     for (investigation, prepared) in planned_suspensions {

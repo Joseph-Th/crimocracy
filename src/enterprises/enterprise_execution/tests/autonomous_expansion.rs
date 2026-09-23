@@ -19,6 +19,53 @@ fn designate_player(registry: &Registry, state: &mut AppState) -> OrganizationId
     player
 }
 
+fn add_second_expansion_mandate(fixture: &mut EnterpriseFixture) {
+    let original_neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
+    };
+    let profile = fixture
+        .state
+        .world()
+        .get_neighborhood(original_neighborhood)
+        .expect("fixture neighborhood should persist")
+        .profile();
+    let second_neighborhood = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Second Expansion Ward".to_owned(),
+            profile,
+        },
+    )
+    .expect("second expansion neighborhood should validate");
+    let second_manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Expansion Manager".to_owned(),
+            organization: Some(fixture.organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second expansion manager should validate");
+    validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: fixture.organization,
+            manager: second_manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(second_neighborhood)]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("second expansion mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("second expansion mandate should commit");
+}
+
 #[test]
 fn autonomous_expansion_shared_slot_prefers_district_leader_over_organization_id() {
     let registry = build_registry();
@@ -316,6 +363,125 @@ fn autonomous_lifecycle_keeps_temporarily_unfunded_racket_suspended() {
             .status(),
         EnterpriseStatus::Suspended,
         "lack of current runway is temporary and must not destroy the racket's history or slot"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_lifecycle_keeps_temporarily_closed_hosted_racket_suspended() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Temporarily Closed Rival Card Room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
+    establish_business_economy_for_enterprise_business(&registry, &mut fixture, venue);
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::LoanSharking,
+            organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("hosted rival racket should validate")
+    .commit(&mut fixture.state)
+    .expect("hosted rival racket should commit");
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("hosted rival racket should suspend")
+        .commit(&mut fixture.state)
+        .expect("hosted rival suspension should commit");
+    validate_suspend_business_economy(&fixture.state, venue)
+        .expect("suspended racket should release its host for temporary closure")
+        .commit(&mut fixture.state)
+        .expect("temporary host closure should commit");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state)
+        .expect("temporary host closure should be a no-action lifecycle blocker");
+
+    assert!(outcome.resumed.is_empty());
+    assert!(outcome.retired.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("temporarily blocked racket should persist")
+            .status(),
+        EnterpriseStatus::Suspended,
+        "temporary host downtime must not be mistaken for a stale configuration"
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_lifecycle_resumes_with_exact_required_working_capital() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    validate_suspend_enterprise(&fixture.state, enterprise)
+        .expect("active rival enterprise should suspend")
+        .commit(&mut fixture.state)
+        .expect("rival suspension should commit");
+    let record = fixture
+        .state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .expect("suspended enterprise should persist");
+    let management = fixture
+        .state
+        .world()
+        .get_character(record.manager())
+        .expect("enterprise manager should persist")
+        .capability(CapabilityKind::Management);
+    let (required, expected_net_cash) = resolve_enterprise_financial_projection(
+        &registry,
+        &fixture.state,
+        record.kind(),
+        record.location(),
+        record.supporting_businesses().len(),
+        management,
+        0,
+    )
+    .expect("suspended enterprise economics should resolve");
+    assert!(expected_net_cash > Money::ZERO);
+    fund_enterprise_fixture_cash(&mut fixture, required.cents());
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+
+    let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state)
+        .expect("exactly funded lifecycle maintenance should resolve");
+
+    assert_eq!(outcome.resumed, vec![enterprise]);
+    assert!(outcome.retired.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("exactly funded enterprise should persist")
+            .status(),
+        EnterpriseStatus::Active,
+        "one full authored cycle of runway is sufficient; no extra cent is required"
     );
     validate_invariants(&fixture.state);
 }
@@ -1053,6 +1219,10 @@ fn autonomous_expansion_allocates_scarce_runway_to_stronger_same_day_mandate() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Enterprise, u32::MAX - 1);
 
     let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
         .expect("multi-mandate autonomous expansion should resolve");
@@ -1370,14 +1540,9 @@ fn autonomous_expansion_surfaces_enterprise_id_exhaustion_without_partial_establ
         .ids
         .set_next_raw_for_test(crate::core::id::IdKind::Enterprise, u32::MAX);
 
-    let error = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
-        .expect_err("autonomous expansion must surface enterprise allocator exhaustion");
-    assert!(matches!(
-        error,
-        crate::enterprises::autonomous_planning::AutonomousEnterpriseError::Enterprise(
-            EnterpriseError::IdExhaustion(_)
-        )
-    ));
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("enterprise-ID exhaustion is a terminal autonomous no-op");
+    assert!(established.is_empty());
     assert_eq!(
         fixture.state.enterprises().enterprises().count(),
         enterprise_count_before,
@@ -1389,6 +1554,83 @@ fn autonomous_expansion_surfaces_enterprise_id_exhaustion_without_partial_establ
         "failed expansion must not consume or open finance records"
     );
     validate_state(&fixture.state).expect("failed autonomous expansion must leave valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_expansion_preflights_multi_mandate_enterprise_capacity() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    add_second_expansion_mandate(&mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Enterprise, u32::MAX - 1);
+    let before = bincode::serialize(&fixture.state).expect("fixture state should serialize");
+
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("daily enterprise-ID exhaustion is a terminal autonomous no-op");
+    assert!(established.is_empty());
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "allocator exhaustion must not leave a successful prefix of the daily expansion cohort"
+    );
+    validate_state(&fixture.state).expect("rejected expansion cohort must leave valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_expansion_preflights_multi_mandate_settlement_account_capacity() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    add_second_expansion_mandate(&mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::FinancialAccount, u32::MAX);
+    let before = bincode::serialize(&fixture.state).expect("fixture state should serialize");
+
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("settlement-account ID exhaustion is a terminal autonomous no-op");
+    assert!(established.is_empty());
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "fresh-settlement exhaustion must reject before any rival establishment commits"
+    );
+    validate_state(&fixture.state).expect("rejected expansion cohort must leave valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn autonomous_expansion_skips_unschedulable_terminal_horizon_candidates() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let last_day_boundary = u64::MAX - (u64::MAX % crate::core::time::DAY_MINUTES);
+    fixture
+        .state
+        .set_now_for_test(SimTime::from_minutes(last_day_boundary));
+    let before = bincode::serialize(&fixture.state).expect("fixture state should serialize");
+
+    let established = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("terminal-horizon capacity is a valid no-action autonomous state");
+    assert!(established.is_empty());
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("terminal state should serialize"),
+        before,
+        "autonomous planning must not mutate when no first recurrence can be represented"
+    );
+    validate_state(&fixture.state).expect("terminal-horizon state must remain valid");
     validate_invariants(&fixture.state);
 }
 

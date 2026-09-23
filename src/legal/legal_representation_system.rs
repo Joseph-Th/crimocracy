@@ -368,13 +368,6 @@ pub fn validate_retain_legal_representation(
                     EntityRef::Character(dependencies.defendant),
                     EntityRef::Character(dependencies.counsel),
                     EntityRef::Organization(dependencies.counsel_institution),
-                    EntityRef::Investigation(
-                        state
-                            .legal
-                            .get_arrest(draft.arrest)
-                            .expect("validated arrest must exist")
-                            .investigation(),
-                    ),
                 ]),
                 decision: None,
             }],

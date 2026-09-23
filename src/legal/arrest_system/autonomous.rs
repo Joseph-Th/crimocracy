@@ -3,6 +3,7 @@
 use super::{
     ArrestError, CustodyCorroborationSource, CustodyEvidenceAssessment,
     evidence_qualifies_for_custody, repeat_custody_without_new_evidence, validate_arrest,
+    validate_custody_evidence_references,
 };
 use crate::core::entity::EntityRef;
 use crate::core::id::{ArrestId, CharacterId, EvidenceId, InvestigationId, OperationId};
@@ -45,6 +46,7 @@ fn resolve_autonomous_arrest_candidate(
             .legal
             .get_evidence(*evidence_id)
             .ok_or(ArrestError::MissingEvidence(*evidence_id))?;
+        validate_custody_evidence_references(state, evidence)?;
         if evidence.subject() != EntityRef::Character(character) || evidence.custodian() != owner {
             continue;
         }
@@ -58,11 +60,17 @@ fn resolve_autonomous_arrest_candidate(
         // source strength, so a custody-grade primary cannot discard a Strong/Direct property
         // that exists only on its derivative.
         let citation = match evidence.derived_from().iter().next().copied() {
-            Some(source_id) => state
-                .legal
-                .get_evidence(source_id)
-                .filter(|source_evidence| evidence_qualifies_for_custody(source_evidence))
-                .map_or(evidence.id(), crate::legal::EvidenceRecord::id),
+            Some(source_id) => {
+                let source_evidence = state
+                    .legal
+                    .get_evidence(source_id)
+                    .expect("custody evidence lineage was validated before citation selection");
+                if evidence_qualifies_for_custody(source_evidence) {
+                    source_evidence.id()
+                } else {
+                    evidence.id()
+                }
+            }
             None => evidence.id(),
         };
         // Among several qualifying records from one source, cite the strongest account, not
@@ -131,11 +139,11 @@ pub fn apply_autonomous_evidence_arrests(
         // Legal authorities can own investigative files, but only law-enforcement institutions
         // have custody authority. Skip non-police case owners here instead of turning a valid
         // legal-authority case with strong evidence into a tick-failing InvalidAuthority error.
-        if !state
+        let owner = state
             .world()
             .get_organization(investigation.owner())
-            .is_some_and(|owner| owner.kind() == OrganizationKind::LawEnforcement)
-        {
+            .ok_or(ArrestError::InvalidAuthority(investigation.owner()))?;
+        if owner.kind() != OrganizationKind::LawEnforcement {
             continue;
         }
         let investigation_id = investigation.id();
@@ -176,8 +184,9 @@ pub fn apply_autonomous_evidence_arrests(
     // first detention aborts it, so count that abort's artifacts once.
     let mut id_budget = Vec::new();
     let mut seen_preempted_operations = BTreeSet::<OperationId>::new();
-    for candidate in &candidates {
-        let validated = validate_arrest(
+    let mut actionable = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let validated = match validate_arrest(
             registry,
             state,
             ArrestDraft {
@@ -185,17 +194,32 @@ pub fn apply_autonomous_evidence_arrests(
                 investigation: candidate.investigation,
                 evidence: candidate.evidence.clone(),
             },
-        )?;
+        ) {
+            Ok(validated) => validated,
+            // Direct custody must remain fail-closed when one of the character's live
+            // responsibilities cannot be detached at its finite version rail. Autonomous
+            // evidence conversion has no useful mutation available for that character, though,
+            // and retrying the same permanent condition on every tick must not block unrelated
+            // arrestable subjects in the cohort.
+            Err(error) if autonomous_custody_is_terminally_blocked(&error) => continue,
+            Err(error) => return Err(error),
+        };
         id_budget.extend(
             validated.id_budget_excluding_duplicate_operation_preemptions(
                 &mut seen_preempted_operations,
             ),
         );
+        actionable.push(candidate);
     }
-    state.ids.reserve_many(&id_budget)?;
+    if state.ids.reserve_many(&id_budget).is_err() {
+        // The autonomous custody pass has not mutated anyone yet. At the finite persistence rail,
+        // detain none of the cohort rather than returning an error that the canonical tick treats
+        // as impossible or letting stable character/case order decide who is arrested first.
+        return Ok(Vec::new());
+    }
 
     let mut arrests = Vec::new();
-    for candidate in candidates {
+    for candidate in actionable {
         // Revalidate against the post-earlier-arrest state so a shared operation already aborted
         // by another participant simply disappears from this character's preemption set. The
         // complete allocator budget and every candidate's independent legal dependencies were
@@ -213,4 +237,33 @@ pub fn apply_autonomous_evidence_arrests(
         arrests.push(arrest);
     }
     Ok(arrests)
+}
+
+fn autonomous_custody_is_terminally_blocked(error: &ArrestError) -> bool {
+    matches!(
+        error,
+        ArrestError::SimulationTimeOverflow
+            | ArrestError::VersionCapacity(_)
+            | ArrestError::Investigation(
+                crate::legal::investigation_system::InvestigationError::VersionCapacity(_),
+            )
+            | ArrestError::InvestigationWork(
+                crate::legal::investigation_work_execution::InvestigationWorkError::VersionCapacity(_),
+            )
+            | ArrestError::ProsecutionStaffing(
+                crate::legal::prosecution_system::ProsecutionStaffingError::VersionCapacity(_),
+            )
+            | ArrestError::LegalRepresentation(
+                crate::legal::legal_representation_system::LegalRepresentationError::VersionCapacity(_),
+            )
+            | ArrestError::Operation(
+                crate::operations::operation_system::OperationError::VersionCapacity(_),
+            )
+            | ArrestError::Decision(
+                crate::decisions::decision_system::DecisionError::VersionCapacity(_),
+            )
+            | ArrestError::Decision(crate::decisions::decision_system::DecisionError::Operation(
+                crate::operations::operation_system::OperationError::VersionCapacity(_),
+            ))
+    )
 }

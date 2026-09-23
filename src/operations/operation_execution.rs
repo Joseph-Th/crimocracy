@@ -9,7 +9,9 @@ mod resolution_factors;
 #[cfg(test)]
 use narrative::build_after_action_summary;
 use narrative::{build_operation_after_action_summary, outcome_label};
-pub(crate) use resolution_commit::validate_operation_resolution_plan;
+pub(crate) use resolution_commit::{
+    mandatory_operation_resolution_id_budget, validate_operation_resolution_plan,
+};
 
 pub(crate) use resolution_factors::{
     has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
@@ -305,10 +307,11 @@ pub(crate) fn decide_operation_resolution(
     }
 
     let role_capability_average = resolve_role_capability_average(registry, state, operation);
-    let leader_capability = state
+    let leader = state
         .world
         .get_character(record.leader())
-        .and_then(|leader| leader.capability(execution.leader_capability()));
+        .expect("validated operation leader must reference a persisted character");
+    let leader_capability = leader.capability(execution.leader_capability());
     let (
         intelligence_quality,
         intelligence_adjustment,

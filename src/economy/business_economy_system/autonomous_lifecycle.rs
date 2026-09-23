@@ -6,7 +6,10 @@
 //! and character-owned businesses can recover when their current zero-variance economics are
 //! positive again.
 
-use super::{BusinessEconomyError, resolve_cycle_financials, validate_resume_business_economy};
+use super::{
+    BusinessEconomyError, ValidatedBusinessEconomyStatusChange, resolve_cycle_financials,
+    validate_resume_business_economy,
+};
 use crate::core::id::BusinessId;
 use crate::core::state::AppState;
 use crate::finance::Money;
@@ -29,7 +32,7 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
         .suspended_business_economies()
         .map(|economy| economy.business())
         .collect();
-    let mut resumed = Vec::new();
+    let mut planned: Vec<(BusinessId, ValidatedBusinessEconomyStatusChange)> = Vec::new();
 
     for business_id in suspended {
         let economy = state
@@ -70,16 +73,25 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
         }
 
         match validate_resume_business_economy(registry, state, business_id) {
-            Ok(resume) => {
-                resume.commit(state)?;
-                resumed.push(business_id);
-            }
-            // Finite version capacity is a valid terminal rail. The business remains suspended
-            // rather than turning routine autonomous maintenance into a campaign failure.
-            Err(BusinessEconomyError::VersionCapacity(_)) => {}
+            Ok(resume) => planned.push((business_id, resume)),
+            // Finite version or clock capacity is a valid terminal rail. The business remains
+            // suspended rather than turning routine autonomous maintenance into a campaign
+            // failure merely because no future recurring cycle can be represented.
+            Err(BusinessEconomyError::VersionCapacity(_))
+            | Err(BusinessEconomyError::SimulationTimeOverflow) => {}
             Err(error) => return Err(error),
         }
     }
 
+    // The daily recovery pass is one fallible planning cohort. All businesses were evaluated
+    // against the same immutable state above, and status changes touch distinct business-economy
+    // records, so no later validation error can follow an earlier recovery mutation.
+    let mut resumed = Vec::with_capacity(planned.len());
+    for (business_id, resume) in planned {
+        resume
+            .commit(state)
+            .expect("preplanned autonomous business recovery must remain current within one pass");
+        resumed.push(business_id);
+    }
     Ok(resumed)
 }

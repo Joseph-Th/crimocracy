@@ -270,21 +270,19 @@ fn retained_artifacts_are_valid(
         && entry.summary == information.summary()
         && entry.sources.is_empty()
         && entry.decision.is_none()
-        && retained_entities_are_valid(representation, refs.arrest, &entry.entities)
+        && retained_entities_are_valid(representation, &entry.entities)
 }
 
 fn retained_entities_are_valid(
     representation: &LegalRepresentationRecord,
-    arrest: &ArrestRecord,
     entities: &BTreeSet<EntityRef>,
 ) -> bool {
-    entities.len() == 4
+    entities.len() == 3
         && entities.contains(&EntityRef::Character(representation.defendant()))
         && entities.contains(&EntityRef::Character(representation.counsel()))
         && entities.contains(&EntityRef::Organization(
             representation.counsel_institution(),
         ))
-        && entities.contains(&EntityRef::Investigation(arrest.investigation()))
 }
 
 fn validate_active_lifecycle(

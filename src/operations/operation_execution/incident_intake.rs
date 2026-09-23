@@ -42,11 +42,17 @@ fn resolve_incident_witness(
     let EntityRef::Business(business) = target else {
         return None;
     };
-    let record = state.world.get_business(business)?;
+    let record = state
+        .world
+        .get_business(business)
+        .expect("validated business objective must reference a persisted business");
     let BusinessOwner::Character(character) = record.owner() else {
         return None;
     };
-    let witness = state.world.get_character(character)?;
+    let witness = state
+        .world
+        .get_character(character)
+        .expect("persisted character-owned business must retain its owner character");
     // A business owner is only the modeled on-scene witness while physically available. Custody
     // places the owner elsewhere, so ownership alone must not manufacture eyewitness testimony.
     // The identified participant also cannot witness their own crime, and an organization's own

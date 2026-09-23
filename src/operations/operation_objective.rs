@@ -104,14 +104,18 @@ pub(crate) fn resolve_objective_blocker(
         )
         .is_empty()
         .then_some(OperationObjectiveBlocker::NoPressureableWitnessCase),
-        OperationObjective::FreeDetainee { target } => operation
-            .extraction_arrest()
-            .and_then(|arrest| state.legal.get_arrest(arrest))
-            .is_none_or(|arrest| {
-                arrest.character() != *target
-                    || arrest.status() != crate::legal::ArrestStatus::Detained
-            })
-            .then_some(OperationObjectiveBlocker::ExtractionCustodyEnded),
+        OperationObjective::FreeDetainee { target } => {
+            let arrest_id = operation
+                .extraction_arrest()
+                .expect("validated extraction operation must retain its pinned arrest");
+            let arrest = state
+                .legal
+                .get_arrest(arrest_id)
+                .expect("validated extraction operation must reference a persisted arrest");
+            (arrest.character() != *target
+                || arrest.status() != crate::legal::ArrestStatus::Detained)
+                .then_some(OperationObjectiveBlocker::ExtractionCustodyEnded)
+        }
         OperationObjective::GatherInformation { .. } => None,
         // These shapes are rejected by operation authorship validation. Keeping the fallback
         // explicit prevents a malformed save from being converted into an invented blocker.
@@ -192,13 +196,11 @@ fn active_foreign_case(
     responsible_organization: OrganizationId,
     investigation: crate::core::id::InvestigationId,
 ) -> bool {
-    state
+    let record = state
         .legal
         .get_investigation(investigation)
-        .is_some_and(|record| {
-            record.status() == InvestigationStatus::Active
-                && record.owner() != responsible_organization
-        })
+        .expect("persisted case witness must reference a persisted investigation");
+    record.status() == InvestigationStatus::Active && record.owner() != responsible_organization
 }
 
 fn business_target_ownership_mismatch(
@@ -206,9 +208,10 @@ fn business_target_ownership_mismatch(
     operation: &OperationRecord,
     business: crate::core::id::BusinessId,
 ) -> bool {
-    let Some(record) = state.world.get_business(business) else {
-        return false;
-    };
+    let record = state
+        .world
+        .get_business(business)
+        .expect("validated business objective must reference a persisted business");
     let sponsor = BusinessOwner::Organization(operation.responsible_organization());
     match operation
         .kind()

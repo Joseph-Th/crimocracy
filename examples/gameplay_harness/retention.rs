@@ -9,7 +9,7 @@ use crimocracy::core::{
     time::{DAY_MINUTES, SimTime},
 };
 use crimocracy::registry::Registry;
-use crimocracy::world::world_system::validate_reassign_character;
+use crimocracy::world::world_system::validate_set_character_supervisor;
 use serde::Serialize;
 use std::{error::Error, path::Path};
 
@@ -47,13 +47,8 @@ pub(crate) fn restore_reporting_line(
     scenario: &mut Scenario,
     member: CharacterId,
 ) -> Result<(), Box<dyn Error>> {
-    validate_reassign_character(
-        &scenario.state,
-        member,
-        Some(scenario.player),
-        Some(scenario.lieutenant),
-    )?
-    .commit(&mut scenario.state)?;
+    validate_set_character_supervisor(&scenario.state, member, Some(scenario.lieutenant))?
+        .commit(&mut scenario.state)?;
     Ok(())
 }
 

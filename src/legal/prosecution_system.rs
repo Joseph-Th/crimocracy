@@ -643,14 +643,13 @@ fn validate_prosecutor(
             investigation: source_investigation,
         });
     }
-    if state
+    let source_investigation_record = state
         .legal
         .get_investigation(source_investigation)
-        .is_some_and(|investigation| {
-            investigation
-                .subjects()
-                .contains(&EntityRef::Character(prosecutor))
-        })
+        .ok_or(ProsecutionError::MissingInvestigation(source_investigation))?;
+    if source_investigation_record
+        .subjects()
+        .contains(&EntityRef::Character(prosecutor))
     {
         return Err(ProsecutionError::ProsecutorIsCaseSubject {
             prosecutor,

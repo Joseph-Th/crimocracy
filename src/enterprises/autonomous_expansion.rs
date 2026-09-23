@@ -3,20 +3,18 @@
 //! command uses.
 
 mod candidate_planning;
+mod cohort_planning;
 
 use crate::core::id::{
-    BusinessId, EnterpriseId, FinancialAccountId, MandateId, NeighborhoodId, OrganizationId,
+    BusinessId, EnterpriseId, FinancialAccountId, IdKind, MandateId, NeighborhoodId, OrganizationId,
 };
 use crate::core::state::AppState;
-use crate::delegation::delegation_system::DelegationError;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::enterprises::autonomous_planning::{
     AutonomousEnterpriseError, ObservedDistrictPressure, available_working_capital,
-    reserve_working_capital, resolve_committed_working_capital, resolve_observed_district_pressure,
 };
 use crate::enterprises::enterprise_execution::{
-    resolve_location_neighborhood, validate_establish_enterprise,
-    validate_establish_enterprise_with_openings,
+    validate_establish_enterprise, validate_establish_enterprise_with_openings,
 };
 use crate::enterprises::{
     ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation,
@@ -24,12 +22,14 @@ use crate::enterprises::{
 use crate::finance::finance_system::validate_open_accounts;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner, Money};
 use crate::registry::{EnterpriseDefinition, Registry};
-use crate::world::territory_influence::resolve_neighborhood_influence;
-use crate::world::{AutonomyLevel, CapabilityKind, Rating};
+use crate::world::{CapabilityKind, Rating};
 use candidate_planning::{
     collect_business_scope_candidates, collect_district_candidates,
     collect_neighborhood_scope_candidates, compare_expansion_plans,
-    compare_phase_expansion_candidates,
+};
+use cohort_planning::{
+    AutonomousExpansionCohort, PlannedAutonomousExpansionAction, PlannedSettlementAccount,
+    plan_due_autonomous_expansions,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,6 +55,7 @@ struct ExpansionEconomicsContext<'a> {
     state: &'a AppState,
     organization: OrganizationId,
     observed_district_pressure: &'a ObservedDistrictPressure,
+    occupied_locations: &'a BTreeSet<(EnterpriseKind, EnterpriseLocation)>,
     management: Option<Rating>,
     available_working_capital: Money,
 }
@@ -97,248 +98,80 @@ pub(crate) fn apply_due_autonomous_enterprises_excluding(
     if !crate::core::time::is_day_boundary(state.now()) {
         return Ok(Vec::new());
     }
-    let player_organization = state.player_organization();
-    // Working capital is a capacity constraint, not a balance-presence check. Existing active
-    // rackets already rely on their cash accounts for one current operating cycle, and each new
-    // establishment in this pass makes another claim on that same pool. Keep those commitments
-    // as a read-only planning projection so delegated managers cannot multiply-count one dollar
-    // of liquidity across several rackets without inventing a second authoritative ledger.
-    let observed_district_pressure = resolve_observed_district_pressure(registry, state)?;
-    let mut working_capital_reservations =
-        resolve_committed_working_capital(registry, state, &observed_district_pressure)?;
-    let mut mandates = resolve_eligible_expansion_mandates(
-        registry,
-        state,
-        player_organization,
-        excluded_mandates,
-    )?;
-    let mut established = Vec::new();
-    // Organizations compete in one phase-wide queue. Resolving an entire organization before
-    // considering the next one would let OrganizationId decide shared location claims and could
-    // allow a lower-id outsider to take a district slot before its incumbent economic leader.
-    // Recompute after every establishment because the committed racket can legitimately change
-    // occupancy and territorial influence for the remaining same-minute decisions.
-    while !mandates.is_empty() {
-        // State is immutable while this iteration evaluates candidates. Resolve each district's
-        // current economic leader once, then discard the cache after the chosen establishment
-        // because that mutation may legitimately change territorial standing.
-        let district_leaders = resolve_district_leaders(state);
-        let iteration = ExpansionIterationContext {
-            registry,
-            state,
-            observed_district_pressure: &observed_district_pressure,
-            district_leaders: &district_leaders,
+    let cohort = plan_due_autonomous_expansions(registry, state, excluded_mandates)?;
+    if state
+        .ids
+        .reserve(IdKind::Enterprise, cohort.enterprise_count())
+        .is_err()
+    {
+        return Ok(Vec::new());
+    }
+    if state
+        .ids
+        .reserve(IdKind::FinancialAccount, cohort.fresh_settlement_accounts())
+        .is_err()
+    {
+        return Ok(Vec::new());
+    }
+    Ok(cohort.commit(registry, state))
+}
+
+impl AutonomousExpansionCohort {
+    fn commit(self, registry: &Registry, state: &mut AppState) -> Vec<EnterpriseId> {
+        self.actions
+            .into_iter()
+            .map(|action| action.commit_preflighted(registry, state))
+            .collect()
+    }
+}
+
+impl PlannedAutonomousExpansionAction {
+    fn commit_preflighted(self, registry: &Registry, state: &mut AppState) -> EnterpriseId {
+        let manager = self.mandate.manager();
+        let draft = |settlement_account| EnterpriseDraft {
+            kind: self.plan.kind,
+            organization: self.organization,
+            authority: MandateAuthority {
+                mandate: self.mandate.id(),
+                manager,
+                scope: self.plan.scope,
+            },
+            location: self.plan.location,
+            supporting_businesses: self.plan.supporting_businesses.clone(),
+            cash_account: self.cash_account,
+            settlement_account,
         };
-        let mut selected: Option<(
-            OrganizationId,
-            usize,
-            crate::core::id::MandateId,
-            bool,
-            AutonomousExpansionPlan,
-        )> = None;
-        for (organization, organization_mandates) in &mandates {
-            let Some(available_working_capital) = resolve_max_autonomous_working_capital(
-                state,
-                *organization,
-                &working_capital_reservations,
-            ) else {
-                continue;
-            };
-            // The state cannot mutate until one phase-wide winner is chosen. Resolve the
-            // organization's usable business network once for this immutable selection pass
-            // instead of rescanning the same ownership/economy indexes for every mandate.
-            let owned_venues = resolve_available_owned_businesses(state, *organization);
-            for (index, mandate) in organization_mandates.iter().enumerate() {
-                let Some(plan) = decide_autonomous_expansion(
-                    &iteration,
-                    *organization,
-                    mandate,
-                    available_working_capital,
-                    &owned_venues,
-                )?
-                else {
-                    continue;
-                };
-                let neighborhood = resolve_location_neighborhood(state, plan.location)
-                    .expect("autonomous candidate location must resolve to a live neighborhood");
-                let district_leader = district_leaders
-                    .get(&neighborhood)
-                    .copied()
-                    .expect("autonomous candidate neighborhood must retain its influence snapshot");
-                let candidate = (
-                    *organization,
-                    index,
-                    mandate.id(),
-                    district_leader == Some(*organization),
-                    plan,
-                );
-                let replace = selected.as_ref().is_none_or(
-                    |(
-                        selected_organization,
-                        _,
-                        selected_mandate,
-                        selected_leads_district,
-                        selected_plan,
-                    )| {
-                        compare_phase_expansion_candidates(
-                            candidate.0,
-                            candidate.3,
-                            &candidate.4,
-                            *selected_organization,
-                            *selected_leads_district,
-                            selected_plan,
-                        )
-                        .then(candidate.0.cmp(selected_organization))
-                        .then(candidate.2.cmp(selected_mandate))
-                        .is_lt()
-                    },
-                );
-                if replace {
-                    selected = Some(candidate);
-                }
+        match self.settlement {
+            PlannedSettlementAccount::Existing(settlement_account) => {
+                validate_establish_enterprise(registry, state, draft(settlement_account))
+                    .expect("read-only autonomous cohort plan must remain establishment-valid")
+                    .commit(state)
+                    .expect("enterprise ID capacity was preflighted for the autonomous cohort")
+            }
+            PlannedSettlementAccount::Fresh => {
+                let openings = validate_open_accounts(
+                    state,
+                    vec![FinancialAccountDraft {
+                        owner: FinancialOwner::Organization(self.organization),
+                        kind: AccountKind::Settlement,
+                    }],
+                )
+                .expect("fresh settlement-account capacity was preflighted for the cohort");
+                let settlement_account = openings
+                    .account_id(0)
+                    .expect("one planned settlement account must expose one id");
+                validate_establish_enterprise_with_openings(
+                    registry,
+                    state,
+                    draft(settlement_account),
+                    openings,
+                )
+                .expect("read-only autonomous cohort plan must remain establishment-valid")
+                .commit(state)
+                .expect("cohort ID capacity makes composite establishment infallible")
             }
         }
-        let Some((organization, mandate_index, _, _, plan)) = selected else {
-            break;
-        };
-        let (mandate, remove_organization) = {
-            let organization_mandates = mandates
-                .get_mut(&organization)
-                .expect("selected autonomous organization must retain its mandate queue");
-            let mandate = organization_mandates.remove(mandate_index);
-            (mandate, organization_mandates.is_empty())
-        };
-        if remove_organization {
-            mandates.remove(&organization);
-        }
-        established.push(commit_autonomous_expansion_plan(
-            registry,
-            state,
-            organization,
-            &mandate,
-            plan,
-            &mut working_capital_reservations,
-        )?);
     }
-    Ok(established)
-}
-
-fn resolve_eligible_expansion_mandates(
-    registry: &Registry,
-    state: &AppState,
-    player_organization: Option<OrganizationId>,
-    excluded_mandates: &BTreeSet<MandateId>,
-) -> Result<
-    BTreeMap<OrganizationId, Vec<crate::delegation::MandateRecord>>,
-    AutonomousEnterpriseError,
-> {
-    let mut by_organization: BTreeMap<OrganizationId, Vec<crate::delegation::MandateRecord>> =
-        BTreeMap::new();
-    for mandate in state.delegation().active_mandates() {
-        if excluded_mandates.contains(&mandate.id()) {
-            continue;
-        }
-        let organization = mandate.organization();
-        if Some(organization) == player_organization {
-            continue;
-        }
-        // Posture gate: an outfit whose police fear reaches or exceeds the authored ceiling keeps
-        // its head down for the day. Reputation therefore throttles rival growth, not just
-        // how candidates judge it.
-        let police_fear = crate::reputation::reputation_system::resolve_score(
-            registry,
-            &state.reputation,
-            organization,
-            crate::reputation::AudienceKind::Police,
-        );
-        if police_fear >= registry.reputation().expansion_police_fear_ceiling() {
-            continue;
-        }
-        let manager = mandate.manager();
-        let manager_record = state
-            .world()
-            .get_character(manager)
-            .ok_or(DelegationError::MissingManager(manager))?;
-        if state.legal().active_arrest_for_character(manager).is_some()
-            || !matches!(
-                manager_record.autonomy(),
-                AutonomyLevel::Delegated | AutonomyLevel::Broad
-            )
-        {
-            continue;
-        }
-        by_organization
-            .entry(organization)
-            .or_default()
-            .push(mandate.clone());
-    }
-    Ok(by_organization)
-}
-
-fn commit_autonomous_expansion_plan(
-    registry: &Registry,
-    state: &mut AppState,
-    organization: OrganizationId,
-    mandate: &crate::delegation::MandateRecord,
-    plan: AutonomousExpansionPlan,
-    working_capital_reservations: &mut BTreeMap<FinancialAccountId, Money>,
-) -> Result<EnterpriseId, AutonomousEnterpriseError> {
-    let manager = mandate.manager();
-    // Delegated managers do not open a new racket from token cash. The decision already
-    // priced one current cycle of runway using the canonical operating-cost composition,
-    // including police burden, support network, and current district heat. Direct player
-    // establishment may still accept a deliberately undercapitalized risk. This money is
-    // not consumed here because no startup fee exists in authored economics.
-    let Some((cash_account, existing_settlement)) = resolve_existing_autonomous_accounts(
-        state,
-        organization,
-        plan.required_working_capital,
-        working_capital_reservations,
-    ) else {
-        unreachable!("selected autonomous plan must retain a sufficiently funded cash account");
-    };
-    reserve_working_capital(
-        working_capital_reservations,
-        cash_account,
-        plan.required_working_capital,
-    )?;
-    let draft = |settlement_account| EnterpriseDraft {
-        kind: plan.kind,
-        organization,
-        authority: MandateAuthority {
-            mandate: mandate.id(),
-            manager,
-            scope: plan.scope,
-        },
-        location: plan.location,
-        supporting_businesses: plan.supporting_businesses.clone(),
-        cash_account,
-        settlement_account,
-    };
-    // A free settlement account establishes directly. When every settlement account is
-    // already reserved, plan a fresh one without mutating state and let the enterprise
-    // commit open it only after every establishment dependency is current.
-    let enterprise = match existing_settlement {
-        Some(settlement_account) => {
-            validate_establish_enterprise(registry, state, draft(settlement_account))?
-                .commit(state)?
-        }
-        None => {
-            let openings = validate_open_accounts(
-                state,
-                vec![FinancialAccountDraft {
-                    owner: FinancialOwner::Organization(organization),
-                    kind: AccountKind::Settlement,
-                }],
-            )?;
-            let fresh = openings
-                .account_id(0)
-                .expect("one planned settlement account must expose one id");
-            validate_establish_enterprise_with_openings(registry, state, draft(fresh), openings)?
-                .commit(state)?
-        }
-    };
-    Ok(enterprise)
 }
 
 /// Read-only deterministic decision over governed-location and authored enterprise candidates.
@@ -353,6 +186,7 @@ fn decide_autonomous_expansion(
     organization: OrganizationId,
     mandate: &crate::delegation::MandateRecord,
     available_working_capital: Money,
+    occupied_locations: &BTreeSet<(EnterpriseKind, EnterpriseLocation)>,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
 ) -> Result<Option<AutonomousExpansionPlan>, AutonomousEnterpriseError> {
     let district_scopes =
@@ -378,6 +212,7 @@ fn decide_autonomous_expansion(
         state: iteration.state,
         organization,
         observed_district_pressure: iteration.observed_district_pressure,
+        occupied_locations,
         management,
         available_working_capital,
     };
@@ -488,23 +323,6 @@ fn collect_enterprise_function_candidates(
     Ok(())
 }
 
-/// Resolves district leadership once per immutable phase-wide selection pass. Establishing the
-/// winner can change territorial influence, so the caller rebuilds this projection at the start
-/// of the next loop iteration rather than retaining it across mutation.
-fn resolve_district_leaders(state: &AppState) -> BTreeMap<NeighborhoodId, Option<OrganizationId>> {
-    state
-        .world()
-        .neighborhoods()
-        .map(|neighborhood| {
-            let id = neighborhood.id();
-            let leader = resolve_neighborhood_influence(state, id)
-                .expect("world neighborhood must resolve for autonomous expansion")
-                .economic_leader();
-            (id, leader)
-        })
-        .collect()
-}
-
 /// One organization's currently usable business network for an immutable expansion selection
 /// pass. Hosting and support both require live organization-owned businesses, so one snapshot can
 /// serve every mandate without repeatedly traversing the same owner index.
@@ -543,28 +361,22 @@ fn resolve_max_autonomous_working_capital(
         .max()
 }
 
-/// Resolves the rival's operating accounts read-only: the smallest sufficiently funded
-/// street-or-concealed cash pool, with account ID as the stable tie-breaker, plus an unreserved
-/// settlement account when one exists. Best-fit cash preserves larger pools for later plans
-/// instead of letting account creation order strand otherwise usable working capital. Cash must
-/// cover the selected configuration's current one-cycle operating runway. Returns
-/// `None` only when no sufficiently funded cash account exists; a missing settlement account is
-/// reported as `None` on the second slot so the caller can open one atomically with the
-/// establishment it backs.
-fn resolve_existing_autonomous_accounts(
+/// Resolves the rival's cash account read-only: the smallest sufficiently funded
+/// street-or-concealed cash pool, with account ID as the stable tie-breaker. Best-fit cash
+/// preserves larger pools for later plans instead of letting account creation order strand
+/// otherwise usable working capital. The account must cover the selected configuration's current
+/// one-cycle operating runway. Settlement-account planning is kept separate because the cohort
+/// projects those finite reusable accounts across multiple same-day establishments.
+fn resolve_autonomous_cash_account(
     state: &AppState,
     organization: OrganizationId,
     minimum_working_capital: Money,
     reservations: &BTreeMap<FinancialAccountId, Money>,
-) -> Option<(FinancialAccountId, Option<FinancialAccountId>)> {
+) -> Option<FinancialAccountId> {
     let owner = FinancialOwner::Organization(organization);
     let mut cash: Option<(Money, FinancialAccountId)> = None;
-    let mut settlement = None;
     for account in state.finance().accounts_for(owner) {
         let id = account.id();
-        // Exhaustive per repo rule: only sufficiently funded street-or-concealed cash backs an
-        // autonomous racket, and only an unreserved settlement account can back its cycle
-        // ledger. Account existence alone is not funding.
         match account.kind() {
             AccountKind::StreetCash | AccountKind::ConcealedCash => {
                 let available = available_working_capital(account, reservations);
@@ -575,18 +387,23 @@ fn resolve_existing_autonomous_accounts(
                 }
             }
             AccountKind::Settlement
-                if settlement.is_none()
-                    && state.enterprises().get_by_settlement_account(id).is_none()
-                    && state.economy().get_by_settlement_account(id).is_none() =>
-            {
-                settlement = Some(id);
-            }
-            AccountKind::Settlement
             | AccountKind::AccountedFunds
             | AccountKind::LegitimateOperating => {}
         }
     }
-    Some((cash?.1, settlement))
+    cash.map(|(_, id)| id)
+}
+
+fn settlement_account_is_available(state: &AppState, account: FinancialAccountId) -> bool {
+    state
+        .finance()
+        .get_account(account)
+        .is_some_and(|record| record.version() < u32::MAX)
+        && state
+            .enterprises()
+            .get_by_settlement_account(account)
+            .is_none()
+        && state.economy().get_by_settlement_account(account).is_none()
 }
 
 #[cfg(test)]
@@ -662,7 +479,7 @@ mod tests {
         .commit(&mut state)
         .expect("treasury funding should commit");
 
-        let selected = resolve_existing_autonomous_accounts(
+        let selected = resolve_autonomous_cash_account(
             &state,
             organization,
             Money::from_cents(6_000),
@@ -670,10 +487,10 @@ mod tests {
         )
         .expect("one cash pool should satisfy the requested runway");
         assert_eq!(
-            selected.0, small,
+            selected, small,
             "best-fit allocation must preserve the larger pool for a later larger runway"
         );
-        assert_eq!(selected.1, Some(settlement));
+        assert!(settlement_account_is_available(&state, settlement));
         validate_invariants(&state);
     }
 }

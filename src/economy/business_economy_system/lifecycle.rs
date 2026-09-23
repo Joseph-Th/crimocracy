@@ -58,6 +58,8 @@ impl ValidatedBusinessEconomyStatusChange {
                 economy.settlement_account(),
                 Some(self.business),
             )?;
+            validate_account_posting_headroom(state, economy.operating_account())?;
+            validate_account_posting_headroom(state, economy.settlement_account())?;
         }
         if let Some(capital_floor) = self.restart_capital_floor {
             if business.version() != capital_floor.business_version {
@@ -181,6 +183,8 @@ pub(crate) fn validate_acquisition_restart(
         economy.settlement_account(),
         Some(business),
     )?;
+    validate_account_posting_headroom(state, economy.operating_account())?;
+    validate_account_posting_headroom(state, economy.settlement_account())?;
     ensure_version_can_advance(economy.version(), "business economy")?;
     ensure_version_can_advance(business_record.version(), "business")?;
     let operating = state
@@ -234,6 +238,8 @@ fn validate_resume_with_cycle_duration(
         economy.settlement_account(),
         Some(business),
     )?;
+    validate_account_posting_headroom(state, economy.operating_account())?;
+    validate_account_posting_headroom(state, economy.settlement_account())?;
     ensure_version_can_advance(economy.version(), "business economy")?;
     let cycle_duration = schedulable_cycle_duration(economy.version(), cycle_duration);
     if let Some(cycle_duration) = cycle_duration {

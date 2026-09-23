@@ -24,10 +24,10 @@ pub(crate) use economics::{
     decode_enterprise_investigation_case_count, resolve_enterprise_financial_projection,
     resolve_enterprise_operating_cost_projection, resolve_historical_enterprise_cycle_financials,
 };
+#[cfg(test)]
+use establishment::enterprise_location_is_occupied;
+pub(crate) use establishment::validate_establish_enterprise_with_openings;
 pub use establishment::{ValidatedEnterpriseEstablishment, validate_establish_enterprise};
-pub(crate) use establishment::{
-    enterprise_location_is_occupied, validate_establish_enterprise_with_openings,
-};
 pub use lifecycle::{
     ValidatedEnterpriseStatusChange, validate_resume_enterprise, validate_retire_enterprise,
     validate_suspend_enterprise,

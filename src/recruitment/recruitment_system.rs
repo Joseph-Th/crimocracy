@@ -303,12 +303,24 @@ pub fn find_recruitment_candidates(
                 continue;
             }
         }
-        if recruitment_is_on_cooldown(
+        let on_cooldown = match recruitment_is_on_cooldown(
             registry.recruitment(),
             state,
             candidate,
             target_organization,
-        )? {
+        ) {
+            Ok(on_cooldown) => on_cooldown,
+            Err(RecruitmentError::SimulationTimeOverflow) => {
+                // The candidate's next legal approach lies beyond the finite campaign clock.
+                // Candidate discovery is a query over currently actionable prospects, so this
+                // permanently unreachable route is unavailable just like a candidate whose
+                // character version can no longer advance. An explicit attempt against this
+                // candidate still reports the typed SimulationTimeOverflow error.
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if on_cooldown {
             continue;
         }
         if let Err(error) = validate_reassign_character(

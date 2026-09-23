@@ -5,7 +5,7 @@
 //! New autonomous work must slot explicitly here with a "runs after X so Y" comment.
 
 use crate::core::id::{
-    BusinessCycleId, CharacterId, EnterpriseCycleId, IdExhaustionError, InvestigationId,
+    BusinessCycleId, CharacterId, EnterpriseCycleId, IdExhaustionError, IdKind, InvestigationId,
     InvestigationWorkId, OperationId, OpportunityId, PoliceResponseId, ProsecutionCaseId,
     RecruitmentAttemptId, ReportId,
 };
@@ -36,7 +36,8 @@ use crate::operations::operation_abort::{
 };
 use crate::operations::operation_execution::{
     OperationResolutionError, OperationResolutionRandomness, decide_operation_resolution,
-    find_due_in_progress_operations, validate_operation_resolution_plan,
+    find_due_in_progress_operations, mandatory_operation_resolution_id_budget,
+    validate_operation_resolution_plan,
 };
 use crate::operations::operation_scheduling::{
     find_due_authorized_operations, find_due_operations_with_missed_deadlines,
@@ -50,6 +51,7 @@ use crate::registry::Registry;
 use crate::reports::executive_brief::{
     decide_executive_brief, is_executive_brief_due, validate_executive_brief_plan,
 };
+use crate::reputation::reputation_system::OperationReputationEvent;
 use rand_core::RngCore;
 use thiserror::Error;
 
@@ -198,7 +200,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         )
         .expect("valid state should maintain suspended non-player business economies");
     let enterprise_cycles = run_enterprise_cycle_phase(registry, state)
-        .expect("valid due enterprise cycles must settle atomically");
+        .expect("valid due enterprise cycles must settle through the preflighted sequential phase");
     // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
     // the same day's wages. Reputation then settles the day boundary before recruitment: daily
     // decay advances only impressions old enough to fade, while operation/racket consequences from
@@ -208,7 +210,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state)
         .expect("valid state should settle every due criminal-organization payroll");
     let reputation_changes =
-        apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles);
+        apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles)
+            .expect("valid state should apply the preflighted reputation consequence cohort");
     let recruitment = apply_due_autonomous_recruitment(registry, state)
         .expect("valid state should resolve every due autonomous recruitment action");
     let recruitment_attempts = recruitment.attempts;
@@ -307,7 +310,10 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
     let prestart_aborts = prepare_authorized_prestart_aborts(registry, state, &due_authorized)
         .expect("valid due authorized abort cohort must preflight atomically");
     let mut started_operations = Vec::with_capacity(due_authorized.len());
-    for (operation, prestart_abort) in due_authorized.into_iter().zip(prestart_aborts) {
+    for (operation, prestart_abort) in due_authorized
+        .into_iter()
+        .zip(prestart_aborts.unwrap_or_default())
+    {
         if let Some(abort) = prestart_abort {
             (*abort).commit_preflighted(state);
             aborted_operations.push(operation);
@@ -319,7 +325,13 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
                 // operation stays Authorized and retries on later ticks. Completion deadlines
                 // and linked opportunity windows are handled by the pre-checks above, so temporary
                 // unavailability cannot silently carry work beyond an authored viability boundary.
-                Err(OperationError::ParticipantBusy { .. }) => {}
+                Err(OperationError::ParticipantBusy { .. })
+                // Direct begin correctly reports that no complete execution window remains.
+                // The autonomous tick has no useful mutation to make in that terminal state:
+                // retain the authorized plan and let the finite clock reach its canonical end
+                // instead of treating exhaustion of future time as an impossible-state panic.
+                | Err(OperationError::SimulationTimeOverflow) => {}
+                Err(error) if operation_begin_is_terminally_blocked(&error) => {}
                 Err(error) => {
                     panic!(
                         "due authorized operation could not begin through its canonical path: {error}"
@@ -335,8 +347,9 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
         apply_overdue_operation_cleanup(registry, state)
             .expect("valid overdue operations must abort as one artifact-preflighted cohort"),
     );
-    let resolved_operations = run_operation_resolution_phase(registry, state)
-        .expect("valid due operation resolutions must commit atomically");
+    let resolved_operations = run_operation_resolution_phase(registry, state).expect(
+        "valid due operation resolutions must commit through the preflighted sequential phase",
+    );
     OperationsPhaseOutcome {
         started: started_operations,
         arrived_police_responses,
@@ -356,7 +369,77 @@ enum OperationPhaseBatchError {
     IdExhaustion(#[from] IdExhaustionError),
 }
 
+fn operation_error_is_terminally_blocked(error: &OperationError) -> bool {
+    use crate::legal::police_response_system::PoliceResponseError;
+
+    matches!(
+        error,
+        OperationError::IdExhaustion(_)
+            | OperationError::VersionCapacity(_)
+            | OperationError::PoliceResponseDispatch(
+                PoliceResponseError::IdExhaustion(_) | PoliceResponseError::VersionCapacity(_)
+            )
+    )
+}
+
+fn operation_begin_is_terminally_blocked(error: &OperationError) -> bool {
+    operation_error_is_terminally_blocked(error)
+}
+
+fn operation_phase_batch_is_terminally_blocked(error: &OperationPhaseBatchError) -> bool {
+    match error {
+        OperationPhaseBatchError::IdExhaustion(_) => true,
+        OperationPhaseBatchError::Operation(error) => operation_error_is_terminally_blocked(error),
+        OperationPhaseBatchError::Decision(error) => match error {
+            DecisionError::IdExhaustion(_) | DecisionError::VersionCapacity(_) => true,
+            DecisionError::Operation(error) => operation_error_is_terminally_blocked(error),
+            DecisionError::EmptySummary
+            | DecisionError::StaleResolutionTime { .. }
+            | DecisionError::InvalidAttention
+            | DecisionError::MissingOperation(_)
+            | DecisionError::MissingCharacter(_)
+            | DecisionError::MissingOrganization(_)
+            | DecisionError::OperationNotInProgress { .. }
+            | DecisionError::OperationNotAwaitingDecision { .. }
+            | DecisionError::InvalidRequester { .. }
+            | DecisionError::InvalidOperationDecisionContext
+            | DecisionError::MissingContingency { .. }
+            | DecisionError::ExistingPendingDecision { .. }
+            | DecisionError::MissingPoliceResponse(_)
+            | DecisionError::InvalidPoliceResponseDecision { .. }
+            | DecisionError::StalePoliceResponse { .. }
+            | DecisionError::ExistingPendingRecruitmentApproval { .. }
+            | DecisionError::RecruitmentApprovalManagerMismatch { .. }
+            | DecisionError::RecruitmentApprovalRequiresPersonnelScope { .. }
+            | DecisionError::RecruitmentApprovalOrganizationMismatch { .. }
+            | DecisionError::RecruitmentApprovalPolicyMismatch { .. }
+            | DecisionError::StaleRecruitmentApprovalAuthority
+            | DecisionError::MissingDecision(_)
+            | DecisionError::DecisionNotPending(_)
+            | DecisionError::InvalidDetentionCancellation { .. }
+            | DecisionError::InvalidResolver { .. }
+            | DecisionError::InvalidResponse { .. }
+            | DecisionError::StaleOperation { .. }
+            | DecisionError::StaleDecision { .. }
+            | DecisionError::Delegation(_)
+            | DecisionError::Recruitment(_) => false,
+        },
+    }
+}
+
 fn prepare_authorized_prestart_aborts(
+    registry: &Registry,
+    state: &AppState,
+    due_authorized: &[OperationId],
+) -> Result<Option<Vec<Option<Box<ValidatedOperationAbort>>>>, OperationPhaseBatchError> {
+    match prepare_authorized_prestart_aborts_strict(registry, state, due_authorized) {
+        Ok(planned) => Ok(Some(planned)),
+        Err(error) if operation_phase_batch_is_terminally_blocked(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn prepare_authorized_prestart_aborts_strict(
     registry: &Registry,
     state: &AppState,
     due_authorized: &[OperationId],
@@ -415,6 +498,17 @@ enum PreparedOverdueOperationCleanup {
 }
 
 fn apply_overdue_operation_cleanup(
+    registry: &Registry,
+    state: &mut AppState,
+) -> Result<Vec<OperationId>, OperationPhaseBatchError> {
+    match apply_overdue_operation_cleanup_strict(registry, state) {
+        Ok(aborted) => Ok(aborted),
+        Err(error) if operation_phase_batch_is_terminally_blocked(&error) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+fn apply_overdue_operation_cleanup_strict(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<Vec<OperationId>, OperationPhaseBatchError> {
@@ -482,6 +576,26 @@ fn run_operation_resolution_phase(
     state: &mut AppState,
 ) -> Result<Vec<OperationId>, OperationResolutionError> {
     let due_operations = find_due_in_progress_operations(state);
+    // Resolution effects remain sequential because one operation can change world/legal context
+    // observed by a later same-minute operation. Some persistence is nevertheless unconditional:
+    // every resolution emits one report, one history event, one organization after-action fact,
+    // and one personal after-action fact per participant. Reserve that exact mandatory footprint
+    // for the complete cohort before the first RNG draw or mutation. Outcome-dependent incident
+    // and discovery artifacts remain in each resolution's canonical per-item preflight.
+    let mut mandatory_budget = Vec::with_capacity(due_operations.len() * 3);
+    for operation in &due_operations {
+        let record = state
+            .operations()
+            .get_operation(*operation)
+            .expect("due operation must still exist");
+        mandatory_budget.extend(mandatory_operation_resolution_id_budget(record));
+    }
+    if state.ids.reserve_many(&mandatory_budget).is_err() {
+        // Mandatory after-action persistence is part of every resolution. If the complete due
+        // cohort no longer fits a finite ID rail, resolve none of it and publish no RNG draws;
+        // allowing an ID-ordered prefix would make terminal behavior depend on stable IDs.
+        return Ok(Vec::new());
+    }
     let mut resolved_operations = Vec::with_capacity(due_operations.len());
     for operation in due_operations {
         let kind = state
@@ -495,13 +609,25 @@ fn run_operation_resolution_phase(
             draw_signed_variance(&mut advanced_rng, execution.variance_limit());
         let exposure_variance =
             draw_signed_variance(&mut advanced_rng, execution.exposure_variance_limit());
-        let plan = decide_operation_resolution(
+        let resolved = match decide_operation_resolution(
             registry,
             state,
             operation,
             OperationResolutionRandomness::new(execution_variance, exposure_variance),
-        )?;
-        let resolved = validate_operation_resolution_plan(registry, state, plan)?.commit(state)?;
+        )
+        .and_then(|plan| validate_operation_resolution_plan(registry, state, plan))
+        .and_then(|validated| validated.commit(state))
+        {
+            Ok(resolved) => resolved,
+            Err(error) if operation_resolution_is_terminally_blocked(&error) => {
+                // Outcome-dependent artifacts and objective effects are preflighted per item
+                // because earlier same-minute resolutions may legitimately change later context.
+                // A finite persistence/version rail therefore leaves only this operation due;
+                // its speculative draw is discarded and later independent work may continue.
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         // A cycle's RNG draw is part of that cycle's transaction. Publish it only after the
         // validated resolution has committed, so allocator or freshness rejection cannot consume
         // randomness for an operation that did not actually resolve.
@@ -509,6 +635,85 @@ fn run_operation_resolution_phase(
         resolved_operations.push(resolved);
     }
     Ok(resolved_operations)
+}
+
+fn operation_resolution_is_terminally_blocked(error: &OperationResolutionError) -> bool {
+    use crate::economy::business_economy_system::BusinessEconomyError;
+    use crate::finance::finance_system::FinanceError;
+    use crate::history::history_system::HistoryError;
+    use crate::intelligence::intelligence_system::IntelligenceError;
+    use crate::legal::arrest_system::ArrestError;
+    use crate::legal::investigation_system::InvestigationError;
+    use crate::legal::witness_system::WitnessError;
+    use crate::reports::report_system::ReportError;
+
+    fn arrest_capacity(error: &ArrestError) -> bool {
+        matches!(
+            error,
+            ArrestError::IdExhaustion(_) | ArrestError::VersionCapacity(_)
+        )
+    }
+    fn investigation_capacity(error: &InvestigationError) -> bool {
+        matches!(
+            error,
+            InvestigationError::IdExhaustion(_)
+                | InvestigationError::VersionCapacity(_)
+                | InvestigationError::CaseKnowledge(IntelligenceError::IdExhaustion(_))
+        )
+    }
+    fn witness_capacity(error: &WitnessError) -> bool {
+        matches!(
+            error,
+            WitnessError::IdExhaustion(_)
+                | WitnessError::VersionCapacity(_)
+                | WitnessError::CaseKnowledge(IntelligenceError::IdExhaustion(_))
+        )
+    }
+    fn business_capacity(error: &BusinessEconomyError) -> bool {
+        matches!(
+            error,
+            BusinessEconomyError::IdExhaustion(_)
+                | BusinessEconomyError::VersionCapacity(_)
+                | BusinessEconomyError::Finance(
+                    FinanceError::IdExhaustion(_) | FinanceError::VersionCapacity(_)
+                )
+                | BusinessEconomyError::Intelligence(IntelligenceError::IdExhaustion(_))
+        )
+    }
+
+    match error {
+        OperationResolutionError::IdExhaustion(_)
+        | OperationResolutionError::VersionCapacity(_)
+        | OperationResolutionError::Intelligence(IntelligenceError::IdExhaustion(_))
+        | OperationResolutionError::History(HistoryError::IdExhaustion(_))
+        | OperationResolutionError::Report(ReportError::IdExhaustion(_)) => true,
+        OperationResolutionError::Investigation(error) => investigation_capacity(error),
+        OperationResolutionError::Witness(error) => witness_capacity(error),
+        OperationResolutionError::Arrest(error) => arrest_capacity(error),
+        OperationResolutionError::DetaineeRelease { error, .. } => arrest_capacity(error),
+        OperationResolutionError::BusinessEconomy(error) => business_capacity(error),
+        OperationResolutionError::MissingOperation(_)
+        | OperationResolutionError::OperationNotInProgress(_)
+        | OperationResolutionError::ResolutionNotDue { .. }
+        | OperationResolutionError::VarianceOutOfRange { .. }
+        | OperationResolutionError::ExposureVarianceOutOfRange { .. }
+        | OperationResolutionError::PropertyProceedsOverflow { .. }
+        | OperationResolutionError::StalePropertyProceedsContext { .. }
+        | OperationResolutionError::CashProceedsOverflow { .. }
+        | OperationResolutionError::StaleCashProceedsContext { .. }
+        | OperationResolutionError::StaleObjectiveContext { .. }
+        | OperationResolutionError::StaleExtractionContext { .. }
+        | OperationResolutionError::StaleOperation { .. }
+        | OperationResolutionError::StaleResolutionTime { .. }
+        | OperationResolutionError::StalePoliceDeploymentContext { .. }
+        | OperationResolutionError::StalePoliceResponseContext { .. }
+        | OperationResolutionError::StaleIncidentRouting { .. }
+        | OperationResolutionError::StaleIncidentJurisdictionVersion { .. }
+        | OperationResolutionError::Intelligence(_)
+        | OperationResolutionError::History(_)
+        | OperationResolutionError::Report(_)
+        | OperationResolutionError::InformationAcquisition(_) => false,
+    }
 }
 
 /// Resolves due scheduled detective work with pre-drawn variance. Runs after operation
@@ -530,13 +735,25 @@ fn run_investigation_work_phase(
             .kind();
         let variance_limit = registry.get_investigation_work(kind).variance_limit();
         let variance = draw_signed_variance(&mut advanced_rng, variance_limit);
-        let plan = decide_investigation_work_resolution(
+        let plan = match decide_investigation_work_resolution(
             registry,
             state,
             work,
             InvestigationWorkRandomness::new(variance),
-        )?;
-        let validated = validate_investigation_work_resolution_plan(registry, state, plan)?;
+        ) {
+            Ok(plan) => plan,
+            Err(error) if investigation_work_is_terminally_blocked(&error) => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        };
+        let validated = match validate_investigation_work_resolution_plan(registry, state, plan) {
+            Ok(validated) => validated,
+            Err(error) if investigation_work_is_terminally_blocked(&error) => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        };
         id_budget.extend(validated.id_budget());
         planned.push(validated);
     }
@@ -546,7 +763,9 @@ fn run_investigation_work_phase(
     // before publishing either RNG progress or the first case mutation. This prevents a later
     // successful review/interview from leaving an earlier prefix resolved when global evidence or
     // statement IDs are nearly exhausted.
-    state.ids.reserve_many(&id_budget)?;
+    if state.ids.reserve_many(&id_budget).is_err() {
+        return Ok(Vec::new());
+    }
 
     let mut resolved = Vec::with_capacity(planned.len());
     for validated in planned {
@@ -561,6 +780,49 @@ fn run_investigation_work_phase(
     // even if a future resolution effect introduces a new fallible dependency.
     *state.investigation_rng_mut() = advanced_rng;
     Ok(resolved)
+}
+
+fn investigation_work_is_terminally_blocked(error: &InvestigationWorkError) -> bool {
+    use crate::intelligence::intelligence_system::IntelligenceError;
+    use crate::legal::witness_system::WitnessError;
+
+    match error {
+        InvestigationWorkError::IdExhaustion(_) | InvestigationWorkError::VersionCapacity(_) => {
+            true
+        }
+        InvestigationWorkError::InterviewStatementFailed { error, .. } => matches!(
+            error,
+            WitnessError::IdExhaustion(_)
+                | WitnessError::VersionCapacity(_)
+                | WitnessError::CaseKnowledge(IntelligenceError::IdExhaustion(_))
+        ),
+        InvestigationWorkError::MissingInvestigation(_)
+        | InvestigationWorkError::InactiveInvestigation(_)
+        | InvestigationWorkError::MissingInvestigator(_)
+        | InvestigationWorkError::InvestigatorNotAssigned { .. }
+        | InvestigationWorkError::DetainedInvestigator { .. }
+        | InvestigationWorkError::MissingInvestigationCapability(_)
+        | InvestigationWorkError::InvalidFocus
+        | InvestigationWorkError::WitnessAlreadyStatemented { .. }
+        | InvestigationWorkError::WitnessIsCaseSubject { .. }
+        | InvestigationWorkError::WitnessInterviewLimitReached { .. }
+        | InvestigationWorkError::EvidenceAlreadyReviewed { .. }
+        | InvestigationWorkError::EvidenceReviewAlreadyAttempted { .. }
+        | InvestigationWorkError::DuplicateScheduledWork { .. }
+        | InvestigationWorkError::InvestigatorBusy { .. }
+        | InvestigationWorkError::StaleInvestigation { .. }
+        | InvestigationWorkError::StaleInvestigator { .. }
+        | InvestigationWorkError::MissingWork(_)
+        | InvestigationWorkError::WorkNotScheduled(_)
+        | InvestigationWorkError::WorkNotDue { .. }
+        | InvestigationWorkError::StaleWork { .. }
+        | InvestigationWorkError::StaleResolutionContext { .. }
+        | InvestigationWorkError::StaleResolutionTime { .. }
+        | InvestigationWorkError::VarianceOutOfRange { .. }
+        | InvestigationWorkError::SimulationTimeOverflow
+        | InvestigationWorkError::InvalidSourceEvidence(_)
+        | InvestigationWorkError::WitnessInterviewAttemptCapacity { .. } => false,
+    }
 }
 
 /// Settles due business operating cycles with pre-drawn gross variance.
@@ -583,10 +845,16 @@ fn run_business_cycle_phase(
             .economics()
             .gross_variance_basis_points();
         let variance = draw_basis_point_variance(&mut advanced_rng, variance_limit);
-        let plan = decide_business_cycle(registry, state, business, variance)
-            .expect("due active business must resolve a valid cycle plan");
-        let validated = validate_business_cycle_plan(state, plan)
-            .expect("fresh business cycle plan must validate");
+        let plan = match decide_business_cycle(registry, state, business, variance) {
+            Ok(plan) => plan,
+            Err(error) if business_cycle_is_terminally_blocked(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let validated = match validate_business_cycle_plan(state, plan) {
+            Ok(validated) => validated,
+            Err(error) if business_cycle_is_terminally_blocked(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
         id_budget.extend(validated.id_budget());
         planned.push(validated);
     }
@@ -596,7 +864,9 @@ fn run_business_cycle_phase(
     // snapshots. Freeze every draw and reserve the complete persistent-ID budget before
     // publishing RNG progress or the first settlement so allocator pressure cannot settle only
     // the lowest business IDs in a same-minute cohort.
-    state.ids.reserve_many(&id_budget)?;
+    if state.ids.reserve_many(&id_budget).is_err() {
+        return Ok(Vec::new());
+    }
     *state.business_rng_mut() = advanced_rng;
 
     let mut business_cycles = Vec::with_capacity(planned.len());
@@ -604,6 +874,47 @@ fn run_business_cycle_phase(
         business_cycles.push(validated.commit_preflighted(state));
     }
     Ok(business_cycles)
+}
+
+fn business_cycle_is_terminally_blocked(
+    error: &crate::economy::business_economy_system::BusinessEconomyError,
+) -> bool {
+    use crate::economy::business_economy_system::BusinessEconomyError;
+    use crate::finance::finance_system::FinanceError;
+    use crate::intelligence::intelligence_system::IntelligenceError;
+
+    match error {
+        BusinessEconomyError::IdExhaustion(_) | BusinessEconomyError::VersionCapacity(_) => true,
+        BusinessEconomyError::Finance(
+            FinanceError::IdExhaustion(_) | FinanceError::VersionCapacity(_),
+        ) => true,
+        BusinessEconomyError::Intelligence(IntelligenceError::IdExhaustion(_)) => true,
+        BusinessEconomyError::Enterprise(error) => enterprise_cycle_is_terminally_blocked(error),
+        BusinessEconomyError::MissingBusiness(_)
+        | BusinessEconomyError::MissingBusinessEconomy(_)
+        | BusinessEconomyError::MissingBusinessNeighborhood(_)
+        | BusinessEconomyError::ExistingBusinessEconomy(_)
+        | BusinessEconomyError::MissingAccount(_)
+        | BusinessEconomyError::AccountOwnerMismatch { .. }
+        | BusinessEconomyError::InvalidOperatingAccountKind(_)
+        | BusinessEconomyError::InvalidSettlementAccountKind(_)
+        | BusinessEconomyError::SettlementAccountInUse { .. }
+        | BusinessEconomyError::EconomyNotActive(_)
+        | BusinessEconomyError::EconomyNotSuspended(_)
+        | BusinessEconomyError::ActiveEnterpriseDependency { .. }
+        | BusinessEconomyError::StaleEnterpriseDependency { .. }
+        | BusinessEconomyError::CycleNotDue { .. }
+        | BusinessEconomyError::VarianceOutOfRange { .. }
+        | BusinessEconomyError::ArithmeticOverflow(_)
+        | BusinessEconomyError::SimulationTimeOverflow
+        | BusinessEconomyError::StaleEconomy { .. }
+        | BusinessEconomyError::StaleBusiness { .. }
+        | BusinessEconomyError::StaleOperatingAccount { .. }
+        | BusinessEconomyError::StaleCycleTime { .. }
+        | BusinessEconomyError::StaleDisruptionTime { .. }
+        | BusinessEconomyError::Finance(_)
+        | BusinessEconomyError::Intelligence(_) => false,
+    }
 }
 
 /// Settles due enterprise cycles. Both draws happen unconditionally per due cycle so the
@@ -614,6 +925,26 @@ fn run_enterprise_cycle_phase(
     state: &mut AppState,
 ) -> Result<Vec<EnterpriseCycleId>, EnterpriseError> {
     let due_enterprises = find_due_enterprises(state);
+    // Later racket decisions intentionally observe earlier same-minute settlements: shared cash
+    // and newly opened enforcement inquiries can change the next racket's economics. We therefore
+    // cannot freeze the complete artifact budget up front without changing simulation semantics.
+    // Every due settlement does, however, unconditionally persist exactly one EnterpriseCycle.
+    // Prove that mandatory cohort capacity before the first mutation so this predictable finite
+    // rail cannot leave a successful prefix merely because stable enterprise order reached it.
+    if state
+        .ids
+        .reserve(
+            IdKind::EnterpriseCycle,
+            u32::try_from(due_enterprises.len())
+                .expect("persisted due enterprise count must fit the cycle ID space"),
+        )
+        .is_err()
+    {
+        // ID exhaustion is a valid finite terminal rail. Do not settle an ID-ordered prefix and
+        // do not consume RNG for work that cannot be persisted; every due racket simply remains
+        // due and inert once no complete cycle-id cohort is representable.
+        return Ok(Vec::new());
+    }
     let mut enterprise_cycles = Vec::with_capacity(due_enterprises.len());
     for enterprise in due_enterprises {
         let kind = state
@@ -633,13 +964,24 @@ fn run_enterprise_cycle_phase(
                 .expect("racket-attention roll range is never empty"),
         )
         .expect("racket-attention roll fits u16");
-        let plan = decide_enterprise_cycle(
+        let cycle = match decide_enterprise_cycle(
             registry,
             state,
             enterprise,
             EnterpriseCycleRandomness::new(variance, enforcement_attention_roll),
-        )?;
-        let cycle = validate_enterprise_cycle_plan(state, plan)?.commit(state)?;
+        )
+        .and_then(|plan| validate_enterprise_cycle_plan(state, plan))
+        .and_then(|validated| validated.commit(state))
+        {
+            Ok(cycle) => cycle,
+            Err(error) if enterprise_cycle_is_terminally_blocked(&error) => {
+                // Capacity exhaustion is not corruption. The failed cycle published neither its
+                // cloned RNG state nor any authoritative mutation, so leave it due and continue
+                // settling later independent rackets rather than panicking the canonical tick.
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         // Enterprise cycles stay sequential because they may share organization cash and one
         // racket's enforcement incident can change another racket's live legal-pressure context.
         // Still publish each item's two draws only after that item commits.
@@ -647,6 +989,29 @@ fn run_enterprise_cycle_phase(
         enterprise_cycles.push(cycle);
     }
     Ok(enterprise_cycles)
+}
+
+fn enterprise_cycle_is_terminally_blocked(error: &EnterpriseError) -> bool {
+    use crate::finance::finance_system::FinanceError;
+    use crate::intelligence::intelligence_system::IntelligenceError;
+    use crate::legal::investigation_system::InvestigationError;
+    use crate::reports::report_system::ReportError;
+
+    matches!(
+        error,
+        EnterpriseError::IdExhaustion(_)
+            | EnterpriseError::VersionCapacity(_)
+            | EnterpriseError::Finance(
+                FinanceError::IdExhaustion(_) | FinanceError::VersionCapacity(_)
+            )
+            | EnterpriseError::Intelligence(IntelligenceError::IdExhaustion(_))
+            | EnterpriseError::Report(ReportError::IdExhaustion(_))
+            | EnterpriseError::Investigation(
+                InvestigationError::IdExhaustion(_)
+                    | InvestigationError::VersionCapacity(_)
+                    | InvestigationError::CaseKnowledge(IntelligenceError::IdExhaustion(_))
+            )
+    )
 }
 
 /// Day-boundary decay runs first in the reputation cluster: eligible aged impressions fade one
@@ -660,11 +1025,13 @@ fn apply_reputation_phase(
     state: &mut AppState,
     resolved_operations: &[OperationId],
     enterprise_cycles: &[EnterpriseCycleId],
-) -> usize {
-    let mut changed =
-        crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
-    for operation in resolved_operations {
-        let (organization, kind, approach, objective_outcome, exposure_level) = {
+) -> Result<usize, crate::reputation::reputation_system::ReputationError> {
+    // Snapshot the consequence inputs before any reputation write. Both the read-only projection
+    // and the authoritative pass consume these exact vectors in this exact order, so clamping and
+    // same-minute accumulation cannot make the report preflight drift from the later mutations.
+    let operation_consequences: Vec<_> = resolved_operations
+        .iter()
+        .map(|operation| {
             let record = state
                 .operations()
                 .get_operation(*operation)
@@ -679,7 +1046,42 @@ fn apply_reputation_phase(
                 resolution.objective_outcome(),
                 resolution.exposure().level(),
             )
-        };
+        })
+        .collect();
+    let racket_inquiries: Vec<_> = enterprise_cycles
+        .iter()
+        .filter_map(|cycle_id| {
+            let cycle = state
+                .enterprises()
+                .get_cycle(*cycle_id)
+                .expect("settled enterprise cycle must exist for reputation consequences");
+            cycle.drew_enforcement_attention().then(|| {
+                state
+                    .enterprises()
+                    .get_enterprise(cycle.enterprise())
+                    .expect("settled enterprise cycle must reference its enterprise")
+                    .organization()
+            })
+        })
+        .collect();
+
+    match preflight_reputation_phase_reports(
+        registry,
+        state,
+        &operation_consequences,
+        &racket_inquiries,
+    ) {
+        Ok(()) => {}
+        Err(crate::reputation::reputation_system::ReputationError::IdExhaustion(_)) => {
+            return Ok(0);
+        }
+        Err(error) => return Err(error),
+    }
+
+    let mut changed =
+        crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
+    for (organization, kind, approach, objective_outcome, exposure_level) in operation_consequences
+    {
         let shifts = crate::reputation::reputation_system::apply_operation_reputation_consequences(
             registry,
             state,
@@ -688,52 +1090,82 @@ fn apply_reputation_phase(
             approach,
             objective_outcome,
             exposure_level,
-        )
-        .expect("valid state should apply operation reputation consequences");
+        )?;
         changed = changed
             .checked_add(shifts.len())
             .expect("one tick cannot contain enough reputation shifts to overflow usize");
     }
-    for cycle_id in enterprise_cycles {
-        let organization = {
-            let cycle = state
-                .enterprises()
-                .get_cycle(*cycle_id)
-                .expect("settled enterprise cycle must exist for reputation consequences");
-            if !cycle.drew_enforcement_attention() {
-                continue;
-            }
-            state
-                .enterprises()
-                .get_enterprise(cycle.enterprise())
-                .expect("settled enterprise cycle must reference its enterprise")
-                .organization()
-        };
+    for organization in racket_inquiries {
         let shifts =
             crate::reputation::reputation_system::apply_racket_inquiry_reputation_consequences(
                 registry,
                 state,
                 organization,
-            )
-            .expect("valid state should apply racket-inquiry reputation consequences");
+            )?;
         changed = changed
             .checked_add(shifts.len())
             .expect("one tick cannot contain enough reputation shifts to overflow usize");
     }
-    changed
+    Ok(changed)
+}
+
+fn preflight_reputation_phase_reports(
+    registry: &Registry,
+    state: &AppState,
+    operation_consequences: &[OperationReputationEvent],
+    racket_inquiries: &[crate::core::id::OrganizationId],
+) -> Result<(), crate::reputation::reputation_system::ReputationError> {
+    // Decay itself emits no report. Project that first, then replay every current consequence.
+    // A player consequence group needs exactly one Standing report iff at least one of its
+    // clamped shifts still moves after all earlier same-minute shifts. Reserve that exact count
+    // before decay so report exhaustion cannot leave a partially updated reputation phase.
+    let player = state.player_organization();
+    let mut projection =
+        crate::reputation::reputation_system::ReputationPhaseProjection::after_daily_decay(
+            registry, state,
+        );
+    let mut standing_reports = 0_u32;
+    for &event in operation_consequences {
+        let organization = event.0;
+        let moved = projection.apply_operation_consequences(registry, state, event)?;
+        if moved > 0 && player == Some(organization) {
+            standing_reports = standing_reports
+                .checked_add(1)
+                .expect("same-minute Standing report count must fit u32");
+        }
+    }
+    for &organization in racket_inquiries {
+        let moved = projection.apply_racket_inquiry_consequences(registry, state, organization)?;
+        if moved > 0 && player == Some(organization) {
+            standing_reports = standing_reports
+                .checked_add(1)
+                .expect("same-minute Standing report count must fit u32");
+        }
+    }
+    state.ids.reserve(IdKind::Report, standing_reports)?;
+    Ok(())
 }
 
 /// Synthesizes the player organization's due executive brief.
 fn synthesize_executive_brief(registry: &Registry, state: &mut AppState) -> Option<ReportId> {
     state.player_organization().and_then(|recipient| {
-        is_executive_brief_due(registry, state.now()).then(|| {
-            let plan = decide_executive_brief(registry, state, recipient)
-                .expect("due player executive brief must produce a valid synthesis plan");
-            validate_executive_brief_plan(state, plan)
-                .expect("fresh executive brief plan must validate")
-                .commit(state)
-                .expect("validated executive brief must commit atomically")
-        })
+        is_executive_brief_due(registry, state.now())
+            .then(|| {
+                let plan = decide_executive_brief(registry, state, recipient)
+                    .expect("due player executive brief must produce a valid synthesis plan");
+                let validated = validate_executive_brief_plan(state, plan)
+                    .expect("fresh executive brief plan must validate");
+                match validated.commit(state) {
+                    Ok(report) => Some(report),
+                    Err(crate::reports::executive_brief::ExecutiveBriefError::Report(
+                        crate::reports::report_system::ReportError::IdExhaustion(_),
+                    )) => None,
+                    Err(error) => {
+                        panic!("validated executive brief must commit atomically: {error}")
+                    }
+                }
+            })
+            .flatten()
     })
 }
 

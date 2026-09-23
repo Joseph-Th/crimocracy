@@ -865,16 +865,23 @@ pub(crate) fn apply_opportunity_expiry(
     let due = state.opportunities.find_due_expiring(state.now());
     let mut validated = Vec::with_capacity(due.len());
     for opportunity in due {
-        validated.push((
-            opportunity,
-            validate_expire_opportunity(registry, state, opportunity)?,
-        ));
+        let transaction = match validate_expire_opportunity(registry, state, opportunity) {
+            Ok(transaction) => transaction,
+            // Open opportunities are restore-bounded away from terminal lifecycle versions, but
+            // keep the autonomous batch tolerant of the finite rail for the same reason as its
+            // report allocator: no expiry has mutated yet, so the complete cohort can remain open.
+            Err(OpportunityError::VersionCapacity(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        validated.push((opportunity, transaction));
     }
     // Every due expiry writes one lifecycle report before the opportunity record changes.
     // Reserve the entire batch before the first report is persisted so allocator exhaustion
     // cannot expire only a prefix of the same-minute opportunity set.
     let report_budget = vec![(IdKind::Report, 1); validated.len()];
-    state.ids.reserve_many(&report_budget)?;
+    if state.ids.reserve_many(&report_budget).is_err() {
+        return Ok(Vec::new());
+    }
     let mut expired = Vec::with_capacity(validated.len());
     for (opportunity, transaction) in validated {
         transaction

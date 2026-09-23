@@ -3,6 +3,7 @@
 use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
+use crate::core::id::OrganizationId;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
@@ -76,6 +77,302 @@ impl rand_core::RngCore for SequenceRng {
 
 fn test_rating(value: u8) -> Rating {
     Rating::try_new(value).expect("simulation test rating must be valid")
+}
+
+#[test]
+fn executive_brief_report_exhaustion_is_terminal_noop() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xB12E_FFFF);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Terminal Brief Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("brief organization should validate");
+    designate_player_organization(&mut state, organization)
+        .expect("brief organization should become the player");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(crate::core::time::DAY_MINUTES)
+            .expect("authored day length must fit SimDuration"),
+    ));
+    assert!(is_executive_brief_due(&registry, state.now()));
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Report, u32::MAX);
+    let before = bincode::serialize(&state).expect("pre-brief state should serialize");
+
+    assert_eq!(synthesize_executive_brief(&registry, &mut state), None);
+    assert_eq!(
+        bincode::serialize(&state).expect("post-brief state should serialize"),
+        before,
+        "terminal report capacity must not mutate executive-brief state"
+    );
+    assert_eq!(state.reports().reports().count(), 0);
+    validate_state(&state).expect("terminal brief no-op should remain valid");
+    validate_invariants(&state);
+}
+
+fn make_resolved_player_reputation_pair() -> (Registry, AppState, OrganizationId, Vec<OperationId>)
+{
+    let registry = build_registry();
+    let mut state = AppState::new(0x57A0_D1A6);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Standing Cohort Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("standing cohort organization should validate");
+    designate_player_organization(&mut state, organization)
+        .expect("standing cohort organization should become the player");
+    let neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Standing Cohort Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: test_rating(60),
+                    commercial_activity: test_rating(60),
+                    illicit_demand: test_rating(50),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: test_rating(0),
+                },
+            },
+        },
+    )
+    .expect("standing cohort neighborhood should validate");
+    let target = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Standing Cohort Shop".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Independent,
+        },
+    )
+    .expect("standing cohort target should validate");
+
+    let mut operations = Vec::new();
+    for index in 0..2 {
+        let leader = insert_character(
+            &mut state,
+            CharacterDraft {
+                name: format!("Standing Cohort Leader {index}"),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([
+                    (CapabilityKind::Management, test_rating(100)),
+                    (CapabilityKind::Stealth, test_rating(100)),
+                ]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("standing cohort leader should validate");
+        let operation = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: format!("Standing cohort collection {index}"),
+                kind: OperationKind::Intimidation,
+                responsible_organization: organization,
+                leader,
+                objective: OperationObjective::ObtainCash {
+                    target: EntityRef::Business(target),
+                },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: SimTime::ZERO,
+            },
+        )
+        .expect("standing cohort operation should validate")
+        .commit(&mut state)
+        .expect("standing cohort operation should commit");
+        operations.push(operation);
+    }
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    for operation in &operations {
+        apply_transition(
+            &registry,
+            &mut state,
+            *operation,
+            OperationTransition::Begin,
+        )
+        .expect("standing cohort operation should begin");
+    }
+    let due_at = state
+        .operations()
+        .get_operation(operations[0])
+        .and_then(|record| record.resolution_due_at())
+        .expect("standing cohort operation must have a due time");
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operations[1])
+            .and_then(|record| record.resolution_due_at()),
+        Some(due_at)
+    );
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due_at.as_minutes() - state.now().as_minutes())
+            .expect("standing cohort duration must fit SimDuration"),
+    ));
+    let execution = registry
+        .get_operation(OperationKind::Intimidation)
+        .execution();
+    let execution_variance =
+        i8::try_from(execution.variance_limit()).expect("authored operation variance fits i8");
+    let exposure_variance = -i8::try_from(execution.exposure_variance_limit())
+        .expect("authored exposure variance fits i8");
+    for operation in &operations {
+        let plan = decide_operation_resolution(
+            &registry,
+            &state,
+            *operation,
+            OperationResolutionRandomness::new(execution_variance, exposure_variance),
+        )
+        .expect("standing cohort operation should decide");
+        validate_operation_resolution_plan(&registry, &state, plan)
+            .expect("standing cohort resolution should validate")
+            .commit(&mut state)
+            .expect("standing cohort resolution should commit");
+        let resolution = state
+            .operations()
+            .get_operation(*operation)
+            .and_then(|record| record.resolution())
+            .expect("standing cohort operation should be resolved");
+        assert_ne!(
+            resolution.objective_outcome(),
+            crate::operations::OperationObjectiveOutcome::Failed,
+            "maximal execution variance should produce a reputation-moving result"
+        );
+        assert!(matches!(
+            resolution.exposure().level(),
+            crate::operations::OperationExposureLevel::None
+                | crate::operations::OperationExposureLevel::Trace
+        ));
+    }
+    (registry, state, organization, operations)
+}
+
+#[test]
+fn reputation_phase_treats_standing_report_exhaustion_as_terminal_before_mutation() {
+    let (registry, mut state, organization, operations) = make_resolved_player_reputation_pair();
+    let baseline = registry.reputation().baseline();
+    assert_eq!(
+        resolve_score(
+            &registry,
+            state.reputation(),
+            organization,
+            AudienceKind::Underworld,
+        ),
+        baseline
+    );
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Report, u32::MAX - 1);
+    let before = bincode::serialize(&state).expect("pre-reputation state should serialize");
+
+    let changed = apply_reputation_phase(&registry, &mut state, &operations, &[])
+        .expect("Standing-report exhaustion is a terminal autonomous no-op");
+    assert_eq!(changed, 0);
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected reputation state should serialize"),
+        before,
+        "Standing-report exhaustion must reject before decay or the first consequence mutation"
+    );
+    assert_eq!(
+        resolve_score(
+            &registry,
+            state.reputation(),
+            organization,
+            AudienceKind::Underworld,
+        ),
+        baseline
+    );
+    validate_invariants(&state);
+}
+
+#[test]
+fn reputation_phase_preflight_counts_only_consequence_groups_that_still_move() {
+    let (registry, mut state, organization, operations) = make_resolved_player_reputation_pair();
+    let first_outcome = state
+        .operations()
+        .get_operation(operations[0])
+        .and_then(|record| record.resolution())
+        .expect("first standing operation should be resolved")
+        .objective_outcome();
+    let competence_delta = match first_outcome {
+        crate::operations::OperationObjectiveOutcome::Achieved => {
+            registry.reputation().achieved_underworld_competence()
+        }
+        crate::operations::OperationObjectiveOutcome::Partial => {
+            registry.reputation().partial_underworld_competence()
+        }
+        crate::operations::OperationObjectiveOutcome::Failed => unreachable!(),
+    };
+    assert!(competence_delta > 0);
+    let competence_delta = u8::try_from(competence_delta)
+        .expect("authored positive competence consequence must fit u8");
+    let baseline = registry.reputation().baseline();
+    let starting_score = 100_u8
+        .checked_sub(competence_delta)
+        .expect("authored competence consequence cannot exceed the score range");
+    assert!(starting_score >= baseline);
+    apply_reputation_delta(
+        &registry,
+        &mut state,
+        organization,
+        AudienceKind::Underworld,
+        i8::try_from(starting_score - baseline).expect("fixture reputation movement must fit i8"),
+    )
+    .expect("fixture reputation should move to one step below the rail");
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Report, u32::MAX - 1);
+
+    let changed = apply_reputation_phase(&registry, &mut state, &operations, &[])
+        .expect("only the first consequence group still needs a Standing report");
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        resolve_score(
+            &registry,
+            state.reputation(),
+            organization,
+            AudienceKind::Underworld,
+        ),
+        100,
+    );
+    assert_eq!(
+        state
+            .reports()
+            .reports_for(organization)
+            .filter(|report| report.kind() == crate::reports::ReportKind::Standing)
+            .count(),
+        1,
+        "the saturated second consequence must not reserve or emit a phantom report"
+    );
+    assert_eq!(
+        state.ids.next_raw(crate::core::id::IdKind::Report),
+        u32::MAX,
+        "exactly one final report ID should have been consumed"
+    );
+    validate_invariants(&state);
 }
 
 #[test]
@@ -226,7 +523,7 @@ fn domain_random_streams_do_not_cross_contaminate_unrelated_simulation_work() {
 }
 
 #[test]
-fn due_business_cycle_cohort_rejects_allocator_exhaustion_without_state_or_rng_progress() {
+fn due_business_cycle_cohort_treats_allocator_exhaustion_as_terminal_without_progress() {
     let registry = build_registry();
     let mut state = AppState::new(0xB051_BA7C);
     let organization = insert_organization(
@@ -312,17 +609,9 @@ fn due_business_cycle_cohort_rejects_allocator_exhaustion_without_state_or_rng_p
     let before =
         bincode::serialize(&state).expect("pre-exhaustion business state should serialize");
 
-    let error = run_business_cycle_phase(&registry, &mut state)
-        .expect_err("the complete due cohort must reserve both business-cycle IDs first");
-    assert_eq!(
-        error,
-        crate::economy::business_economy_system::BusinessEconomyError::IdExhaustion(
-            crate::core::id::IdExhaustionError::Exhausted {
-                kind: "business cycle",
-                next: u32::MAX - 1,
-            }
-        )
-    );
+    let cycles = run_business_cycle_phase(&registry, &mut state)
+        .expect("business-cycle ID exhaustion is a terminal autonomous no-op");
+    assert!(cycles.is_empty());
     assert_eq!(
         bincode::serialize(&state).expect("rejected business state should serialize"),
         before,
@@ -334,7 +623,7 @@ fn due_business_cycle_cohort_rejects_allocator_exhaustion_without_state_or_rng_p
 }
 
 #[test]
-fn authorized_prestart_abort_cohort_reserves_all_artifacts_before_first_abort() {
+fn authorized_prestart_abort_cohort_exhaustion_is_terminal_noop_before_first_abort() {
     let registry = build_registry();
     let mut state = AppState::new(0xA071_BA7C);
     let crew = insert_organization(
@@ -395,17 +684,9 @@ fn authorized_prestart_abort_cohort_reserves_all_artifacts_before_first_abort() 
     let before =
         bincode::serialize(&state).expect("pre-exhaustion authorized state should serialize");
 
-    let error = prepare_authorized_prestart_aborts(&registry, &state, &operations)
-        .expect_err("the full prestart abort cohort must reserve every abort artifact first");
-    assert!(matches!(
-        error,
-        OperationPhaseBatchError::IdExhaustion(
-            crate::core::id::IdExhaustionError::Exhausted {
-                kind: "information",
-                next,
-            }
-        ) if next == u32::MAX - 1
-    ));
+    let planned = prepare_authorized_prestart_aborts(&registry, &state, &operations)
+        .expect("prestart artifact exhaustion is a terminal autonomous no-op");
+    assert!(planned.is_none());
     assert_eq!(
         bincode::serialize(&state).expect("rejected authorized state should serialize"),
         before,
@@ -426,7 +707,7 @@ fn authorized_prestart_abort_cohort_reserves_all_artifacts_before_first_abort() 
 }
 
 #[test]
-fn overdue_operation_cleanup_reserves_full_abort_artifact_cohort_before_mutation() {
+fn overdue_operation_cleanup_exhaustion_is_terminal_noop_before_mutation() {
     let registry = build_registry();
     let mut state = AppState::new(0x0A0E_D34D);
     let crew = insert_organization(
@@ -503,17 +784,9 @@ fn overdue_operation_cleanup_reserves_full_abort_artifact_cohort_before_mutation
         .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX - 1);
     let before = bincode::serialize(&state).expect("pre-exhaustion overdue state should serialize");
 
-    let error = apply_overdue_operation_cleanup(&registry, &mut state)
-        .expect_err("the full overdue cohort must reserve all abort artifacts before mutation");
-    assert!(matches!(
-        error,
-        OperationPhaseBatchError::IdExhaustion(
-            crate::core::id::IdExhaustionError::Exhausted {
-                kind: "information",
-                next,
-            }
-        ) if next == u32::MAX - 1
-    ));
+    let aborted = apply_overdue_operation_cleanup(&registry, &mut state)
+        .expect("overdue abort artifact exhaustion is a terminal autonomous no-op");
+    assert!(aborted.is_empty());
     assert_eq!(
         bincode::serialize(&state).expect("rejected overdue state should serialize"),
         before,
@@ -534,7 +807,7 @@ fn overdue_operation_cleanup_reserves_full_abort_artifact_cohort_before_mutation
 }
 
 #[test]
-fn due_operation_resolution_rejects_allocator_exhaustion_without_rng_progress() {
+fn due_operation_resolution_treats_allocator_exhaustion_as_terminal_without_rng_progress() {
     let registry = build_registry();
     let mut state = AppState::new(0x0A0E_BA7C);
     let crew = insert_organization(
@@ -634,17 +907,9 @@ fn due_operation_resolution_rejects_allocator_exhaustion_without_rng_progress() 
     let before =
         bincode::serialize(&state).expect("pre-exhaustion operation state should serialize");
 
-    let error = run_operation_resolution_phase(&registry, &mut state)
-        .expect_err("resolution artifacts must reserve before RNG publication or mutation");
-    assert_eq!(
-        error,
-        crate::operations::operation_execution::OperationResolutionError::IdExhaustion(
-            crate::core::id::IdExhaustionError::Exhausted {
-                kind: "report",
-                next: u32::MAX,
-            }
-        )
-    );
+    let resolved = run_operation_resolution_phase(&registry, &mut state)
+        .expect("resolution artifact exhaustion is a terminal autonomous no-op");
+    assert!(resolved.is_empty());
     assert_eq!(
         bincode::serialize(&state).expect("rejected resolution state should serialize"),
         before,
@@ -663,7 +928,156 @@ fn due_operation_resolution_rejects_allocator_exhaustion_without_rng_progress() 
 }
 
 #[test]
-fn due_investigation_work_cohort_rejects_late_artifact_exhaustion_before_rng_or_state_progress() {
+fn due_operation_resolution_cohort_preflights_mandatory_reports() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x0A0E_C0A0);
+    let crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Cohort Resolution Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("resolution crew should validate");
+    let neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Cohort Resolution Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: test_rating(50),
+                    commercial_activity: test_rating(50),
+                    illicit_demand: test_rating(50),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: test_rating(0),
+                },
+            },
+        },
+    )
+    .expect("resolution neighborhood should validate");
+    let target = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Cohort Observed Shop".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Independent,
+        },
+    )
+    .expect("resolution target should validate");
+    let mut operations = Vec::new();
+    for index in 0..2 {
+        let leader = insert_character(
+            &mut state,
+            CharacterDraft {
+                name: format!("Cohort Observer {index}"),
+                organization: Some(crew),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([
+                    (CapabilityKind::Surveillance, test_rating(100)),
+                    (CapabilityKind::Stealth, test_rating(100)),
+                ]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("resolution leader should validate");
+        let operation = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: format!("Cohort surveillance {index}"),
+                kind: OperationKind::Surveillance,
+                responsible_organization: crew,
+                leader,
+                objective: OperationObjective::GatherInformation {
+                    target: EntityRef::Business(target),
+                },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: SimTime::ZERO,
+            },
+        )
+        .expect("resolution operation should validate")
+        .commit(&mut state)
+        .expect("resolution operation should commit");
+        operations.push(operation);
+    }
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    for operation in &operations {
+        apply_transition(
+            &registry,
+            &mut state,
+            *operation,
+            OperationTransition::Begin,
+        )
+        .expect("cohort resolution operation should begin");
+    }
+    let due_at = state
+        .operations()
+        .get_operation(operations[0])
+        .and_then(|record| record.resolution_due_at())
+        .expect("in-progress operation must have a due time");
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operations[1])
+            .and_then(|record| record.resolution_due_at()),
+        Some(due_at),
+        "matched surveillance operations should resolve in one cohort"
+    );
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due_at.as_minutes() - state.now().as_minutes())
+            .expect("fixture execution duration must fit SimDuration"),
+    ));
+    assert_eq!(find_due_in_progress_operations(&state), operations);
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Report, u32::MAX - 1);
+    let before =
+        bincode::serialize(&state).expect("pre-exhaustion operation cohort should serialize");
+    let mut untouched_rng = state.operation_rng_mut().clone();
+
+    let resolved = run_operation_resolution_phase(&registry, &mut state)
+        .expect("mandatory report exhaustion is a terminal autonomous no-op");
+    assert!(resolved.is_empty());
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected operation cohort should serialize"),
+        before,
+        "mandatory report exhaustion must reject before the first same-minute resolution"
+    );
+    let post_failure_draw =
+        draw_index(state.operation_rng_mut(), 100).expect("operation RNG draw should succeed");
+    let untouched_draw =
+        draw_index(&mut untouched_rng, 100).expect("control operation RNG draw should succeed");
+    assert_eq!(post_failure_draw, untouched_draw);
+    for operation in operations {
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(operation)
+                .expect("rejected operation should persist")
+                .status(),
+            OperationStatus::InProgress
+        );
+    }
+    validate_state(&state).expect("rejected operation-resolution cohort should remain valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn due_investigation_work_cohort_treats_late_artifact_exhaustion_as_terminal_noop() {
     let registry = build_registry();
     let mut state = AppState::new(0x1A7E_BA7C);
     let police = insert_organization(
@@ -804,18 +1218,9 @@ fn due_investigation_work_cohort_rejects_late_artifact_exhaustion_before_rng_or_
         bincode::serialize(&state).expect("pre-exhaustion investigation state should serialize");
     let mut untouched_rng = state.investigation_rng_mut().clone();
 
-    let error = run_investigation_work_phase(&registry, &mut state).expect_err(
-        "the complete due cohort must reserve both evidence IDs before any resolution commits",
-    );
-    assert_eq!(
-        error,
-        crate::legal::investigation_work_execution::InvestigationWorkError::IdExhaustion(
-            crate::core::id::IdExhaustionError::Exhausted {
-                kind: "evidence",
-                next: u32::MAX - 1,
-            }
-        )
-    );
+    let resolved = run_investigation_work_phase(&registry, &mut state)
+        .expect("evidence-ID exhaustion is a terminal autonomous no-op");
+    assert!(resolved.is_empty());
     assert_eq!(
         bincode::serialize(&state).expect("rejected investigation state should serialize"),
         before,
@@ -844,7 +1249,7 @@ fn due_investigation_work_cohort_rejects_late_artifact_exhaustion_before_rng_or_
 }
 
 #[test]
-fn due_enterprise_cycle_rejects_allocator_exhaustion_without_rng_progress() {
+fn due_enterprise_cycle_treats_allocator_exhaustion_as_terminal_without_rng_progress() {
     let registry = build_registry();
     let mut state = AppState::new(0xE17E_BA7C);
     let organization = insert_organization(
@@ -948,17 +1353,9 @@ fn due_enterprise_cycle_rejects_allocator_exhaustion_without_rng_progress() {
         bincode::serialize(&state).expect("pre-exhaustion enterprise state should serialize");
     let mut untouched_rng = state.enterprise_rng_mut().clone();
 
-    let error = run_enterprise_cycle_phase(&registry, &mut state)
-        .expect_err("cycle-ID exhaustion must reject the due enterprise before settlement");
-    assert_eq!(
-        error,
-        crate::enterprises::enterprise_execution::EnterpriseError::IdExhaustion(
-            crate::core::id::IdExhaustionError::Exhausted {
-                kind: "enterprise cycle",
-                next: u32::MAX,
-            }
-        )
-    );
+    let cycles = run_enterprise_cycle_phase(&registry, &mut state)
+        .expect("cycle-ID exhaustion is a terminal autonomous no-op");
+    assert!(cycles.is_empty());
     assert_eq!(
         bincode::serialize(&state).expect("rejected enterprise state should serialize"),
         before,
@@ -974,6 +1371,167 @@ fn due_enterprise_cycle_rejects_allocator_exhaustion_without_rng_progress() {
         "rejected enterprise settlement must not persist a cycle"
     );
     validate_state(&state).expect("rejected enterprise-cycle state should remain valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn due_enterprise_cycle_cohort_preflights_mandatory_cycle_ids() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xE17E_C0A0);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Cohort Racket Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("enterprise organization should validate");
+    let neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Cohort Racket Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: test_rating(60),
+                    commercial_activity: test_rating(70),
+                    illicit_demand: test_rating(55),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: test_rating(40),
+                },
+            },
+        },
+    )
+    .expect("enterprise neighborhood should validate");
+    let manager = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Cohort Racket Manager".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, test_rating(80))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("enterprise manager should validate");
+    let scope = ResponsibilityScope::Neighborhood(neighborhood);
+    let mandate = validate_assign_mandate(
+        &state,
+        MandateDraft {
+            organization,
+            manager,
+            scopes: BTreeSet::from([scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .expect("enterprise mandate should validate")
+    .commit(&mut state)
+    .expect("enterprise mandate should commit");
+    let cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("enterprise cash account should validate");
+    let protection_settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("protection settlement account should validate");
+    let gambling_settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("gambling settlement account should validate");
+    let authority = MandateAuthority {
+        mandate,
+        manager,
+        scope,
+    };
+    let protection = validate_establish_enterprise(
+        &registry,
+        &state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization,
+            authority,
+            location: EnterpriseLocation::Neighborhood(neighborhood),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: cash,
+            settlement_account: protection_settlement,
+        },
+    )
+    .expect("protection enterprise should validate")
+    .commit(&mut state)
+    .expect("protection enterprise should commit");
+    let gambling_venue = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Cohort Card Room".to_owned(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+                BusinessFunction::MeetingSpace,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Organization(organization),
+        },
+    )
+    .expect("gambling venue should validate");
+    let gambling = validate_establish_enterprise(
+        &registry,
+        &state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization,
+            authority,
+            location: EnterpriseLocation::Business(gambling_venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: cash,
+            settlement_account: gambling_settlement,
+        },
+    )
+    .expect("gambling enterprise should validate")
+    .commit(&mut state)
+    .expect("gambling enterprise should commit");
+    state.advance_clock(SimDuration::from_minutes(1_440));
+    assert_eq!(find_due_enterprises(&state), vec![protection, gambling]);
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::EnterpriseCycle, u32::MAX - 1);
+    let before = bincode::serialize(&state).expect("pre-cohort state should serialize");
+    let mut untouched_rng = state.enterprise_rng_mut().clone();
+
+    let cycles = run_enterprise_cycle_phase(&registry, &mut state)
+        .expect("incomplete cycle-ID cohort capacity is a terminal autonomous no-op");
+    assert!(cycles.is_empty());
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected cohort state should serialize"),
+        before,
+        "mandatory cycle-ID exhaustion must reject before the first same-minute settlement"
+    );
+    let post_failure_draw =
+        draw_index(state.enterprise_rng_mut(), 100).expect("enterprise RNG draw should succeed");
+    let untouched_draw =
+        draw_index(&mut untouched_rng, 100).expect("control enterprise RNG draw should succeed");
+    assert_eq!(post_failure_draw, untouched_draw);
+    assert_eq!(state.enterprises().cycles_for(protection).count(), 0);
+    assert_eq!(state.enterprises().cycles_for(gambling).count(), 0);
+    validate_state(&state).expect("rejected enterprise-cycle cohort should remain valid");
     validate_invariants(&state);
 }
 

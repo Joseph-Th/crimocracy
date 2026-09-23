@@ -103,10 +103,11 @@ fn resolve_jurisdiction_priority(
         .legal
         .jurisdictions_for_neighborhood(neighborhood)
         .filter(|jurisdiction| {
-            state
+            let organization = state
                 .world
                 .get_organization(jurisdiction.organization())
-                .is_some_and(|organization| kinds.contains(&organization.kind()))
+                .expect("persisted jurisdiction must reference its authority organization");
+            kinds.contains(&organization.kind())
         })
         .fold(None, |best, jurisdiction| match best {
             None => Some(jurisdiction),

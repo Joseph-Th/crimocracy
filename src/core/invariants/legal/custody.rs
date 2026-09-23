@@ -106,6 +106,7 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
                     });
                 if arrest.released_at().is_some()
                     || arrest.version() != 1
+                    || state.now() == crate::core::time::SimTime::MAX
                     || !matches!(
                         investigation.status(),
                         // A closed case may still hold its detainee: the case was cleared by
@@ -165,11 +166,11 @@ pub(in crate::core::invariants) fn validate_arrests_against_registry(
         }
         match arrest.status() {
             ArrestStatus::Detained => {
-                // At the absolute clock endpoint an arrest can be authored at the same instant as
-                // its clamped release boundary. That ordering is still a valid terminal event.
-                // Every older detention whose release boundary has arrived would already have
-                // been released by the canonical first phase of that minute.
-                if arrest.arrested_at() < release_boundary && state.now() >= release_boundary {
+                // The canonical tick releases every detention whose boundary has arrived before
+                // any later same-minute work. At the finite clock endpoint it releases every
+                // remaining detention, and new custody is rejected, so no persisted detained
+                // record may survive at or beyond its derived release boundary.
+                if state.now() >= release_boundary {
                     return Err(invalid());
                 }
             }

@@ -192,6 +192,8 @@ impl ValidatedBusinessEconomyEstablishment {
             self.draft.settlement_account,
             None,
         )?;
+        validate_account_posting_headroom(state, self.draft.operating_account)?;
+        validate_account_posting_headroom(state, self.draft.settlement_account)?;
         let operating = state
             .finance
             .get_account(self.draft.operating_account)
@@ -241,6 +243,8 @@ pub fn validate_establish_business_economy(
         draft.settlement_account,
         None,
     )?;
+    validate_account_posting_headroom(state, draft.operating_account)?;
+    validate_account_posting_headroom(state, draft.settlement_account)?;
     let cycle_duration = registry.get_business(business.kind()).economics().cycle();
     state
         .now()
@@ -437,6 +441,18 @@ fn validate_accounts(
             business: existing.business(),
         });
     }
+    Ok(())
+}
+
+fn validate_account_posting_headroom(
+    state: &AppState,
+    account: FinancialAccountId,
+) -> Result<(), BusinessEconomyError> {
+    let account = state
+        .finance
+        .get_account(account)
+        .ok_or(BusinessEconomyError::MissingAccount(account))?;
+    ensure_version_can_advance(account.version(), "financial account")?;
     Ok(())
 }
 

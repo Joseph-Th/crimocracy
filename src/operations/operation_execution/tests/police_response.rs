@@ -997,19 +997,14 @@ fn police_arrival_decision_id_exhaustion_leaves_response_dispatched_and_operatio
         .ids
         .set_next_raw_for_test(IdKind::DecisionRequest, u32::MAX);
 
-    let error = crate::operations::police_response_integration::apply_due_police_response_arrivals(
-        &mut state,
-    )
-    .expect_err("decision allocator exhaustion must reject the whole response arrival");
-    assert!(matches!(
-        error,
-        crate::operations::police_response_integration::PoliceResponseIntegrationError::IdExhaustion(
-            IdExhaustionError::Exhausted {
-                kind: "decision request",
-                ..
-            }
+    let outcome =
+        crate::operations::police_response_integration::apply_due_police_response_arrivals(
+            &mut state,
         )
-    ));
+        .expect("decision allocator exhaustion is a terminal autonomous no-op");
+    assert!(outcome.arrived.is_empty());
+    assert!(outcome.decisions.is_empty());
+    assert!(outcome.aborted_operations.is_empty());
     let response = state
         .legal()
         .get_police_response(response_id)
@@ -1079,16 +1074,14 @@ fn police_arrival_abort_artifact_exhaustion_leaves_response_dispatched_and_opera
     let history_next = state.ids.next_raw(IdKind::HistoryEvent);
     state.ids.set_next_raw_for_test(IdKind::Report, u32::MAX);
 
-    let error = crate::operations::police_response_integration::apply_due_police_response_arrivals(
-        &mut state,
-    )
-    .expect_err("abort report exhaustion must reject the whole response arrival");
-    assert!(matches!(
-        error,
-        crate::operations::police_response_integration::PoliceResponseIntegrationError::IdExhaustion(
-            IdExhaustionError::Exhausted { kind: "report", .. }
+    let outcome =
+        crate::operations::police_response_integration::apply_due_police_response_arrivals(
+            &mut state,
         )
-    ));
+        .expect("abort report exhaustion is a terminal autonomous no-op");
+    assert!(outcome.arrived.is_empty());
+    assert!(outcome.decisions.is_empty());
+    assert!(outcome.aborted_operations.is_empty());
     let response = state
         .legal()
         .get_police_response(response_id)
@@ -1111,7 +1104,7 @@ fn police_arrival_abort_artifact_exhaustion_leaves_response_dispatched_and_opera
 }
 
 #[test]
-fn same_minute_police_arrival_batch_rejects_information_exhaustion_atomically() {
+fn same_minute_police_arrival_batch_information_exhaustion_is_terminal_noop_atomically() {
     let (registry, mut state, _police, neighborhood, first_operation) =
         make_exposed_business_operation_fixture(true);
     let second_operation =
@@ -1158,19 +1151,14 @@ fn same_minute_police_arrival_batch_rejects_information_exhaustion_atomically() 
     let before =
         bincode::serialize(&state).expect("pre-exhaustion response cohort should serialize");
 
-    let error = crate::operations::police_response_integration::apply_due_police_response_arrivals(
-        &mut state,
-    )
-    .expect_err("the full same-minute response cohort must reserve its information budget first");
-    assert!(matches!(
-        error,
-        crate::operations::police_response_integration::PoliceResponseIntegrationError::IdExhaustion(
-            IdExhaustionError::Exhausted {
-                kind: "information",
-                next,
-            }
-        ) if next == u32::MAX - 3
-    ));
+    let outcome =
+        crate::operations::police_response_integration::apply_due_police_response_arrivals(
+            &mut state,
+        )
+        .expect("same-minute response information exhaustion is a terminal autonomous no-op");
+    assert!(outcome.arrived.is_empty());
+    assert!(outcome.decisions.is_empty());
+    assert!(outcome.aborted_operations.is_empty());
     assert_eq!(
         bincode::serialize(&state).expect("rejected response cohort should serialize"),
         before,

@@ -518,7 +518,7 @@ fn autonomous_disclosure_reaches_each_matching_case_in_one_pass() {
 }
 
 #[test]
-fn autonomous_disclosure_batch_rejects_allocator_exhaustion_atomically() {
+fn autonomous_disclosure_allocator_exhaustion_is_terminal_noop_atomically() {
     let mut fixture = fixture();
     validate_establish_informant(
         &fixture.state,
@@ -550,15 +550,9 @@ fn autonomous_disclosure_batch_rejects_allocator_exhaustion_atomically() {
     let before = bincode::serialize(&fixture.state)
         .expect("pre-exhaustion disclosure state should serialize");
 
-    let error = apply_informant_disclosures(&mut fixture.state)
-        .expect_err("two same-pass disclosures must reserve both evidence IDs before mutation");
-    assert_eq!(
-        error,
-        InformantError::IdExhaustion(IdExhaustionError::Exhausted {
-            kind: "evidence",
-            next: u32::MAX - 1,
-        })
-    );
+    let disclosures = apply_informant_disclosures(&mut fixture.state)
+        .expect("disclosure evidence-ID exhaustion is a terminal autonomous no-op");
+    assert!(disclosures.is_empty());
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected disclosure state should serialize"),
         before,
@@ -1281,7 +1275,7 @@ fn informant_flip_uses_half_open_percentile_threshold() {
 }
 
 #[test]
-fn informant_id_exhaustion_rejects_before_consuming_investigation_rng() {
+fn informant_id_exhaustion_is_terminal_noop_before_consuming_investigation_rng() {
     let registry = build_registry();
     let mut fixture = fixture();
     let detainee = insert_character(
@@ -1366,15 +1360,9 @@ fn informant_id_exhaustion_rejects_before_consuming_investigation_rng() {
         .set_next_raw_for_test(IdKind::Informant, u32::MAX);
     let mut untouched = fixture.state.clone();
 
-    let error = apply_detainee_informant_recruitment(&registry, &mut fixture.state)
-        .expect_err("a successful flip must surface informant allocator exhaustion");
-    assert!(matches!(
-        error,
-        InformantError::IdExhaustion(IdExhaustionError::Exhausted {
-            kind: "informant",
-            ..
-        })
-    ));
+    let recruited = apply_detainee_informant_recruitment(&registry, &mut fixture.state)
+        .expect("informant allocator exhaustion is a terminal autonomous no-op");
+    assert!(recruited.is_empty());
     assert_eq!(fixture.state.legal().informants().count(), 0);
 
     let after_failure =
@@ -1385,12 +1373,12 @@ fn informant_id_exhaustion_rejects_before_consuming_investigation_rng() {
             .expect("control draw should succeed");
     assert_eq!(
         after_failure, untouched_draw,
-        "a rejected informant establishment must not advance the investigation RNG"
+        "a terminally blocked informant establishment must not advance the investigation RNG"
     );
 }
 
 #[test]
-fn informant_recruitment_batch_rejects_later_success_exhaustion_atomically() {
+fn informant_recruitment_batch_exhaustion_is_terminal_noop_atomically() {
     let registry = build_registry();
     let mut fixture = fixture();
     let detainees = (0..6)
@@ -1425,16 +1413,9 @@ fn informant_recruitment_batch_rejects_later_success_exhaustion_atomically() {
         .expect("pre-exhaustion informant state should serialize");
     let mut untouched_rng = fixture.state.investigation_rng_mut().clone();
 
-    let error = apply_detainee_informant_recruitment(&registry, &mut fixture.state).expect_err(
-        "the full successful cohort must fit before the first informant is established",
-    );
-    assert_eq!(
-        error,
-        InformantError::IdExhaustion(IdExhaustionError::Exhausted {
-            kind: "informant",
-            next,
-        })
-    );
+    let recruited = apply_detainee_informant_recruitment(&registry, &mut fixture.state)
+        .expect("informant-ID exhaustion is a terminal autonomous no-op");
+    assert!(recruited.is_empty());
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected informant state should serialize"),
         before,

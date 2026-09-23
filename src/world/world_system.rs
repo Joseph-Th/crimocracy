@@ -311,12 +311,33 @@ impl ValidatedCharacterReassignment {
     }
 }
 
-pub fn validate_reassign_character(
+/// Validates an internal membership/reassignment mutation. Organization membership changes are
+/// composed by their owning gameplay systems (notably recruitment) rather than exposed as a
+/// public shortcut that can bypass willingness, approval, or other domain policy.
+pub(crate) fn validate_reassign_character(
     state: &AppState,
     character: CharacterId,
     organization: Option<OrganizationId>,
     supervisor: Option<CharacterId>,
 ) -> Result<ValidatedCharacterReassignment, WorldError> {
+    validate_reassign_character_with_approval(state, character, organization, supervisor, None)
+}
+
+/// Public organization-management command for changing only a member's reporting line.
+///
+/// The character's current organization is retained by construction. Joining, defecting to, or
+/// otherwise changing organizations must go through the domain that owns that transition instead
+/// of using the world store as a recruitment bypass.
+pub fn validate_set_character_supervisor(
+    state: &AppState,
+    character: CharacterId,
+    supervisor: Option<CharacterId>,
+) -> Result<ValidatedCharacterReassignment, WorldError> {
+    let organization = state
+        .world
+        .get_character(character)
+        .ok_or(WorldError::MissingCharacter(character))?
+        .organization();
     validate_reassign_character_with_approval(state, character, organization, supervisor, None)
 }
 
@@ -438,10 +459,11 @@ fn validate_reassignment_preconditions(
         if current == character {
             return Err(WorldError::SupervisionCycle { character });
         }
-        cursor = state
+        let current_record = state
             .world
             .get_character(current)
-            .and_then(|record| record.supervisor());
+            .ok_or(WorldError::MissingCharacter(current))?;
+        cursor = current_record.supervisor();
     }
     Ok(())
 }

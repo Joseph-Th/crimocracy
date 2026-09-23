@@ -131,6 +131,8 @@ pub enum ArrestError {
     },
     #[error("arrest was validated at {expected:?}, but simulation time is now {found:?}")]
     StaleArrestTime { expected: SimTime, found: SimTime },
+    #[error("custody cannot begin at the terminal simulation minute")]
+    SimulationTimeOverflow,
     #[error("character {character}'s live responsibilities changed after arrest validation")]
     CustodyResponsibilitiesChanged { character: CharacterId },
     #[error("arrest {0} does not exist")]
@@ -340,6 +342,12 @@ pub fn validate_arrest(
 ) -> Result<ValidatedArrest, ArrestError> {
     let minimum_qualifying_evidence = registry.legal().minimum_arrest_qualifying_evidence();
     let authority = validate_arrest_dependencies(state, &draft, minimum_qualifying_evidence)?;
+    // Existing detention is released when the clock reaches its final representable minute.
+    // Starting fresh custody at that same terminal instant would create a detention with no
+    // successor tick in which the authored custody cap can ever release it.
+    if state.now() == SimTime::MAX {
+        return Err(ArrestError::SimulationTimeOverflow);
+    }
     let investigation = state
         .legal
         .get_investigation(draft.investigation)
@@ -463,6 +471,7 @@ fn validate_arrest_dependencies(
             .legal
             .get_evidence(*evidence_id)
             .ok_or(ArrestError::MissingEvidence(*evidence_id))?;
+        validate_custody_evidence_references(state, evidence)?;
         if evidence.investigation() != draft.investigation {
             return Err(ArrestError::EvidenceInvestigationMismatch {
                 evidence: *evidence_id,
@@ -509,6 +518,19 @@ fn validate_arrest_dependencies(
     validate_repeat_custody_evidence(state, draft)?;
 
     Ok(authority)
+}
+
+pub(super) fn validate_custody_evidence_references(
+    state: &AppState,
+    evidence: &crate::legal::EvidenceRecord,
+) -> Result<(), ArrestError> {
+    for source in evidence.derived_from() {
+        state
+            .legal
+            .get_evidence(*source)
+            .ok_or(ArrestError::MissingEvidence(*source))?;
+    }
+    Ok(())
 }
 
 fn latest_released_arrest_for_case_character(

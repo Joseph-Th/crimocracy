@@ -866,6 +866,36 @@ fn reassignment_rejects_supervision_cycle_without_mutation() {
 }
 
 #[test]
+fn public_supervisor_change_retains_character_organization() {
+    let registry = build_registry();
+    let mut state = AppState::new(10);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Reporting Line Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("test organization should validate");
+    let boss = make_test_character(&mut state, "Boss", organization, None);
+    let member = make_test_character(&mut state, "Member", organization, None);
+
+    validate_set_character_supervisor(&state, member, Some(boss))
+        .expect("public reporting-line change should validate")
+        .commit(&mut state)
+        .expect("public reporting-line change should commit");
+
+    let record = state
+        .world()
+        .get_character(member)
+        .expect("member should persist");
+    assert_eq!(record.organization(), Some(organization));
+    assert_eq!(record.supervisor(), Some(boss));
+    validate_invariants(&state);
+}
+
+#[test]
 fn reassignment_updates_hierarchy_indexes_atomically() {
     let registry = build_registry();
     let mut state = AppState::new(11);

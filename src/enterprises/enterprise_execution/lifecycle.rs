@@ -4,6 +4,7 @@
 //! retirement retain one focused validate/commit owner without expanding the already substantial
 //! settlement module.
 
+use super::support::validate_enterprise_account_posting_headroom;
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +147,8 @@ impl ValidatedEnterpriseStatusChange {
                 record.settlement_account(),
                 Some(record.id()),
             )?;
+            validate_enterprise_account_posting_headroom(state, record.cash_account())?;
+            validate_enterprise_account_posting_headroom(state, record.settlement_account())?;
         }
         let next_status = match self.change {
             EnterpriseStatusChange::Suspend => EnterpriseStatus::Suspended,
@@ -242,6 +245,8 @@ pub fn validate_resume_enterprise(
         record.settlement_account(),
         Some(record.id()),
     )?;
+    validate_enterprise_account_posting_headroom(state, record.cash_account())?;
+    validate_enterprise_account_posting_headroom(state, record.settlement_account())?;
     let cycle_duration = definition.economics().cycle();
     let cycle_duration = (record.version() < u32::MAX - 1).then_some(cycle_duration);
     if let Some(cycle_duration) = cycle_duration {

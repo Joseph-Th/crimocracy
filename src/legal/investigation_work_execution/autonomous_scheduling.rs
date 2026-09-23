@@ -67,10 +67,17 @@ pub(crate) fn apply_investigation_work_scheduling(
     // plan above targets a distinct case/investigator pair, so preflight the complete ID budget
     // before the first schedule mutation instead of allowing a later capacity failure to leave
     // only the earlier case IDs scheduled.
-    state.ids.reserve(
-        IdKind::InvestigationWork,
-        u32::try_from(planned.len()).expect("persisted investigation count must fit the ID space"),
-    )?;
+    if state
+        .ids
+        .reserve(
+            IdKind::InvestigationWork,
+            u32::try_from(planned.len())
+                .expect("persisted investigation count must fit the ID space"),
+        )
+        .is_err()
+    {
+        return Ok(InvestigationWorkSchedulingOutcome::default());
+    }
     let mut outcome = InvestigationWorkSchedulingOutcome::default();
     for (kind, work) in planned {
         let id = work
@@ -84,9 +91,9 @@ pub(crate) fn apply_investigation_work_scheduling(
     Ok(outcome)
 }
 
-/// Schedules witness interviews for staffed active cases whose registered witnesses have not
-/// given a statement yet. Kept as a focused owner surface for tests and explicit callers; the
-/// canonical tick uses the combined scheduler so it does not rescan active cases.
+/// Focused witness-only policy surface for tests that isolate interview ordering/headroom from
+/// evidence-review priority. It uses the same cohort preflight/commit discipline as the canonical
+/// combined scheduler rather than a sequential test-only mutation path.
 #[cfg(test)]
 pub(crate) fn apply_witness_interview_scheduling(
     registry: &Registry,
@@ -97,7 +104,7 @@ pub(crate) fn apply_witness_interview_scheduling(
         .active_investigations()
         .map(|investigation| investigation.id())
         .collect();
-    let mut scheduled = Vec::new();
+    let mut planned = Vec::new();
     for investigation_id in candidates {
         let investigation = state
             .legal
@@ -115,12 +122,14 @@ pub(crate) fn apply_witness_interview_scheduling(
         if let Some(work) =
             plan_next_witness_interview(registry, state, investigation_id, investigator)?
         {
-            scheduled.push(work.commit(state)?);
+            planned.push(work);
         }
     }
-    Ok(scheduled)
+    commit_planned_work_cohort(state, planned)
 }
 
+/// Focused review-only policy surface for tests that isolate evidence ordering/retry behavior.
+/// The canonical combined scheduler remains the production tick path.
 #[cfg(test)]
 pub(crate) fn apply_evidence_review_scheduling(
     registry: &Registry,
@@ -131,7 +140,7 @@ pub(crate) fn apply_evidence_review_scheduling(
         .active_investigations()
         .map(|investigation| investigation.id())
         .collect();
-    let mut scheduled = Vec::new();
+    let mut planned = Vec::new();
     for investigation_id in investigations {
         let investigation = state
             .legal
@@ -149,10 +158,28 @@ pub(crate) fn apply_evidence_review_scheduling(
         if let Some(work) =
             plan_next_evidence_review(registry, state, investigation_id, investigator)?
         {
-            scheduled.push(work.commit(state)?);
+            planned.push(work);
         }
     }
-    Ok(scheduled)
+    commit_planned_work_cohort(state, planned)
+}
+
+#[cfg(test)]
+fn commit_planned_work_cohort(
+    state: &mut AppState,
+    planned: Vec<super::ValidatedInvestigationWorkSchedule>,
+) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
+    state.ids.reserve(
+        IdKind::InvestigationWork,
+        u32::try_from(planned.len()).expect("persisted investigation count must fit the ID space"),
+    )?;
+    Ok(planned
+        .into_iter()
+        .map(|work| {
+            work.commit(state)
+                .expect("prevalidated focused scheduling cohort must remain current")
+        })
+        .collect())
 }
 
 /// The investigator an autonomous casework scheduler may currently use. The lead is the single
@@ -180,7 +207,7 @@ fn plan_next_evidence_review(
     let Some(source) = next_unattempted_review_source(state, record)? else {
         return Ok(None);
     };
-    let work = validate_schedule_investigation_work(
+    match validate_schedule_investigation_work(
         registry,
         state,
         InvestigationWorkDraft {
@@ -189,8 +216,13 @@ fn plan_next_evidence_review(
             kind: InvestigationWorkKind::EvidenceReview,
             focus: InvestigationWorkFocus::evidence(source),
         },
-    )?;
-    Ok(Some(work))
+    ) {
+        Ok(work) => Ok(Some(work)),
+        // Direct scheduling should report the finite-clock error. Autonomous scheduling simply
+        // has no useful task to create when that task cannot finish inside the simulation horizon.
+        Err(InvestigationWorkError::SimulationTimeOverflow) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn plan_next_witness_interview(
@@ -226,7 +258,7 @@ fn plan_next_witness_interview(
         {
             continue;
         }
-        let work = validate_schedule_investigation_work(
+        match validate_schedule_investigation_work(
             registry,
             state,
             InvestigationWorkDraft {
@@ -235,8 +267,11 @@ fn plan_next_witness_interview(
                 kind: InvestigationWorkKind::WitnessInterview,
                 focus,
             },
-        )?;
-        return Ok(Some(work));
+        ) {
+            Ok(work) => return Ok(Some(work)),
+            Err(InvestigationWorkError::SimulationTimeOverflow) => return Ok(None),
+            Err(error) => return Err(error),
+        }
     }
     Ok(None)
 }

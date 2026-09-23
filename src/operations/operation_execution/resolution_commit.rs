@@ -31,7 +31,9 @@ use crate::legal::jurisdiction_system::{
 use crate::operations::information_acquisition::{
     OperationInformationPlan, validate_operation_information,
 };
-use crate::operations::{OperationExposureRecord, OperationObjective, OperationResolutionRecord};
+use crate::operations::{
+    OperationExposureRecord, OperationObjective, OperationRecord, OperationResolutionRecord,
+};
 use crate::registry::Registry;
 use crate::reports::report_system::{ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
@@ -61,18 +63,14 @@ impl ValidatedOperationResolution {
     ) -> Result<OperationId, OperationResolutionError> {
         let acquired_information_count = u32::try_from(self.acquired_information.len())
             .expect("acquired information count must fit u32");
-        let mut budget = vec![
-            (IdKind::Information, 1 + acquired_information_count),
-            (IdKind::HistoryEvent, 1),
-            (IdKind::Report, 1),
-        ];
         let operation = state
             .operations
             .get_operation(self.plan.snapshot.operation)
             .expect("resolution plan operation must exist");
-        let participant_count =
-            u32::try_from(operation.participant_count()).expect("participant count must fit u32");
-        budget.push((IdKind::Information, participant_count));
+        let mut budget = mandatory_operation_resolution_id_budget(operation).to_vec();
+        if acquired_information_count > 0 {
+            budget.push((IdKind::Information, acquired_information_count));
+        }
         if let Some(incident) = self.incident.as_ref() {
             budget.extend(incident.id_budget()?);
         }
@@ -234,6 +232,24 @@ impl ValidatedOperationResolution {
         }
         Ok(self.plan.snapshot.operation)
     }
+}
+
+/// Persistent artifacts every successful resolution emits regardless of operation kind, outcome,
+/// exposure, or information-discovery side effects. The simulation phase uses the same owner rule
+/// to preflight the guaranteed cohort footprint without freezing outcome-dependent artifacts.
+pub(crate) fn mandatory_operation_resolution_id_budget(
+    operation: &OperationRecord,
+) -> [(IdKind, u32); 3] {
+    let participant_count =
+        u32::try_from(operation.participant_count()).expect("participant count must fit u32");
+    let information = participant_count
+        .checked_add(1)
+        .expect("operation after-action information count must fit u32");
+    [
+        (IdKind::Information, information),
+        (IdKind::HistoryEvent, 1),
+        (IdKind::Report, 1),
+    ]
 }
 
 pub(crate) fn validate_operation_resolution_plan(

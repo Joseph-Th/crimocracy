@@ -323,6 +323,45 @@ fn held_work_schedule_rejects_clock_overflow_before_work_id_is_consumed() {
 }
 
 #[test]
+fn autonomous_work_scheduler_skips_unschedulable_terminal_horizon() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let duration = registry
+        .get_investigation_work(InvestigationWorkKind::EvidenceReview)
+        .duration();
+    fixture.state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(duration.as_minutes()) + 1,
+    ));
+    let direct_error = match validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        review_draft(&fixture, fixture.first_evidence),
+    ) {
+        Ok(_) => panic!("direct scheduling must still report the unrepresentable due time"),
+        Err(error) => error,
+    };
+    assert_eq!(direct_error, InvestigationWorkError::SimulationTimeOverflow);
+    let before = bincode::serialize(&fixture.state).expect("fixture state should serialize");
+
+    let scheduled = apply_investigation_work_scheduling(&registry, &mut fixture.state)
+        .expect("terminal clock capacity is a valid no-action autonomous scheduling state");
+    assert!(scheduled.evidence_reviews.is_empty());
+    assert!(scheduled.witness_interviews.is_empty());
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("terminal state should serialize"),
+        before,
+        "autonomous scheduling must not mutate when no work can finish before the clock horizon"
+    );
+    validate_state(&fixture.state).expect("terminal scheduling state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn evidence_review_scheduling_requires_full_resolution_version_headroom() {
     let registry = build_registry();
     let mut fixture = make_fixture(
@@ -367,6 +406,51 @@ fn evidence_review_scheduling_requires_full_resolution_version_headroom() {
     );
     assert_eq!(fixture.state.legal().investigation_work().count(), 0);
     validate_state(&fixture.state).expect("deferred near-terminal case should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn evidence_review_scheduling_accepts_exact_resolution_headroom_boundary() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let original = fixture
+        .state
+        .legal()
+        .get_investigation(fixture.investigation)
+        .expect("fixture investigation should persist")
+        .clone();
+    let mut replacement = original.clone();
+    replacement.version = u32::MAX - 3;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_record(
+            build_save(&registry, &fixture.state).expect("review boundary fixture should save"),
+            &original,
+            &replacement,
+            "investigation",
+        ),
+    )
+    .expect("exact review headroom boundary should remain structurally valid");
+
+    let outcome = apply_investigation_work_scheduling(&registry, &mut fixture.state)
+        .expect("exact review resolution headroom must still permit scheduling");
+    assert_eq!(outcome.evidence_reviews.len(), 1);
+    assert!(outcome.witness_interviews.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(outcome.evidence_reviews[0])
+            .expect("boundary review should persist")
+            .focus(),
+        InvestigationWorkFocus::evidence(fixture.first_evidence)
+    );
+    validate_state(&fixture.state).expect("exact review boundary state should remain valid");
     validate_invariants(&fixture.state);
 }
 
@@ -478,6 +562,97 @@ fn witness_interview_scheduling_requires_case_and_witness_resolution_headroom() 
     );
     assert_eq!(fixture.state.legal().investigation_work().count(), 0);
     validate_state(&fixture.state).expect("deferred witness work state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn witness_interview_scheduling_accepts_exact_case_and_witness_headroom_boundaries() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        90,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let interview_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Exact witness headroom case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.target)]),
+        },
+    )
+    .expect("boundary witness case should validate")
+    .commit(&mut fixture.state)
+    .expect("boundary witness case should commit");
+    validate_assign_investigator(&fixture.state, interview_case, fixture.second_investigator)
+        .expect("boundary witness investigator should validate")
+        .commit(&mut fixture.state)
+        .expect("boundary witness investigator should commit");
+    let case_witness = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: interview_case,
+            witness: fixture.witness,
+            subject: EntityRef::Character(fixture.target),
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("boundary case witness should validate")
+    .commit(&mut fixture.state)
+    .expect("boundary case witness should commit");
+
+    let original_investigation = fixture
+        .state
+        .legal()
+        .get_investigation(interview_case)
+        .expect("boundary investigation should persist")
+        .clone();
+    let mut replacement_investigation = original_investigation.clone();
+    replacement_investigation.version = u32::MAX - 4;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_record(
+            build_save(&registry, &fixture.state).expect("boundary case should save"),
+            &original_investigation,
+            &replacement_investigation,
+            "investigation",
+        ),
+    )
+    .expect("exact interview case headroom should remain structurally valid");
+
+    let original_witness = fixture
+        .state
+        .legal()
+        .get_case_witness(case_witness)
+        .expect("boundary case witness should persist")
+        .clone();
+    let mut replacement_witness = original_witness.clone();
+    replacement_witness.version = u32::MAX - 2;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_record(
+            build_save(&registry, &fixture.state).expect("boundary witness should save"),
+            &original_witness,
+            &replacement_witness,
+            "case witness",
+        ),
+    )
+    .expect("exact witness resolution headroom should remain structurally valid");
+
+    let outcome = apply_investigation_work_scheduling(&registry, &mut fixture.state)
+        .expect("exact interview case and witness headroom must permit scheduling");
+    assert_eq!(outcome.witness_interviews.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(outcome.witness_interviews[0])
+            .expect("boundary interview should persist")
+            .focus(),
+        InvestigationWorkFocus::witness(case_witness)
+    );
+    validate_state(&fixture.state).expect("exact interview boundary state should remain valid");
     validate_invariants(&fixture.state);
 }
 
@@ -696,7 +871,7 @@ fn combined_autonomous_scheduler_handles_review_and_interview_cases_in_one_pass(
 }
 
 #[test]
-fn combined_autonomous_scheduler_rejects_work_id_exhaustion_atomically() {
+fn combined_autonomous_scheduler_work_id_exhaustion_is_terminal_noop_atomically() {
     let registry = build_registry();
     let mut fixture = make_fixture(
         90,
@@ -752,15 +927,10 @@ fn combined_autonomous_scheduler_rejects_work_id_exhaustion_atomically() {
     let before = bincode::serialize(&fixture.state)
         .expect("pre-exhaustion scheduling state should serialize");
 
-    let error = apply_investigation_work_scheduling(&registry, &mut fixture.state)
-        .expect_err("two planned work records must reserve both IDs before mutation");
-    assert_eq!(
-        error,
-        InvestigationWorkError::IdExhaustion(crate::core::id::IdExhaustionError::Exhausted {
-            kind: "investigation work",
-            next: u32::MAX - 1,
-        })
-    );
+    let outcome = apply_investigation_work_scheduling(&registry, &mut fixture.state)
+        .expect("work-ID exhaustion is a terminal autonomous no-op");
+    assert!(outcome.evidence_reviews.is_empty());
+    assert!(outcome.witness_interviews.is_empty());
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected scheduling state should serialize"),
         before,

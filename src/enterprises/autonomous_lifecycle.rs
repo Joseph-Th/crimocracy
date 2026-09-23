@@ -16,8 +16,8 @@ use crate::enterprises::autonomous_planning::{
     resolve_observed_district_pressure,
 };
 use crate::enterprises::enterprise_execution::{
-    EnterpriseError, resolve_enterprise_financial_projection, validate_resume_enterprise,
-    validate_retire_enterprise,
+    EnterpriseError, ValidatedEnterpriseStatusChange, resolve_enterprise_financial_projection,
+    validate_resume_enterprise, validate_retire_enterprise,
 };
 use crate::finance::Money;
 use crate::registry::Registry;
@@ -34,13 +34,18 @@ pub(crate) struct AutonomousEnterpriseLifecycleOutcome {
     pub(crate) resumed_mandates: BTreeSet<MandateId>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ResumeCandidate {
     enterprise: EnterpriseId,
     mandate: MandateId,
     cash_account: crate::core::id::FinancialAccountId,
     required_working_capital: Money,
     expected_net_cash: Money,
+    resume: ValidatedEnterpriseStatusChange,
+}
+
+struct AutonomousEnterpriseLifecyclePlan {
+    retirements: Vec<(EnterpriseId, ValidatedEnterpriseStatusChange)>,
+    resumptions: Vec<(EnterpriseId, MandateId, ValidatedEnterpriseStatusChange)>,
 }
 
 /// Reconsiders suspended non-player rackets on the daily governance boundary.
@@ -69,7 +74,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
         .map(|enterprise| enterprise.id())
         .collect();
 
-    let mut outcome = AutonomousEnterpriseLifecycleOutcome::default();
+    let mut retirements = Vec::new();
     let mut candidates = Vec::new();
     for enterprise_id in suspended {
         let enterprise = state
@@ -83,10 +88,14 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
         }
 
         let organization = enterprise.organization();
-        match validate_resume_enterprise(registry, state, enterprise_id) {
-            Ok(_) => {}
+        let resume = match validate_resume_enterprise(registry, state, enterprise_id) {
+            Ok(resume) => resume,
             Err(error) if stale_configuration_requires_retirement(&error) => {
-                retire_stale_autonomous_enterprise(state, enterprise_id, &mut outcome)?;
+                if let Some(retirement) =
+                    plan_stale_autonomous_enterprise_retirement(state, enterprise_id)?
+                {
+                    retirements.push((enterprise_id, retirement));
+                }
                 continue;
             }
             Err(EnterpriseError::Delegation(DelegationError::DetainedManager { .. }))
@@ -95,7 +104,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             | Err(EnterpriseError::VersionCapacity(_))
             | Err(EnterpriseError::SimulationTimeOverflow) => continue,
             Err(error) => return Err(error.into()),
-        }
+        };
 
         let manager = enterprise.manager();
         let manager_record = state
@@ -110,7 +119,11 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             // manager without delegated discretion has no autonomous route that can ever reopen
             // this suspended racket, so retaining the frozen record would reserve its slot
             // forever. Abandon it through the same terminal lifecycle used for stale authority.
-            retire_stale_autonomous_enterprise(state, enterprise_id, &mut outcome)?;
+            if let Some(retirement) =
+                plan_stale_autonomous_enterprise_retirement(state, enterprise_id)?
+            {
+                retirements.push((enterprise_id, retirement));
+            }
             continue;
         }
         // Police posture is a temporary operating choice, so evaluate it only after canonical
@@ -151,6 +164,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             cash_account: enterprise.cash_account(),
             required_working_capital,
             expected_net_cash,
+            resume,
         });
     }
 
@@ -166,8 +180,10 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             )
             .then(left.enterprise.cmp(&right.enterprise))
     });
+    let mut resumed_mandates = BTreeSet::new();
+    let mut resumptions = Vec::new();
     for candidate in candidates {
-        if outcome.resumed_mandates.contains(&candidate.mandate) {
+        if resumed_mandates.contains(&candidate.mandate) {
             continue;
         }
         let Some(account) = state.finance().get_account(candidate.cash_account) else {
@@ -183,28 +199,46 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             candidate.cash_account,
             candidate.required_working_capital,
         )?;
-        validate_resume_enterprise(registry, state, candidate.enterprise)?.commit(state)?;
-        outcome.resumed.push(candidate.enterprise);
-        outcome.resumed_mandates.insert(candidate.mandate);
+        resumed_mandates.insert(candidate.mandate);
+        resumptions.push((candidate.enterprise, candidate.mandate, candidate.resume));
     }
 
-    Ok(outcome)
+    Ok(AutonomousEnterpriseLifecyclePlan {
+        retirements,
+        resumptions,
+    }
+    .commit(state))
 }
 
-fn retire_stale_autonomous_enterprise(
-    state: &mut AppState,
-    enterprise: EnterpriseId,
-    outcome: &mut AutonomousEnterpriseLifecycleOutcome,
-) -> Result<(), AutonomousEnterpriseError> {
-    match validate_retire_enterprise(state, enterprise) {
-        Ok(retirement) => {
-            retirement.commit(state)?;
+impl AutonomousEnterpriseLifecyclePlan {
+    fn commit(self, state: &mut AppState) -> AutonomousEnterpriseLifecycleOutcome {
+        let mut outcome = AutonomousEnterpriseLifecycleOutcome::default();
+        for (enterprise, retirement) in self.retirements {
+            retirement
+                .commit(state)
+                .expect("preplanned autonomous retirement must remain current within one pass");
             outcome.retired.push(enterprise);
-            Ok(())
         }
+        for (enterprise, mandate, resume) in self.resumptions {
+            resume
+                .commit(state)
+                .expect("preplanned autonomous resumption must remain current within one pass");
+            outcome.resumed.push(enterprise);
+            outcome.resumed_mandates.insert(mandate);
+        }
+        outcome
+    }
+}
+
+fn plan_stale_autonomous_enterprise_retirement(
+    state: &AppState,
+    enterprise: EnterpriseId,
+) -> Result<Option<ValidatedEnterpriseStatusChange>, AutonomousEnterpriseError> {
+    match validate_retire_enterprise(state, enterprise) {
+        Ok(retirement) => Ok(Some(retirement)),
         // Version exhaustion is a valid finite terminal rail. The enterprise remains suspended
         // because no further versioned lifecycle transition is representable.
-        Err(EnterpriseError::VersionCapacity(_)) => Ok(()),
+        Err(EnterpriseError::VersionCapacity(_)) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }

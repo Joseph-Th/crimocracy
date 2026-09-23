@@ -1184,7 +1184,7 @@ fn automatic_legal_support_policy_retains_counsel_through_the_tick() {
 }
 
 #[test]
-fn automatic_legal_support_surfaces_commit_failure_instead_of_silently_skipping_counsel() {
+fn automatic_legal_support_allocator_exhaustion_is_terminal_noop() {
     let mut fx = fixture();
     validate_set_policy(
         &fx.registry,
@@ -1203,9 +1203,10 @@ fn automatic_legal_support_surfaces_commit_failure_instead_of_silently_skipping_
         .balance();
     fx.state.ids.set_next_raw_for_test(IdKind::Report, u32::MAX);
 
-    let error = apply_automatic_legal_support(&fx.registry, &mut fx.state)
-        .expect_err("automatic support must surface a canonical commit failure");
-    assert!(matches!(error, LegalRepresentationError::IdExhaustion(_)));
+    let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
+        .expect("automatic-support allocator exhaustion is a terminal autonomous no-op");
+    assert!(outcome.retained.is_empty());
+    assert_eq!(outcome.concluded, 0);
     assert_eq!(
         fx.state
             .finance()
@@ -1225,7 +1226,7 @@ fn automatic_legal_support_surfaces_commit_failure_instead_of_silently_skipping_
 }
 
 #[test]
-fn automatic_legal_support_retention_batch_rejects_allocator_exhaustion_atomically() {
+fn automatic_legal_support_retention_batch_exhaustion_is_terminal_noop_atomically() {
     let mut fx = fixture();
     validate_set_policy(
         &fx.registry,
@@ -1266,15 +1267,10 @@ fn automatic_legal_support_retention_batch_rejects_allocator_exhaustion_atomical
     let before = bincode::serialize(&fx.state)
         .expect("pre-exhaustion automatic-retention state should serialize");
 
-    let error = apply_automatic_legal_support(&fx.registry, &mut fx.state)
-        .expect_err("two retainers must reserve both report IDs before the first payment");
-    assert!(matches!(
-        error,
-        LegalRepresentationError::IdExhaustion(crate::core::id::IdExhaustionError::Exhausted {
-            kind: "report",
-            ..
-        })
-    ));
+    let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
+        .expect("retention report-ID exhaustion is a terminal autonomous no-op");
+    assert!(outcome.retained.is_empty());
+    assert_eq!(outcome.concluded, 0);
     assert_eq!(
         bincode::serialize(&fx.state).expect("rejected automatic-retention state should serialize"),
         before,
@@ -1442,15 +1438,10 @@ fn automatic_legal_support_preflights_conclusion_and_retention_as_one_cohort() {
     let before = bincode::serialize(&fx.state)
         .expect("mixed automatic-support cohort should serialize before exhaustion");
 
-    let error = apply_automatic_legal_support(&fx.registry, &mut fx.state)
-        .expect_err("one conclusion plus one retention require two report IDs");
-    assert!(matches!(
-        error,
-        LegalRepresentationError::IdExhaustion(crate::core::id::IdExhaustionError::Exhausted {
-            kind: "report",
-            ..
-        })
-    ));
+    let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
+        .expect("mixed support cohort report exhaustion is a terminal autonomous no-op");
+    assert!(outcome.retained.is_empty());
+    assert_eq!(outcome.concluded, 0);
     assert_eq!(
         bincode::serialize(&fx.state).expect("rejected mixed cohort should serialize"),
         before,
@@ -1653,6 +1644,15 @@ fn automatic_legal_support_prefers_stronger_later_counsel() {
     assert_eq!(representation.counsel(), stronger_counsel);
     validate_state(&fx.state).expect("competence-ranked automatic support should remain valid");
     validate_invariants(&fx.state);
+}
+
+#[test]
+fn automatic_legal_support_finance_projection_respects_terminal_account_versions() {
+    assert!(super::automatic_support::automatic_account_has_posting_headroom(1, 0));
+    assert!(super::automatic_support::automatic_account_has_posting_headroom(u32::MAX - 1, 0));
+    assert!(!super::automatic_support::automatic_account_has_posting_headroom(u32::MAX - 1, 1));
+    assert!(!super::automatic_support::automatic_account_has_posting_headroom(u32::MAX, 0));
+    assert!(!super::automatic_support::automatic_account_has_posting_headroom(u32::MAX, 1));
 }
 
 #[test]
@@ -1943,14 +1943,20 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
             .map(|record| record.id()),
         Some(representation)
     );
+    let retainer_report = fixture
+        .state
+        .reports()
+        .get_report(record.report())
+        .expect("retainer report should persist");
+    assert_eq!(retainer_report.kind(), ReportKind::Legal);
     assert_eq!(
-        fixture
-            .state
-            .reports()
-            .get_report(record.report())
-            .expect("retainer report should persist")
-            .kind(),
-        ReportKind::Legal
+        retainer_report.entries()[0].entities,
+        BTreeSet::from([
+            EntityRef::Character(fixture.defendant),
+            EntityRef::Character(fixture.counsel),
+            EntityRef::Organization(fixture.firm),
+        ]),
+        "retaining counsel proves custody, not the identity of the hidden police investigation"
     );
     assert_eq!(
         fixture
@@ -2335,7 +2341,7 @@ fn automatic_policy_concludes_representation_after_release_and_frees_the_contact
 }
 
 #[test]
-fn automatic_policy_conclusion_batch_rejects_allocator_exhaustion_atomically() {
+fn automatic_policy_conclusion_batch_exhaustion_is_terminal_noop_atomically() {
     let mut fixture = fixture();
     let mut first_draft = representation_draft(&fixture, 7_500, None);
     first_draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
@@ -2387,17 +2393,10 @@ fn automatic_policy_conclusion_batch_rejects_allocator_exhaustion_atomically() {
     let before = bincode::serialize(&fixture.state)
         .expect("pre-exhaustion automatic-support state serializes");
 
-    let error = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
-        .expect_err("two conclusions must reserve both information artifacts before mutation");
-    assert!(matches!(
-        error,
-        LegalRepresentationError::IdExhaustion(
-            crate::core::id::IdExhaustionError::Exhausted {
-                kind: "information",
-                next
-            }
-        ) if next == u32::MAX - 1
-    ));
+    let outcome = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
+        .expect("conclusion information-ID exhaustion is a terminal autonomous no-op");
+    assert!(outcome.retained.is_empty());
+    assert_eq!(outcome.concluded, 0);
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected conclusion state serializes"),
         before,

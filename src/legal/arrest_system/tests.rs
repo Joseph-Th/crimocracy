@@ -914,7 +914,7 @@ fn autonomous_arrest_is_evidence_driven_not_case_origin_driven() {
 }
 
 #[test]
-fn autonomous_arrest_cohort_reserves_all_arrest_ids_before_first_detention() {
+fn autonomous_arrest_cohort_id_exhaustion_is_terminal_noop_before_first_detention() {
     let mut fixture = fixture();
     add_character_evidence(
         &mut fixture.state,
@@ -971,15 +971,9 @@ fn autonomous_arrest_cohort_reserves_all_arrest_ids_before_first_detention() {
     let before =
         bincode::serialize(&fixture.state).expect("pre-exhaustion custody state should serialize");
 
-    let error = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
-        .expect_err("the full arrest cohort must fit before the first detention");
-    assert_eq!(
-        error,
-        ArrestError::IdExhaustion(IdExhaustionError::Exhausted {
-            kind: "arrest",
-            next: u32::MAX - 1,
-        })
-    );
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("arrest-ID exhaustion is a terminal autonomous no-op");
+    assert!(arrests.is_empty());
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected custody state should serialize"),
         before,
@@ -1368,6 +1362,152 @@ fn custody_preflights_shared_case_version_budget_for_work_cancel_and_lead_releas
             .active_arrest_for_character(detective)
             .is_none()
     );
+
+    let autonomous = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("terminal responsibility capacity must not fail autonomous custody");
+    assert!(
+        autonomous.is_empty(),
+        "autonomous custody must skip a character whose required responsibility preemptions cannot be represented"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(detective)
+            .is_none(),
+        "skipped autonomous custody must not partially detain the blocked detective"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(case)
+            .expect("synthetic capacity case must persist")
+            .version(),
+        u32::MAX - 1
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(work)
+            .expect("synthetic scheduled work must persist")
+            .status(),
+        crate::legal::InvestigationWorkStatus::Scheduled
+    );
+}
+
+#[test]
+fn autonomous_custody_skips_valid_version_exhausted_lead_case() {
+    use crate::legal::investigation_system::{InvestigationError, validate_assign_investigator};
+    use crate::world::{CapabilityKind, Rating};
+
+    let mut fixture = fixture();
+    let detective = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Terminal Lead Detective".to_owned(),
+            organization: Some(fixture.police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Investigation,
+                Rating::try_new(85).expect("investigation capability should validate"),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("detective should validate");
+    let subject = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Terminal Lead Case Subject".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("case subject should validate");
+    let lead_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Terminal lead case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(subject)]),
+        },
+    )
+    .expect("lead case should validate")
+    .commit(&mut fixture.state)
+    .expect("lead case should commit");
+    validate_assign_investigator(&fixture.state, lead_case, detective)
+        .expect("lead assignment should validate")
+        .commit(&mut fixture.state)
+        .expect("lead assignment should commit");
+    fixture
+        .state
+        .legal
+        .investigations
+        .get_mut(&lead_case)
+        .expect("lead case should persist")
+        .version = u32::MAX;
+
+    let arrest_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Terminal lead custody case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(detective)]),
+        },
+    )
+    .expect("custody case should validate")
+    .commit(&mut fixture.state)
+    .expect("custody case should commit");
+    let first = add_character_evidence(&mut fixture.state, fixture.police, arrest_case, detective);
+    let second = add_character_evidence(&mut fixture.state, fixture.police, arrest_case, detective);
+    validate_state(&fixture.state).expect("version-exhausted staffed case should remain valid");
+
+    let error = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: detective,
+            investigation: arrest_case,
+            evidence: BTreeSet::from([first, second]),
+        },
+    )
+    .expect_err("direct custody must report exhausted lead-release capacity");
+    assert!(matches!(
+        error,
+        ArrestError::Investigation(InvestigationError::VersionCapacity(_))
+    ));
+
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .expect("autonomous custody must skip permanently unrepresentable lead release")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(detective)
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(lead_case)
+            .expect("lead case should persist")
+            .lead_investigator(),
+        Some(detective)
+    );
+    validate_state(&fixture.state).expect("skipped terminal custody must preserve valid state");
+    validate_invariants(&fixture.state);
 }
 
 fn fixture() -> Fixture {
@@ -1424,6 +1564,77 @@ fn fixture() -> Fixture {
         investigation,
         evidence,
     }
+}
+
+#[test]
+fn terminal_simulation_minute_rejects_new_custody_without_blocking_autonomous_pass() {
+    let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    fixture.state.set_now_for_test(SimTime::MAX);
+
+    let error = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence, corroborating]),
+        },
+    )
+    .expect_err("direct custody cannot start when no later custody minute exists");
+    assert_eq!(error, ArrestError::SimulationTimeOverflow);
+
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .expect("terminal custody capacity must skip rather than fail autonomous maintenance")
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none()
+    );
+    validate_state(&fixture.state).expect("terminal no-custody state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn terminal_simulation_state_rejects_unreleased_preexisting_custody() {
+    let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    fixture
+        .state
+        .set_now_for_test(SimTime::from_minutes(u64::MAX - 1));
+    validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence, corroborating]),
+        },
+    )
+    .expect("pre-terminal custody should validate")
+    .commit(&mut fixture.state)
+    .expect("pre-terminal custody should commit");
+    fixture.state.set_now_for_test(SimTime::MAX);
+
+    assert!(matches!(
+        validate_state(&fixture.state),
+        Err(crate::core::invariants::StateValidationError::InvalidArrest { .. })
+    ));
 }
 
 fn add_character_evidence(

@@ -412,12 +412,14 @@ impl OperationState {
             .range(..now)
             .flat_map(|(_, ids)| ids.iter().copied())
             .filter(|id| {
-                self.records.get(id).is_some_and(|record| {
-                    matches!(
-                        record.status(),
-                        OperationStatus::InProgress | OperationStatus::AwaitingDecision
-                    )
-                })
+                let record = self
+                    .records
+                    .get(id)
+                    .expect("completion-deadline index must reference an operation");
+                matches!(
+                    record.status(),
+                    OperationStatus::InProgress | OperationStatus::AwaitingDecision
+                )
             })
             .collect()
     }
@@ -1190,6 +1192,19 @@ mod tests {
             checked_shift_past_pause(SimTime::from_minutes(u64::MAX - 4), 5),
             None
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "completion-deadline index must reference an operation")]
+    fn overdue_deadline_query_fails_loudly_on_stale_index_member() {
+        let mut state = OperationState::new();
+        state
+            .active_by_completion_deadline
+            .entry(SimTime::from_minutes(10))
+            .or_default()
+            .insert(OperationId::from_raw(1));
+
+        let _ = state.find_running_past_completion_deadline(SimTime::from_minutes(11));
     }
 
     #[test]

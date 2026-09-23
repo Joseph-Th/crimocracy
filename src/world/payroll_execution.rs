@@ -81,10 +81,7 @@ impl OrganizationPayrollPlan {
                 .iter()
                 .filter(|(member, _, amount)| {
                     *amount > Money::ZERO
-                        && state
-                            .finance()
-                            .accounts_for(FinancialOwner::Character(*member))
-                            .all(|account| account.kind() != AccountKind::StreetCash)
+                        && find_existing_wage_account(state, *member, *amount).is_none()
                 })
                 .count();
             budget.push((
@@ -165,7 +162,13 @@ pub(crate) fn apply_daily_payroll(
     for plan in &plans {
         budget.extend(plan.id_budget(state));
     }
-    state.ids.reserve_many(&budget)?;
+    if state.ids.reserve_many(&budget).is_err() {
+        // The daily pass is one preflighted cohort. At the finite allocator rail there is no
+        // representable persisted payday, so mutate none of the organizations rather than
+        // paying an ID-ordered prefix or panicking the canonical tick after the day advanced.
+        // Direct organization payroll transactions retain their typed exhaustion errors.
+        return Ok(Vec::new());
+    }
 
     let mut outcomes = Vec::with_capacity(plans.len());
     for plan in plans {
@@ -253,12 +256,7 @@ fn preflight_organization_payroll(
         if *amount == Money::ZERO {
             continue;
         }
-        let owner = FinancialOwner::Character(*member);
-        if let Some(account) = state
-            .finance()
-            .accounts_for(owner)
-            .find(|account| account.kind() == AccountKind::StreetCash)
-        {
+        if let Some(account) = find_existing_wage_account(state, *member, *amount) {
             ensure_version_can_advance(account.version(), "financial account")
                 .map_err(FinanceError::from)?;
             account
@@ -511,12 +509,7 @@ fn plan_wage_accounts(
             continue;
         }
         let owner = FinancialOwner::Character(*member);
-        match state
-            .finance()
-            .accounts_for(owner)
-            .find(|account| account.kind() == AccountKind::StreetCash)
-            .map(|account| account.id())
-        {
+        match find_existing_wage_account(state, *member, *amount).map(|account| account.id()) {
             Some(existing) => {
                 resolved[index] = Some(existing);
             }
@@ -551,11 +544,12 @@ fn find_funding_accounts(
         .accounts_for(owner)
         .filter_map(|account| {
             let spendable = account.spendable_balance();
-            (spendable > Money::ZERO).then_some((
-                account.kind().unrestricted_spending_priority(),
-                spendable,
-                account.id(),
-            ))
+            (spendable > Money::ZERO && payroll_account_has_posting_headroom(account.version()))
+                .then_some((
+                    account.kind().unrestricted_spending_priority(),
+                    spendable,
+                    account.id(),
+                ))
         })
         .collect();
     // Wages are an informal carrying cost. Spend exposed street cash first, then hidden dirty
@@ -569,6 +563,25 @@ fn find_funding_accounts(
             .then(left.2.cmp(&right.2))
     });
     accounts.into_iter().map(|(_, _, id)| id).collect()
+}
+
+fn find_existing_wage_account(
+    state: &AppState,
+    member: CharacterId,
+    amount: Money,
+) -> Option<&crate::finance::FinancialAccountRecord> {
+    state
+        .finance()
+        .accounts_for(FinancialOwner::Character(member))
+        .find(|account| {
+            account.kind() == AccountKind::StreetCash
+                && payroll_account_has_posting_headroom(account.version())
+                && account.balance().checked_add(amount).is_some()
+        })
+}
+
+fn payroll_account_has_posting_headroom(version: u32) -> bool {
+    version < u32::MAX
 }
 
 struct ValidatedPayrollShortfallConsequences {
@@ -629,12 +642,15 @@ fn validate_shortfall_consequences(
         if dimensions == current_dimensions {
             continue;
         }
-        relationships.push(validate_set_relationship(
-            state,
-            *member,
-            *supervisor,
-            dimensions,
-        )?);
+        match validate_set_relationship(state, *member, *supervisor, dimensions) {
+            Ok(relationship) => relationships.push(relationship),
+            // Payroll itself remains mandatory even when one social edge has consumed its final
+            // representable revision. Direct relationship commands still report VersionCapacity;
+            // the automatic shortfall pass simply cannot persist any further resentment on that
+            // terminal edge and must not use it to block wages, other organizations, or reports.
+            Err(RelationshipError::VersionCapacity(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     let report = if state.player_organization() == Some(organization) {
         Some(validate_payroll_shortfall_report(

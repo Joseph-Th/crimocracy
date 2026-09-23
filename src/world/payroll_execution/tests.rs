@@ -217,6 +217,13 @@ fn payroll_is_due_only_on_nonzero_day_boundaries() {
 }
 
 #[test]
+fn payroll_account_selection_respects_terminal_version_capacity() {
+    assert!(payroll_account_has_posting_headroom(1));
+    assert!(payroll_account_has_posting_headroom(u32::MAX - 1));
+    assert!(!payroll_account_has_posting_headroom(u32::MAX));
+}
+
+#[test]
 fn funded_payroll_moves_wages_into_member_pockets() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();
@@ -326,15 +333,9 @@ fn daily_payroll_reserves_all_organization_ledger_ids_before_first_payment() {
     let before =
         bincode::serialize(&fixture.state).expect("pre-payroll allocator state should serialize");
 
-    let error = apply_daily_payroll(&registry, &mut fixture.state)
-        .expect_err("two funded organizations require two ledger transaction IDs");
-    assert_eq!(
-        error,
-        PayrollError::IdExhaustion(IdExhaustionError::Exhausted {
-            kind: "ledger transaction",
-            next: u32::MAX - 1,
-        })
-    );
+    let outcomes = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("ledger-ID exhaustion is a terminal autonomous no-op");
+    assert!(outcomes.is_empty());
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected payroll state should serialize"),
         before,
@@ -382,15 +383,9 @@ fn daily_payroll_reserves_all_wage_account_ids_before_first_payment() {
     let before =
         bincode::serialize(&fixture.state).expect("pre-payroll account rail should serialize");
 
-    let error = apply_daily_payroll(&registry, &mut fixture.state)
-        .expect_err("the full payday must reserve every missing wage account before mutation");
-    assert_eq!(
-        error,
-        PayrollError::IdExhaustion(IdExhaustionError::Exhausted {
-            kind: "financial account",
-            next: u32::MAX - 2,
-        })
-    );
+    let outcomes = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("wage-account ID exhaustion is a terminal autonomous no-op");
+    assert!(outcomes.is_empty());
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected payroll state should serialize"),
         before,
@@ -419,15 +414,9 @@ fn daily_payroll_reserves_later_player_shortfall_report_before_rival_payment() {
     let before =
         bincode::serialize(&fixture.state).expect("pre-payroll report rail should serialize");
 
-    let error = apply_daily_payroll(&registry, &mut fixture.state)
-        .expect_err("later player shortfall report exhaustion must reject the entire payday");
-    assert_eq!(
-        error,
-        PayrollError::IdExhaustion(IdExhaustionError::Exhausted {
-            kind: "report",
-            next: u32::MAX,
-        })
-    );
+    let outcomes = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("shortfall-report ID exhaustion is a terminal autonomous no-op");
+    assert!(outcomes.is_empty());
     assert_eq!(
         bincode::serialize(&fixture.state).expect("rejected payroll state should serialize"),
         before,
@@ -446,7 +435,7 @@ fn daily_payroll_reserves_later_player_shortfall_report_before_rival_payment() {
 }
 
 #[test]
-fn daily_payroll_preflights_later_relationship_version_before_first_payment() {
+fn daily_payroll_skips_later_terminal_relationship_consequence_without_blocking_payments() {
     let registry = build_registry();
     let mut state = AppState::new(0xDA11_A701C);
 
@@ -507,31 +496,36 @@ fn daily_payroll_preflights_later_relationship_version_before_first_payment() {
     state = restore_save(&registry, corrupted)
         .expect("max-version relationship remains structurally valid");
     state.advance_clock(SimDuration::from_minutes(DAY_MINUTES));
-    let before = bincode::serialize(&state).expect("pre-payroll state should serialize");
-
-    let error = apply_daily_payroll(&registry, &mut state)
-        .expect_err("later shortfall relationship exhaustion must reject the whole payday");
-    let PayrollError::Relationship(
-        crate::social::relationship_system::RelationshipError::VersionCapacity(capacity),
-    ) = error
-    else {
-        panic!("unexpected payroll preflight error: {error:?}");
-    };
-    assert_eq!(capacity.record_kind(), "relationship");
-    assert_eq!(
-        bincode::serialize(&state).expect("rejected payroll state should serialize"),
-        before,
-        "later relationship exhaustion must not let the earlier organization get paid"
-    );
+    let outcomes = apply_daily_payroll(&registry, &mut state)
+        .expect("terminal relationship capacity must not block mandatory payroll");
+    assert_eq!(outcomes.len(), 2);
     assert_eq!(
         state
             .finance()
             .get_account(first_treasury)
             .expect("earlier treasury should persist")
             .balance(),
-        Money::from_cents(100_000)
+        Money::from_cents(100_000 - registry.upkeep().per_member_daily().cents()),
+        "the earlier funded organization must still complete payroll"
     );
-    validate_state(&state).expect("rejected payroll state should remain release-valid");
+    let exhausted = state
+        .social()
+        .get_relationship(later_member, later_boss)
+        .expect("terminal relationship should persist");
+    assert_eq!(exhausted.version(), u32::MAX);
+    assert_eq!(
+        exhausted.dimensions(),
+        original.dimensions(),
+        "an exhausted relationship cannot represent additional shortfall resentment"
+    );
+    let later = outcomes
+        .iter()
+        .find(|outcome| outcome.organization() == later_org)
+        .expect("later unfunded organization must still resolve payroll");
+    assert_eq!(later.paid(), Money::ZERO);
+    assert_eq!(later.short(), later.owed());
+    validate_state(&state)
+        .expect("terminal-relationship payroll state should remain release-valid");
     validate_invariants(&state);
 }
 

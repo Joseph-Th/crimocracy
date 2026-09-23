@@ -83,15 +83,30 @@ pub(crate) fn apply_due_autonomous_recruitment(
         return Ok(AutonomousRecruitmentOutcome::default());
     }
 
-    let plan = plan_due_autonomous_recruitment(registry, state)?;
+    let plan = match plan_due_autonomous_recruitment(registry, state) {
+        Ok(plan) => plan,
+        Err(error) if autonomous_recruitment_is_terminally_blocked(&error) => {
+            return Ok(AutonomousRecruitmentOutcome::default());
+        }
+        Err(error) => return Err(error),
+    };
     // The daily personnel pass is one fallible cohort. Exact action selection and every
     // action-specific artifact budget were resolved above without mutation, so allocator
     // exhaustion cannot leave only the strongest prefix of managers recorded.
-    state
-        .ids
-        .reserve_many(&plan.id_budget)
-        .map_err(RecruitmentError::from)?;
+    if state.ids.reserve_many(&plan.id_budget).is_err() {
+        return Ok(AutonomousRecruitmentOutcome::default());
+    }
     Ok(plan.commit(state))
+}
+
+fn autonomous_recruitment_is_terminally_blocked(error: &AutonomousRecruitmentError) -> bool {
+    use crate::decisions::decision_system::DecisionError;
+
+    matches!(
+        error,
+        AutonomousRecruitmentError::Recruitment(RecruitmentError::IdExhaustion(_))
+            | AutonomousRecruitmentError::Decision(DecisionError::IdExhaustion(_))
+    )
 }
 
 fn plan_due_autonomous_recruitment(

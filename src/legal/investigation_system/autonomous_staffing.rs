@@ -294,7 +294,13 @@ pub(crate) fn apply_autonomous_investigator_staffing(
             kind: IdKind::Information.label(),
             next: state.ids.next_raw(IdKind::Information),
         })?;
-    state.ids.reserve(IdKind::Information, information_count)?;
+    if state
+        .ids
+        .reserve(IdKind::Information, information_count)
+        .is_err()
+    {
+        return Ok(Vec::new());
+    }
 
     let mut staffed = Vec::with_capacity(planned.len());
     for (investigation_id, investigator, prepared) in planned {

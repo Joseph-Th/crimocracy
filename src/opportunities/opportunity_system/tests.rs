@@ -2061,7 +2061,7 @@ fn expiry_token_rejects_clock_staleness_without_partial_report_mutation() {
 }
 
 #[test]
-fn expiry_batch_report_exhaustion_leaves_every_due_opportunity_open() {
+fn expiry_batch_report_exhaustion_is_terminal_noop_and_leaves_every_due_opportunity_open() {
     let mut fixture = make_fixture();
     let first = validate_discover_operation_opportunity(
         &fixture.registry,
@@ -2087,12 +2087,9 @@ fn expiry_batch_report_exhaustion_leaves_every_due_opportunity_open() {
         .ids
         .set_next_raw_for_test(IdKind::Report, u32::MAX);
 
-    let error = apply_opportunity_expiry(&fixture.registry, &mut fixture.state)
-        .expect_err("batch report exhaustion must reject before the first expiry");
-    assert!(matches!(
-        error,
-        OpportunityError::IdExhaustion(IdExhaustionError::Exhausted { kind: "report", .. })
-    ));
+    let expired = apply_opportunity_expiry(&fixture.registry, &mut fixture.state)
+        .expect("batch report exhaustion is a terminal autonomous no-op");
+    assert!(expired.is_empty());
     for opportunity in [first, second] {
         let record = fixture
             .state

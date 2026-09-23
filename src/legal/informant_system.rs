@@ -518,7 +518,11 @@ pub(crate) fn apply_detainee_informant_recruitment(
     // committed behind an allocator error.
     let successful = u32::try_from(planned.iter().filter(|(_, success)| *success).count())
         .expect("detained candidate count must fit the informant ID space");
-    state.ids.reserve(IdKind::Informant, successful)?;
+    if state.ids.reserve(IdKind::Informant, successful).is_err() {
+        // The draw sequence is still speculative here. At the finite relationship-ID rail,
+        // publish neither recruits nor RNG progress rather than panicking the canonical tick.
+        return Ok(Vec::new());
+    }
 
     let mut recruited = Vec::with_capacity(successful as usize);
     for (validated, success) in planned {
@@ -663,10 +667,19 @@ pub(crate) fn apply_informant_disclosures(
     // fact before cold-case processing.
     let candidate_count =
         u32::try_from(candidates.len()).map_err(|_| VersionCapacityError::new("investigation"))?;
-    state.ids.reserve_many(&[
-        (IdKind::Evidence, candidate_count),
-        (IdKind::InformantDisclosure, candidate_count),
-    ])?;
+    if state
+        .ids
+        .reserve_many(&[
+            (IdKind::Evidence, candidate_count),
+            (IdKind::InformantDisclosure, candidate_count),
+        ])
+        .is_err()
+    {
+        // Same-minute propagation is an all-or-none promise across the surviving candidate set.
+        // An exhausted persistence rail leaves every disclosure pending instead of publishing an
+        // ID-ordered prefix before cold-case processing.
+        return Ok(Vec::new());
+    }
     let mut advances_by_investigation: BTreeMap<InvestigationId, u32> = BTreeMap::new();
     for (informant, information, investigation) in &candidates {
         let draft = InformantDisclosureDraft {
