@@ -587,8 +587,7 @@ impl ValidatedRecruitmentAttempt {
         Ok(())
     }
 
-    pub fn commit(self, state: &mut AppState) -> Result<RecruitmentAttemptId, RecruitmentError> {
-        self.preflight_ids(state)?;
+    pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), RecruitmentError> {
         if let Some(guard) = self.delegated_guard {
             ensure_mandate_authority_current(state, guard.authority)?;
             let current_policy = resolve_policy_for_manager(
@@ -616,6 +615,16 @@ impl ValidatedRecruitmentAttempt {
         // owner's complete reassignment preconditions before any recruitment artifact mutates,
         // even on the refusal path where membership itself will remain unchanged.
         self.reassignment.ensure_current(state)?;
+        Ok(())
+    }
+
+    pub fn commit(self, state: &mut AppState) -> Result<RecruitmentAttemptId, RecruitmentError> {
+        self.preflight_ids(state)?;
+        self.ensure_current(state)?;
+        Ok(self.commit_preflighted(state))
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) -> RecruitmentAttemptId {
         let (history_event, resulting_candidate_version) = match self.plan.context.outcome {
             RecruitmentOutcome::Accepted => {
                 // The full cross-domain reassignment contract was proved immediately above and
@@ -679,7 +688,7 @@ impl ValidatedRecruitmentAttempt {
                     member_report,
                 },
             }));
-        Ok(id)
+        id
     }
 }
 

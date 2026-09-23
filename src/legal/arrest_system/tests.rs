@@ -651,6 +651,8 @@ fn custody_release_horizon_overflow_clamps_to_last_representable_minute() {
     let released = apply_due_custody_releases(&mut fixture.state, maximum_detention)
         .expect("custody before the clamped horizon should remain active");
     assert!(released.is_empty());
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("pre-horizon clamped custody should remain registry-valid");
 
     fixture
         .state
@@ -667,6 +669,8 @@ fn custody_release_horizon_overflow_clamps_to_last_representable_minute() {
         .expect("released arrest should remain persisted");
     assert_eq!(record.status(), ArrestStatus::Released);
     assert_eq!(record.released_at(), Some(SimTime::from_minutes(u64::MAX)));
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("release at the clamped custody horizon should remain registry-valid");
     validate_invariants(&fixture.state);
 }
 
@@ -1946,8 +1950,8 @@ fn active_detention_blocks_case_suspension_and_membership_escape_until_release()
     let mut fixture = fixture();
     let arrest = arrest_fixture(&mut fixture);
 
-    // Suspension stays blocked while an arrest holds someone in custody; closing remains
-    // allowed because a case whose subject is detained is cleared by arrest.
+    // Suspension stays blocked while an arrest holds someone in custody. Explicit closure is
+    // still a distinct case-management decision because prosecution owns the arrest/evidence.
     let transition_error = validate_transition_investigation(
         &fixture.state,
         fixture.investigation,
@@ -1966,7 +1970,7 @@ fn active_detention_blocks_case_suspension_and_membership_escape_until_release()
         fixture.investigation,
         InvestigationTransition::Close,
     )
-    .expect("a cleared case must close while its subject is in custody");
+    .expect("explicit case closure may validate while its subject is in custody");
     let reassignment_error =
         validate_reassign_character(&fixture.state, fixture.suspect, None, None)
             .expect_err("detained character must not escape custody through reassignment");

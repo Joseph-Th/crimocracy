@@ -1147,8 +1147,7 @@ fn law_enforcement_org_surveillance_reports_case_heat_and_shelved_close_without_
     fixture.state.advance_clock(SimDuration::from_minutes(121));
     let suspended = apply_cold_case_decay(&mut fixture.state, SimDuration::from_minutes(120))
         .expect("cold-case decay should resolve");
-    assert_eq!(suspended.suspended, vec![case]);
-    assert!(suspended.closed.is_empty());
+    assert_eq!(suspended, vec![case]);
     assert_eq!(
         fixture
             .state
@@ -1262,7 +1261,7 @@ fn resumed_case_does_not_grant_unrelated_organization_authority_sightline() {
     fixture.state.advance_clock(SimDuration::from_minutes(121));
     let decay = apply_cold_case_decay(&mut fixture.state, SimDuration::from_minutes(120))
         .expect("cold-case decay should suspend the inactive case");
-    assert_eq!(decay.suspended, vec![case]);
+    assert_eq!(decay, vec![case]);
 
     let second_crew = insert_organization(
         &fixture.registry,

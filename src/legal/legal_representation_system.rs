@@ -221,17 +221,21 @@ pub struct ValidatedLegalRepresentation {
 }
 
 impl ValidatedLegalRepresentation {
-    pub fn commit(
-        self,
-        state: &mut AppState,
-    ) -> Result<LegalRepresentationId, LegalRepresentationError> {
+    pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
         let mut budget = self.payment.id_budget();
         budget.extend([
             (IdKind::Information, 1),
             (IdKind::Report, 1),
             (IdKind::LegalRepresentation, 1),
         ]);
-        state.ids.reserve_many(&budget)?;
+        budget
+    }
+
+    pub fn commit(
+        self,
+        state: &mut AppState,
+    ) -> Result<LegalRepresentationId, LegalRepresentationError> {
+        state.ids.reserve_many(&self.id_budget())?;
         validate_time(state, self.retained_at)?;
         validate_dependency_versions(
             state,

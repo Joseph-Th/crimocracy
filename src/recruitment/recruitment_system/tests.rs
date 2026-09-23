@@ -879,6 +879,221 @@ fn failed_delegated_autonomous_recruitment_is_atomic() {
 }
 
 #[test]
+fn delegated_autonomous_recruitment_batch_rejects_allocator_exhaustion_atomically() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+
+    let second_target = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Second Recruiting Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("second recruiting organization should validate");
+    let second_manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Personnel Manager".to_owned(),
+            organization: Some(second_target),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second personnel manager should validate");
+    validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: second_target,
+            manager: second_manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            )]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::IndependentRecruitment,
+                PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+            )]),
+            budget: None,
+        },
+    )
+    .expect("second personnel mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("second personnel mandate should commit");
+
+    let second_candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Delegated Prospect".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second delegated candidate should validate");
+    validate_set_relationship(
+        &fixture.state,
+        second_candidate,
+        second_manager,
+        relationship(90, 90, 0, 80, 0, 0, 60),
+    )
+    .expect("second delegated recruitment relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("second delegated recruitment relationship should commit");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::RecruitmentAttempt, u32::MAX - 1);
+    let before =
+        bincode::serialize(&fixture.state).expect("two-manager recruitment state should serialize");
+
+    let error = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect_err("the complete delegated recruitment cohort must preflight attempt IDs");
+    assert!(matches!(
+        error,
+        AutonomousRecruitmentError::Recruitment(RecruitmentError::IdExhaustion(
+            crate::core::id::IdExhaustionError::Exhausted {
+                kind: "recruitment attempt",
+                ..
+            }
+        ))
+    ));
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected recruitment cohort should serialize"),
+        before,
+        "allocator exhaustion must not commit only the first autonomous recruitment action"
+    );
+    assert_eq!(fixture.state.recruitment().attempts().count(), 0);
+    validate_state(&fixture.state).expect("rejected recruitment cohort must leave valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn approval_required_autonomous_recruitment_batch_preflights_decision_ids() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+
+    let second_target = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Second Approval Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("second approval organization should validate");
+    let second_manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Approval Manager".to_owned(),
+            organization: Some(second_target),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second approval manager should validate");
+    validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: second_target,
+            manager: second_manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            )]),
+            standing_orders: BTreeMap::from([(
+                PolicyKind::IndependentRecruitment,
+                PolicySetting::IndependentRecruitment(ApprovalPolicy::RequireApproval),
+            )]),
+            budget: None,
+        },
+    )
+    .expect("second approval mandate should validate")
+    .commit(&mut fixture.state)
+    .expect("second approval mandate should commit");
+
+    let second_candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Approval Prospect".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second approval candidate should validate");
+    validate_set_relationship(
+        &fixture.state,
+        second_candidate,
+        second_manager,
+        relationship(90, 90, 0, 80, 0, 0, 60),
+    )
+    .expect("second approval relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("second approval relationship should commit");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::DecisionRequest, u32::MAX - 1);
+    let before =
+        bincode::serialize(&fixture.state).expect("two-manager approval state should serialize");
+
+    let error = apply_due_autonomous_recruitment(&registry, &mut fixture.state)
+        .expect_err("the complete approval cohort must fit before any request or pitch commits");
+    assert!(matches!(
+        error,
+        AutonomousRecruitmentError::Decision(
+            crate::decisions::decision_system::DecisionError::IdExhaustion(
+                crate::core::id::IdExhaustionError::Exhausted {
+                    kind: "decision request",
+                    ..
+                }
+            )
+        )
+    ));
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected approval cohort should serialize"),
+        before,
+        "decision-ID exhaustion must not leave an earlier NPC approval or recruitment attempt"
+    );
+    assert_eq!(fixture.state.recruitment().attempts().count(), 0);
+    assert_eq!(
+        fixture
+            .state
+            .decisions()
+            .decisions()
+            .filter(|decision| {
+                matches!(decision.context(), DecisionContext::RecruitmentApproval(_))
+            })
+            .count(),
+        0
+    );
+    validate_state(&fixture.state).expect("rejected approval cohort must leave valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn delegated_recruitment_requires_personnel_authority_and_delegated_policy() {
     let mut fixture = fixture();
     let mandate = assign_personnel_mandate(&mut fixture, None);

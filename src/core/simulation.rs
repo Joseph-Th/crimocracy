@@ -94,7 +94,6 @@ pub struct TickOutcome {
     pub autonomous_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
-    pub cold_case_closures: Vec<InvestigationId>,
     pub executive_brief: Option<ReportId>,
 }
 
@@ -270,8 +269,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         retired_enterprises,
         autonomous_enterprises,
         expired_opportunities,
-        cold_case_suspensions: cold_case_decay.suspended,
-        cold_case_closures: cold_case_decay.closed,
+        cold_case_suspensions: cold_case_decay,
         executive_brief,
     })
 }

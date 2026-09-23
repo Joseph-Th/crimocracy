@@ -10,19 +10,21 @@ use super::{
 };
 use crate::contacts::{ContactKind, ContactStatus};
 use crate::core::id::{
-    ArrestId, CharacterId, ContactId, FinancialAccountId, LegalRepresentationId, OrganizationId,
+    ArrestId, CharacterId, ContactId, FinancialAccountId, IdKind, LegalRepresentationId, MandateId,
+    OrganizationId,
 };
 use crate::core::state::AppState;
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance_by};
 use crate::delegation::delegation_system::{
     DelegationError, PolicySource, resolve_policy_for_manager,
 };
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
-use crate::finance::finance_system::resolve_budget_usage;
+use crate::finance::finance_system::{FinanceError, resolve_budget_usage};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::legal::{ArrestStatus, LegalRepresentationDraft, LegalRepresentationEndReason};
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug)]
 struct AutomaticLegalSupportCandidate {
@@ -34,6 +36,31 @@ struct AutomaticLegalSupportCandidate {
 #[derive(Clone, Copy, Debug)]
 struct ResolvedAutomaticLegalSupport {
     authorization: Option<MandateAuthority>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AutomaticCounselSelection {
+    contact: ContactId,
+    provider_account: FinancialAccountId,
+}
+
+#[derive(Clone, Debug)]
+struct PlannedAutomaticLegalSupportRetention {
+    candidate: AutomaticLegalSupportCandidate,
+    payer_accounts: BTreeSet<FinancialAccountId>,
+    counsel: AutomaticCounselSelection,
+}
+
+#[derive(Debug, Default)]
+struct AutomaticSupportFinanceProjection {
+    balances: BTreeMap<FinancialAccountId, Money>,
+    account_advances: BTreeMap<FinancialAccountId, u32>,
+    mandate_spending: BTreeMap<MandateId, Money>,
+}
+
+struct AutomaticLegalSupportRetentionPlan {
+    retentions: Vec<PlannedAutomaticLegalSupportRetention>,
+    id_budget: Vec<(IdKind, u32)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -71,21 +98,40 @@ pub(crate) fn apply_automatic_legal_support(
     {
         return Ok(AutomaticLegalSupportOutcome::default());
     }
-    let concluded = conclude_inactive_automatic_representations(state)?;
-    let candidates = resolve_automatic_legal_support_candidates(state)?;
-    let mut retained = Vec::new();
-    for candidate in candidates {
-        let fee = registry.legal().automatic_support_retainer();
-        let Some(payer_accounts) = resolve_automatic_support_payer_accounts(state, candidate, fee)?
-        else {
-            continue;
-        };
-        let Some(validated_representation) =
-            validate_best_usable_automatic_counsel(state, candidate, fee, &payer_accounts)?
-        else {
-            continue;
-        };
-        retained.push(validated_representation.commit(state)?);
+
+    // Treat the whole governance pass as one fallible cohort. Concluding old matters and retaining
+    // new counsel can both allocate artifacts, while several retainers can share sponsor cash,
+    // provider accounts, or a delegated budget. Plan the exact sequential funding outcome and
+    // reserve its complete ID/version capacity before the first representation changes.
+    let endings = validate_inactive_automatic_representation_endings(state)?;
+    let concluded = endings.len();
+    let retention_plan = plan_automatic_legal_support_retentions(registry, state)?;
+    let mut id_budget = retention_plan.id_budget;
+    id_budget.extend(endings.iter().flat_map(
+        crate::legal::legal_representation_system::ValidatedLegalRepresentationEnd::id_budget,
+    ));
+    state.ids.reserve_many(&id_budget)?;
+
+    for ending in endings {
+        ending.commit_preflighted(state);
+    }
+
+    let fee = registry.legal().automatic_support_retainer();
+    let mut retained = Vec::with_capacity(retention_plan.retentions.len());
+    for planned in retention_plan.retentions {
+        let validated = validate_automatic_counsel_retention(
+            state,
+            planned.candidate,
+            fee,
+            &planned.payer_accounts,
+            planned.counsel,
+        )
+        .expect("preflighted automatic legal-support retention must remain valid within one pass");
+        retained.push(
+            validated
+                .commit(state)
+                .expect("preflighted automatic legal-support retention must commit"),
+        );
     }
     Ok(AutomaticLegalSupportOutcome {
         retained,
@@ -93,9 +139,9 @@ pub(crate) fn apply_automatic_legal_support(
     })
 }
 
-fn conclude_inactive_automatic_representations(
-    state: &mut AppState,
-) -> Result<usize, LegalRepresentationError> {
+fn validate_inactive_automatic_representation_endings(
+    state: &AppState,
+) -> Result<Vec<super::ValidatedLegalRepresentationEnd>, LegalRepresentationError> {
     let concluded: Vec<LegalRepresentationId> = state
         .legal
         .active_automatic_policy_representations()
@@ -107,15 +153,7 @@ fn conclude_inactive_automatic_representations(
         })
         .map(|record| record.id())
         .collect();
-    let concluded_count = concluded.len();
-    if concluded_count == 0 {
-        return Ok(0);
-    }
-
-    // Validate every ending before the first representation mutates. Each ending emits one
-    // information record and one report; reserve the whole batch up front so allocator
-    // exhaustion cannot conclude a prefix of same-minute automatic matters.
-    let endings = concluded
+    concluded
         .into_iter()
         .map(|representation| {
             validate_end_legal_representation(
@@ -124,18 +162,53 @@ fn conclude_inactive_automatic_representations(
                 LegalRepresentationEndReason::MatterConcluded,
             )
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let artifact_budget = endings
-        .iter()
-        .flat_map(
-            crate::legal::legal_representation_system::ValidatedLegalRepresentationEnd::id_budget,
-        )
-        .collect::<Vec<_>>();
-    state.ids.reserve_many(&artifact_budget)?;
-    for ending in endings {
-        ending.commit_preflighted(state);
+        .collect()
+}
+
+fn plan_automatic_legal_support_retentions(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<AutomaticLegalSupportRetentionPlan, LegalRepresentationError> {
+    let candidates = resolve_automatic_legal_support_candidates(state)?;
+    let fee = registry.legal().automatic_support_retainer();
+    let mut projection = AutomaticSupportFinanceProjection::default();
+    let mut retentions = Vec::new();
+    let mut id_budget = Vec::new();
+
+    for candidate in candidates {
+        let Some(payer_accounts) =
+            resolve_automatic_support_payer_accounts(state, candidate, fee, &projection)?
+        else {
+            continue;
+        };
+        let Some(counsel) = resolve_best_usable_automatic_counsel(state, candidate)? else {
+            continue;
+        };
+
+        // Validate every non-projected dependency now. The finance projection below then proves
+        // the cumulative balance/version/budget effects that single-record validation cannot see
+        // while the real state is intentionally still untouched.
+        let validated =
+            validate_automatic_counsel_retention(state, candidate, fee, &payer_accounts, counsel)?;
+        projection.plan_retainer(
+            state,
+            candidate,
+            fee,
+            &payer_accounts,
+            counsel.provider_account,
+        )?;
+        id_budget.extend(validated.id_budget());
+        retentions.push(PlannedAutomaticLegalSupportRetention {
+            candidate,
+            payer_accounts,
+            counsel,
+        });
     }
-    Ok(concluded_count)
+
+    Ok(AutomaticLegalSupportRetentionPlan {
+        retentions,
+        id_budget,
+    })
 }
 
 fn resolve_automatic_legal_support_candidates(
@@ -251,6 +324,7 @@ fn resolve_automatic_support_payer_accounts(
     state: &AppState,
     candidate: AutomaticLegalSupportCandidate,
     fee: Money,
+    projection: &AutomaticSupportFinanceProjection,
 ) -> Result<Option<BTreeSet<FinancialAccountId>>, LegalRepresentationError> {
     // Organization policy can draw across the sponsor's liquid reserves. A mandate-sourced
     // policy must instead use exactly its configured budget account and stay inside the
@@ -264,11 +338,20 @@ fn resolve_automatic_support_payer_accounts(
             .budget()
             .expect("automatic delegated support candidate requires a mandate budget");
         let usage = resolve_budget_usage(state, authority.mandate, state.now())?;
+        let already_planned = projection
+            .mandate_spending
+            .get(&authority.mandate)
+            .copied()
+            .unwrap_or(Money::ZERO);
+        let remaining = usage
+            .remaining
+            .checked_sub(already_planned)
+            .ok_or(FinanceError::BudgetOverflow(authority.mandate))?;
         let funding = state
             .finance
             .get_account(budget.funding_account)
             .expect("validated mandate budget account must persist");
-        if usage.remaining < fee || funding.spendable_balance() < fee {
+        if remaining < fee || projection.spendable_balance(funding) < fee {
             return Ok(None);
         }
         BTreeSet::from([budget.funding_account])
@@ -276,19 +359,18 @@ fn resolve_automatic_support_payer_accounts(
         state
             .finance
             .accounts_for(FinancialOwner::Organization(candidate.sponsor))
-            .filter(|account| account.spendable_balance() > Money::ZERO)
+            .filter(|account| projection.spendable_balance(account) > Money::ZERO)
             .map(|account| account.id())
             .collect()
     };
     let available = payer_accounts
         .iter()
         .map(|account| {
-            state
+            let record = state
                 .finance
                 .get_account(*account)
-                .expect("funding account came from finance owner index")
-                .spendable_balance()
-                .cents()
+                .expect("funding account came from finance owner index");
+            projection.spendable_balance(record).cents()
         })
         .fold(0_i128, |total, cents| {
             (total + i128::from(cents)).min(i128::from(fee.cents()))
@@ -299,12 +381,121 @@ fn resolve_automatic_support_payer_accounts(
     Ok(Some(payer_accounts))
 }
 
-fn validate_best_usable_automatic_counsel(
+impl AutomaticSupportFinanceProjection {
+    fn balance(&self, account: &crate::finance::FinancialAccountRecord) -> Money {
+        self.balances
+            .get(&account.id())
+            .copied()
+            .unwrap_or_else(|| account.balance())
+    }
+
+    fn spendable_balance(&self, account: &crate::finance::FinancialAccountRecord) -> Money {
+        let balance = self.balance(account);
+        if account.kind().is_liquid() && balance > Money::ZERO {
+            balance
+        } else {
+            Money::ZERO
+        }
+    }
+
+    fn plan_retainer(
+        &mut self,
+        state: &AppState,
+        candidate: AutomaticLegalSupportCandidate,
+        fee: Money,
+        payer_accounts: &BTreeSet<FinancialAccountId>,
+        provider_account: FinancialAccountId,
+    ) -> Result<(), LegalRepresentationError> {
+        let mut payers = Vec::with_capacity(payer_accounts.len());
+        for account_id in payer_accounts {
+            let account = state
+                .finance
+                .get_account(*account_id)
+                .ok_or(LegalRepresentationError::MissingAccount(*account_id))?;
+            let spendable = self.spendable_balance(account);
+            if spendable > Money::ZERO {
+                payers.push((
+                    account.kind().unrestricted_spending_priority(),
+                    spendable,
+                    account.id(),
+                ));
+            }
+        }
+        payers.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then(right.1.cmp(&left.1))
+                .then(left.2.cmp(&right.2))
+        });
+
+        let mut remaining = fee;
+        for (_, spendable, account) in payers {
+            if remaining == Money::ZERO {
+                break;
+            }
+            let debit = spendable.min(remaining);
+            let debit = debit
+                .checked_neg()
+                .ok_or(LegalRepresentationError::FeeArithmeticOverflow)?;
+            self.apply_posting(state, account, debit)?;
+            remaining = remaining
+                .checked_add(debit)
+                .ok_or(LegalRepresentationError::FeeArithmeticOverflow)?;
+        }
+        if remaining != Money::ZERO {
+            let available = fee
+                .checked_sub(remaining)
+                .ok_or(LegalRepresentationError::FeeArithmeticOverflow)?;
+            return Err(LegalRepresentationError::InsufficientFunds {
+                available_cents: available.cents(),
+                required_cents: fee.cents(),
+            });
+        }
+        self.apply_posting(state, provider_account, fee)?;
+
+        if let Some(authority) = candidate.authorization {
+            let already_planned = self
+                .mandate_spending
+                .get(&authority.mandate)
+                .copied()
+                .unwrap_or(Money::ZERO);
+            let next_planned = already_planned
+                .checked_add(fee)
+                .expect("delegated payer resolution proved the complete projected budget headroom");
+            self.mandate_spending
+                .insert(authority.mandate, next_planned);
+        }
+        Ok(())
+    }
+
+    fn apply_posting(
+        &mut self,
+        state: &AppState,
+        account: FinancialAccountId,
+        amount: Money,
+    ) -> Result<(), LegalRepresentationError> {
+        let record = state
+            .finance
+            .get_account(account)
+            .ok_or(LegalRepresentationError::MissingAccount(account))?;
+        let current = self.balance(record);
+        let balance = current
+            .checked_add(amount)
+            .ok_or(FinanceError::BalanceOverflow(account))?;
+        let advances = self.account_advances.entry(account).or_insert(0);
+        *advances = advances
+            .checked_add(1)
+            .ok_or_else(|| VersionCapacityError::new("financial account"))?;
+        ensure_version_can_advance_by(record.version(), *advances, "financial account")?;
+        self.balances.insert(account, balance);
+        Ok(())
+    }
+}
+
+fn resolve_best_usable_automatic_counsel(
     state: &AppState,
     candidate: AutomaticLegalSupportCandidate,
-    fee: Money,
-    payer_accounts: &BTreeSet<FinancialAccountId>,
-) -> Result<Option<ValidatedLegalRepresentation>, LegalRepresentationError> {
+) -> Result<Option<AutomaticCounselSelection>, LegalRepresentationError> {
     // Legal contacts are broader than retained counsel: prosecutors and legal authorities also
     // expose Legal channels. Rank every currently viable LegalServices lawyer by actual legal
     // competence rather than contact creation order. Contact/account IDs are deterministic
@@ -352,18 +543,30 @@ fn validate_best_usable_automatic_counsel(
     let Some((_, contact, provider_account)) = best else {
         return Ok(None);
     };
+    Ok(Some(AutomaticCounselSelection {
+        contact,
+        provider_account,
+    }))
+}
+
+fn validate_automatic_counsel_retention(
+    state: &AppState,
+    candidate: AutomaticLegalSupportCandidate,
+    fee: Money,
+    payer_accounts: &BTreeSet<FinancialAccountId>,
+    counsel: AutomaticCounselSelection,
+) -> Result<ValidatedLegalRepresentation, LegalRepresentationError> {
     validate_retain_legal_representation(
         state,
         LegalRepresentationDraft {
             arrest: candidate.arrest,
             sponsor: candidate.sponsor,
-            contact,
+            contact: counsel.contact,
             fee,
             payer_accounts: payer_accounts.clone(),
-            provider_account,
+            provider_account: counsel.provider_account,
             authorization: candidate.authorization,
             origin: crate::legal::LegalRepresentationOrigin::AutomaticPolicy,
         },
     )
-    .map(Some)
 }

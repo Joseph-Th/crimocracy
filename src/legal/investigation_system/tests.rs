@@ -3287,13 +3287,7 @@ fn cold_case_decay_cools_and_reopens_operation_originated_cases_canonically() {
     state.advance_clock(SimDuration::from_minutes(119));
     let premature = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
         .expect("pre-window cold-case pass should resolve");
-    assert_eq!(
-        premature,
-        ColdCaseDecayOutcome {
-            suspended: Vec::new(),
-            closed: Vec::new()
-        }
-    );
+    assert!(premature.is_empty());
     assert_eq!(
         state
             .legal()
@@ -3306,13 +3300,7 @@ fn cold_case_decay_cools_and_reopens_operation_originated_cases_canonically() {
     state.advance_clock(SimDuration::ONE_MINUTE);
     let suspended = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
         .expect("cold-case decay should resolve");
-    assert_eq!(
-        suspended,
-        ColdCaseDecayOutcome {
-            suspended: vec![case, questionable_lead, identified],
-            closed: Vec::new()
-        }
-    );
+    assert_eq!(suspended, vec![case, questionable_lead, identified]);
     let record = state
         .legal()
         .get_investigation(case)
@@ -3398,10 +3386,7 @@ fn cold_case_decay_uses_elapsed_time_since_nonzero_activity() {
     assert_eq!(
         apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
             .expect("pre-threshold cold-case pass should resolve"),
-        ColdCaseDecayOutcome {
-            suspended: Vec::new(),
-            closed: Vec::new(),
-        },
+        Vec::<InvestigationId>::new(),
         "119 elapsed inactive minutes must not be treated as a full 120-minute window"
     );
     assert_eq!(
@@ -3417,10 +3402,7 @@ fn cold_case_decay_uses_elapsed_time_since_nonzero_activity() {
     assert_eq!(
         apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
             .expect("exact-threshold cold-case pass should resolve"),
-        ColdCaseDecayOutcome {
-            suspended: vec![investigation],
-            closed: Vec::new(),
-        },
+        vec![investigation],
         "exactly 120 elapsed inactive minutes must make the originated case cold"
     );
     validate_state(&state).expect("elapsed-time cold-case state should remain valid");
@@ -3481,13 +3463,10 @@ fn cold_case_decay_defers_originated_case_with_scheduled_work() {
     .expect("evidence review should schedule");
 
     state.advance_clock(SimDuration::from_minutes(121));
-    assert_eq!(
+    assert!(
         apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
-            .expect("scheduled work should defer rather than fail cold decay"),
-        ColdCaseDecayOutcome {
-            suspended: Vec::new(),
-            closed: Vec::new(),
-        }
+            .expect("scheduled work should defer rather than fail cold decay")
+            .is_empty()
     );
     let investigation_record = state
         .legal()
@@ -3754,8 +3733,7 @@ fn cold_case_decay_skips_version_exhausted_case_and_shelves_other_due_files() {
 
     let outcome = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
         .expect("finite-rail case must not block other cold-case lifecycle work");
-    assert_eq!(outcome.suspended, vec![ordinary]);
-    assert!(outcome.closed.is_empty());
+    assert_eq!(outcome, vec![ordinary]);
     let exhausted_record = state
         .legal()
         .get_investigation(exhausted)
@@ -3780,14 +3758,14 @@ fn cold_case_decay_skips_version_exhausted_case_and_shelves_other_due_files() {
 }
 
 #[test]
-fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() {
+fn cold_case_decay_defers_a_case_while_its_only_identified_subject_is_detained() {
     let registry = build_registry();
     let mut state = AppState::new(0xC1EA_1933);
     let police = insert_organization(
         &registry,
         &mut state,
         OrganizationDraft {
-            name: "Cleared Case Precinct".to_owned(),
+            name: "Custody Deferral Precinct".to_owned(),
             kind: OrganizationKind::LawEnforcement,
         },
     )
@@ -3796,7 +3774,7 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
         &registry,
         &mut state,
         OrganizationDraft {
-            name: "Cleared Case Crew".to_owned(),
+            name: "Custody Deferral Crew".to_owned(),
             kind: OrganizationKind::Criminal,
         },
     )
@@ -3804,7 +3782,7 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
     let leader = insert_character(
         &mut state,
         CharacterDraft {
-            name: "Cleared Case Leader".to_owned(),
+            name: "Custody Deferral Leader".to_owned(),
             organization: Some(criminal),
             supervisor: None,
             autonomy: AutonomyLevel::Delegated,
@@ -3820,7 +3798,7 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
     let lieutenant = insert_character(
         &mut state,
         CharacterDraft {
-            name: "Cleared Case Lieutenant".to_owned(),
+            name: "Custody Deferral Lieutenant".to_owned(),
             organization: Some(criminal),
             supervisor: Some(leader),
             autonomy: AutonomyLevel::Delegated,
@@ -3856,7 +3834,7 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
         &state,
         IncidentIntakeDraft {
             owner: police,
-            title: "Cleared identified inquiry".to_owned(),
+            title: "Custody deferral inquiry".to_owned(),
             subjects: BTreeSet::from([
                 EntityRef::Operation(origin),
                 EntityRef::Character(lieutenant),
@@ -3901,9 +3879,9 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
     .commit(&mut state)
     .expect("corroborating arrest evidence should commit");
 
-    // The subject's arrest sits under this very case; the case is cleared by arrest and
-    // must close through decay instead of lingering active with a held investigator slot.
-    crate::legal::arrest_system::validate_arrest(
+    // The subject's arrest sits under this very case. Custody is a temporary legal state, not a
+    // terminal investigative result, so cold decay must leave the case active until custody ends.
+    let arrest = crate::legal::arrest_system::validate_arrest(
         &registry,
         &state,
         crate::legal::ArrestDraft {
@@ -3918,22 +3896,33 @@ fn cold_case_decay_closes_a_fully_worked_case_whose_every_subject_is_detained() 
 
     state.advance_clock(SimDuration::from_minutes(121));
     let decayed = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
-        .expect("cold-case decay should resolve");
+        .expect("cold-case decay should defer detained cases");
+    assert!(decayed.is_empty());
     assert_eq!(
-        decayed,
-        ColdCaseDecayOutcome {
-            suspended: Vec::new(),
-            closed: vec![identified]
-        }
+        state
+            .legal()
+            .get_investigation(identified)
+            .map(|record| record.status()),
+        Some(InvestigationStatus::Active)
+    );
+    crate::legal::arrest_system::validate_release_arrest(&state, arrest)
+        .expect("same-case custody should release")
+        .commit(&mut state)
+        .expect("same-case custody release should commit");
+    assert_eq!(
+        apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
+            .expect("cold-case decay should resume once custody clears"),
+        vec![identified]
     );
     assert_eq!(
         state
             .legal()
             .get_investigation(identified)
             .map(|record| record.status()),
-        Some(InvestigationStatus::Closed)
+        Some(InvestigationStatus::Suspended),
+        "custody defers cold decay only while the case owns live detention"
     );
-    validate_state(&state).expect("cleared-case state should validate");
+    validate_state(&state).expect("post-custody cold-case state should validate");
     validate_invariants(&state);
 }
 
@@ -3976,7 +3965,7 @@ fn cold_case_decay_scopes_custody_to_each_case_and_defers_detained_files() {
     };
     let held = member(&mut state, "Held Member");
     let partner = member(&mut state, "At Large Partner");
-    let cleared = member(&mut state, "Cleared Member");
+    let same_case_subject = member(&mut state, "Same-Case Subject");
     let unrelated = member(&mut state, "Unrelated Member");
     let origin = crate::operations::operation_system::validate_authorize_operation(
         &registry,
@@ -4039,7 +4028,11 @@ fn cold_case_decay_scopes_custody_to_each_case_and_defers_detained_files() {
         .investigation
     };
     let partial = open_case(&mut state, "Partial custody inquiry", vec![held, partner]);
-    let cleared_case = open_case(&mut state, "Cleared inquiry", vec![cleared, unrelated]);
+    let same_case_custody = open_case(
+        &mut state,
+        "Same-case custody inquiry",
+        vec![same_case_subject, unrelated],
+    );
     let borrowed = open_case(&mut state, "Borrowed custody inquiry", vec![unrelated]);
     let arrest_under = |state: &mut AppState,
                         investigation: crate::core::id::InvestigationId,
@@ -4095,18 +4088,17 @@ fn cold_case_decay_scopes_custody_to_each_case_and_defers_detained_files() {
         .commit(state)
         .expect("evidence-backed arrest should commit")
     };
-    // `held` is detained under the partial case while `partner` stays at large; `cleared`
-    // is detained under its own case; `unrelated` is detained under the cleared case, so
-    // the borrowed file holds no custody of its own.
+    // `held` is detained under the partial case while `partner` stays at large. Both subjects
+    // in `same_case_custody` are detained under that file. `unrelated` is also a subject of the
+    // borrowed file, but that file owns no custody of its own.
     arrest_under(&mut state, partial, held);
-    arrest_under(&mut state, cleared_case, cleared);
-    arrest_under(&mut state, cleared_case, unrelated);
+    arrest_under(&mut state, same_case_custody, same_case_subject);
+    arrest_under(&mut state, same_case_custody, unrelated);
 
     state.advance_clock(SimDuration::from_minutes(121));
     let decayed = apply_cold_case_decay(&mut state, SimDuration::from_minutes(120))
         .expect("detained files must defer without poisoning the decay batch");
-    assert_eq!(decayed.closed, vec![cleared_case]);
-    assert_eq!(decayed.suspended, vec![borrowed]);
+    assert_eq!(decayed, vec![borrowed]);
     assert_eq!(
         state
             .legal()
@@ -4114,6 +4106,14 @@ fn cold_case_decay_scopes_custody_to_each_case_and_defers_detained_files() {
             .map(|record| record.status()),
         Some(InvestigationStatus::Active),
         "a case with live custody of its own waits for custody to resolve"
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(same_case_custody)
+            .map(|record| record.status()),
+        Some(InvestigationStatus::Active),
+        "even complete same-case custody defers decay because arrest is not case closure"
     );
     assert_eq!(
         state

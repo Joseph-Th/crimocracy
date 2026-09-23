@@ -149,15 +149,13 @@ fn observe_cold_case_and_opportunity_cost(
     narrative: bool,
     metrics: &mut RunMetrics,
 ) {
-    // A cold-case shelf or closure is an institutional beat, not player-visible news. Capture it
-    // only as contract evidence; the narrative waits until the organization learns the change
-    // through its own surveillance/contact channels.
-    if let Some(case) = scenario.investigation {
-        let shelved = outcome.cold_case_suspensions.contains(&case);
-        let closed = outcome.cold_case_closures.contains(&case);
-        if shelved || closed {
-            metrics.case_cold_minute = Some(outcome.now.as_minutes());
-        }
+    // A cold-case shelf is an institutional beat, not player-visible news. Capture it only as
+    // contract evidence; the narrative waits until the organization learns the change through its
+    // own surveillance/contact channels.
+    if let Some(case) = scenario.investigation
+        && outcome.cold_case_suspensions.contains(&case)
+    {
+        metrics.case_cold_minute = Some(outcome.now.as_minutes());
     }
 
     // The second score's lapse is a deliberate, observed consequence: PRESS stands down while the
@@ -657,7 +655,6 @@ pub fn tick_changed_observable_state(outcome: &TickOutcome) -> bool {
         || !outcome.autonomous_enterprises.is_empty()
         || !outcome.expired_opportunities.is_empty()
         || !outcome.cold_case_suspensions.is_empty()
-        || !outcome.cold_case_closures.is_empty()
         || outcome.executive_brief.is_some()
 }
 

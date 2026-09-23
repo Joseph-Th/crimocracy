@@ -125,7 +125,7 @@ fn resolve_jurisdiction_priority(
 
 /// The authority that originates casework in a neighborhood. Case ownership is deliberately
 /// law-enforcement-only: every downstream lifecycle gate (autonomous evidence arrests,
-/// cold-case closure, lead-knowledge recording) is defined against police institutions, so
+/// cold-case shelving, lead-knowledge recording) is defined against police institutions, so
 /// letting another authority kind take intake would strand its cases outside every one of
 /// those paths.
 pub fn resolve_case_intake_authority(

@@ -1,17 +1,21 @@
 //! Daily delegated recruitment decisions; `recruitment_system` remains the canonical transaction owner.
 
 use crate::core::attention::AttentionClass;
-use crate::core::id::{CharacterId, MandateId, OrganizationId, RecruitmentAttemptId};
+use crate::core::id::{
+    CharacterId, DecisionRequestId, IdKind, MandateId, OrganizationId, RecruitmentAttemptId,
+};
 use crate::core::state::AppState;
 use crate::core::time::is_recurring_boundary;
 use crate::decisions::decision_system::{
-    DecisionError, DecisionRequestOutcome, validate_request_recruitment_approval,
+    DecisionError, DecisionRequestOutcome, ValidatedAutonomousRecruitmentApproval,
+    ValidatedRecruitmentApprovalRequest, validate_request_recruitment_approval,
 };
 use crate::decisions::{DecisionResponse, RecruitmentApprovalRequestDraft};
 use crate::delegation::delegation_system::{DelegationError, resolve_policy_for_manager};
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::recruitment::recruitment_system::{
-    RecruitmentError, find_recruitment_candidates, validate_delegated_recruitment_attempt,
+    RecruitmentError, ValidatedRecruitmentAttempt, find_recruitment_candidates,
+    validate_delegated_recruitment_attempt,
 };
 use crate::recruitment::scoring::recruitment_relationship_support;
 use crate::recruitment::{RecruitmentApproach, RecruitmentDraft};
@@ -53,6 +57,17 @@ struct PreparedRecruitmentAuthority {
     candidates: Vec<RankedRecruitmentCandidate>,
 }
 
+enum PlannedAutonomousRecruitmentAction {
+    Delegated(ValidatedRecruitmentAttempt),
+    PlayerApproval(ValidatedRecruitmentApprovalRequest),
+    AutonomousApproval(ValidatedAutonomousRecruitmentApproval),
+}
+
+struct AutonomousRecruitmentPlan {
+    actions: Vec<PlannedAutonomousRecruitmentAction>,
+    id_budget: Vec<(IdKind, u32)>,
+}
+
 /// Applies the authored recruitment cadence for delegated personnel managers. Candidate choice
 /// is deterministic managerial judgment: strongest relationship support wins, with CharacterId
 /// used only as an exact-score tie-breaker. This avoids both creation-order strategy and a random
@@ -68,10 +83,27 @@ pub(crate) fn apply_due_autonomous_recruitment(
         return Ok(AutonomousRecruitmentOutcome::default());
     }
 
+    let plan = plan_due_autonomous_recruitment(registry, state)?;
+    // The daily personnel pass is one fallible cohort. Exact action selection and every
+    // action-specific artifact budget were resolved above without mutation, so allocator
+    // exhaustion cannot leave only the strongest prefix of managers recorded.
+    state
+        .ids
+        .reserve_many(&plan.id_budget)
+        .map_err(RecruitmentError::from)?;
+    Ok(plan.commit(state))
+}
+
+fn plan_due_autonomous_recruitment(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<AutonomousRecruitmentPlan, AutonomousRecruitmentError> {
     let personnel_scope = ResponsibilityScope::Function(ResponsibilityFunction::Personnel);
     let mut authorities = prepare_recruitment_authorities(registry, state, personnel_scope)?;
-    let mut outcome = AutonomousRecruitmentOutcome::default();
     let mut claimed_this_pass = BTreeSet::new();
+    let mut actions = Vec::new();
+    let mut id_budget = Vec::new();
+    let mut decision_count = 0_u32;
 
     while !authorities.is_empty() {
         let Some((authority_index, candidate)) =
@@ -100,7 +132,7 @@ pub(crate) fn apply_due_autonomous_recruitment(
 
         match policy {
             ApprovalPolicy::Delegated => {
-                let attempt = validate_delegated_recruitment_attempt(
+                let validated = validate_delegated_recruitment_attempt(
                     registry,
                     state,
                     authority,
@@ -110,10 +142,9 @@ pub(crate) fn apply_due_autonomous_recruitment(
                         candidate,
                         approach,
                     },
-                )?
-                .commit(state)?;
-                claimed_this_pass.insert(candidate);
-                outcome.attempts.push(attempt);
+                )?;
+                id_budget.extend(validated.id_budget());
+                actions.push(PlannedAutonomousRecruitmentAction::Delegated(validated));
             }
             ApprovalPolicy::RequireApproval => {
                 let request = validate_request_recruitment_approval(
@@ -129,29 +160,71 @@ pub(crate) fn apply_due_autonomous_recruitment(
                         summary: approval_request_summary(state, manager, candidate, approach),
                     },
                 )?;
+                decision_count = decision_count
+                    .checked_add(1)
+                    .expect("persisted mandate count must fit the u32 decision ID space");
+                // Besides proving this request count is representable, the check makes the
+                // predicted future decision ID below safe to derive without wrapping.
+                state
+                    .ids
+                    .reserve(IdKind::DecisionRequest, decision_count)
+                    .map_err(DecisionError::from)?;
                 if state.player_organization() == Some(organization) {
-                    let committed = request.commit(state)?;
-                    // The strongest live relationship won this pass's contention. Keep the
-                    // candidate unavailable to weaker same-minute autonomous pitches while
-                    // leadership owns the surfaced approval decision.
-                    claimed_this_pass.insert(candidate);
-                    outcome.approval_requests.push(committed);
+                    id_budget.extend(request.id_budget());
+                    actions.push(PlannedAutonomousRecruitmentAction::PlayerApproval(request));
                 } else {
-                    let (committed, resolution) = request.commit_autonomous_resolution(
+                    let predicted_decision = DecisionRequestId::from_raw(
+                        state
+                            .ids
+                            .next_raw(IdKind::DecisionRequest)
+                            .checked_add(decision_count - 1)
+                            .expect("decision-count reserve proved the predicted ID representable"),
+                    );
+                    let prepared = request.prepare_autonomous_resolution(
                         registry,
                         state,
                         DecisionResponse::Approve,
+                        predicted_decision,
                     )?;
-                    outcome.approval_requests.push(committed);
+                    id_budget.extend(prepared.id_budget());
+                    actions.push(PlannedAutonomousRecruitmentAction::AutonomousApproval(
+                        prepared,
+                    ));
+                }
+            }
+        }
+        // Every selected route either records an attempt immediately or owns the candidate in a
+        // pending player decision. The read-only planner therefore models the existing same-pass
+        // contention rule exactly without needing a speculative AppState clone.
+        claimed_this_pass.insert(candidate);
+    }
+    Ok(AutonomousRecruitmentPlan { actions, id_budget })
+}
+
+impl AutonomousRecruitmentPlan {
+    fn commit(self, state: &mut AppState) -> AutonomousRecruitmentOutcome {
+        let mut outcome = AutonomousRecruitmentOutcome::default();
+        for action in self.actions {
+            match action {
+                PlannedAutonomousRecruitmentAction::Delegated(attempt) => {
+                    outcome.attempts.push(attempt.commit_preflighted(state));
+                }
+                PlannedAutonomousRecruitmentAction::PlayerApproval(request) => {
+                    outcome
+                        .approval_requests
+                        .push(request.commit_preflighted(state));
+                }
+                PlannedAutonomousRecruitmentAction::AutonomousApproval(prepared) => {
+                    let (request, resolution) = prepared.commit_preflighted(state);
+                    outcome.approval_requests.push(request);
                     if let Some(attempt) = resolution.recruitment_attempt {
-                        claimed_this_pass.insert(candidate);
                         outcome.attempts.push(attempt);
                     }
                 }
             }
         }
+        outcome
     }
-    Ok(outcome)
 }
 
 /// Builds the day's actionable manager queue without mutation. Managers with no currently usable

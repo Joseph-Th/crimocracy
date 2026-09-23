@@ -346,8 +346,8 @@ pub fn validate_batch_strategy_coverage(
 /// Full-mode Press narrative must complete the whole consequence arc: the player follows up,
 /// reads that the case is hot, then polls its standing police contact until the channel itself
 /// carries the cooled read - the contact's knowledge being production investigator state, not
-/// hidden case access. The institution may end the case either way production rules allow:
-/// quiet cases decay cold, and cases escalated into custody can close outright.
+/// hidden case access. Quiet originated cases deterministically shelf after the authored cold
+/// window once scheduled work and live same-case custody have cleared.
 pub fn validate_press_consequence_arc(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
     if metrics.strategy != Some(Strategy::Press) {
         return Ok(());
@@ -363,7 +363,7 @@ pub fn validate_press_consequence_arc(metrics: &RunMetrics) -> Result<(), Harnes
     } else {
         Err(HarnessContractError::MissingStrategyEvidence {
             strategy: Strategy::Press,
-            evidence: "the surfaced case must end through an institutional ending (cold shelf or closure) and the player's standing police contact must confirm it through a canonical disclosure",
+            evidence: "the surfaced case must shelf after the authored cold window and the player's standing police contact must confirm it through a canonical disclosure",
         })
     }
 }

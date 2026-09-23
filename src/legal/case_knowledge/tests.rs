@@ -266,7 +266,7 @@ fn cold_shelving_refreshes_the_leads_knowledge_to_shelved() {
         .state
         .advance_clock(SimDuration::from_minutes(window.as_minutes() + 60));
     let decay = apply_cold_case_decay(&mut fixture.state, window).expect("decay must succeed");
-    assert_eq!(decay.suspended, vec![investigation]);
+    assert_eq!(decay, vec![investigation]);
 
     let held: Vec<_> = fixture
         .state

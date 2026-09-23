@@ -6,7 +6,6 @@ mod incident_intake;
 
 pub(crate) use autonomous_staffing::apply_autonomous_investigator_staffing;
 pub use autonomous_staffing::{ValidatedInvestigatorAssignment, validate_assign_investigator};
-pub use cold_case_decay::ColdCaseDecayOutcome;
 pub(crate) use cold_case_decay::apply_cold_case_decay;
 pub(crate) use incident_intake::case_origin_responsible_organization;
 pub use incident_intake::{
@@ -510,9 +509,9 @@ fn validate_investigation_transition_dependencies(
         });
     }
     // Suspending a case while one of its arrests still holds someone in custody would shelve
-    // live institutional work, so only Resume escapes this gate. Closing stays allowed: a case
-    // whose every identified subject is detained is cleared by arrest, and prosecution works
-    // from the arrest and its evidence rather than from an active investigation.
+    // live institutional work, so only Resume escapes this gate. Explicit closure remains a
+    // separate terminal case-management decision: prosecution owns the arrest and cited evidence
+    // independently and does not require the investigation to remain active.
     if transition == InvestigationTransition::Suspend
         && let Some(arrest) = state
             .legal

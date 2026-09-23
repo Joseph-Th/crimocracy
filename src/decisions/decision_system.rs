@@ -4,7 +4,7 @@ mod recruitment_approval;
 
 use recruitment_approval::validate_recruitment_approval_authority_snapshot;
 pub(crate) use recruitment_approval::{
-    ValidatedRecruitmentApprovalCancellations,
+    ValidatedAutonomousRecruitmentApproval, ValidatedRecruitmentApprovalCancellations,
     validate_cancel_recruitment_approvals_for_mandate_change,
     validate_cancel_recruitment_approvals_for_organization_policy_change,
 };

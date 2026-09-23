@@ -116,20 +116,19 @@ determinism and harness contracts.
  6    ├─ find_due_with_missed_deadlines → abort via decision when present
  7    └─ find_due_in_progress → decide+validate+commit per operation (RNG: operation stream)
  8  apply_autonomous_investigator_staffing single-seat staffing, lead-investigator knowledge
- 9  apply_evidence_review_scheduling       next unattempted reviewable evidence on active staffed cases
-10  apply_witness_interview_scheduling     after reviews so same-minute witness is interviewable
-11  run_investigation_work_phase           resolve due work (RNG: investigation stream)
-12  apply_autonomous_evidence_arrests      active LawEnforcement cases: authored independent-evidence threshold → custody + responsibility preemption
-13  apply_autonomous_prosecution_staffing  refill prosecution seats released by custody
-14  apply_automatic_legal_support          conclude boundary releases; retain before a due detainee decision
-15  apply_detainee_informant_recruitment   one decision after a delay; active counsel lowers authored flip chance
-16  apply_informant_disclosures            holder-knowledge → handler cases
-17  apply_cold_case_decay                  originated cases only, authored inactivity window, no RNG
-18  run_business_cycle_phase               per due business (RNG: business stream)
-19  apply_due_autonomous_business_lifecycle
+ 9  apply_investigation_work_scheduling    one active-case scan; evidence review first, otherwise witness interview
+10  run_investigation_work_phase           resolve due work (RNG: investigation stream)
+11  apply_autonomous_evidence_arrests      active LawEnforcement cases: authored independent-evidence threshold → custody + responsibility preemption
+12  apply_autonomous_prosecution_staffing  refill prosecution seats released by custody
+13  apply_automatic_legal_support          conclude boundary releases; retain before a due detainee decision
+14  apply_detainee_informant_recruitment   one decision after a delay; active counsel lowers authored flip chance
+15  apply_informant_disclosures            holder-knowledge → handler cases
+16  apply_cold_case_decay                  originated cases only, authored inactivity window, no RNG
+17  run_business_cycle_phase               per due business (RNG: business stream)
+18  apply_due_autonomous_business_lifecycle
                                                 suspended non-player books reopen only when current zero-variance economics recover
-20  run_enterprise_cycle_phase             per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
-21  apply_daily_payroll  →  apply_reputation_phase
+19  run_enterprise_cycle_phase             per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
+20  apply_daily_payroll  →  apply_reputation_phase
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence
     ──► apply_due_autonomous_enterprise_lifecycle
           suspended NPC rackets: viable reopen; stale frozen authority/assets retire
