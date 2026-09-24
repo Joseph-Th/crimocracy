@@ -8,12 +8,12 @@
 //! Narrative sessions also run a player-earned defector watch after an accepted defection: the
 //! organization watches every known rival through canonical surveillance and confirms where the
 //! departed member resurfaces, instead of the departure report leaking the recruiting organization.
-//! The follow-up win-back pitch matches the candidate's visible drives and traits the way a
-//! player matches a pitch, rather than rolling a random approach.
-//! Timeline anchors are derived from the authored registry (operation duration, autonomous
-//! recruitment cadence, and cold-case window) so session timing tracks the game instead of a
-//! second hard-coded ruleset. World/simulation and evaluation-policy seeds are independent; scenario
-//! sensitivity varies the world while matched branches keep one fixed policy treatment.
+//! The follow-up win-back pitch uses the player's established boss-member relationship rather
+//! than hidden candidate drives or traits; production scoring still decides whether it works.
+//! Timeline anchors use authored operation durations and the canonical campaign-day boundary so
+//! session timing tracks the game instead of a second hard-coded ruleset. World/simulation and
+//! evaluation-policy seeds are independent; full-mode sampling varies both streams reproducibly
+//! while matched branches share one treatment.
 
 mod contracts;
 mod leverage;
@@ -177,7 +177,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 
     println!("CRIMOCRACY GAMEPLAY HARNESS");
     println!("===========================\n");
-    println!("Mode: controlled/calibration strategy comparison with bounded scenario sensitivity.");
+    println!("Mode: exploratory matched-play sessions plus controlled/calibration probes.");
     println!(
         "Evidence boundary: synthetic setup through production paths; narrated policy inputs and consequences are player-visible. Hidden structural evidence stays in contracts/artifacts.\n"
     );
@@ -185,7 +185,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         "Observation windows: full sessions capture the shared financial comparison at two simulated days; consequence arcs may continue beyond that boundary when player policy keeps waiting. Matched batches run for one day to keep sensitivity evidence bounded.\n"
     );
     println!(
-        "Narrative comparisons rotate across {NARRATIVE_SEED_ROTATION} adjacent world seeds so every authored fixture variation gets exercised while policy seed {policy_seed:#x} stays fixed; matched branches inside one world share one treatment.\n"
+        "Narrative comparisons rotate across {NARRATIVE_SEED_ROTATION} reproducible world/policy seed pairs so every authored fixture variation gets exercised with slight policy variation; matched branches inside one sample share the exact same pair.\n"
     );
     if !detail {
         println!("Output: concise. Use `cargo harness-full-detail` for the primary narrative.\n");
@@ -194,7 +194,8 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     let mut narrative_sets: Vec<(EvaluationSeeds, RunMetrics, RunMetrics, RunMetrics)> =
         Vec::with_capacity(NARRATIVE_SEED_ROTATION as usize);
     for offset in 0..NARRATIVE_SEED_ROTATION {
-        let narrative_seeds = EvaluationSeeds::new(world_seed.wrapping_add(offset), policy_seed);
+        let narrative_seeds =
+            varied_evaluation_seeds(EvaluationSeeds::new(world_seed, policy_seed), offset);
         let deep_readout = offset == 0;
         println!(
             "\n=== NARRATIVE COMPARISON SET {} of {NARRATIVE_SEED_ROTATION}: world {:#x}, policy {:#x} ===",
@@ -447,8 +448,10 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         println!("[PROBE PASS] legal foundation");
     }
 
-    println!("\n--- NIGHT-TRAP BATCH ({samples} world seeds per strategy) ---");
-    println!("[BATCH] Running matched world seeds with policy {policy_seed:#x} for NIGHT TRAP...");
+    println!("\n--- NIGHT-TRAP BATCH ({samples} varied seed pairs per strategy) ---");
+    println!(
+        "[BATCH] Running reproducible matched world/policy samples from bases {world_seed:#x}/{policy_seed:#x} for NIGHT TRAP..."
+    );
     let (rush_aggregate, press_aggregate, recon_aggregate) = run_strategy_batch(
         &registry,
         ScenarioProfile::NightTrap,
@@ -456,7 +459,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         EvaluationSeeds::new(world_seed, policy_seed),
         Some(&artifact_dir),
     )?;
-    println!("[BATCH PASS] NIGHT TRAP matched-world checks passed.");
+    println!("[BATCH PASS] NIGHT TRAP matched-sample checks passed.");
     if detail {
         rush_aggregate.print("RUSH");
         press_aggregate.print("PRESS");
@@ -489,11 +492,11 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     });
     let mut sensitivity_summaries = Vec::new();
     println!(
-        "\n--- SCENARIO SENSITIVITY ({samples} world seeds per strategy/profile, fixed policy {policy_seed:#x}) ---"
+        "\n--- SCENARIO SENSITIVITY ({samples} matched world/policy samples per strategy/profile) ---"
     );
     for profile in ScenarioProfile::SENSITIVITY_SET {
         println!(
-            "[BATCH] Running matched world seeds for {}...",
+            "[BATCH] Running matched world/policy samples for {}...",
             profile.label()
         );
         let (rush, press, recon) = run_strategy_batch(
@@ -515,7 +518,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         }
         print_convergence_observation(profile, &rush, &press, &recon);
         println!(
-            "[BATCH PASS] {} matched-world checks passed.",
+            "[BATCH PASS] {} matched-sample checks passed.",
             profile.label()
         );
         sensitivity_summaries.push(serde_json::json!({
@@ -567,7 +570,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
                 "personnel_retention": retention_observed,
                 "legal_foundation": true,
             },
-            "note": "Scenario-sensitivity samples vary world/simulation seed while the evaluation-policy seed remains fixed; per-run JSON retains both."
+            "note": "Full-mode exploratory samples vary world/simulation and evaluation-policy seeds on separate deterministic streams; all strategy arms within a sample share the exact pair, and per-run JSON retains both."
         });
         let path = artifact_dir.join(format!(
             "summary-w{world_seed:016x}-p{policy_seed:016x}.json"
@@ -614,13 +617,13 @@ mod tests {
         ScenarioTimeline, SessionRunMode, Strategy, bounded_policy_choice,
         choose_lower_risk_start_from_patrol_signal, format_avg_dollars, format_day_minute,
         format_patrol_windows, parse_options, patrol_intervals_from_signal, play_session,
-        run_enforcement_attention_probe, run_opportunity_portfolio_probe,
+        recon_patrol_buffer, run_enforcement_attention_probe, run_opportunity_portfolio_probe,
         run_organizational_capacity_probe, run_recon_self_heat_probe, stamp,
         validate_batch_strategy_coverage, validate_branch_financial_isolation,
         validate_press_witness_counterplay, validate_run_metrics, validate_second_act_evidence,
-        validate_sensitivity_profile_coverage, validate_strategy_evidence,
+        validate_sensitivity_profile_coverage, validate_strategy_evidence, varied_evaluation_seeds,
     };
-    use crimocracy::core::time::{SimDuration, SimTime};
+    use crimocracy::core::time::{DAY_MINUTES, DAY_MINUTES_U16, SimDuration, SimTime};
     use crimocracy::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
     use crimocracy::operations::OperationObjectiveOutcome;
 
@@ -634,6 +637,68 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn full_sample_schedule_varies_both_seed_axes_reproducibly() {
+        let base = EvaluationSeeds::defaults();
+        let first: Vec<_> = (0..NARRATIVE_SEED_ROTATION)
+            .map(|index| varied_evaluation_seeds(base, index))
+            .collect();
+        let replay: Vec<_> = (0..NARRATIVE_SEED_ROTATION)
+            .map(|index| varied_evaluation_seeds(base, index))
+            .collect();
+
+        assert_eq!(first, replay, "sample schedules must be exactly replayable");
+        assert_eq!(
+            first[0], base,
+            "primary narrative must preserve exact CLI seeds"
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|seeds| seeds.world)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len() as u64,
+            NARRATIVE_SEED_ROTATION,
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|seeds| seeds.policy)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len() as u64,
+            NARRATIVE_SEED_ROTATION,
+        );
+    }
+
+    #[test]
+    fn recon_patrol_margin_is_bounded_varied_and_replayable() {
+        let margins: Vec<_> = (0..8)
+            .map(|index| {
+                let seeds = varied_evaluation_seeds(EvaluationSeeds::defaults(), index);
+                recon_patrol_buffer(seeds.policy).as_minutes()
+            })
+            .collect();
+        let replay: Vec<_> = (0..8)
+            .map(|index| {
+                let seeds = varied_evaluation_seeds(EvaluationSeeds::defaults(), index);
+                recon_patrol_buffer(seeds.policy).as_minutes()
+            })
+            .collect();
+
+        assert_eq!(margins, replay);
+        assert_eq!(margins[0], 60, "baseline treatment must remain stable");
+        assert!(margins.iter().all(|minutes| [45, 60, 75].contains(minutes)));
+        assert!(
+            margins
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                >= 2,
+            "exploratory samples must not replay one RECON timing margin"
+        );
     }
 
     #[test]
@@ -744,7 +809,7 @@ mod tests {
                 let metrics = |strategy| RunMetrics {
                     strategy: Some(strategy),
                     variation: Some(FixtureVariation::from_seed(seeds.world)),
-                    burglary_terminal_minute: Some(2_880 + offset),
+                    burglary_terminal_minute: Some(DAY_MINUTES * 2 + offset),
                     ..RunMetrics::default()
                 };
                 (
@@ -758,7 +823,7 @@ mod tests {
         // A matching batch identity must coexist without losing its shorter-window evidence.
         let (seeds, rush, _, _) = &sets[1];
         let batch = RunMetrics {
-            burglary_terminal_minute: Some(1_440),
+            burglary_terminal_minute: Some(DAY_MINUTES),
             ..rush.clone()
         };
         let batch_path =
@@ -1004,10 +1069,10 @@ mod tests {
 
     #[test]
     fn reads_normalized_windows_from_typed_patrol_signal() {
-        let signal = patrol_signal(&[(120, 240), (1_320, 1_440)]);
+        let signal = patrol_signal(&[(120, 240), (1_320, DAY_MINUTES_U16)]);
         assert_eq!(
             patrol_intervals_from_signal(&signal),
-            vec![(120, 240), (1_320, 1_440)]
+            vec![(120, 240), (1_320, DAY_MINUTES)]
         );
     }
 
@@ -1022,8 +1087,8 @@ mod tests {
     #[test]
     fn formats_day_anchored_stamps_for_multi_day_arcs() {
         assert_eq!(format_day_minute(160), "Day 1 02:40");
-        assert_eq!(format_day_minute(1_440), "Day 2 00:00");
-        assert_eq!(format_day_minute(11_820), "Day 9 05:00");
+        assert_eq!(format_day_minute(DAY_MINUTES), "Day 2 00:00");
+        assert_eq!(format_day_minute(DAY_MINUTES * 8 + 300), "Day 9 05:00");
         assert_eq!(stamp(160), "minute 160, Day 1 02:40");
         assert_eq!(format_avg_dollars(39_017.5), "$390.18");
         assert_eq!(format_avg_dollars(-61_885.0), "-$618.85");
@@ -1069,7 +1134,7 @@ mod tests {
             matches!(
                 sighting.subject,
                 crimocracy::core::entity::EntityRef::Enterprise(_)
-            ) && sighting.observed_minute >= 1_440
+            ) && sighting.observed_minute >= DAY_MINUTES
         }));
         assert_eq!(metrics.replacement, None);
         assert_eq!(metrics.payroll_short_cents, 0);
@@ -1117,7 +1182,7 @@ mod tests {
 
     #[test]
     fn chooses_a_buffered_window_from_player_visible_patrol_signal() {
-        let signal = patrol_signal(&[(120, 240), (1_320, 1_440)]);
+        let signal = patrol_signal(&[(120, 240), (1_320, DAY_MINUTES_U16)]);
         let chosen = choose_lower_risk_start_from_patrol_signal(
             SimTime::from_minutes(1),
             &signal,
@@ -1150,7 +1215,7 @@ mod tests {
 
     #[test]
     fn refuses_a_lower_risk_start_after_opportunity_expiry() {
-        let signal = patrol_signal(&[(120, 240), (1_320, 1_440)]);
+        let signal = patrol_signal(&[(120, 240), (1_320, DAY_MINUTES_U16)]);
         let error = choose_lower_risk_start_from_patrol_signal(
             SimTime::from_minutes(1),
             &signal,
@@ -1719,7 +1784,7 @@ mod tests {
             // A burglary-originated case is by definition a staffed session case, so the
             // heating signal and the burglary resolution record move together in fixtures.
             session_case_staffed: investigation_created,
-            matched_financial_boundary_minute: Some(2_880),
+            matched_financial_boundary_minute: Some(DAY_MINUTES * 2),
             ..RunMetrics::default()
         };
         if let Some((legitimate, enterprise)) = matched {

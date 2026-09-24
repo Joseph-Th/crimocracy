@@ -149,6 +149,8 @@ fn run_recon_second_act(
         .get_operation(OperationKind::Surveillance)
         .execution()
         .duration();
+    let uncertainty_buffer = recon_patrol_buffer(scenario.seeds.policy);
+    metrics.recon_patrol_buffer_minutes = Some(uncertainty_buffer.as_minutes());
     let ready_at = scenario
         .state
         .now()
@@ -159,17 +161,18 @@ fn run_recon_second_act(
             .signal()
             .expect("selected patrol observation has semantics"),
         duration,
-        SimDuration::from_minutes(60),
+        uncertainty_buffer,
         scenario.timeline.second_opportunity_valid_until,
     )?;
     if narrative {
         println!(
-            "[REUSE INTEL] Patrol observation from {}: {} Scout ready at {}; schedule {}m of surveillance at {} with a 60m patrol buffer. Known patrol windows constrain looking as well as taking; this reduces risk, not guarantees safety.",
+            "[REUSE INTEL] Patrol observation from {}: {} Scout ready at {}; schedule {}m of surveillance at {} with a {}m patrol buffer. Known patrol windows constrain looking as well as taking; this reduces risk, not guarantees safety.",
             format_day_minute(patrol.observed_at().as_minutes()),
             patrol.summary(),
             format_day_minute(ready_at.as_minutes()),
             duration.as_minutes(),
             format_day_minute(scout_at.as_minutes()),
+            uncertainty_buffer.as_minutes(),
         );
     }
     metrics.second_scout_patrol_observed_minute = Some(patrol.observed_at().as_minutes());
@@ -272,20 +275,22 @@ fn run_recon_second_act(
         .get_operation(OperationKind::Burglary)
         .execution()
         .duration();
+    let uncertainty_buffer = recon_patrol_buffer(scenario.seeds.policy);
     let scheduled_for = choose_lower_risk_start_from_patrol_signal(
         scenario.state.now(),
         &patrol_signal,
         duration,
-        SimDuration::from_minutes(60),
+        uncertainty_buffer,
         scenario.timeline.second_opportunity_valid_until,
     )?;
     if narrative {
         let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
         println!(
-            "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {}, the window avoids the known concentrations, but ambient district policing still remains.",
+            "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +{}m buffer -> chose {}, the window avoids the known concentrations, but ambient district policing still remains.",
             patrol_record.summary(),
             crate::readout::format_patrol_windows(&windows),
             duration.as_minutes(),
+            uncertainty_buffer.as_minutes(),
             crate::readout::stamp(scheduled_for.as_minutes())
         );
     }

@@ -4,7 +4,7 @@ use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{BusinessId, InformationId};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::state::AppState;
-use crimocracy::core::time::{SimDuration, SimTime};
+use crimocracy::core::time::{DAY_DURATION, SimDuration, SimTime};
 use crimocracy::delegation::delegation_system::MandateRevisionDraft;
 use crimocracy::delegation::delegation_system::validate_revise_mandate;
 use crimocracy::delegation::{ResponsibilityFunction, ResponsibilityScope};
@@ -164,13 +164,12 @@ pub fn run_delegation_control_probe(
         registry: &Registry,
         scenario: &mut Scenario<'_>,
     ) -> Result<crimocracy::core::simulation::TickOutcome, Box<dyn Error>> {
-        let cadence = registry.recruitment().autonomous_attempt_cadence();
         let pre_boundary = scenario.state.now()
             + SimDuration::from_minutes(
-                cadence
+                DAY_DURATION
                     .as_minutes()
                     .checked_sub(1)
-                    .expect("autonomous recruitment cadence must exceed one minute"),
+                    .expect("campaign day must exceed one minute"),
             );
         let mut metrics = RunMetrics::default();
         run_until(scenario, pre_boundary, false, &mut metrics)?;
@@ -1184,7 +1183,7 @@ pub fn run_strategy_batch(
     let mut recon_aggregate = Aggregate::default();
     let mut artifacts_written = 0_u64;
     for offset in 0..samples {
-        let sample_seeds = EvaluationSeeds::new(seeds.world.wrapping_add(offset + 1), seeds.policy);
+        let sample_seeds = varied_evaluation_seeds(seeds, offset + 1);
         let rush = play_session(
             registry,
             Strategy::Rush,
@@ -1221,9 +1220,9 @@ pub fn run_strategy_batch(
                 artifacts_written += 1;
             }
         }
-        rush_aggregate.add(&rush);
-        press_aggregate.add(&press);
-        recon_aggregate.add(&recon);
+        rush_aggregate.add(sample_seeds, &rush);
+        press_aggregate.add(sample_seeds, &press);
+        recon_aggregate.add(sample_seeds, &recon);
     }
     if let Some(dir) = artifact_dir {
         println!(
@@ -1237,6 +1236,15 @@ pub fn run_strategy_batch(
         let observed = rush_aggregate.fixture_variations.len();
         if observed < 3 {
             return Err(HarnessContractError::InsufficientFixtureVariation {
+                profile,
+                observed,
+                required: 3,
+            }
+            .into());
+        }
+        let observed = rush_aggregate.policy_seeds.len();
+        if observed < 3 {
+            return Err(HarnessContractError::InsufficientPolicyVariation {
                 profile,
                 observed,
                 required: 3,
@@ -1401,6 +1409,7 @@ pub fn persist_run_artifact(
         "burglary_duration_minutes": metrics.opening_burglary_duration_minutes,
         "surveillance_duration_minutes": metrics.opening_surveillance_duration_minutes,
         "scout_time_slack_minutes": metrics.opening_scout_time_slack_minutes,
+        "recon_patrol_buffer_minutes": metrics.recon_patrol_buffer_minutes,
         "selected_posture": metrics.strategy.map(|strategy| strategy.label()),
         "alternatives": [
             "move now with standing pre-entry abort",

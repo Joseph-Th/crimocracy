@@ -3110,12 +3110,106 @@ fn resume_allows_current_minute_follow_up_when_next_tick_start_equals_shifted_en
             .scheduled_for(),
         paused_at
     );
+    let boundary = run_tick(&registry, &mut state);
+    assert_eq!(boundary.now, due_at);
+    assert_eq!(boundary.resolved_operations, vec![operation]);
+    assert_eq!(
+        boundary.started_operations,
+        vec![follow_up],
+        "exact back-to-back booking should start once the prior operation resolves at the boundary"
+    );
     validate_state(&state).expect("boundary resume state should remain structurally valid");
     validate_invariants(&state);
 }
 
 #[test]
-fn due_follow_up_waits_when_prior_operation_remains_paused_past_boundary() {
+fn resume_rejects_pause_that_pushes_completion_past_hard_deadline() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture_with_constraints(
+            OperationKind::Intimidation,
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+            vec![OperationConstraint::CompleteBy(SimTime::from_minutes(6))],
+        );
+    designate_operation_owner_as_player(&mut state, operation);
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    let operation_record = state
+        .operations()
+        .get_operation(operation)
+        .expect("started operation should persist");
+    let organization = operation_record.responsible_organization();
+    let paused_at = run_until_police_arrival_decision(&registry, &mut state, operation);
+    assert_eq!(paused_at, SimTime::from_minutes(5));
+    let decision = state
+        .decisions()
+        .pending_for_operation(operation)
+        .expect("police-arrival decision should be pending");
+
+    let boundary = run_tick(&registry, &mut state);
+    assert_eq!(boundary.now, SimTime::from_minutes(6));
+    let error = match validate_resolve_decision(
+        &registry,
+        &state,
+        decision,
+        organization,
+        DecisionResponse::Continue,
+    ) {
+        Ok(_) => panic!("a pause cannot push completion beyond an unchanged hard deadline"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        DecisionError::Operation(OperationError::ResumeExceedsCompletionDeadline {
+            operation,
+            projected_due_at: SimTime::from_minutes(7),
+            deadline: SimTime::from_minutes(6),
+        })
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operation)
+            .expect("rejected resume must leave the operation intact")
+            .status(),
+        OperationStatus::AwaitingDecision
+    );
+    assert_eq!(
+        state
+            .decisions()
+            .get_decision(decision)
+            .expect("rejected resume must leave the decision intact")
+            .status(),
+        DecisionStatus::Pending
+    );
+
+    validate_resolve_decision(
+        &registry,
+        &state,
+        decision,
+        organization,
+        DecisionResponse::Abort,
+    )
+    .expect("leadership may still abort on the hard-deadline minute")
+    .commit(&mut state)
+    .expect("deadline-minute leadership abort should commit");
+    let aborted = state
+        .operations()
+        .get_operation(operation)
+        .expect("aborted operation should persist");
+    assert_eq!(aborted.status(), OperationStatus::Aborted);
+    assert_eq!(
+        aborted.abort_record().map(|abort| abort.cause()),
+        Some(OperationAbortCause::Decision(decision))
+    );
+    validate_state(&state).expect("deadline-bound rejected resume state should remain valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn due_follow_up_starts_when_prior_deadline_cleanup_releases_boundary() {
     let (registry, mut state, _police, _neighborhood, operation) =
         make_exposed_operation_fixture_with_constraints(
             OperationKind::Intimidation,
@@ -3203,7 +3297,8 @@ fn due_follow_up_waits_when_prior_operation_remains_paused_past_boundary() {
 
     let deadline_cleanup = run_tick(&registry, &mut state);
     assert_eq!(deadline_cleanup.now, SimTime::from_minutes(7));
-    assert!(deadline_cleanup.started_operations.is_empty());
+    assert_eq!(deadline_cleanup.aborted_operations, vec![operation]);
+    assert_eq!(deadline_cleanup.started_operations, vec![follow_up]);
     assert_eq!(
         state
             .operations()
@@ -3216,14 +3311,10 @@ fn due_follow_up_waits_when_prior_operation_remains_paused_past_boundary() {
         state
             .operations()
             .get_operation(follow_up)
-            .expect("follow-up should remain queued until the next tick")
+            .expect("follow-up should begin once overdue cleanup releases its participant")
             .status(),
-        OperationStatus::Authorized
+        OperationStatus::InProgress
     );
-
-    let retry = run_tick(&registry, &mut state);
-    assert_eq!(retry.now, SimTime::from_minutes(8));
-    assert_eq!(retry.started_operations, vec![follow_up]);
     validate_state(&state).expect("deferred follow-up state should remain structurally valid");
     validate_invariants(&state);
 }

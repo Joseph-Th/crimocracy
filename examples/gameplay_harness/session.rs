@@ -494,11 +494,13 @@ fn prepare_initial_burglary_plan(
                 .get_operation(OperationKind::Burglary)
                 .execution()
                 .duration();
+            let uncertainty_buffer = recon_patrol_buffer(scenario.seeds.policy);
+            metrics.recon_patrol_buffer_minutes = Some(uncertainty_buffer.as_minutes());
             let chosen = match choose_lower_risk_start_from_patrol_signal(
                 scenario.state.now(),
                 &patrol_signal,
                 duration,
-                SimDuration::from_minutes(60),
+                uncertainty_buffer,
                 scenario.timeline.initial_opportunity_valid_until,
             ) {
                 Ok(chosen) => chosen,
@@ -524,10 +526,11 @@ fn prepare_initial_burglary_plan(
             if narrative {
                 let windows = crate::observe::patrol_intervals_from_signal(&patrol_signal);
                 println!(
-                    "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +60m buffer -> chose {}, the window avoids the known concentrations, but ambient district policing still remains.",
+                    "[INTERPRET] Patrol report \"{}\" -> heavy/regular windows {}, burglary {}m +{}m buffer -> chose {}, the window avoids the known concentrations, but ambient district policing still remains.",
                     patrol_record.summary(),
                     crate::readout::format_patrol_windows(&windows),
                     duration.as_minutes(),
+                    uncertainty_buffer.as_minutes(),
                     crate::readout::stamp(chosen.as_minutes())
                 );
             }

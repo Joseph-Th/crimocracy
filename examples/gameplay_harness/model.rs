@@ -5,7 +5,7 @@ use crimocracy::core::id::{
     NeighborhoodId, OperationId, OpportunityId, OrganizationId,
 };
 use crimocracy::core::state::AppState;
-use crimocracy::core::time::SimTime;
+use crimocracy::core::time::{DAY_MINUTES, SimDuration, SimTime};
 use crimocracy::finance::AccountKind;
 use crimocracy::intelligence::{InformationTopic, Reliability, Specificity};
 use crimocracy::operations::{
@@ -26,8 +26,11 @@ pub const DEFAULT_WORLD_SEED: u64 = 0x1933_0514;
 /// sweeps can now vary environment/simulation state without silently varying policy as well.
 pub const DEFAULT_POLICY_SEED: u64 = 0x1933_0514;
 pub const MIN_SAMPLES_FOR_VARIATION_CONTRACT: u64 = 3;
-/// Narrative comparisons rotate across this many adjacent world seeds, covering every authored
-/// fixture variation while the policy seed remains fixed across the comparison.
+/// Full-mode sample policy seeds move on their own deterministic stream instead of replaying one
+/// treatment for every world. Strategies within a sample still share the exact same seed pair.
+pub const POLICY_SAMPLE_STRIDE: u64 = 17;
+/// Narrative comparisons rotate across this many seed pairs, covering every authored fixture
+/// variation while also exercising bounded evaluation-policy variation.
 pub const NARRATIVE_SEED_ROTATION: u64 = 3;
 
 /// Explicit seed channels for behavior evaluation. `world` determines fixture variation and the
@@ -50,6 +53,17 @@ impl EvaluationSeeds {
     }
 }
 
+/// Reproducible full-mode sample schedule. Index zero preserves the caller's exact base pair for
+/// the primary narrative; later indexes vary both the world and evaluation-owned policy without
+/// consuming simulation RNG or changing the number of sessions executed.
+pub const fn varied_evaluation_seeds(base: EvaluationSeeds, index: u64) -> EvaluationSeeds {
+    EvaluationSeeds::new(
+        base.world.wrapping_add(index),
+        base.policy
+            .wrapping_add(index.wrapping_mul(POLICY_SAMPLE_STRIDE)),
+    )
+}
+
 /// Bounded deterministic policy choice for evaluation-owned variation. This is not a game
 /// rule: it keeps controlled treatments from replaying one exact decision sequence forever
 /// while staying fully determined by the explicit policy seed. The splitmix-style finalizer
@@ -68,6 +82,15 @@ pub fn bounded_policy_choice(policy_seed: u64, salt: u64, choices: u64) -> u64 {
     mixed = mixed.wrapping_mul(0x94D0_49BB_1331_11EB);
     mixed ^= mixed >> 31;
     mixed % choices
+}
+
+/// RECON's uncertainty margin is evaluation policy, not a production rule. Keep the cautious
+/// posture stable while allowing bounded policy-seed variation in how much room it leaves around
+/// a player-visible patrol concentration.
+pub fn recon_patrol_buffer(policy_seed: u64) -> SimDuration {
+    const BUFFER_MINUTES: [u32; 3] = [45, 60, 75];
+    let index = bounded_policy_choice(policy_seed, 0xC451_9EED, BUFFER_MINUTES.len() as u64);
+    SimDuration::from_minutes(BUFFER_MINUTES[index as usize])
 }
 
 /// Session depth and presentation are one explicit harness choice. FullQuiet deliberately runs
@@ -90,9 +113,9 @@ impl SessionRunMode {
     }
 }
 
-/// Longest authored operation duration plus a fixed margin, so the terminal-wait guard in
-/// [`crate::session`] tracks authored content instead of a constant that could go stale as
-/// authors add longer operations.
+/// Longest authored operation duration, used as content-derived slack by the terminal-wait guard
+/// in [`crate::session`] so adding a longer operation cannot silently make the harness time out
+/// before production can resolve it.
 pub fn operation_wait_slack_minutes(registry: &Registry) -> u32 {
     ALL_OPERATION_KINDS
         .iter()
@@ -233,6 +256,14 @@ pub enum HarnessContractError {
         "{profile:?} batch observed only {observed} fixture variation(s); expected at least {required}"
     )]
     InsufficientFixtureVariation {
+        profile: ScenarioProfile,
+        observed: usize,
+        required: usize,
+    },
+    #[error(
+        "{profile:?} batch observed only {observed} evaluation-policy variation(s); expected at least {required}"
+    )]
+    InsufficientPolicyVariation {
         profile: ScenarioProfile,
         observed: usize,
         required: usize,
@@ -586,12 +617,7 @@ impl ScenarioTimeline {
     }
 
     pub fn for_profile(registry: &Registry, policy_seed: u64, profile: ScenarioProfile) -> Self {
-        let campaign_day_minutes = u64::from(
-            registry
-                .recruitment()
-                .autonomous_attempt_cadence()
-                .as_minutes(),
-        );
+        let campaign_day_minutes = DAY_MINUTES;
         let burglary_duration = u64::from(
             registry
                 .get_operation(OperationKind::Burglary)
@@ -741,6 +767,9 @@ pub struct RunMetrics {
     pub opening_opportunity_window_minutes: Option<u64>,
     pub opening_burglary_duration_minutes: Option<u32>,
     pub opening_surveillance_duration_minutes: Option<u32>,
+    /// Evaluation-owned uncertainty margin used by RECON around observed patrol concentrations.
+    /// Persisting it makes policy-seed variation inspectable instead of hiding it in code.
+    pub recon_patrol_buffer_minutes: Option<u32>,
     /// Minutes remaining before opportunity expiry after a full scout starting on the next tick.
     /// Negative means full casing cannot finish before the score closes.
     pub opening_scout_time_slack_minutes: Option<i64>,
@@ -941,6 +970,7 @@ pub struct RunMetrics {
 pub struct Aggregate {
     pub samples: u64,
     pub fixture_variations: BTreeSet<FixtureVariation>,
+    pub policy_seeds: BTreeSet<u64>,
     pub achieved: u64,
     pub partial: u64,
     pub failed: u64,
@@ -992,8 +1022,9 @@ pub struct Aggregate {
 }
 
 impl Aggregate {
-    pub fn add(&mut self, metrics: &RunMetrics) {
+    pub fn add(&mut self, seeds: EvaluationSeeds, metrics: &RunMetrics) {
         self.samples += 1;
+        self.policy_seeds.insert(seeds.policy);
         if let Some(variation) = metrics.variation {
             self.fixture_variations.insert(variation);
         }
@@ -1146,7 +1177,7 @@ impl Aggregate {
         // Money prints as dollars: this is the same player-facing unit the financial view uses,
         // not the internal cent accounting.
         println!(
-            "{label:<6} samples {:>2}  fixtures {:?}
+            "{label:<6} samples {:>2}  fixtures {:?}  policies {}
        outcomes: achieved {:>5.1}%  partial {:>5.1}%  failed {:>5.1}%  aborted {:>5.1}%  opening standdown {:>5.1}% (risk {:>5.1}%, timing {:>5.1}%)  unresolved {:>2}
        information: opening scout findings/run {:>4.1}  committed plan facts/run {:>4.1}
                     legal-intel sessions {:>5.1}%  police-intel sessions {:>5.1}%  follow-up hot {:>5.1}%  case cold {:>5.1}%
@@ -1160,6 +1191,7 @@ impl Aggregate {
        money:    laundered {} gross  accounted balance {}",
             self.samples,
             self.fixture_variations,
+            self.policy_seeds.len(),
             self.percent(self.achieved),
             self.percent(self.partial),
             self.percent(self.failed),
@@ -1215,9 +1247,10 @@ impl Aggregate {
             .opening_standdowns
             .saturating_sub(self.opening_timing_standdowns);
         println!(
-            "{label:<5} n={} fixtures={} | achieved {} partial {} failed {} aborted {} standdown {} (risk {}, timing {}) | police {} cases {} | exception prompts/run {:.2} | scout findings/run {:.1} plan facts/run {:.1} | poach warnings/run {:.1} departures/run {:.1}",
+            "{label:<5} n={} fixtures={} policies={} | achieved {} partial {} failed {} aborted {} standdown {} (risk {}, timing {}) | police {} cases {} | exception prompts/run {:.2} | scout findings/run {:.1} plan facts/run {:.1} | poach warnings/run {:.1} departures/run {:.1}",
             self.samples,
             self.fixture_variations.len(),
+            self.policy_seeds.len(),
             self.achieved,
             self.partial,
             self.failed,

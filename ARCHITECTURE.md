@@ -110,11 +110,11 @@ determinism and harness contracts.
  0  checked next minute                    reject ClockExhausted before mutation
  1  apply_due_custody_releases             hard arrest-custody boundary before same-minute consumers
  2  apply_opportunity_expiry               durable lifecycle report before remaining same-minute consumers
- 3  run_operations_phase                   police arrivals → starts → deadline cleanup → resolution
- 4    ├─ apply_due_police_response_arrivals (exposure → decisions; must precede new starts)
- 5    ├─ find_due_authorized → Begin or deadline-missed
- 6    ├─ find_due_with_missed_deadlines → abort via decision when present
- 7    └─ find_due_in_progress → decide+validate+commit per operation (RNG: operation stream)
+ 3  run_operations_phase                   police arrivals → deadline cleanup → resolution → starts
+ 4    ├─ apply_due_police_response_arrivals (exposure → decisions; must precede completion/new starts)
+ 5    ├─ find_due_with_missed_deadlines → abort via decision when present
+ 6    ├─ find_due_in_progress → decide+validate+commit per operation (RNG: operation stream)
+ 7    └─ find_due_authorized → Begin or deadline-missed
  8  apply_autonomous_investigator_staffing single-seat staffing, lead-investigator knowledge
  9  apply_investigation_work_scheduling    one active-case scan; evidence review first, otherwise witness interview
 10  run_investigation_work_phase           resolve due work (RNG: investigation stream)

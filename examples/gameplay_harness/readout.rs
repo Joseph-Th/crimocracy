@@ -3,7 +3,7 @@
 use crimocracy::core::attention::AttentionClass;
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{BusinessId, EnterpriseId, OperationId};
-use crimocracy::core::time::SimTime;
+use crimocracy::core::time::{DAY_MINUTES, SimTime};
 use crimocracy::economy::business_reporting::resolve_organization_business_financial_summary;
 use crimocracy::enterprises::EnterpriseLocation;
 use crimocracy::finance::{AccountKind, FinancialOwner, Money};
@@ -924,8 +924,11 @@ mod earnings_tests {
 
     #[test]
     fn rates_normalize_duration_without_treating_parallel_books_as_days() {
-        assert_eq!(daily_rate(10_000, 720) + daily_rate(15_000, 1_440), 35_000);
-        assert_eq!(daily_rate(-5_000, 2_880), -2_500);
+        assert_eq!(
+            daily_rate(10_000, DAY_MINUTES / 2) + daily_rate(15_000, DAY_MINUTES),
+            35_000
+        );
+        assert_eq!(daily_rate(-5_000, DAY_MINUTES * 2), -2_500);
     }
 
     #[test]
@@ -941,7 +944,7 @@ mod earnings_tests {
         let mut metrics = RunMetrics::default();
         run_until(
             &mut scenario,
-            SimTime::from_minutes(1_440),
+            SimTime::from_minutes(DAY_MINUTES),
             false,
             &mut metrics,
         )
@@ -969,7 +972,7 @@ fn daily_rate(cents: i64, cycle_minutes: u64) -> i64 {
         cycle_minutes > 0,
         "authored cycles must have positive duration"
     );
-    i64::try_from(i128::from(cents) * 1_440 / i128::from(cycle_minutes))
+    i64::try_from(i128::from(cents) * i128::from(DAY_MINUTES) / i128::from(cycle_minutes))
         .expect("daily earnings must fit money range")
 }
 
@@ -991,7 +994,7 @@ mod experience_contract_tests {
             investigation_created: true,
             investigation_opened_minute: Some(120),
             case_open_minute: None,
-            matched_financial_boundary_minute: Some(1_440),
+            matched_financial_boundary_minute: Some(DAY_MINUTES),
             ..RunMetrics::default()
         };
         assert!(
@@ -1932,7 +1935,7 @@ pub fn print_experience_readout(
     );
     let observed_days = |run: &RunMetrics| {
         run.session_end_minute
-            .map(|minute| minute as f64 / 1_440.0)
+            .map(|minute| minute as f64 / DAY_MINUTES as f64)
             .unwrap_or(0.0)
     };
     let per_day = |count: usize, run: &RunMetrics| {
@@ -2062,7 +2065,7 @@ pub fn optional_scalar<T: std::fmt::Display>(value: Option<T>) -> String {
 
 /// Renders an absolute campaign minute as the clock time the player would see on a report.
 pub fn format_minute_of_day(minute: u64) -> String {
-    let minute_of_day = minute % 1_440;
+    let minute_of_day = minute % DAY_MINUTES;
     format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
 }
 
@@ -2072,7 +2075,7 @@ pub fn format_minute_of_day(minute: u64) -> String {
 pub fn format_day_minute(minute: u64) -> String {
     format!(
         "Day {} {}",
-        minute / 1_440 + 1,
+        minute / DAY_MINUTES + 1,
         format_minute_of_day(minute)
     )
 }

@@ -127,7 +127,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     .expect("valid state should release custody that reached the authored maximum");
     // Phase order is the contract: bounded custody release first; opportunity expiry next so its
     // durable lifecycle report is available to every remaining same-minute consumer; then
-    // operations (police arrivals, starts, overdue cleanup, resolution), legal institutional work
+    // operations (police arrivals, overdue cleanup, resolution, starts), legal institutional work
     // (staffing, detective work, new custody, representation, informants, cold decay), economy
     // cycles plus legitimate-business recovery, then the day-boundary governance cluster: payroll,
     // reputation (decay before current consequences), recruitment, delegated expansion (which
@@ -282,9 +282,9 @@ pub(crate) fn run_test_tick(registry: &Registry, state: &mut AppState) -> TickOu
     run_tick(registry, state).expect("test fixture must leave room for another simulation minute")
 }
 
-/// Processes due police-response arrivals, starts due authorized operations, aborts missed
-/// deadlines (through the pending decision when one exists), and resolves due in-progress
-/// operations with pre-drawn deterministic variance.
+/// Processes due police-response arrivals, aborts missed deadlines (through the pending decision
+/// when one exists), resolves due in-progress operations with pre-drawn deterministic variance,
+/// then starts due authorized operations.
 struct OperationsPhaseOutcome {
     started: Vec<OperationId>,
     arrived_police_responses: Vec<PoliceResponseId>,
@@ -294,10 +294,11 @@ struct OperationsPhaseOutcome {
 }
 
 fn run_operations_phase(registry: &Registry, state: &mut AppState) -> OperationsPhaseOutcome {
-    // Process responses that were dispatched on earlier ticks before admitting new work.
+    // Process responses that were dispatched on earlier ticks before closing or admitting work.
     // Authorization deliberately allows exact back-to-back participant windows. A response
     // arriving on that boundary can turn the earlier operation into an unresolved commitment;
-    // that state must be visible to begin-time participant validation before the follow-up starts.
+    // that state must be visible before due resolution releases the participant and before the
+    // follow-up starts.
     // Newly started operations cannot add another due arrival here because registry validation
     // requires every police-response delay to be strictly positive.
     let police_response_outcome = apply_due_police_response_arrivals(state)
@@ -305,6 +306,23 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
     let arrived_police_responses = police_response_outcome.arrived;
     let decision_requests = police_response_outcome.decisions;
     let mut aborted_operations = police_response_outcome.aborted_operations;
+
+    // Hard completion deadlines are lifecycle boundaries, not advisory scheduling hints. Clear
+    // work that was already overdue at the beginning of this minute before it can block a new
+    // commitment during the same minute. A deadline equal to now is still live and may resolve
+    // below; only strictly missed deadlines enter this cleanup.
+    aborted_operations.extend(
+        apply_overdue_operation_cleanup(registry, state)
+            .expect("valid overdue operations must abort as one artifact-preflighted cohort"),
+    );
+    // Resolve windows ending at this minute before admitting exact back-to-back starts. This makes
+    // the half-open booking contract [start, end) executable in practice: an operation ending at
+    // minute N releases its participants and applies its consequences before a successor begins at
+    // N. A police arrival above can still pause that operation first, in which case it is not due
+    // resolution and continues to block the successor.
+    let resolved_operations = run_operation_resolution_phase(registry, state).expect(
+        "valid due operation resolutions must commit through the preflighted sequential phase",
+    );
 
     let due_authorized = find_due_authorized_operations(state);
     let prestart_aborts = prepare_authorized_prestart_aborts(registry, state, &due_authorized)
@@ -340,16 +358,6 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
             }
         }
     }
-    // Preserve the established retry boundary: a follow-up that was blocked at begin time by a
-    // still-paused operation does not immediately retry merely because overdue cleanup releases
-    // the participant later in this same phase. It remains Authorized until the next tick.
-    aborted_operations.extend(
-        apply_overdue_operation_cleanup(registry, state)
-            .expect("valid overdue operations must abort as one artifact-preflighted cohort"),
-    );
-    let resolved_operations = run_operation_resolution_phase(registry, state).expect(
-        "valid due operation resolutions must commit through the preflighted sequential phase",
-    );
     OperationsPhaseOutcome {
         started: started_operations,
         arrived_police_responses,

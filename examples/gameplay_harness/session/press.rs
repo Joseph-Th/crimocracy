@@ -337,6 +337,7 @@ fn schedule_witness_pressure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crimocracy::core::time::DAY_MINUTES;
 
     #[test]
     fn laundering_preserves_reserve_even_when_capacity_exceeds_surplus() {
@@ -352,7 +353,7 @@ mod tests {
         let mut metrics = RunMetrics::default();
         run_until(
             &mut scenario,
-            SimTime::from_minutes(1_440),
+            SimTime::from_minutes(DAY_MINUTES),
             false,
             &mut metrics,
         )
@@ -449,7 +450,7 @@ mod tests {
         );
         run_until(
             &mut scenario,
-            SimTime::from_minutes(1_440),
+            SimTime::from_minutes(DAY_MINUTES),
             false,
             &mut metrics,
         )
@@ -537,7 +538,7 @@ mod tests {
         for day in 1..=10 {
             run_until(
                 &mut scenario,
-                SimTime::from_minutes(day * 1_440),
+                SimTime::from_minutes(day * DAY_MINUTES),
                 false,
                 &mut metrics,
             )

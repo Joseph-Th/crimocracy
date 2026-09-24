@@ -184,6 +184,14 @@ pub enum OperationError {
     SimulationTimeOverflow,
     #[error("operation completion deadline leaves no executable window after begin/entry")]
     DeadlineLeavesNoExecutionWindow,
+    #[error(
+        "operation {operation} cannot resume with projected completion {projected_due_at:?} after hard deadline {deadline:?}"
+    )]
+    ResumeExceedsCompletionDeadline {
+        operation: OperationId,
+        projected_due_at: SimTime,
+        deadline: SimTime,
+    },
     #[error("plan lacks usable required {0:?} intelligence at its earliest planned start")]
     MissingRequiredIntelligenceTopic(crate::intelligence::InformationTopic),
     #[error("business {0} has no active operating economy for this operation")]
@@ -624,14 +632,15 @@ fn resolve_witness_pressure_cases(
     Ok(known)
 }
 
-/// Validates that resuming a decision-blocked operation at `resumed_at` does not double-book any
-/// of its participants. Resuming shifts the resolution deadline forward by the pause duration, so
-/// the post-resume window can collide with operations authorized while this one was paused.
+/// Validates that resuming a decision-blocked operation at `resumed_at` remains inside any hard
+/// completion deadline and does not double-book its participants. Resuming shifts the resolution
+/// deadline forward by the pause duration, so the post-resume window can exceed an authored
+/// deadline or collide with operations authorized while this one was paused.
 ///
 /// Operations that have not yet begun keep no persisted end time, so an authorized operation whose
 /// start falls inside the resumed window is treated as a conflict; its duration cannot shorten the
 /// overlap because a start inside the window always overlaps it.
-pub(crate) fn validate_operation_resume_participants(
+pub(crate) fn validate_operation_resume(
     state: &AppState,
     operation_id: OperationId,
     resumed_at: SimTime,
@@ -649,6 +658,15 @@ pub(crate) fn validate_operation_resume_participants(
     let paused_minutes = pause_duration_minutes(paused_at, resumed_at);
     let shifted_due_at = checked_shift_past_pause(due_at, paused_minutes)
         .ok_or(OperationError::SimulationTimeOverflow)?;
+    if let Some(deadline) = record.completion_deadline()
+        && shifted_due_at > deadline
+    {
+        return Err(OperationError::ResumeExceedsCompletionDeadline {
+            operation: operation_id,
+            projected_due_at: shifted_due_at,
+            deadline,
+        });
+    }
     if let Some(entry_at) = record.entry_at()
         && entry_at > paused_at
         && checked_shift_past_pause(entry_at, paused_minutes).is_none()
@@ -694,7 +712,8 @@ pub(crate) fn apply_decision_pause_preflighted(
 }
 
 /// Applies the operation-owned half of a validated Continue decision. Resume overflow and
-/// participant conflicts are preflighted by `validate_operation_resume_participants`; this
+/// participant conflicts and hard-deadline viability are preflighted by
+/// `validate_operation_resume`; this
 /// mutation is deliberately infallible after that validation so the decision record and operation
 /// lifecycle can commit as one cross-domain transaction.
 pub(crate) fn apply_decision_resume_preflighted(

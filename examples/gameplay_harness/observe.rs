@@ -2,7 +2,7 @@
 
 use crimocracy::core::attention::AttentionClass;
 use crimocracy::core::simulation::TickOutcome;
-use crimocracy::core::time::{SimDuration, SimTime};
+use crimocracy::core::time::{DAY_MINUTES, SimDuration, SimTime};
 use crimocracy::decisions::decision_system::validate_resolve_decision;
 use crimocracy::decisions::{DecisionContext, DecisionResponse, DecisionStatus};
 use crimocracy::finance::{AccountKind, FinancialOwner};
@@ -676,16 +676,18 @@ pub fn choose_lower_risk_start_from_patrol_signal(
     let first_candidate = earliest.div_ceil(30).saturating_mul(30);
     for candidate in (first_candidate..latest_start_exclusive)
         .step_by(30)
-        .take_while(|candidate| *candidate < first_candidate.saturating_add(2_880))
+        .take_while(|candidate| {
+            *candidate < first_candidate.saturating_add(DAY_MINUTES.saturating_mul(2))
+        })
     {
-        let operation_start = candidate % 1_440;
+        let operation_start = candidate % DAY_MINUTES;
         let operation_end = operation_start.saturating_add(duration);
-        if operation_end > 1_440 {
+        if operation_end > DAY_MINUTES {
             continue;
         }
         let overlaps_buffered_patrol = windows.iter().any(|(start, end)| {
             let buffered_start = start.saturating_sub(buffer);
-            let buffered_end = end.saturating_add(buffer).min(1_440);
+            let buffered_end = end.saturating_add(buffer).min(DAY_MINUTES);
             intervals_overlap(operation_start, operation_end, buffered_start, buffered_end)
         });
         if !overlaps_buffered_patrol {

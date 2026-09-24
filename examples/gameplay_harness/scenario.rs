@@ -4,7 +4,7 @@ use crimocracy::contacts::contact_system::{InstitutionalContactDraft, validate_e
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{BusinessId, CharacterId, InformationId, OperationId, OpportunityId};
 use crimocracy::core::state::AppState;
-use crimocracy::core::time::{SimDuration, SimTime};
+use crimocracy::core::time::{DAY_MINUTES_U16, SimDuration, SimTime};
 use crimocracy::delegation::delegation_system::MandateRevisionDraft;
 use crimocracy::delegation::delegation_system::{validate_assign_mandate, validate_revise_mandate};
 use crimocracy::delegation::{
@@ -158,7 +158,8 @@ pub fn build_scenario(
         .into_iter()
         .map(|(start, duration, presence)| {
             let jittered_start = (i32::from(start) + i32::from(jitter_minutes))
-                .clamp(0, 1_440 - i32::from(duration)) as u16;
+                .clamp(0, i32::from(DAY_MINUTES_U16) - i32::from(duration))
+                as u16;
             Ok(PatrolWindow::try_new(
                 DayMinute::try_new(jittered_start)?,
                 duration,

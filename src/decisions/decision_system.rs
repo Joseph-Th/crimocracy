@@ -606,11 +606,11 @@ impl ValidatedDecisionResolution {
                         debug_assert!(abort.is_none());
                         // Re-check at commit: the pause may have lengthened since validation,
                         // extending the post-resume window past a conflicting authorization.
-                        crate::operations::operation_system::validate_operation_resume_participants(
-              state,
-              operation,
-              state.now(),
-            )?;
+                        crate::operations::operation_system::validate_operation_resume(
+                            state,
+                            operation,
+                            state.now(),
+                        )?;
                         state.decisions.resolve(
                             self.decision,
                             build_resolution(self.response, state.now(), self.resolver),
@@ -689,7 +689,7 @@ fn validate_operation_resolution_action(
     if next_status == OperationStatus::InProgress {
         // Resuming shifts the operation's window; a participant may have been booked
         // into the gap while the operation was paused.
-        crate::operations::operation_system::validate_operation_resume_participants(
+        crate::operations::operation_system::validate_operation_resume(
             state,
             operation,
             state.now(),
