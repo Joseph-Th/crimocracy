@@ -177,15 +177,14 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
 
     println!("CRIMOCRACY GAMEPLAY HARNESS");
     println!("===========================\n");
-    println!("Mode: exploratory matched-play sessions plus controlled/calibration probes.");
     println!(
-        "Evidence boundary: synthetic setup through production paths; narrated policy inputs and consequences are player-visible. Hidden structural evidence stays in contracts/artifacts.\n"
+        "Mode: exploratory matched-play sessions plus controlled/calibration probes (concise)."
     );
     println!(
-        "Observation windows: full sessions capture the shared financial comparison at two simulated days; consequence arcs may continue beyond that boundary when player policy keeps waiting. Matched batches run for one day to keep sensitivity evidence bounded.\n"
+        "Acting policy uses player-visible information only; audit-only fields stay in artifacts.\n"
     );
     println!(
-        "Narrative comparisons rotate across {NARRATIVE_SEED_ROTATION} reproducible world/policy seed pairs so every authored fixture variation gets exercised with slight policy variation; matched branches inside one sample share the exact same pair.\n"
+        "Narrative comparisons rotate across {NARRATIVE_SEED_ROTATION} reproducible world/policy seed pairs; matched branches inside one sample share the exact same pair.\n"
     );
     if !detail {
         println!("Output: concise. Use `cargo harness-full-detail` for the primary narrative.\n");

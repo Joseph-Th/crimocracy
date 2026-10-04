@@ -6,46 +6,16 @@ cockpit routing is in [`AGENTS.md`](AGENTS.md).
 
 ## Test selection — narrowest proof first
 
-```
-Which change did you make?
-  │
-  ├─ Documentation / command routes only?
-  │   Complete: .\scripts\check-docs.cmd   (compile-free)
-  │
-  ├─ Syntax / type error?
-  │   Fastest: cargo check-fast
-  │            .\scripts\verify.cmd -Check   (includes fmt)
-  │
-  ├─ One library behavior (single module, single system)
-  │   Focused: cargo test-focused <filter>
-  │   Complete: .\scripts\verify.cmd -Fast -Filter <filter>
-  │
-  ├─ Library implementation (no harness surface touched)
-  │   Focused: cargo check-fast  or  cargo test-focused <filter>
-  │   Complete: .\scripts\verify.cmd -Fast
-  │
-  ├─ Harness surface (examples/gameplay_harness/*.rs)
-  │   Focused: cargo test-harness  or  cargo harness-rush
-  │   Complete: .\scripts\verify.cmd -Harness
-  │
-  ├─ Scenario-scale harness contract / presentation equivalence
-  │   Focused: cargo test-harness-deep
-  │   Complete: cargo harness-full --samples <needed evidence>
-  │
-  └─ Persistence, invariants, cross-domain, or verification infra
-      Focused: owning module's focused test (e.g. cargo test-focused finance) plus a save/restore round-trip
-      Complete: .\scripts\verify.cmd
-```
-
 | Change | Focused feedback | Completion lane |
 |---|---|---|
-| Documentation/routes only | `.\scripts\check-docs.cmd` | same command |
-| Syntax / types | `cargo check-fast` | `.\scripts\verify.cmd -Check` |
+| Documentation/routes only | `.\scripts\check-docs.cmd` (compile-free) | same command |
+| Syntax / types | `cargo check-fast` (no linking) | `.\scripts\verify.cmd -Check` (adds fmt) |
 | One library behavior | `cargo test-focused <filter>` | `.\scripts\verify.cmd -Fast -Filter <filter>` |
 | Library implementation | `cargo check-fast` or focused test | `.\scripts\verify.cmd -Fast` |
 | Harness implementation | `cargo test-harness` or focused smoke | `.\scripts\verify.cmd -Harness` |
 | Scenario-scale harness behavior | `cargo test-harness-deep` | `cargo harness-full --samples <N>` |
-| Persistence, invariants, or cross-domain | Focused owner test | `.\scripts\verify.cmd` (broad gate) |
+| Persistence, invariants, or cross-domain | Owning module's focused test plus a save/restore round-trip | `.\scripts\verify.cmd` (broad gate) |
+| Mixed-state stress | `cargo soak` (always explicit, never part of a gate) | same command |
 
 The columns are not a required sequence. Use focused feedback while iterating or
 isolating a failure; go directly to the completion lane once it compiles and
@@ -82,6 +52,11 @@ invariants, serialization, deterministic continuation, and failure paths.
 - For atomic rejection, assert authoritative state is unchanged.
 - Use explicit seeds and stable ordering. Do not hunt for a passing seed.
 - Keep content-count, CRUD, or smokes only when they protect a real contract.
+- Keep assertions non-brittle: pin counts only for authored bounds (brief entry caps,
+  overflow arithmetic), derive expected display prose from the test's own production
+  values (e.g. format the asserted cents through the production money formatter)
+  instead of duplicating literals, and assert a coarse marker plus the typed record
+  rather than a full sentence when the sentence is not the contract.
 - Persistence tests distinguish authoritative bytes from derived runtime indexes: save bytes omit
   owner-maintained lookup/scheduling projections, and restore must rebuild them before indexed reads.
 
@@ -144,7 +119,7 @@ Fail-fast stages, in order (see [`scripts/verify.ps1`](scripts/verify.ps1)):
 
 1. Compile-free documentation/route/alias/version contracts (`scripts/check-docs.ps1`)
 2. `cargo fmt --check`
-3. `cargo test --locked --lib --quiet`
+3. `cargo test --locked --lib --quiet -- --skip soak` (soak stays explicit via `cargo soak`)
 4. Fast gameplay-harness implementation contracts (`cargo test-harness`)
 5. Gameplay-harness smoke executable (`--mode smoke`): canonical strategies plus the legal-foundation chain
 6. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`

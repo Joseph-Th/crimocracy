@@ -8,10 +8,14 @@
 # Stages (broad gate, in order, fail-fast):
 #   1. compile-free documentation contracts
 #   2. cargo fmt --check
-#   3. cargo test --locked --lib --quiet
+#   3. cargo test --locked --lib --quiet -- --skip soak
 #   4. fast gameplay-harness implementation contracts
 #   5. gameplay-harness smoke executable
 #   6. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
+#
+# Soak-class stress (`soak` substring) stays explicit (`cargo soak`) in every
+# lane, including the broad gate: it costs ~4s of simulated mixed-state work
+# and must not tax unrelated checkpoints.
 #
 # Tests run before clippy so the hot test cache is not invalidated by clippy's
 # driver hash. Clippy is last: you get test signal even if lint fails.
@@ -275,7 +279,7 @@ if ($NoFmt) {
     Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false
 }
 
-Invoke-CargoStage "lib tests" @("test", "--locked", "--lib", "--quiet")
+Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
 
 # Verification-infrastructure and cross-domain changes need the harness adapter's fast contracts,
 # but scenario-scale comparisons stay in their explicit deep tier.
