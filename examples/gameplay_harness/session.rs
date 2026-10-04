@@ -16,7 +16,7 @@ use crimocracy::core::id::{
     FinancialAccountId, InformationId, OperationId, OpportunityId, OrganizationId,
 };
 use crimocracy::core::simulation::run_tick;
-use crimocracy::core::time::{SimDuration, SimTime};
+use crimocracy::core::time::{DAY_MINUTES, SimDuration, SimTime};
 use crimocracy::finance::finance_system::{
     LaunderingDraft, LaunderingError, ValidatedLaundering, validate_launder_funds,
 };
@@ -1019,7 +1019,18 @@ fn run_post_burglary_campaign(
     } else {
         SimTime::from_minutes(campaign_day_minutes)
     };
-    let recruitment_boundary = SimTime::from_minutes(campaign_day_minutes + 1);
+    // The boundary crosses the whole first campaign day and the first autonomous
+    // recruitment cadence, so recruitment counters carry real rival-attempt evidence even
+    // if the cadence ever diverges from the day length.
+    let recruitment_cadence_minutes = u64::from(
+        scenario
+            .registry
+            .recruitment()
+            .autonomous_attempt_cadence()
+            .as_minutes(),
+    );
+    let recruitment_boundary =
+        SimTime::from_minutes(campaign_day_minutes.max(recruitment_cadence_minutes) + 1);
     if full_arc && observation_end > recruitment_boundary {
         run_until(scenario, recruitment_boundary, narrative, metrics)?;
     } else {
@@ -1143,13 +1154,10 @@ pub fn play_session_with_fixture_view(
     };
     // Matched financial boundary: full sessions snapshot at two campaign days and batch
     // sessions at one. Every branch crosses this minute before a longer consequence arc extends,
-    // so the snapshot compares identical windows instead of unequal waits.
-    let campaign_day_minutes = u64::from(
-        registry
-            .recruitment()
-            .autonomous_attempt_cadence()
-            .as_minutes(),
-    );
+    // so the snapshot compares identical windows instead of unequal waits. The day length is
+    // the canonical campaign day, not the recruitment cadence: the two currently coincide,
+    // but only the day boundary defines the comparison window.
+    let campaign_day_minutes = DAY_MINUTES;
     metrics.matched_financial_boundary_minute =
         Some(campaign_day_minutes * if full_arc { 2 } else { 1 });
 
@@ -1173,6 +1181,9 @@ pub fn play_session_with_fixture_view(
         &mut metrics,
     )?;
     capture_final_session_summary(&scenario, &mut metrics);
+    // Session-boundary validation: setup was checked in `build_scenario`, every waited span
+    // above checked at its own boundary, and this closes the session.
+    validate_harness_state(registry, &scenario.state)?;
 
     Ok(metrics)
 }
@@ -1237,6 +1248,9 @@ pub fn run_until_operation_terminal(
             status,
             OperationStatus::Completed | OperationStatus::Aborted
         ) {
+            // Structural validation runs at observation boundaries, not every tick: the
+            // terminal operation is the boundary this loop was waiting for.
+            validate_harness_state(scenario.registry, &scenario.state)?;
             return Ok(());
         }
         if scenario.state.now() >= deadline {
@@ -1265,6 +1279,9 @@ pub fn run_until(
         maybe_capture_matched_financials(scenario, metrics)?;
     }
     maybe_capture_matched_financials(scenario, metrics)?;
+    // Observation-boundary validation: one structural check per waited span instead of one
+    // per simulated minute.
+    validate_harness_state(scenario.registry, &scenario.state)?;
     Ok(())
 }
 

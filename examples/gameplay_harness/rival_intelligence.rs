@@ -2,7 +2,7 @@
 
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{BusinessId, InformationId, OperationId};
-use crimocracy::core::time::{SimDuration, SimTime};
+use crimocracy::core::time::{DAY_MINUTES, SimDuration, SimTime};
 use crimocracy::economy::BusinessEconomyDraft;
 use crimocracy::economy::business_economy_system::validate_establish_business_economy;
 use crimocracy::finance::finance_system::insert_account;
@@ -220,12 +220,9 @@ fn collect_probe(
     let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
     let mut metrics = RunMetrics::default();
     establish_rival_venue_economy(registry, &mut scenario)?;
-    let boundary = u64::from(
-        registry
-            .recruitment()
-            .autonomous_attempt_cadence()
-            .as_minutes(),
-    );
+    // The probe watches after a normal daily boundary so delegated rival expansion has had
+    // its cadence: the day length owns this, not the recruitment cadence.
+    let boundary = DAY_MINUTES;
     run_until(
         &mut scenario,
         SimTime::from_minutes(boundary),

@@ -35,9 +35,6 @@ pub fn observe_tick(
     observe_investigation_and_arrests(scenario, outcome, narrative, metrics);
     narrate_resolutions_and_enterprise_cycles(scenario, outcome, narrative);
 
-    if tick_changed_observable_state(outcome) {
-        validate_harness_state(scenario.registry, &scenario.state)?;
-    }
     Ok(())
 }
 
@@ -623,39 +620,6 @@ fn narrate_standing_reports(scenario: &Scenario, outcome: &TickOutcome) {
             );
         }
     }
-}
-
-/// True when the tick produced any transaction a player could observe or that persists state.
-/// The harness validates the whole world at these consequential boundaries; skipping fully routine
-/// minutes keeps the matched-batch lane fast without losing corruption coverage at any real event.
-pub fn tick_changed_observable_state(outcome: &TickOutcome) -> bool {
-    !outcome.started_operations.is_empty()
-        || !outcome.arrived_police_responses.is_empty()
-        || !outcome.decision_requests.is_empty()
-        || !outcome.aborted_operations.is_empty()
-        || !outcome.resolved_operations.is_empty()
-        || !outcome.staffed_investigations.is_empty()
-        || !outcome.scheduled_investigation_work.is_empty()
-        || !outcome.scheduled_witness_interviews.is_empty()
-        || !outcome.resolved_investigation_work.is_empty()
-        || !outcome.evidence_arrests.is_empty()
-        || !outcome.staffed_prosecution_cases.is_empty()
-        || !outcome.informant_recruitments.is_empty()
-        || !outcome.informant_disclosures.is_empty()
-        || !outcome.custody_releases.is_empty()
-        || !outcome.automatic_legal_support.is_empty()
-        || outcome.concluded_automatic_legal_support > 0
-        || !outcome.business_cycles.is_empty()
-        || !outcome.enterprise_cycles.is_empty()
-        || !outcome.payrolls.is_empty()
-        || outcome.reputation_changes > 0
-        || !outcome.recruitment_attempts.is_empty()
-        || !outcome.resumed_enterprises.is_empty()
-        || !outcome.retired_enterprises.is_empty()
-        || !outcome.autonomous_enterprises.is_empty()
-        || !outcome.expired_opportunities.is_empty()
-        || !outcome.cold_case_suspensions.is_empty()
-        || outcome.executive_brief.is_some()
 }
 
 pub fn choose_lower_risk_start_from_patrol_signal(

@@ -1,6 +1,8 @@
 //! PRESS strategy response arc built only from player-visible information and canonical game APIs.
 
 use super::*;
+use crimocracy::core::time::DAY_MINUTES;
+use crimocracy::legal::ALL_INVESTIGATION_WORK_KINDS;
 
 pub(super) fn run_press_response(
     scenario: &mut Scenario,
@@ -40,11 +42,18 @@ pub(super) fn run_press_response(
             .expect("press consequence arc requires the surfaced case-open minute");
         // Player tradecraft, not institutional math: look at the precinct itself the next
         // morning, about 90 minutes after the case opened. An originated street case takes
-        // days of inactivity to go cold, so a next-morning read always precedes any possible
-        // shelf; the check never overlaps earlier scout work because it follows the clock.
+        // the authored cold-case window of inactivity to go cold, so a next-morning read
+        // always precedes any possible shelf; the check never overlaps earlier scout work
+        // because it follows the clock.
         let heat_check_delay = 90_u64;
         let heat_check_at = SimTime::from_minutes(case_open_minute + heat_check_delay)
             .max(scenario.state.now() + SimDuration::from_minutes(1));
+        debug_assert!(
+            heat_check_at.as_minutes()
+                < case_open_minute
+                    + u64::from(scenario.registry.legal().cold_case_window().as_minutes()),
+            "the next-morning heat check must precede any possible cold-case shelf"
+        );
         let heat_check_lag = heat_check_at.as_minutes().saturating_sub(case_open_minute);
         if narrative {
             println!(
@@ -294,11 +303,13 @@ fn schedule_witness_pressure(
                 .get_operation(OperationKind::WitnessPressure)
                 .execution()
                 .duration();
-            // Witness interviews typically land 2-3h after intake. When the organization has a
-            // typed patrol pattern, that evidence is binding: if no lower-risk window exists before the
-            // interview horizon, fail the treatment instead of discarding known risk and inventing
+            // Institutional interviews land within the longest authored investigation-work
+            // duration after intake. When the organization has a typed patrol pattern, that
+            // evidence is binding: if no lower-risk window exists before the interview
+            // horizon, fail the treatment instead of discarding known risk and inventing
             // a convenient fallback time.
-            let latest_start = SimTime::from_minutes(case_open_minute + 180);
+            let latest_start =
+                SimTime::from_minutes(case_open_minute + interview_horizon_minutes(scenario));
             choose_lower_risk_start_from_patrol_signal(
                 SimTime::from_minutes(case_open_minute),
                 &patrol_signal,
@@ -1064,6 +1075,32 @@ pub fn acquire_annex_front(
     Ok(true)
 }
 
+/// Daily stand-down reviews bounded by production timing: the authored cold-case window
+/// plus margin for the daily polling cadence, custody-deferred decay, and the final
+/// purchase beat. A fixed day count would go stale if the authored window ever changes.
+fn stand_down_day_bound(scenario: &Scenario) -> u64 {
+    let cold_window_minutes = u64::from(scenario.registry.legal().cold_case_window().as_minutes());
+    cold_window_minutes.div_ceil(DAY_MINUTES).saturating_add(8)
+}
+
+/// Latest start for a patrol-informed quiet word, derived from production: institutional
+/// interviews land within the longest authored investigation-work duration after intake.
+fn interview_horizon_minutes(scenario: &Scenario) -> u64 {
+    ALL_INVESTIGATION_WORK_KINDS
+        .iter()
+        .map(|kind| {
+            u64::from(
+                scenario
+                    .registry
+                    .get_investigation_work(*kind)
+                    .duration()
+                    .as_minutes(),
+            )
+        })
+        .max()
+        .unwrap_or_default()
+}
+
 fn run_stand_down_and_diversify(
     scenario: &mut Scenario,
     burglary: OperationId,
@@ -1076,8 +1113,9 @@ fn run_stand_down_and_diversify(
     // front's books and asks its standing precinct contact whether anything moved on
     // the case - daily tradecraft, not calendar math: leadership cannot know when the
     // file will go cold, so it keeps asking until the channel itself carries the
-    // shelved read. The loop is bounded (40 days) well past any authored cold window,
-    // so both waits terminate through production disclosures.
+    // shelved read. The loop is bounded past the authored cold-case window (plus margin
+    // for daily polling, custody-deferred decay, and the final purchase beat), so both
+    // waits terminate through production disclosures.
     // PRESS notices the reopened second score at the same canonical minute every narrative
     // branch does, while it is still standing down. The branch then deliberately schedules
     // nothing on it: the discipline that protects the open case is also an opportunity cost.
@@ -1132,7 +1170,8 @@ fn run_stand_down_and_diversify(
                 .name(),
         );
     }
-    for _ in 0..40 {
+    let stand_down_days = stand_down_day_bound(scenario);
+    for _ in 0..stand_down_days {
         if scenario.state.now() < day_at {
             run_until(scenario, day_at, narrative, metrics)?;
         }
