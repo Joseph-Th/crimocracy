@@ -572,7 +572,14 @@ pub fn find_pending_disclosure_sources(
         return Vec::new();
     }
     let topics = disclosable_topics(record.kind());
-    let mut sources = Vec::new();
+    // Each information record carries exactly one topic, so per-topic holder scans are
+    // disjoint by construction. Collect timestamps once so the newest-first ordering does
+    // not re-resolve the same records inside the sort comparator.
+    let mut ordered: Vec<(
+        crate::core::time::SimTime,
+        crate::core::time::SimTime,
+        InformationId,
+    )> = Vec::new();
     for topic in topics {
         for information in state
             .intelligence()
@@ -583,27 +590,22 @@ pub fn find_pending_disclosure_sources(
                 .disclosure_from_source(contact, information.id())
                 .is_none()
             {
-                sources.push(information.id());
+                ordered.push((
+                    information.observed_at(),
+                    information.recorded_at(),
+                    information.id(),
+                ));
             }
         }
     }
-    sources.sort_unstable_by(|left, right| {
-        let left_record = state
-            .intelligence()
-            .get_information(*left)
-            .expect("pending disclosure source must remain indexed as information");
-        let right_record = state
-            .intelligence()
-            .get_information(*right)
-            .expect("pending disclosure source must remain indexed as information");
-        right_record
-            .observed_at()
-            .cmp(&left_record.observed_at())
-            .then_with(|| right_record.recorded_at().cmp(&left_record.recorded_at()))
-            .then_with(|| right.cmp(left))
+    ordered.sort_unstable_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| right.2.cmp(&left.2))
     });
-    sources.dedup();
-    sources
+    ordered.into_iter().map(|(_, _, id)| id).collect()
 }
 
 /// Topics each contact channel credibly knows through its institution. A topic is listed

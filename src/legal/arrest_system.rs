@@ -501,13 +501,13 @@ fn validate_arrest_dependencies(
         assessment.observe(state, evidence);
     }
 
-    if assessment.independent_qualifying() < usize::from(minimum_qualifying_evidence) {
-        return Err(ArrestError::InsufficientIndependentEvidence {
-            found: assessment.independent_qualifying(),
-            required: minimum_qualifying_evidence,
-        });
-    }
-    if !assessment.has_strong_independent() {
+    if !assessment.meets(minimum_qualifying_evidence) {
+        if assessment.independent_qualifying() < usize::from(minimum_qualifying_evidence) {
+            return Err(ArrestError::InsufficientIndependentEvidence {
+                found: assessment.independent_qualifying(),
+                required: minimum_qualifying_evidence,
+            });
+        }
         return Err(ArrestError::NoStrongIndependentEvidence);
     }
     validate_repeat_custody_evidence(state, draft)?;
@@ -577,7 +577,10 @@ fn repeat_custody_without_new_evidence(
     // later. Identity alone would let a held-back pre-release exhibit chain detentions, and
     // freshness alone would let the same cited set re-arm custody whenever its timestamps
     // cluster on the release minute. Both properties are caller-visible and unforgable through
-    // this path: new records arrive only through canonical evidence creation.
+    // this path: new records arrive only through canonical evidence creation. Renewal also
+    // waits until after the release minute so the release remains observable for one minute
+    // instead of the same tick releasing and immediately re-detaining through the later
+    // autonomous arrest phase.
     let novel = evidence.iter().any(|evidence| {
         !prior.evidence().contains(evidence)
             && state

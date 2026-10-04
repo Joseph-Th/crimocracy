@@ -39,7 +39,7 @@ pub(crate) const fn character_objective_target(
 /// Effective objective result after applying a practical blocker. A blocker is only authored for
 /// a base result that would otherwise achieve something; tactical failure remains tactical
 /// failure and therefore carries no redundant practical-failure explanation.
-pub(crate) const fn effective_objective_outcome(
+pub(crate) const fn resolve_effective_objective_outcome(
     base: OperationObjectiveOutcome,
     blocker: Option<OperationObjectiveBlocker>,
 ) -> OperationObjectiveOutcome {
@@ -144,7 +144,7 @@ pub(crate) fn blocker_clause(
         OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
             "The target came under the sponsoring organization's ownership before the crew reached the objective, so taking or damaging it would have meant hitting its own assets."
         }
-        OperationObjectiveBlocker::TargetEconomyInactive if operation_cash_kind(kind) => {
+        OperationObjectiveBlocker::TargetEconomyInactive if is_operation_cash_kind(kind) => {
             "The target was no longer operating when the crew reached the objective, so there was no active cash-generating business to collect from."
         }
         OperationObjectiveBlocker::TargetEconomyInactive => {
@@ -260,7 +260,7 @@ pub(crate) fn blocker_matches_objective(
     }
 }
 
-const fn operation_cash_kind(kind: OperationKind) -> bool {
+const fn is_operation_cash_kind(kind: OperationKind) -> bool {
     matches!(
         kind,
         OperationKind::Robbery

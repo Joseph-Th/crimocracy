@@ -58,7 +58,7 @@ pub(crate) fn build_settlement_postings(
     ])
 }
 
-/// Renders a cents amount as leader-readable dollars (`"$1,234.56"`, `"-$12.30"`).
+/// Renders a cents amount as human-readable dollars (`"$1,234.56"`, `"-$12.30"`).
 /// Player-facing reports quote people talking about money, so raw cent counts stay
 /// confined to diagnostics and ledger internals.
 pub(crate) fn format_money_cents(cents: i64) -> String {
@@ -77,7 +77,7 @@ pub(crate) fn format_money_cents(cents: i64) -> String {
     format!("{sign}${grouped}.{fraction:02}")
 }
 
-/// Describes a gross-variance draw as leader-readable language instead of basis points.
+/// Describes a gross-variance draw as human-readable language instead of basis points.
 /// Cycle reports are how managers and accountants talk, so small draws read as "close to
 /// plan" and material ones as an approximate percentage over or under expectations.
 pub(crate) fn describe_gross_variance(basis_points: i16) -> String {

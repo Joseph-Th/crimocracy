@@ -44,12 +44,12 @@ use crate::operations::information_acquisition::{
     validate_operation_information_plan_snapshot,
 };
 use crate::operations::operation_economics::{
-    CashProceedsPlan, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE, depleted_take_clause,
-    downgrade_empty_take_outcome, held_cash_clause, held_property_clause, resolve_cash_proceeds,
-    resolve_property_proceeds,
+    CashProceedsPlan, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE, build_depleted_take_clause,
+    build_held_cash_clause, build_held_property_clause, downgrade_empty_take_outcome,
+    resolve_cash_proceeds, resolve_property_proceeds,
 };
 use crate::operations::operation_objective::{
-    blocker_clause, effective_objective_outcome, pressureable_witness_targets_for_cases,
+    blocker_clause, pressureable_witness_targets_for_cases, resolve_effective_objective_outcome,
     resolve_objective_blocker,
 };
 use crate::operations::{
@@ -392,7 +392,8 @@ pub(crate) fn decide_operation_resolution(
     } else {
         resolve_objective_blocker(state, record)
     };
-    let objective_outcome = effective_objective_outcome(base_objective_outcome, objective_blocker);
+    let objective_outcome =
+        resolve_effective_objective_outcome(base_objective_outcome, objective_blocker);
     let exposure = resolve_exposure_plan(
         registry,
         state,
@@ -499,19 +500,24 @@ fn compose_after_action_summary(
     // silencing the clause would make an Achieved outcome look like an ordinary score.
     if let Some(proceeds) = context.property_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
-        summary.push_str(&held_property_clause(proceeds.estimated_value().cents()));
+        summary.push_str(&build_held_property_clause(
+            proceeds.estimated_value().cents(),
+        ));
     }
     if context.property_proceeds_plan.depleted_by_recent_take {
         summary.push(' ');
-        summary.push_str(depleted_take_clause(record.kind()));
+        summary.push_str(build_depleted_take_clause(record.kind()));
     }
     if let Some(proceeds) = context.cash_proceeds_plan.proceeds.as_ref() {
         summary.push(' ');
-        summary.push_str(&held_cash_clause(record.kind(), proceeds.amount().cents()));
+        summary.push_str(&build_held_cash_clause(
+            record.kind(),
+            proceeds.amount().cents(),
+        ));
     }
     if context.cash_proceeds_plan.depleted_by_recent_take {
         summary.push(' ');
-        summary.push_str(depleted_take_clause(record.kind()));
+        summary.push_str(build_depleted_take_clause(record.kind()));
     }
     if let Some(clause) = context.information_clause {
         summary.push(' ');
@@ -552,7 +558,7 @@ pub(crate) fn render_persisted_after_action_summary(
     let execution = registry.get_operation(record.kind()).execution();
     let tactical_outcome = resolve_objective_outcome(execution, resolution.execution_margin());
     let pre_depletion_outcome =
-        effective_objective_outcome(tactical_outcome, resolution.objective_blocker());
+        resolve_effective_objective_outcome(tactical_outcome, resolution.objective_blocker());
     let property_proceeds_plan =
         resolve_property_proceeds(registry, state, record, pre_depletion_outcome).ok()?;
     let cash_proceeds_plan =

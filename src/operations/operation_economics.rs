@@ -66,6 +66,34 @@ pub(crate) struct PropertyProceedsPlan {
     pub(crate) depleted_by_recent_take: bool,
 }
 
+/// Shared take-proceeds derivation: gross basis, recency depletion, and cent rounding for
+/// one take-kind objective. Property and cash callers supply only their definition's basis
+/// points and overflow constructor; empty-haul handling stays with each caller so the
+/// persisted plan shape cannot drift between the two proceeds families.
+fn resolve_take_proceeds_cents(
+    registry: &Registry,
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    business: crate::core::id::BusinessId,
+    economics: TakeEconomics,
+    outcome: OperationObjectiveOutcome,
+    overflow: fn(crate::core::id::OperationId) -> OperationResolutionError,
+) -> Result<(i64, bool), OperationResolutionError> {
+    let gross = resolve_take_gross(registry, state, business)?;
+    let reference_at = take_reference_time(state, operation);
+    let recent_hits = recent_take_times(state, operation, business, economics.recovery_window);
+    let cents = resolve_take_cents(
+        operation.id(),
+        gross.cents(),
+        economics,
+        outcome,
+        reference_at,
+        &recent_hits,
+        overflow,
+    )?;
+    Ok((cents, !recent_hits.is_empty()))
+}
+
 pub(crate) fn resolve_property_proceeds(
     registry: &Registry,
     state: &AppState,
@@ -98,17 +126,11 @@ pub(crate) fn resolve_property_proceeds(
         });
     }
 
-    let gross = resolve_take_gross(registry, state, *business)?;
-    let reference_at = take_reference_time(state, operation);
-    let recent_hits = recent_take_times(
+    let (cents, depleted_by_recent_take) = resolve_take_proceeds_cents(
+        registry,
         state,
         operation,
         *business,
-        definition.recent_take_recovery_window(),
-    );
-    let cents = resolve_take_cents(
-        operation.id(),
-        gross.cents(),
         TakeEconomics {
             full_basis_points: definition.business_gross_basis_points(),
             partial_basis_points: definition.partial_recovery_basis_points(),
@@ -116,14 +138,12 @@ pub(crate) fn resolve_property_proceeds(
             immediate_repeat_value_basis_points: definition.immediate_repeat_value_basis_points(),
         },
         outcome,
-        reference_at,
-        &recent_hits,
         |operation| OperationResolutionError::PropertyProceedsOverflow { operation },
     )?;
     if cents <= 0 {
         return Ok(PropertyProceedsPlan {
             proceeds: None,
-            depleted_by_recent_take: !recent_hits.is_empty(),
+            depleted_by_recent_take,
         });
     }
     Ok(PropertyProceedsPlan {
@@ -131,7 +151,7 @@ pub(crate) fn resolve_property_proceeds(
             EntityRef::Business(*business),
             crate::finance::Money::from_cents(cents),
         )),
-        depleted_by_recent_take: !recent_hits.is_empty(),
+        depleted_by_recent_take,
     })
 }
 
@@ -285,17 +305,11 @@ pub(crate) fn resolve_cash_proceeds(
         });
     }
 
-    let gross = resolve_take_gross(registry, state, *business)?;
-    let reference_at = take_reference_time(state, operation);
-    let recent_hits = recent_take_times(
+    let (cents, depleted_by_recent_take) = resolve_take_proceeds_cents(
+        registry,
         state,
         operation,
         *business,
-        definition.recent_take_recovery_window(),
-    );
-    let cents = resolve_take_cents(
-        operation.id(),
-        gross.cents(),
         TakeEconomics {
             full_basis_points: definition.business_take_basis_points(),
             partial_basis_points: definition.partial_take_basis_points(),
@@ -303,14 +317,12 @@ pub(crate) fn resolve_cash_proceeds(
             immediate_repeat_value_basis_points: definition.immediate_repeat_value_basis_points(),
         },
         outcome,
-        reference_at,
-        &recent_hits,
         |operation| OperationResolutionError::CashProceedsOverflow { operation },
     )?;
     if cents <= 0 {
         return Ok(CashProceedsPlan {
             proceeds: None,
-            depleted_by_recent_take: !recent_hits.is_empty(),
+            depleted_by_recent_take,
         });
     }
     Ok(CashProceedsPlan {
@@ -318,14 +330,14 @@ pub(crate) fn resolve_cash_proceeds(
             EntityRef::Business(*business),
             crate::finance::Money::from_cents(cents),
         )),
-        depleted_by_recent_take: !recent_hits.is_empty(),
+        depleted_by_recent_take,
     })
 }
 
 /// Historical after-action phrasing for property secured by an operation. It describes what
 /// happened at resolution time without claiming the property is still held when a later report
 /// in the same executive window records its liquidation.
-pub(crate) fn held_property_clause(est_value_cents: i64) -> String {
+pub(crate) fn build_held_property_clause(est_value_cents: i64) -> String {
     format!(
         "The crew secured property with an estimated held value of {}; the haul was held for later liquidation.",
         crate::finance::helpers::format_money_cents(est_value_cents)
@@ -335,7 +347,7 @@ pub(crate) fn held_property_clause(est_value_cents: i64) -> String {
 /// Historical after-action phrasing for direct cash proceeds. The economic event differs by
 /// operation kind even though every result enters the same held-cash disposition lifecycle.
 /// A later deposit remains a separate financial event rather than requiring history rewriting.
-pub(crate) fn held_cash_clause(kind: OperationKind, cents: i64) -> String {
+pub(crate) fn build_held_cash_clause(kind: OperationKind, cents: i64) -> String {
     let amount = crate::finance::helpers::format_money_cents(cents);
     match kind {
         OperationKind::Robbery => {
@@ -370,7 +382,7 @@ pub(crate) fn held_cash_clause(kind: OperationKind, cents: i64) -> String {
 /// After-action phrasing for same-kind recency depletion. Different proceeds models represent
 /// different practical bottlenecks, so the explanation must not describe gambling receipts or
 /// delivery payment as unreplaced physical stock.
-pub(crate) fn depleted_take_clause(kind: OperationKind) -> &'static str {
+pub(crate) fn build_depleted_take_clause(kind: OperationKind) -> &'static str {
     match kind {
         OperationKind::Burglary | OperationKind::Hijacking => {
             "The take came in lighter than usual; this target has not fully replaced stock from a recent score."

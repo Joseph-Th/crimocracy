@@ -149,7 +149,7 @@ pub(super) fn validate_id_allocators(state: &AppState) -> Result<(), StateValida
     validate_id_allocator(
         &state.ids,
         IdKind::RecruitmentAttempt,
-        state.recruitment.attempt_id_bounds(),
+        state.recruitment.recruitment_attempt_id_bounds(),
     )?;
     validate_id_allocator(
         &state.ids,

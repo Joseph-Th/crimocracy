@@ -33,7 +33,7 @@ use crate::operations::operation_execution::{
 };
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::{
-    blocker_matches_objective, character_objective_target, effective_objective_outcome,
+    blocker_matches_objective, character_objective_target, resolve_effective_objective_outcome,
 };
 use crate::operations::operation_scheduling::{
     resolve_deadline_without_execution_window, resolve_operation_booking_window,

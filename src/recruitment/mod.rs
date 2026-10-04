@@ -371,7 +371,7 @@ impl RecruitmentState {
     pub(crate) fn attempts(&self) -> impl Iterator<Item = &RecruitmentAttemptRecord> {
         self.records.values()
     }
-    pub(crate) fn attempt_id_bounds(&self) -> Option<(u32, u32)> {
+    pub(crate) fn recruitment_attempt_id_bounds(&self) -> Option<(u32, u32)> {
         self.records.id_bounds()
     }
 

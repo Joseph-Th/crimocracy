@@ -272,13 +272,17 @@ fn operation_consequence_deltas(
             OperationObjectiveOutcome::Failed => 0,
         },
     };
-    deltas.push((AudienceKind::Underworld, competence_delta));
+    if competence_delta != 0 {
+        deltas.push((AudienceKind::Underworld, competence_delta));
+    }
     let police_fear = match exposure_level {
         OperationExposureLevel::None | OperationExposureLevel::Trace => 0,
         OperationExposureLevel::Witnessed => config.witnessed_exposure_police_fear(),
         OperationExposureLevel::Identifying => config.identifying_exposure_police_fear(),
     };
-    deltas.push((AudienceKind::Police, police_fear));
+    if police_fear != 0 {
+        deltas.push((AudienceKind::Police, police_fear));
+    }
     if approach == OperationApproach::Violent
         && !matches!(
             exposure_level,

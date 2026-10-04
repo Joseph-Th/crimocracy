@@ -394,7 +394,7 @@ fn validate_authored_operation_resolution(
     let base_expected_outcome = resolve_objective_outcome(execution, expected_margin);
     validate_resolution_objective_context(state, operation, resolution, base_expected_outcome)?;
     let expected_outcome =
-        effective_objective_outcome(base_expected_outcome, resolution.objective_blocker());
+        resolve_effective_objective_outcome(base_expected_outcome, resolution.objective_blocker());
     if matches!(
         operation.objective(),
         OperationObjective::FreeDetainee { .. }

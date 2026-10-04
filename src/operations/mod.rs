@@ -237,26 +237,16 @@ impl OperationObjective {
     /// it. Callers that need ownership or authored business-target semantics must also consult the
     /// kind, because surveillance can observe a business without being a business-target action.
     pub(crate) const fn business_target(&self) -> Option<BusinessId> {
-        let target = match self {
-            Self::AcquireProperty { target }
-            | Self::ObtainCash { target }
-            | Self::GatherInformation { target }
-            | Self::DisruptBusiness { target } => target,
-            Self::Frighten { .. } | Self::FreeDetainee { .. } => return None,
-        };
-        match target {
-            EntityRef::Business(business) => Some(*business),
-            EntityRef::Organization(_)
-            | EntityRef::Character(_)
-            | EntityRef::Neighborhood(_)
-            | EntityRef::Operation(_)
-            | EntityRef::Investigation(_)
-            | EntityRef::Evidence(_)
-            | EntityRef::FinancialAccount(_)
-            | EntityRef::DecisionRequest(_)
-            | EntityRef::Mandate(_)
-            | EntityRef::Enterprise(_) => None,
-        }
+        Self::business_target_for_objectives(
+            self,
+            matches!(
+                self,
+                Self::AcquireProperty { .. }
+                    | Self::ObtainCash { .. }
+                    | Self::GatherInformation { .. }
+                    | Self::DisruptBusiness { .. }
+            ),
+        )
     }
 
     /// The business whose gross potential sizes a take-like objective, if any. Theft and
@@ -264,12 +254,22 @@ impl OperationObjective {
     /// customer throughput sizes the house take. The economics owner decides replenishment
     /// independently per operation kind.
     pub(crate) fn taken_business(&self) -> Option<BusinessId> {
+        Self::business_target_for_objectives(
+            self,
+            matches!(self, Self::AcquireProperty { .. } | Self::ObtainCash { .. }),
+        )
+    }
+
+    const fn business_target_for_objectives(&self, is_candidate: bool) -> Option<BusinessId> {
+        if !is_candidate {
+            return None;
+        }
         let target = match self {
-            Self::AcquireProperty { target } | Self::ObtainCash { target } => target,
-            Self::Frighten { .. }
-            | Self::GatherInformation { .. }
-            | Self::FreeDetainee { .. }
-            | Self::DisruptBusiness { .. } => return None,
+            Self::AcquireProperty { target }
+            | Self::ObtainCash { target }
+            | Self::GatherInformation { target }
+            | Self::DisruptBusiness { target } => target,
+            Self::Frighten { .. } | Self::FreeDetainee { .. } => return None,
         };
         match target {
             EntityRef::Business(business) => Some(*business),

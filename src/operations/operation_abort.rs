@@ -50,7 +50,7 @@ pub(crate) fn validate_expired_opportunity_operation(
         .operations
         .get_operation(operation)
         .ok_or(OperationError::MissingOperation(operation))?;
-    if !opportunity_expiry_can_abort(state, record, opportunity) {
+    if !can_abort_for_expired_opportunity(state, record, opportunity) {
         return Err(OperationError::InvalidAbortCause {
             operation,
             status: record.status(),
@@ -253,7 +253,7 @@ impl ValidatedOperationAbort {
             });
         }
         if let OperationAbortCause::PoliceArrival(response) = self.cause
-            && !police_arrival_can_abort(state, record, response)
+            && !can_abort_for_police_arrival(state, record, response)
         {
             return Err(OperationError::InvalidAbortCause {
                 operation: self.operation,
@@ -271,7 +271,7 @@ impl ValidatedOperationAbort {
             });
         }
         if let OperationAbortCause::OpportunityExpired(opportunity) = self.cause
-            && !opportunity_expiry_can_abort(state, record, opportunity)
+            && !can_abort_for_expired_opportunity(state, record, opportunity)
         {
             return Err(OperationError::InvalidAbortCause {
                 operation: self.operation,
@@ -342,7 +342,7 @@ pub(crate) fn validate_police_arrival_abort_if_applicable(
     let Some(response) = record.police_response() else {
         return Ok(None);
     };
-    if police_arrival_can_abort(state, record, response) {
+    if can_abort_for_police_arrival(state, record, response) {
         validate_police_arrival_abort_operation(state, operation, response).map(Some)
     } else {
         Ok(None)
@@ -416,7 +416,7 @@ fn resolve_abort_phase(
             Ok(OperationAbortPhase::AwaitingDecision)
         }
         (OperationStatus::InProgress, OperationAbortCause::PoliceArrival(response))
-            if police_arrival_can_abort(state, record, response) =>
+            if can_abort_for_police_arrival(state, record, response) =>
         {
             Ok(OperationAbortPhase::InProgress)
         }
@@ -741,7 +741,7 @@ pub(crate) fn resolve_abort_entities(
     Ok(entities)
 }
 
-fn opportunity_expiry_can_abort(
+fn can_abort_for_expired_opportunity(
     state: &AppState,
     operation: &OperationRecord,
     opportunity: OpportunityId,
@@ -757,7 +757,7 @@ fn opportunity_expiry_can_abort(
 /// response, dispatched at begin while the operation is `InProgress`; a decision pause can
 /// only originate from that same response's post-arrival request, so an arrival can always
 /// only abort an operation that is still `InProgress` and has not entered yet.
-pub(crate) fn police_arrival_can_abort(
+pub(crate) fn can_abort_for_police_arrival(
     state: &AppState,
     operation: &OperationRecord,
     response: PoliceResponseId,

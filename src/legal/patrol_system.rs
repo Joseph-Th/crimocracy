@@ -662,13 +662,7 @@ pub(crate) fn police_response_patrol_snapshot_is_possible(
             let candidate = deployment.revisions().iter().find(|revision| {
                 revision.version() == snapshot.version()
                     && revision.status() == PatrolDeploymentStatus::Active
-                    && (revision.changed_at() == at
-                        || revision.changed_at() < at
-                            && deployment
-                                .revisions()
-                                .iter()
-                                .filter(|later| later.version() > revision.version())
-                                .all(|later| later.changed_at() >= at))
+                    && patrol_revision_is_candidate_at(deployment, revision, at)
             });
             candidate.is_some_and(|revision| {
                 patrol_revision_presence(revision, at, off_window_presence) == presence
@@ -698,13 +692,7 @@ pub(crate) fn police_response_patrol_snapshot_reference_is_possible(
                 && deployment.revisions().iter().any(|revision| {
                     revision.version() == snapshot.version()
                         && revision.status() == PatrolDeploymentStatus::Active
-                        && (revision.changed_at() == at
-                            || revision.changed_at() < at
-                                && deployment
-                                    .revisions()
-                                    .iter()
-                                    .filter(|later| later.version() > revision.version())
-                                    .all(|later| later.changed_at() >= at))
+                        && patrol_revision_is_candidate_at(deployment, revision, at)
                 })
         });
     }
@@ -746,6 +734,20 @@ fn patrol_revision_presence(
         .map(PatrolWindow::presence)
         .max_by_key(|rating| rating.value())
         .unwrap_or(off_window_presence)
+}
+
+fn patrol_revision_is_candidate_at(
+    deployment: &crate::legal::PatrolDeploymentRecord,
+    revision: &PatrolDeploymentRevision,
+    at: SimTime,
+) -> bool {
+    revision.changed_at() == at
+        || revision.changed_at() < at
+            && deployment
+                .revisions()
+                .iter()
+                .filter(|later| later.version() > revision.version())
+                .all(|later| later.changed_at() >= at)
 }
 
 fn reduced_off_window_presence(ambient: Rating, off_window_patrol_presence_percent: u8) -> Rating {

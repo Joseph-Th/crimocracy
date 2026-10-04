@@ -33,10 +33,10 @@ use cohort_planning::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const LED_NEIGHBORHOOD_AUTHORITY_RANK: usize = 0;
+const LEAD_NEIGHBORHOOD_AUTHORITY_RANK: usize = 0;
 const OTHER_NEIGHBORHOOD_AUTHORITY_RANK: usize = 1;
 const BUSINESS_AUTHORITY_RANK: usize = 2;
-const ENTERPRISE_FUNCTION_LED_AUTHORITY_RANK: usize = 3;
+const ENTERPRISE_FUNCTION_LEAD_AUTHORITY_RANK: usize = 3;
 const ENTERPRISE_FUNCTION_OTHER_AUTHORITY_RANK: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,7 +276,7 @@ fn resolve_ranked_district_scopes(
             let leads = leader == Some(organization);
             (
                 if leads {
-                    LED_NEIGHBORHOOD_AUTHORITY_RANK
+                    LEAD_NEIGHBORHOOD_AUTHORITY_RANK
                 } else {
                     OTHER_NEIGHBORHOOD_AUTHORITY_RANK
                 },
@@ -303,7 +303,7 @@ fn collect_enterprise_function_candidates(
     for (neighborhood_id, leader) in district_leaders {
         let leads = *leader == Some(economics.organization);
         let authority_rank = if leads {
-            ENTERPRISE_FUNCTION_LED_AUTHORITY_RANK
+            ENTERPRISE_FUNCTION_LEAD_AUTHORITY_RANK
         } else {
             ENTERPRISE_FUNCTION_OTHER_AUTHORITY_RANK
         };

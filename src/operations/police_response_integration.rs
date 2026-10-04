@@ -21,7 +21,7 @@ use crate::legal::police_response_system::{
     find_due_police_responses, validate_dispatch_police_response, validate_police_response_arrival,
 };
 use crate::operations::operation_abort::{
-    police_arrival_can_abort, validate_authority_abort_operation,
+    can_abort_for_police_arrival, validate_authority_abort_operation,
     validate_police_arrival_abort_operation,
 };
 use crate::operations::operation_execution::resolve_operation_police_alert_context;
@@ -230,7 +230,7 @@ fn apply_due_police_response_arrivals_strict(
                 .expect("police response source operation must exist");
             // The owning pre-entry abort predicate, shared with the canonical abort
             // validator so the tick pass and validation can never disagree.
-            let should_abort = police_arrival_can_abort(state, operation, response_id);
+            let should_abort = can_abort_for_police_arrival(state, operation, response_id);
             let requests_leadership = !should_abort
                 && operation.status() == OperationStatus::InProgress
                 && operation
