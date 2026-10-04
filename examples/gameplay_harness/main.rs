@@ -271,6 +271,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         validate_press_consequence_arc(&press)?;
         validate_press_witness_counterplay(&press)?;
         validate_press_expansion_evidence(&press)?;
+        validate_press_second_front_evidence(&press)?;
         validate_defector_trail_evidence(&rush)?;
         validate_defector_trail_evidence(&press)?;
         validate_defector_trail_evidence(&recon)?;

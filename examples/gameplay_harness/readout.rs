@@ -802,6 +802,9 @@ pub fn print_organization_closing_view(
         if metrics.front_acquired {
             actions.push("bought the harbor club".to_owned());
         }
+        if metrics.annex_acquired {
+            actions.push("bought the lapsed annex score as a clean second front".to_owned());
+        }
         if metrics.expansion_established {
             actions.push("opened a second-district book".to_owned());
         }

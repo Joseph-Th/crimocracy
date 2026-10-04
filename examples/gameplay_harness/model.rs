@@ -913,6 +913,14 @@ pub struct RunMetrics {
     /// True once the branch purchased the harbor venue through the canonical acquisition
     /// path: ownership moved, and accounted funds paid the authored price in full.
     pub front_acquired: bool,
+    /// Second-front evidence: with the harbor escape secured, surplus accounted funds buy
+    /// the lapsed annex score as pure legitimate infrastructure (income, no racket, no
+    /// heat surface). Tracked separately so the harbor legitimacy-gate contract keeps its
+    /// exact price/spend/rejection accounting.
+    pub annex_acquired: bool,
+    pub annex_price_cents: Option<i64>,
+    pub annex_spent_cents: i64,
+    pub annex_rejections: u32,
     /// Live home-racket posture governance during the PRESS stand-down. Leadership
     /// re-evaluates the trailing settled book each day from manager-reported cycles
     /// and suspends only while the book loses money, resuming once the file cools.

@@ -606,6 +606,35 @@ pub fn validate_press_witness_counterplay(
     }
 }
 
+/// Full-mode narrative PRESS allocates surplus capital once the harbor escape is open:
+/// the lapsed annex score becomes a second legitimate front (real front income the case
+/// cannot tax, no racket, no heat surface). Ownership transfer and the live operating
+/// economy are asserted at commit time, so metrics evidence is enough here: the primary
+/// set must show the lapsed opportunity, a paid authored price, and spend matching that
+/// price. Rotated sets report honestly - surplus or a clean skip.
+pub fn validate_press_second_front_evidence(
+    metrics: &RunMetrics,
+) -> Result<(), HarnessContractError> {
+    if metrics.strategy != Some(Strategy::Press) {
+        return Ok(());
+    }
+    if !metrics.primary_narrative_set {
+        return Ok(());
+    }
+    if metrics.annex_acquired
+        && metrics.annex_price_cents.is_some_and(|price| price > 0)
+        && metrics.annex_spent_cents == metrics.annex_price_cents.unwrap_or_default()
+        && metrics.second_opportunity_expired
+    {
+        Ok(())
+    } else {
+        Err(HarnessContractError::MissingStrategyEvidence {
+            strategy: Strategy::Press,
+            evidence: "with the harbor escape open and surplus accounted funds, PRESS must convert the lapsed annex score into a second legitimate front at its authored price",
+        })
+    }
+}
+
 pub fn validate_harness_state(registry: &Registry, state: &AppState) -> Result<(), Box<dyn Error>> {
     validate_state(state)?;
     validate_state_against_registry(registry, state)?;

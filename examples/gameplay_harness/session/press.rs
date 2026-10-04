@@ -520,9 +520,9 @@ mod tests {
     }
 
     #[test]
-    fn press_posture_governance_reviews_a_paying_book_without_suspending() {
+    fn press_stand_down_governs_home_book_and_surplus_capital() {
         let registry = crimocracy::build_registry();
-        let metrics = play_session(
+        let mut metrics = play_session(
             &registry,
             Strategy::Press,
             ScenarioProfile::NightTrap,
@@ -539,6 +539,46 @@ mod tests {
             "a book that stays net-positive under its heat surcharge stays open"
         );
         assert_eq!(metrics.posture_resumptions, 0);
+        assert!(
+            metrics.front_acquired && metrics.expansion_established,
+            "the harbor escape must open before surplus allocation"
+        );
+        assert!(
+            metrics.annex_acquired,
+            "surplus accounted funds must convert the lapsed score into a second front"
+        );
+        assert!(metrics.annex_price_cents.is_some_and(|price| price > 0));
+        assert_eq!(
+            metrics.annex_spent_cents,
+            metrics.annex_price_cents.unwrap_or_default()
+        );
+        assert!(metrics.second_opportunity_expired);
+        metrics.primary_narrative_set = true;
+        validate_press_second_front_evidence(&metrics)
+            .expect("the primary set must complete the second-front chain");
+    }
+
+    #[test]
+    fn annex_short_purchase_is_a_canonical_rejection_without_state_mutation() {
+        let registry = crimocracy::build_registry();
+        let mut scenario = build_scenario(
+            &registry,
+            EvaluationSeeds::defaults(),
+            ScenarioProfile::NightTrap,
+        )
+        .unwrap();
+        let mut metrics = RunMetrics {
+            second_opportunity_expired: true,
+            ..RunMetrics::default()
+        };
+        let before = scenario.state.clone();
+        assert!(!acquire_annex_front(&mut scenario, false, &mut metrics).unwrap());
+        assert_eq!(metrics.annex_rejections, 1);
+        assert!(!metrics.annex_acquired);
+        assert_eq!(
+            bincode::serialize(&scenario.state).unwrap(),
+            bincode::serialize(&before).unwrap()
+        );
     }
 
     #[test]
@@ -800,6 +840,15 @@ fn run_daily_capital_management(
             );
         }
     }
+    // Second-front allocation with surplus only: the harbor escape keeps priority, so
+    // this runs once the harbor book is open and the lapsed score is honestly history.
+    if metrics.front_acquired
+        && metrics.expansion_established
+        && !metrics.annex_acquired
+        && metrics.second_opportunity_expired
+    {
+        acquire_annex_front(scenario, narrative, metrics)?;
+    }
     Ok(())
 }
 
@@ -895,6 +944,117 @@ fn govern_home_racket_posture(
         );
     }
     Ok(())
+}
+
+/// The PRESS second purchase: with the harbor escape secured, surplus accounted funds
+/// buy the lapsed annex score as pure legitimate infrastructure. It earns real front
+/// income the case cannot tax and hosts no racket, so it adds no heat surface. The
+/// purchase is gated on the lapsed opportunity so leadership never scores property it
+/// owns, and on the open harbor book so heat escape keeps priority over marginal income.
+/// Harbor accounting stays exclusive: this path records its own price, spend, and
+/// short-book rejections.
+pub fn acquire_annex_front(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<bool, Box<dyn Error>> {
+    use crimocracy::economy::business_acquisition::{
+        BusinessAcquisitionDraft, validate_acquire_business,
+    };
+    use crimocracy::finance::{AccountKind, FinancialOwner};
+    if !metrics.second_opportunity_expired {
+        return Ok(false);
+    }
+    let price = scenario
+        .registry
+        .get_business(
+            scenario
+                .state
+                .world()
+                .get_business(scenario.alternate_target)
+                .expect("annex target must persist")
+                .kind(),
+        )
+        .economics()
+        .acquisition_cost();
+    let funding_accounts: BTreeSet<_> = scenario
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(scenario.player))
+        .filter(|account| account.kind() == AccountKind::AccountedFunds)
+        .map(|account| account.id())
+        .collect();
+    if narrative && metrics.annex_rejections == 0 && !metrics.annex_acquired {
+        println!(
+            "[DECIDE]  Harbor first: escaping the Canal case dominates marginal income. The annex - the score we refused - waits for surplus; with clean money to spare it becomes infrastructure instead of temptation."
+        );
+    }
+    let purchase = validate_acquire_business(
+        scenario.registry,
+        &scenario.state,
+        BusinessAcquisitionDraft {
+            organization: scenario.player,
+            business: scenario.alternate_target,
+            funding_accounts,
+        },
+    );
+    let purchase = match purchase {
+        Ok(purchase) => purchase,
+        Err(
+            crimocracy::economy::business_acquisition::BusinessAcquisitionError::InsufficientFunds {
+                available_cents,
+                price_cents,
+            },
+        ) => {
+            if metrics.annex_rejections == 0 && narrative {
+                println!(
+                    "[ACQUIRE] The annex seller wants {}; our accounted books hold only {} after the harbor purchase. Income property waits for surplus.",
+                    format_cents(price_cents),
+                    format_cents(available_cents),
+                );
+            }
+            metrics.annex_rejections = metrics.annex_rejections.saturating_add(1);
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let venue_name = scenario
+        .state
+        .world()
+        .get_business(scenario.alternate_target)
+        .expect("annex target must persist")
+        .name()
+        .to_owned();
+    purchase.commit(&mut scenario.state)?;
+    assert_eq!(
+        scenario
+            .state
+            .world()
+            .get_business(scenario.alternate_target)
+            .expect("acquired annex must persist")
+            .owner(),
+        crimocracy::world::BusinessOwner::Organization(scenario.player),
+        "a committed acquisition must transfer venue ownership"
+    );
+    assert!(
+        scenario
+            .state
+            .economy()
+            .get_business_economy(scenario.alternate_target)
+            .is_some(),
+        "a committed acquisition must open the venue's operating economy"
+    );
+    metrics.annex_acquired = true;
+    metrics.annex_price_cents = Some(price.cents());
+    metrics.annex_spent_cents = price.cents();
+    if narrative {
+        println!(
+            "[ACQUIRE] {}: {venue_name} purchased outright for {} from accounted surplus: the score we refused becomes infrastructure - legitimate income the case cannot tax, run clean with no book to heat.",
+            stamp(scenario.state.now().as_minutes()),
+            format_cents(price.cents()),
+        );
+    }
+    Ok(true)
 }
 
 fn run_stand_down_and_diversify(
