@@ -48,9 +48,11 @@ pub(super) fn register_upkeep(builder: &mut RegistryBuilder) {
         .register_upkeep(UpkeepConfigSpec {
             // Daily street wage per member is visible next to one enterprise cycle, so an
             // idle organization feels carrying costs and headcount remains a real decision.
-            // District heat can tighten the resulting surplus without making a small crew
-            // immediately insolvent.
-            per_member_daily: Money::from_cents(32_00),
+            // At $40 a four-person crew costs $160 a day against roughly $300 of combined
+            // front and racket income, leaving a thin surplus that one heated cycle can erase.
+            // District heat can therefore tighten the resulting surplus into a real posture
+            // choice without making a small crew immediately insolvent.
+            per_member_daily: Money::from_cents(40_00),
             shortfall_resentment: 12,
         })
         .unwrap_or_else(|error| panic!("invalid upkeep registry: {error}"));

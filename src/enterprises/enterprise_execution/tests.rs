@@ -3520,7 +3520,7 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
     let (cross_district_cost, cross_district_heat, _) = due_cycle(&mut fixture);
     assert_eq!(cross_district_cost, baseline_cost);
     assert_eq!(cross_district_heat, Money::ZERO);
-    // A case targeting the enterprise's own district raises the daily cost by $50, becomes
+    // A case targeting the enterprise's own district raises the daily cost by $120, becomes
     // notable, and records a player-visible report explaining the street surcharge.
     open_heat_case(
         &mut fixture,
@@ -3531,10 +3531,10 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
     assert_eq!(
         local_cost,
         cross_district_cost
-            .checked_add(Money::from_cents(5_000))
+            .checked_add(Money::from_cents(12_000))
             .expect("heat surcharge arithmetic should not overflow")
     );
-    assert_eq!(local_heat, Money::from_cents(5_000));
+    assert_eq!(local_heat, Money::from_cents(12_000));
     assert_eq!(local_attention, AttentionClass::Notable);
     let hot_cycle = fixture
         .state
@@ -3554,7 +3554,7 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
     assert!(
         hot_information
             .summary()
-            .contains("$50.00 street surcharge while police work stays heavy")
+            .contains("$120.00 street surcharge while police work stays heavy")
     );
     validate_state(&fixture.state).expect("district heat state should validate");
     validate_invariants(&fixture.state);
@@ -5791,7 +5791,7 @@ fn same_minute_peer_racket_inquiry_does_not_retroactively_raise_cycle_heat() {
     .expect("first hot peer cycle should resolve");
     assert_eq!(
         first_plan.economics.investigation_heat,
-        Money::from_cents(5_000),
+        Money::from_cents(12_000),
         "the one preexisting district case should price the first peer cycle"
     );
     let first_cycle = validate_enterprise_cycle_plan(&fixture.state, first_plan)
@@ -5820,7 +5820,7 @@ fn same_minute_peer_racket_inquiry_does_not_retroactively_raise_cycle_heat() {
     .expect("second same-minute peer cycle should resolve");
     assert_eq!(
         second_plan.economics.investigation_heat,
-        Money::from_cents(5_000),
+        Money::from_cents(12_000),
         "a peer inquiry created by an earlier settlement at the same instant cannot retroactively tax this cycle"
     );
     let second_cycle = validate_enterprise_cycle_plan(&fixture.state, second_plan)
@@ -5865,7 +5865,7 @@ fn same_minute_peer_racket_inquiry_does_not_retroactively_raise_cycle_heat() {
     .expect("next-day source cycle should resolve");
     assert_eq!(
         source_next_day.economics.investigation_heat,
-        Money::from_cents(10_000),
+        Money::from_cents(24_000),
         "the preexisting pressure case and yesterday's racket inquiry should both apply to the source racket"
     );
     let source_cycle = validate_enterprise_cycle_plan(&fixture.state, source_next_day)
@@ -5893,7 +5893,7 @@ fn same_minute_peer_racket_inquiry_does_not_retroactively_raise_cycle_heat() {
     .expect("next-day peer cycle should resolve");
     assert_eq!(
         next_day.economics.investigation_heat,
-        Money::from_cents(10_000),
+        Money::from_cents(24_000),
         "on the next cycle the preexisting case and yesterday's racket inquiry must both apply"
     );
     validate_state(&fixture.state).expect("peer settlement pressure state should validate");
@@ -6019,7 +6019,7 @@ fn sustained_district_heat_draws_a_racket_inquiry_onto_the_racket_itself() {
         .expect("compounded cycle should persist");
     assert_eq!(
         settled_cycle.investigation_heat(),
-        Money::from_cents(10_000),
+        Money::from_cents(24_000),
         "two active district cases must compound the authored surcharge"
     );
 

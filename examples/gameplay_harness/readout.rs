@@ -295,6 +295,28 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             .expect("front must exist")
             .name(),
     );
+    {
+        let member_count = scenario
+            .state
+            .world()
+            .characters_in_organization(scenario.player)
+            .count()
+            .max(1);
+        let daily_wage =
+            scenario.registry.upkeep().per_member_daily().cents() * member_count as i64;
+        let treasury = scenario
+            .state
+            .finance()
+            .get_account(scenario.liquidation_cash)
+            .expect("starting street treasury must exist")
+            .balance()
+            .cents();
+        println!(
+            "[ECONOMY] Starting street treasury {}; wages {} /day across {member_count} member(s). Front and racket books have not settled yet; heat surcharges and payroll will decide whether idle trade covers headcount or scores must carry the crew.",
+            format_cents(treasury),
+            format_cents(daily_wage),
+        );
+    }
     let (contact_name, handler_name) = {
         let record = scenario
             .state
@@ -1462,18 +1484,26 @@ pub fn print_metrics(metrics: &RunMetrics) {
     let property_acquired = optional_dollars(metrics.property_acquired_value_cents);
     let property_realized = optional_dollars(metrics.property_realized_cash_cents);
     let liquidation_minute = optional_minute(metrics.liquidation_minute);
+    let strategy = metrics.strategy.expect("strategy must be set").label();
+    let variation = metrics
+        .variation
+        .expect("fixture variation must be set")
+        .label();
     println!(
-        "{:<6} [{:<9}]: {}, finish {:?}m, police dispatched {}, police arrived {}, decisions {}, plan items {} {:?}, intel {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}, case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (follow-up hot {:?}), cold confirmed {:?} @ {:?}, case work {}/{}, surveillance discoveries {}, reports {}, briefs {}, recruitment {}, poach warnings {}, departures {}, legit {}, enterprise {}, matched@{}: legit {}, enterprise {}",
-        metrics.strategy.expect("strategy must be set").label(),
-        metrics
-            .variation
-            .expect("fixture variation must be set")
-            .label(),
+        "{strategy:<6} [{variation:<9}]: {}, finish {:?}m",
         terminal_label(metrics),
         metrics.burglary_terminal_minute,
+    );
+    println!(
+        "        pressure: police dispatched {}, arrived {}, decisions {}, standing aborts carry {:?}/{:?}",
         metrics.police_dispatched,
         metrics.police_arrived,
         metrics.decision_requests,
+        metrics.abort_phase,
+        metrics.abort_cause,
+    );
+    println!(
+        "        intel: plan items {} {:?}, quality {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}",
         metrics.planning_information_count,
         metrics.planning_information_topics,
         metrics.burglary_information_quality,
@@ -1482,6 +1512,9 @@ pub fn print_metrics(metrics: &RunMetrics) {
         property_acquired,
         property_realized,
         liquidation_minute,
+    );
+    println!(
+        "        legal: case {}, evidence {}, player legal intel {}, police intel {}, follow-up {:?}/{} info (hot {:?}), cold {:?} @ {:?}, work {}/{}",
         metrics.investigation_created,
         metrics.evidence_count,
         metrics.player_legal_activity_information,
@@ -1493,12 +1526,19 @@ pub fn print_metrics(metrics: &RunMetrics) {
         metrics.case_cold_minute,
         metrics.investigation_work_scheduled,
         metrics.investigation_work_resolved,
+    );
+    println!(
+        "        attention: scout findings {}, reports {}, briefs {}, recruitment {}, poach warnings {}, departures {}, contact reads {}",
         metrics.discovered_surveillance_information,
         metrics.player_report_count,
         metrics.executive_brief_count,
         metrics.autonomous_recruitment_attempts,
         metrics.player_poach_warnings,
         metrics.player_personnel_departures,
+        metrics.contact_reads,
+    );
+    println!(
+        "        books: legit {}, enterprise {}, matched@{}: legit {}, enterprise {}",
         optional_dollars(metrics.legitimate_net_cents),
         optional_dollars(metrics.enterprise_net_cents),
         optional_minute(metrics.matched_financial_boundary_minute),

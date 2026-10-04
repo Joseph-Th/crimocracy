@@ -1137,13 +1137,27 @@ pub fn establish_harbor_expansion(
         .cents();
     // Waive the laundering floor for the strategic diversification: any positive street
     // cash can capitalize the harbor book, even if the main till is lean from heat taxes.
-    let expansion_float_cents = EXPANSION_FLOAT_TARGET_CENTS.min(canal_balance.max(0));
+    // Prefer idle gambling cash first, then fall back to the general street treasury:
+    // leadership uses whatever idle cash it actually holds rather than letting a lean
+    // home till strand an owned harbor venue without its escape book.
+    let liquidation_balance = scenario
+        .state
+        .finance()
+        .get_account(scenario.liquidation_cash)
+        .expect("general street treasury must exist")
+        .balance()
+        .cents();
+    let canal_contribution = EXPANSION_FLOAT_TARGET_CENTS.min(canal_balance.max(0));
+    let remaining_after_canal = EXPANSION_FLOAT_TARGET_CENTS - canal_contribution;
+    let liquidation_contribution = remaining_after_canal.min(liquidation_balance.max(0)).max(0);
+    let expansion_float_cents = canal_contribution + liquidation_contribution;
     if expansion_float_cents < 1_00 {
-        // Truly empty till - defer one day for the next enterprise cycle to settle.
+        // Truly empty tills - defer one day for the next enterprise cycle to settle.
         if narrative {
             println!(
-                "[EXPAND]   Harbor book waits: canal till holds {}, needs $1 for float. Retrying next cycle.",
-                format_cents(canal_balance)
+                "[EXPAND]   Harbor book waits: canal till holds {}, street treasury holds {}, needs $1 for float. Retrying next cycle.",
+                format_cents(canal_balance),
+                format_cents(liquidation_balance),
             );
         }
         return Ok(());
@@ -1205,21 +1219,29 @@ pub fn establish_harbor_expansion(
         .get_mandate(scenario.lieutenant_mandate)
         .map(|record| record.version())
         .expect("revised mandate must persist");
+    let mut float_postings = Vec::new();
+    if canal_contribution > 0 {
+        float_postings.push(LedgerPosting {
+            account: canal_cash,
+            amount: Money::from_cents(-canal_contribution),
+        });
+    }
+    if liquidation_contribution > 0 {
+        float_postings.push(LedgerPosting {
+            account: scenario.liquidation_cash,
+            amount: Money::from_cents(-liquidation_contribution),
+        });
+    }
+    float_postings.push(LedgerPosting {
+        account: scenario.expansion_cash,
+        amount: Money::from_cents(expansion_float_cents),
+    });
     validate_record_transaction(
         &scenario.state,
         LedgerTransactionDraft {
             occurred_at: scenario.state.now(),
             memo: "Capitalize the second-district book".to_owned(),
-            postings: vec![
-                LedgerPosting {
-                    account: canal_cash,
-                    amount: Money::from_cents(-expansion_float_cents),
-                },
-                LedgerPosting {
-                    account: scenario.expansion_cash,
-                    amount: Money::from_cents(expansion_float_cents),
-                },
-            ],
+            postings: float_postings,
             authorization: None,
         },
     )?

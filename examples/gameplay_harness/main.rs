@@ -69,6 +69,9 @@ fn run_smoke(
         "mode: smoke | world seed {:#x} | policy seed {:#x}",
         seeds.world, seeds.policy
     );
+    println!(
+        "fantasy: Learn what the city reveals, turn it into an organizational plan, delegate execution, then stay powerful enough to absorb the consequences."
+    );
     let contract = match selected_strategy {
         Some(strategy) => format!(
             "contract: {} canonical strategy path (legal foundation skipped)",
