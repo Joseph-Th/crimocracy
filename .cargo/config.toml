@@ -27,6 +27,10 @@ test-release = ["test", "--locked", "--release", "--quiet"]
 soak = ["test", "--locked", "--lib", "--quiet", "soak", "--", "--nocapture"]
 # Harness implementation contracts. Scenario-scale checks are explicitly ignored from the
 # routine target; the deep lane runs every ignored harness test.
+# Focused harness iteration appends a filter substring, mirroring test-focused:
+#   cargo test-harness press_stand_down   # one harness behavior only
+# Focused strategy smoke stays on the warm dev cache for sub-second iteration:
+#   cargo harness-rush  (or -press / -recon)  # one strategy branch only
 test-harness = ["test", "--locked", "--quiet", "--example", "gameplay_harness"]
 test-harness-deep = ["test", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--ignored"]
 

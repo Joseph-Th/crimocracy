@@ -7,11 +7,18 @@
 #
 # Stages (broad gate, in order, fail-fast):
 #   1. compile-free documentation contracts
-#   2. cargo fmt --check
+#   2. cargo fmt --check (all files; Fast/Check lanes check changed files only)
 #   3. cargo test --locked --lib --quiet -- --skip soak
-#   4. fast gameplay-harness implementation contracts
-#   5. gameplay-harness smoke executable
-#   6. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
+#   4. gameplay-harness smoke executable (--mode smoke)
+#   5. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
+#
+# The broad gate intentionally stops at canonical smoke. Harness implementation
+# contracts (`cargo test-harness`, ~12s of full-arc sessions) stay in the
+# Harness lane so persistence/invariant checkpoints do not rebuild and rerun
+# the example test binary on every change. Run the Harness lane when harness
+# code itself changes; use `cargo test-harness <filter>` or
+# `verify -Harness -Filter <pat>` plus `cargo harness-rush/-press/-recon`
+# for sub-second harness iteration.
 #
 # Soak-class stress (`soak` substring) stays explicit (`cargo soak`) in every
 # lane, including the broad gate: it costs ~4s of simulated mixed-state work
@@ -22,10 +29,11 @@
 #
 # Lanes:
 #   .\scripts\verify.cmd                  broad gate for contracts that require it
-#   .\scripts\verify.cmd -Fast            fmt + lib tests --skip soak
+#   .\scripts\verify.cmd -Fast            fmt (changed files) + lib tests --skip soak
 #   .\scripts\verify.cmd -Harness         fmt + harness contracts + smoke
-#   .\scripts\verify.cmd -Check           fmt + lib type-check only
-#   .\scripts\verify.cmd -Fast -Filter X  fmt + matching lib tests
+#   .\scripts\verify.cmd -Harness -Filter X  fmt (changed) + matching harness tests, no smoke
+#   .\scripts\verify.cmd -Check           fmt (changed files) + lib type-check only
+#   .\scripts\verify.cmd -Fast -Filter X  fmt (changed) + matching lib tests
 #   cargo check-fast / test-fast / harness  even more targeted, via .cargo aliases
 #
 # Flags: -Jobs N  cap cargo parallelism  |  -NoClippy -NoFmt  skip known-passing
@@ -100,8 +108,9 @@ function Invoke-CargoStage {
             "fmt*"              { "fix formatting: cargo fmt" }
             "lib*tests"         { "re-run: cargo test-focused <filter>  or  cargo test --lib -- --nocapture" }
             "test-focused*"     { "re-run: cargo test-focused <filter> -- --nocapture" }
+            "test-harness*"     { "re-run: cargo test-harness <filter> -- --nocapture" }
             "harness contracts*" { "re-run: cargo test-harness -- --nocapture" }
-            "harness smoke"      { "re-run: cargo harness  or  cargo harness-rush" }
+            "harness smoke"     { "re-run: cargo harness  or  cargo harness-rush" }
             "clippy*"           { "fix lints: cargo clippy --lib --example gameplay_harness -- -D warnings" }
             "check*"            { "re-run: cargo check-fast  or  cargo check-all" }
             default             { "" }
@@ -176,6 +185,57 @@ function Skip-Stage {
     $script:GateStagesSkipped++
 }
 
+function Invoke-FmtStage {
+    param([switch]$ChangedOnly)
+    if (-not $ChangedOnly) {
+        Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false
+        return
+    }
+    # Fast lanes check only changed .rs files so fmt stays sub-second on a
+    # warm tree (full `cargo fmt --check` scans ~240 files, ~1.5s on Windows).
+    # The broad and harness completion lanes still check every file.
+    $changed = @()
+    $prevGitEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    try { $changed += (& git diff --name-only HEAD -- '*.rs' 2>$null) } catch {}
+    try { $changed += (& git ls-files --others --exclude-standard -- '*.rs' 2>$null) } catch {}
+    $ErrorActionPreference = $prevGitEAP
+    $files = @($changed | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object -Unique)
+    if ($files.Count -eq 0) {
+        Skip-Stage -Name "fmt (changed)" -Reason "no changed .rs"
+        return
+    }
+    $displayName = "fmt (changed)".PadRight(28)
+    Write-Host "  $displayName " -NoNewline -ForegroundColor Cyan
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    # Edition must match Cargo.toml (`edition = "2024"`).
+    $output = & rustfmt --edition 2024 --check $files 2>&1 | Out-String
+    $exit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    $sw.Stop()
+    $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    $timing = ("{0,5}s" -f $elapsed)
+    if ($exit -ne 0) {
+        Write-Host "FAIL $timing" -ForegroundColor Red
+        $trimmed = $output.Trim()
+        if ($trimmed) {
+            $lines = $trimmed -split "`n"
+            if ($lines.Count -gt 40) {
+                $lines = $lines[0..39] + @("  ... ($($lines.Count - 40) more lines truncated; run cargo fmt to fix)")
+            }
+            Write-Host ($lines -join "`n") -ForegroundColor DarkGray
+        }
+        Write-Host "  -> rustfmt --edition 2024 --check ($($files.Count) changed file(s))" -ForegroundColor Red
+        Write-Host "  hint: fix formatting: cargo fmt" -ForegroundColor Yellow
+        exit $exit
+    }
+    $script:GateStagesPassed++
+    $script:GateTimings += [pscustomobject]@{ Stage = "fmt (changed)"; Seconds = $elapsed }
+    Write-Host "ok   $timing  ($($files.Count) file(s))" -ForegroundColor Green
+}
+
 # ── bookkeeping ──────────────────────────────────────────────────────────────
 
 $script:GateStagesPassed = 0
@@ -193,15 +253,15 @@ if ($gitBranch) {
     Write-Host "  branch $gitBranch @ $gitShort" -ForegroundColor DarkGray
 }
 
-if ($Harness -and ($Fast -or $Filter)) {
-    Write-Host "[FAIL] -Harness is its own lane; do not combine it with -Fast or -Filter" -ForegroundColor Red
+if ($Harness -and $Fast) {
+    Write-Host "[FAIL] -Harness is its own lane; do not combine it with -Fast" -ForegroundColor Red
     exit 1
 }
 if ($Check -and ($Fast -or $Harness -or $Filter)) {
     Write-Host "[FAIL] -Check cannot be combined with -Fast, -Harness, or -Filter" -ForegroundColor Red
     exit 1
 }
-if ($Filter -and -not $Fast) {
+if ($Filter -and -not ($Fast -or $Harness)) {
     Write-Host "  note: -Filter implies -Fast (focused lib tests)" -ForegroundColor Yellow
     $Fast = $true
 }
@@ -211,7 +271,7 @@ if ($Filter -and -not $Fast) {
 if ($Check) {
     $gate = [System.Diagnostics.Stopwatch]::StartNew()
     Write-Host "CHECK LANE: library type-check" -ForegroundColor Yellow
-    if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
+    if (-not $NoFmt) { Invoke-FmtStage -ChangedOnly }
     Invoke-CargoStage "check lib" @("check", "--locked", "--lib")
     $gate.Stop()
     Write-Host "CHECK PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  type-check only" -ForegroundColor Green
@@ -223,6 +283,15 @@ if ($Check) {
 
 if ($Harness) {
     $gate = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($Filter) {
+        Write-Host "HARNESS: focused harness tests matching '$Filter'" -ForegroundColor Yellow
+        if (-not $NoFmt) { Invoke-FmtStage -ChangedOnly }
+        Invoke-CargoStage "test-harness $Filter" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $Filter) -MinimumPassed 1 -ShowOutputOnPass:$Detail
+        $gate.Stop()
+        Write-Host "HARNESS PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  filter: $Filter" -ForegroundColor Green
+        Write-Host "  full harness completion: .\scripts\verify.cmd -Harness  |  strategy smoke: cargo harness-rush" -ForegroundColor DarkGray
+        exit 0
+    }
     Write-Host "HARNESS LANE: implementation contracts + canonical smoke" -ForegroundColor Yellow
     if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
     Invoke-CargoStage "harness contracts" @("test", "--locked", "--quiet", "--example", "gameplay_harness")
@@ -242,7 +311,7 @@ if ($Fast) {
     $gate = [System.Diagnostics.Stopwatch]::StartNew()
     if ($Filter) {
         Write-Host "FAST: focused lib tests matching '$Filter'" -ForegroundColor Yellow
-        if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
+        if (-not $NoFmt) { Invoke-FmtStage -ChangedOnly }
         Invoke-CargoStage "test-focused $Filter" @("test", "--locked", "--lib", "--quiet", $Filter) -MinimumPassed 1 -ShowOutputOnPass:$Detail
         $gate.Stop()
         Write-Host "FAST PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  filter: $Filter" -ForegroundColor Green
@@ -252,7 +321,7 @@ if ($Fast) {
 
     $lane = "library unit tests (soak excluded)"
     Write-Host "FAST LANE: $lane" -ForegroundColor Yellow
-    if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
+    if (-not $NoFmt) { Invoke-FmtStage -ChangedOnly }
     Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
     $gate.Stop()
     $totalSec = [math]::Round($gate.Elapsed.TotalSeconds, 1)
@@ -269,7 +338,7 @@ if ($Fast) {
 
 $gate = [System.Diagnostics.Stopwatch]::StartNew()
 $jobsDisplay = if ($Jobs -eq 0) { "auto" } else { "$Jobs" }
-Write-Host "BROAD GATE  (docs -> fmt -> lib -> harness contracts -> smoke -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
+Write-Host "BROAD GATE  (docs -> fmt -> lib -> smoke -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
 
 Invoke-DocsStage
 
@@ -281,9 +350,9 @@ if ($NoFmt) {
 
 Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
 
-# Verification-infrastructure and cross-domain changes need the harness adapter's fast contracts,
-# but scenario-scale comparisons stay in their explicit deep tier.
-Invoke-CargoStage "harness contracts" @("test", "--locked", "--quiet", "--example", "gameplay_harness")
+# The broad gate proves systemic behavior through the canonical smoke executable,
+# not by rerunning every harness implementation contract. Harness contracts stay
+# in the Harness lane (`verify -Harness`), where harness code itself is the change.
 Invoke-CargoStage "harness smoke" @("run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke")
 
 if ($NoClippy) {

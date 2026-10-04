@@ -12,7 +12,7 @@ cockpit routing is in [`AGENTS.md`](AGENTS.md).
 | Syntax / types | `cargo check-fast` (no linking) | `.\scripts\verify.cmd -Check` (adds fmt) |
 | One library behavior | `cargo test-focused <filter>` | `.\scripts\verify.cmd -Fast -Filter <filter>` |
 | Library implementation | `cargo check-fast` or focused test | `.\scripts\verify.cmd -Fast` |
-| Harness implementation | `cargo test-harness` or focused smoke | `.\scripts\verify.cmd -Harness` |
+| Harness implementation | `cargo test-harness <filter>` or focused smoke (`cargo harness-rush`) | `.\scripts\verify.cmd -Harness` (or `-Harness -Filter <pat>`, no smoke) |
 | Scenario-scale harness behavior | `cargo test-harness-deep` | `cargo harness-full --samples <N>` |
 | Persistence, invariants, or cross-domain | Owning module's focused test plus a save/restore round-trip | `.\scripts\verify.cmd` (broad gate) |
 | Mixed-state stress | `cargo soak` (always explicit, never part of a gate) | same command |
@@ -87,21 +87,27 @@ cannot silently drop deep coverage. These deeper tiers are evidence, not prerequ
 | Type-check harness | `cargo check-harness` | example adapter compiles |
 | Lib tests (no soak) | `cargo test-fast` | all library tests except soak-class tests |
 | One test / module | `cargo test-focused <filter>` | owning module's `#[cfg(test)]` |
-| Harness contracts | `cargo test-harness` | fast harness implementation tests; deep scenario tests excluded |
+| Harness contracts | `cargo test-harness` | harness implementation tests; deep scenario tests excluded |
+| One harness behavior | `cargo test-harness <filter>` | matching harness tests only (check the pass count; a typo matches zero) |
 | Deep harness contracts | `cargo test-harness-deep` | explicit scenario-scale comparison tests |
-| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter` or `-Harness`) | lib check by default; selected executable proof on demand |
+| Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter`, `-Harness`, or both) | lib check by default; lib focused, harness smoke, or harness focused on demand |
 | Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | one strategy branch |
 | Full-mode batch | `cargo harness-full --samples 8` | all strategies, matched seeds, artifacts |
-| Check lane | `.\scripts\verify.cmd -Check` | fmt + lib type-check |
-| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | library completion gate |
-| Harness lane | `.\scripts\verify.cmd -Harness` | fmt + fast harness contracts + executable smoke |
-| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pat>` | fail-closed focused tests + fmt |
+| Check lane | `.\scripts\verify.cmd -Check` | fmt (changed files) + lib type-check |
+| Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | library completion gate; fmt checks changed files only |
+| Harness lane | `.\scripts\verify.cmd -Harness` | fmt + harness contracts + executable smoke |
+| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pat>` | fail-closed focused lib tests + fmt (changed) |
+| Filtered harness lane | `.\scripts\verify.cmd -Harness -Filter <pat>` | fail-closed focused harness tests, no smoke + fmt (changed) |
 | Soak only | `cargo soak` | mixed-state invariant stress |
 
 `cargo check-fast` is the absolute fastest; `cargo test-focused` is the inner loop
-for behavior. A single-owner change can complete through the filtered fast lane
-without rerunning every library test. The broad gate is reserved for contracts that
-actually cross persistence, invariant, domain, or verification boundaries.
+for library behavior and `cargo test-harness <filter>` plus `cargo harness-rush`
+(or `-press` / `-recon`) is the inner loop for harness behavior. A single-owner
+change can complete through the filtered fast lane without rerunning every
+library test. A harness change can complete through the filtered harness lane
+without rerunning every harness contract or the full smoke. The broad gate is
+reserved for contracts that actually cross persistence, invariant, domain, or
+verification boundaries.
 
 Build-profile tuning and measured compile-cost observations live with Cargo configuration.
 This document owns behavioral proof selection, not machine-specific timing claims.
@@ -120,20 +126,19 @@ Fail-fast stages, in order (see [`scripts/verify.ps1`](scripts/verify.ps1)):
 1. Compile-free documentation/route/alias/version contracts (`scripts/check-docs.ps1`)
 2. `cargo fmt --check`
 3. `cargo test --locked --lib --quiet -- --skip soak` (soak stays explicit via `cargo soak`)
-4. Fast gameplay-harness implementation contracts (`cargo test-harness`)
-5. Gameplay-harness smoke executable (`--mode smoke`): canonical strategies plus the legal-foundation chain
-6. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
+4. Gameplay-harness smoke executable (`--mode smoke`): canonical strategies plus the legal-foundation chain
+5. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
 
-[`scripts/verify.ps1`](scripts/verify.ps1) owns the broad gate; [`scripts/verify.cmd`](scripts/verify.cmd) wraps it. Scenario-scale harness comparisons stay explicit instead of taxing every persistence or cross-domain change. `scripts/check-docs.ps1` replaces the former Rust integration test for authority/link/route/alias/version checks, so documentation-only completion does not compile the crate.
+[`scripts/verify.ps1`](scripts/verify.ps1) owns the broad gate; [`scripts/verify.cmd`](scripts/verify.cmd) wraps it. The broad gate proves systemic behavior through smoke, not by rerunning every harness implementation contract: harness contracts stay in the Harness lane so persistence or cross-domain checkpoints do not rebuild and rerun the example test binary. Scenario-scale harness comparisons stay explicit instead of taxing every persistence or cross-domain change. `scripts/check-docs.ps1` replaces the former Rust integration test for authority/link/route/alias/version checks, so documentation-only completion does not compile the crate.
 
 **When to run what:**
 
-- One-owner behavior work may complete with `.\scripts\verify.cmd -Fast -Filter <filter>`; broader library work with `.\scripts\verify.cmd -Fast`; harness implementation work with `.\scripts\verify.cmd -Harness`.
-- Run the broad gate only when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider smoke/Clippy coverage, or for an explicit broad checkpoint. It intentionally stops at canonical smoke; a full gameplay study is specialized evidence, not a tax on unrelated changes. Never rerun it after a passing narrower lane merely for reassurance.
+- One-owner behavior work may complete with `.\scripts\verify.cmd -Fast -Filter <filter>`; broader library work with `.\scripts\verify.cmd -Fast`; harness implementation work with `.\scripts\verify.cmd -Harness` (or `-Harness -Filter <pat>` for one harness behavior, no smoke).
+- Run the broad gate only when persistence, invariants, cross-domain behavior, verification infrastructure, or another changed contract requires its wider smoke/Clippy coverage, or for an explicit broad checkpoint. It intentionally stops at canonical smoke; harness implementation contracts and the full gameplay study are specialized evidence, not a tax on unrelated changes. Never rerun it after a passing narrower lane merely for reassurance.
 - Run `cargo soak`, `cargo test-harness-deep`, or a multi-sample `cargo harness-full` only when the changed contract requires that evidence.
 - When optimized compilation could change behavior, also run `cargo test-release`.
 
-Gate flags: `-Check` (fmt + lib type-check) | `-Fast` (library tests, soak excluded) | `-Harness` (fast harness contracts + smoke) | `-Filter <pat>` (fail-closed focused library tests; implies `-Fast`) | `-Jobs N` (cap parallelism) | `-NoClippy` / `-NoFmt` (skip known-passing) | `-Verbose` / `-Detail` (show captured output on success).
+Gate flags: `-Check` (fmt on changed files + lib type-check) | `-Fast` (library tests, soak excluded; fmt on changed files) | `-Harness` (harness contracts + smoke; with `-Filter <pat>` runs fail-closed focused harness tests without smoke) | `-Filter <pat>` (fail-closed focused tests; implies `-Fast` unless `-Harness` is given) | `-Jobs N` (cap parallelism) | `-NoClippy` / `-NoFmt` (skip known-passing) | `-Verbose` / `-Detail` (show captured output on success).
 
 Documentation contracts are intentionally outside Rust's integration-test graph. The checker reads source declarations directly, so Markdown and command-surface changes have a complete compile-free path and the broad gate no longer links a second test binary merely to validate documentation.
 

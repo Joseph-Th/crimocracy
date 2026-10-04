@@ -9,6 +9,7 @@
 #   powershell -NoProfile -File scripts\watch.ps1                  # lib type-check (default)
 #   powershell -NoProfile -File scripts\watch.ps1 -Filter <name>   # matching lib tests only
 #   powershell -NoProfile -File scripts\watch.ps1 -Harness         # harness smoke executable
+#   powershell -NoProfile -File scripts\watch.ps1 -Harness -Filter <name>  # matching harness tests only
 #
 # The first run starts immediately; later runs start ~300ms after your last
 # save. Press Ctrl+C to stop. Works on both Windows PowerShell 5.1 and pwsh.
@@ -24,14 +25,11 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-if ($Filter -and $Harness) {
-    Write-Host "[FAIL] -Filter and -Harness select different lanes" -ForegroundColor Red
-    exit 1
-}
-
 # ── resolve the lane once ────────────────────────────────────────────────────
 
-$title = if ($Filter) {
+$title = if ($Filter -and $Harness) {
+    "focused harness tests: $Filter"
+} elseif ($Filter) {
     "focused tests: $Filter"
 } elseif ($Harness) {
     "harness smoke"
@@ -39,7 +37,9 @@ $title = if ($Filter) {
     "lib type-check"
 }
 
-$cargoArgs = if ($Filter) {
+$cargoArgs = if ($Filter -and $Harness) {
+    @("test", "--locked", "--quiet", "--example", "gameplay_harness", $Filter)
+} elseif ($Filter) {
     @("test", "--locked", "--lib", "--quiet", $Filter)
 } elseif ($Harness) {
     @("run", "--locked", "--quiet", "--example", "gameplay_harness",
@@ -112,7 +112,7 @@ try {
     $watcher.EnableRaisingEvents = $true
     Write-Host "CRIMOCRACY WATCH" -ForegroundColor Cyan
     Write-Host "  lane: $title   (save a file to rerun, Ctrl+C to stop)" -ForegroundColor DarkGray
-    Write-Host "  tip:  -Filter <name> for one behavior  |  -Harness for gameplay smoke" -ForegroundColor DarkGray
+    Write-Host "  tip:  -Filter <name> for one behavior  |  -Harness for gameplay smoke  |  -Harness -Filter <name> for one harness behavior" -ForegroundColor DarkGray
 
     $runCount = 0
     while ($true) {
@@ -126,9 +126,18 @@ try {
         Write-Host ("{0}  {1,5}s{2}" -f $status, $result.Seconds, $countInfo) -ForegroundColor $color
         if ($result.Output -and $result.Exit -ne 0) {
             # Cap watch failure output so the terminal stays scannable.
+            $rerunHint = if ($Harness -and $Filter) {
+                "re-run with cargo test-harness $Filter -- --nocapture"
+            } elseif ($Harness) {
+                "re-run with cargo harness-rush  or  cargo test-harness -- --nocapture"
+            } elseif ($Filter) {
+                "re-run with cargo test-focused $Filter -- --nocapture"
+            } else {
+                "re-run with cargo check-fast"
+            }
             $lines = $result.Output -split "`n"
             if ($lines.Count -gt 60) {
-                $lines = $lines[0..59] + @("  ... ($($lines.Count - 60) more lines; re-run with cargo test -- --nocapture)")
+                $lines = $lines[0..59] + @("  ... ($($lines.Count - 60) more lines; $rerunHint)")
             }
             Write-Host ($lines -join "`n") -ForegroundColor DarkGray
         }
