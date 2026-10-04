@@ -1456,6 +1456,61 @@ fn witness_interview_scheduling_prioritizes_unattempted_witness_before_retry() {
 }
 
 #[test]
+fn witness_interview_scheduling_prefers_more_cooperative_unattempted_witness() {
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Weak,
+        EvidenceReliability::Mixed,
+        Admissibility::Unknown,
+    );
+    let hostile = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            subject: EntityRef::Character(fixture.first),
+            cooperation: crate::legal::WitnessCooperation::Hostile,
+        },
+    )
+    .expect("hostile witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("hostile witness registration should commit");
+    let cooperative = crate::legal::witness_system::validate_register_case_witness(
+        &fixture.state,
+        crate::legal::CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.middle,
+            subject: EntityRef::Character(fixture.first),
+            cooperation: crate::legal::WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("cooperative witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("cooperative witness registration should commit");
+    assert!(
+        hostile < cooperative,
+        "fixture must create the hostile witness first"
+    );
+
+    let scheduled = apply_witness_interview_scheduling(&registry, &mut fixture.state)
+        .expect("witness scheduling should resolve");
+    assert_eq!(scheduled.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_investigation_work(scheduled[0])
+            .expect("scheduled interview should persist")
+            .focus(),
+        InvestigationWorkFocus::witness(cooperative),
+        "equal-attempt witnesses should be ordered by modeled cooperation before record ID"
+    );
+    validate_state(&fixture.state).expect("cooperation-prioritized scheduling should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn direct_interview_scheduling_rejects_witness_who_already_gave_statement() {
     let registry = build_registry();
     let mut fixture = make_fixture(

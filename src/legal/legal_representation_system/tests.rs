@@ -538,7 +538,7 @@ fn mandate_automatic_legal_support_accepts_exact_cash_and_budget_headroom() {
 }
 
 #[test]
-fn mandate_automatic_legal_support_funds_only_the_affordable_same_budget_prefix() {
+fn mandate_automatic_legal_support_uses_stable_tie_break_for_equal_priority_budget_limit() {
     let mut fx = fixture_with_options(OrganizationKind::LegalServices, true);
     let supervisor = fx
         .supervisor
@@ -600,7 +600,7 @@ fn mandate_automatic_legal_support_funds_only_the_affordable_same_budget_prefix(
             .active_representation_for_arrest(fx.arrest)
             .map(|record| record.id()),
         outcome.retained.first().copied(),
-        "stable arrest order should fund the earlier supervised detainee first"
+        "equal-priority detainees should use arrest ID only as the final deterministic tie-breaker"
     );
     assert!(
         fx.state
@@ -1290,22 +1290,17 @@ fn automatic_legal_support_retention_batch_exhaustion_is_terminal_noop_atomicall
 }
 
 #[test]
-fn automatic_legal_support_retains_only_the_affordable_detainee_without_error() {
+fn automatic_legal_support_prioritizes_pending_custody_decision_when_funds_are_scarce() {
     let mut fx = fixture();
-    validate_set_policy(
-        &fx.registry,
-        &fx.state,
-        fx.sponsor,
-        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
-    )
-    .expect("automatic legal-support policy should validate")
-    .commit(&fx.registry, &mut fx.state)
-    .expect("automatic legal-support policy should commit");
+    let decision_delay = fx.registry.legal().informant_decision_delay().as_minutes();
+    for _ in 0..=decision_delay {
+        run_tick(&fx.registry, &mut fx.state);
+    }
 
     let second_defendant = insert_character(
         &mut fx.state,
         CharacterDraft {
-            name: "Later Affordable Associate".to_owned(),
+            name: "Newly Arrested Associate".to_owned(),
             organization: Some(fx.sponsor),
             supervisor: fx.supervisor,
             autonomy: AutonomyLevel::Guided,
@@ -1324,54 +1319,35 @@ fn automatic_legal_support_retains_only_the_affordable_detainee_without_error() 
         .expect("second defendant arrest should validate")
         .commit(&mut fx.state)
         .expect("second defendant arrest should commit");
-
-    let parked = insert_account(
-        &mut fx.state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Organization(fx.sponsor),
-            kind: AccountKind::Settlement,
-        },
-    )
-    .expect("parking account should validate");
-    validate_record_transaction(
+    validate_set_policy(
+        &fx.registry,
         &fx.state,
-        LedgerTransactionDraft {
-            occurred_at: fx.state.now(),
-            memo: "Leave exactly one automatic legal retainer liquid".to_owned(),
-            postings: vec![
-                LedgerPosting {
-                    account: fx.payer,
-                    amount: Money::from_cents(-45_000),
-                },
-                LedgerPosting {
-                    account: parked,
-                    amount: Money::from_cents(45_000),
-                },
-            ],
-            authorization: None,
-        },
+        fx.sponsor,
+        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
     )
-    .expect("liquidity partition should validate")
-    .commit(&mut fx.state)
-    .expect("liquidity partition should commit");
+    .expect("automatic legal-support policy should validate")
+    .commit(&fx.registry, &mut fx.state)
+    .expect("automatic legal-support policy should commit");
+
+    leave_exactly_one_automatic_retainer_liquid(&mut fx);
 
     let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
         .expect("limited liquidity is ordinary availability, not a failed legal-support pass");
     assert_eq!(outcome.retained.len(), 1);
-    assert_eq!(
-        fx.state
-            .legal()
-            .active_representation_for_arrest(fx.arrest)
-            .map(|record| record.id()),
-        outcome.retained.first().copied(),
-        "stable arrest order should fund the earlier detainee first"
-    );
     assert!(
         fx.state
             .legal()
-            .active_representation_for_arrest(second_arrest)
+            .active_representation_for_arrest(fx.arrest)
             .is_none(),
-        "the later detainee remains unrepresented when the shared liquid pool is exhausted"
+        "a detainee whose one-time cooperation decision already passed must not consume scarce counsel ahead of a pending decision"
+    );
+    assert_eq!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(second_arrest)
+            .map(|record| record.id()),
+        outcome.retained.first().copied(),
+        "the newly detained member still has a counsel-sensitive cooperation decision ahead"
     );
     assert_eq!(
         fx.state
@@ -1383,6 +1359,107 @@ fn automatic_legal_support_retains_only_the_affordable_detainee_without_error() 
     );
     validate_state(&fx.state).expect("limited-liquidity support should remain structurally valid");
     validate_invariants(&fx.state);
+}
+
+#[test]
+fn automatic_legal_support_treats_exact_informant_decision_minute_as_pending() {
+    let mut fx = fixture();
+    fx.state
+        .advance_clock(fx.registry.legal().informant_decision_delay());
+    let second_defendant = insert_character(
+        &mut fx.state,
+        CharacterDraft {
+            name: "Later Custody Associate".to_owned(),
+            organization: Some(fx.sponsor),
+            supervisor: fx.supervisor,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second defendant should validate");
+    let second_arrest_draft =
+        arrest_draft_for_character(&mut fx, second_defendant, "Boundary custody inquiry");
+    let second_arrest = validate_arrest(&fx.registry, &fx.state, second_arrest_draft)
+        .expect("second defendant arrest should validate")
+        .commit(&mut fx.state)
+        .expect("second defendant arrest should commit");
+    validate_set_policy(
+        &fx.registry,
+        &fx.state,
+        fx.sponsor,
+        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+    )
+    .expect("automatic legal-support policy should validate")
+    .commit(&fx.registry, &mut fx.state)
+    .expect("automatic legal-support policy should commit");
+
+    leave_exactly_one_automatic_retainer_liquid(&mut fx);
+    let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
+        .expect("exact decision-minute support should resolve");
+    assert_eq!(outcome.retained.len(), 1);
+    assert_eq!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(fx.arrest)
+            .map(|record| record.id()),
+        outcome.retained.first().copied(),
+        "counsel retained at the exact decision minute still precedes and can affect the detainee decision"
+    );
+    assert!(
+        fx.state
+            .legal()
+            .active_representation_for_arrest(second_arrest)
+            .is_none(),
+        "a later pending decision should not outrank the exact same-minute decision"
+    );
+    validate_state(&fx.state).expect("exact decision-minute support should remain valid");
+    validate_invariants(&fx.state);
+}
+
+fn leave_exactly_one_automatic_retainer_liquid(fx: &mut Fixture) {
+    let parked = insert_account(
+        &mut fx.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fx.sponsor),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("parking account should validate");
+    let fee = fx.registry.legal().automatic_support_retainer();
+    let payer_balance = fx
+        .state
+        .finance()
+        .get_account(fx.payer)
+        .expect("payer account should persist")
+        .balance();
+    let excess = payer_balance
+        .checked_sub(fee)
+        .expect("fixture should retain enough post-payroll liquidity for one retainer");
+    validate_record_transaction(
+        &fx.state,
+        LedgerTransactionDraft {
+            occurred_at: fx.state.now(),
+            memo: "Leave exactly one automatic legal retainer liquid".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fx.payer,
+                    amount: excess
+                        .checked_neg()
+                        .expect("positive fixture excess must be negatable"),
+                },
+                LedgerPosting {
+                    account: parked,
+                    amount: excess,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("liquidity partition should validate")
+    .commit(&mut fx.state)
+    .expect("liquidity partition should commit");
 }
 
 #[test]

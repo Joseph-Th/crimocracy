@@ -275,23 +275,32 @@ fn acquisition_payment_draft(
     price: Money,
     business_name: &str,
 ) -> LedgerTransactionDraft {
+    // Spend the largest spendable balance first so one well-funded accounted pocket covers
+    // the price alone instead of draining every low-ID dust account. ID breaks exact-balance
+    // ties. This matches payroll's largest-first funding order; the debit set is otherwise
+    // identical, only the fragmentation differs.
+    let mut ordered: Vec<(FinancialAccountId, Money)> = funding_accounts
+        .iter()
+        .map(|account| {
+            let spendable = state
+                .finance
+                .get_account(*account)
+                .expect("validated acquisition funding account must exist")
+                .spendable_balance();
+            (*account, spendable)
+        })
+        .filter(|(_, spendable)| *spendable != Money::ZERO)
+        .collect();
+    ordered.sort_by_key(|(account, spendable)| (std::cmp::Reverse(spendable.cents()), *account));
     let mut postings = Vec::with_capacity(funding_accounts.len() + 1);
     let mut remaining = price;
-    for account in funding_accounts {
+    for (account, spendable) in ordered {
         if remaining == Money::ZERO {
             break;
         }
-        let spendable = state
-            .finance
-            .get_account(*account)
-            .expect("validated acquisition funding account must exist")
-            .spendable_balance();
-        if spendable == Money::ZERO {
-            continue;
-        }
         let debit = spendable.min(remaining);
         postings.push(LedgerPosting {
-            account: *account,
+            account,
             amount: debit
                 .checked_neg()
                 .expect("positive acquisition debit must negate"),

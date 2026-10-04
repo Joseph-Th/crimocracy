@@ -11,6 +11,7 @@ use crate::core::id::{CharacterId, EvidenceId, IdKind, InvestigationId, Investig
 use crate::core::state::AppState;
 use crate::legal::{
     InvestigationRecord, InvestigationWorkDraft, InvestigationWorkFocus, InvestigationWorkKind,
+    WitnessCooperation,
 };
 use crate::registry::Registry;
 
@@ -242,10 +243,17 @@ fn plan_next_witness_interview(
         .filter(|witness| {
             witness.interview_attempts() < registry.legal().witness_interview_attempt_limit()
         })
-        .map(|witness| (witness.interview_attempts(), witness.id()))
+        .map(|witness| {
+            (
+                witness.interview_attempts(),
+                witness_cooperation_priority(witness.cooperation()),
+                witness.registered_at(),
+                witness.id(),
+            )
+        })
         .collect();
     witnesses.sort_unstable();
-    for (_, case_witness) in witnesses {
+    for (_, _, _, case_witness) in witnesses {
         let focus = InvestigationWorkFocus::witness(case_witness);
         if state
             .legal
@@ -274,6 +282,14 @@ fn plan_next_witness_interview(
         }
     }
     Ok(None)
+}
+
+const fn witness_cooperation_priority(cooperation: WitnessCooperation) -> u8 {
+    match cooperation {
+        WitnessCooperation::Cooperative => 0,
+        WitnessCooperation::Reluctant => 1,
+        WitnessCooperation::Hostile => 2,
+    }
 }
 
 /// Returns the oldest case-owned reviewable evidence that has not received a real autonomous

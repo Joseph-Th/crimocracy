@@ -5,9 +5,7 @@ use crate::core::id::EvidenceId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
-use crate::legal::arrest_system::{
-    arrest_evidence_meets_threshold, custody_release_at, evidence_qualifies_for_custody,
-};
+use crate::legal::arrest_system::{arrest_evidence_meets_threshold, custody_release_at};
 use crate::legal::informant_system::{
     informant_reliability, informant_strength, information_is_relevant_to_investigation,
 };
@@ -83,7 +81,11 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
                             || evidence.custodian() != arrest.authority()
                             || evidence.subject() != EntityRef::Character(arrest.character())
                             || evidence.discovered_at() > arrest.arrested_at()
-                            || !evidence_qualifies_for_custody(evidence)
+                            // Cited exhibits must be reference-valid and untainted, but they
+                            // need not each be custody-grade: the canonical arrest path
+                            // ignores merely weak/questionable exhibits and lets the
+                            // aggregate independent-source threshold judge the remainder.
+                            || evidence.admissibility() == Admissibility::Inadmissible
                     })
             })
         {

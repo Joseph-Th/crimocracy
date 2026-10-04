@@ -7,12 +7,16 @@
 //! Take sizing is deliberately static: authored basis points of the target's registry-derived
 //! gross potential model the venue's *typical contents*, not its live register or operating
 //! status. A suspended storefront still holds goods worth taking; only the recent-take
-//! depletion index (persisted at completion commit) decays a repeated target.
+//! depletion index (persisted at completion commit) decays a repeated target. An actively
+//! sabotage-disrupted venue pays takes from its degraded current gross instead: wrecking the
+//! shop leaves emptier shelves until repairs catch up.
 use super::operation_execution::OperationResolutionError;
 use crate::core::entity::EntityRef;
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
-use crate::economy::business_economy_system::resolve_business_gross_potential;
+use crate::economy::business_economy_system::{
+    BusinessEconomyError, resolve_business_current_gross, resolve_business_gross_potential,
+};
 use crate::finance::Money;
 use crate::finance::helpers::apply_basis_point_multiplier;
 use crate::operations::{
@@ -94,7 +98,7 @@ pub(crate) fn resolve_property_proceeds(
         });
     }
 
-    let gross = resolve_business_gross_potential(registry, state, *business)?;
+    let gross = resolve_take_gross(registry, state, *business)?;
     let reference_at = take_reference_time(state, operation);
     let recent_hits = recent_take_times(
         state,
@@ -142,6 +146,25 @@ fn take_reference_time(
         .resolution()
         .map(|resolution| resolution.resolved_at())
         .unwrap_or_else(|| state.now())
+}
+
+/// Take basis: the venue's degraded current gross while an active sabotage-disruption
+/// horizon applies, otherwise its normal gross potential. Businesses without operating
+/// books have no disruption horizon to honor, so they pay from potential directly. Both
+/// resolution planning and registry-aware invariant re-derivation consume this owner, so
+/// a persisted haul re-derives exactly.
+fn resolve_take_gross(
+    registry: &Registry,
+    state: &AppState,
+    business: crate::core::id::BusinessId,
+) -> Result<Money, OperationResolutionError> {
+    match resolve_business_current_gross(registry, state, business) {
+        Ok(gross) => Ok(gross),
+        Err(BusinessEconomyError::MissingBusinessEconomy(_)) => {
+            resolve_business_gross_potential(registry, state, business).map_err(Into::into)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn recent_take_times(
@@ -262,7 +285,7 @@ pub(crate) fn resolve_cash_proceeds(
         });
     }
 
-    let gross = resolve_business_gross_potential(registry, state, *business)?;
+    let gross = resolve_take_gross(registry, state, *business)?;
     let reference_at = take_reference_time(state, operation);
     let recent_hits = recent_take_times(
         state,
@@ -381,6 +404,15 @@ pub(crate) const SABOTAGE_DISRUPTION_CLAUSE: &str =
 mod tests {
     use super::*;
     use crate::core::id::OperationId;
+    use crate::finance::finance_system::insert_account;
+    use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+    use crate::world::world_system::{insert_business, insert_neighborhood, insert_organization};
+    use crate::world::{
+        BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, NeighborhoodDraft,
+        NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
+        OrganizationDraft, OrganizationKind, Rating,
+    };
+    use std::collections::BTreeSet;
 
     fn proceeds_overflow(operation: OperationId) -> OperationResolutionError {
         OperationResolutionError::PropertyProceedsOverflow { operation }
@@ -427,6 +459,120 @@ mod tests {
         assert_eq!(
             depleted, 0,
             "an active repeat-target penalty must not round a one-cent take back to one cent"
+        );
+    }
+
+    #[test]
+    fn disrupted_venue_pays_takes_from_degraded_current_gross() {
+        use crate::economy::BusinessEconomyDraft;
+        use crate::economy::business_economy_system::{
+            validate_disrupt_business_economy, validate_establish_business_economy,
+        };
+
+        let registry = crate::build_registry();
+        let mut state = crate::AppState::new(0xD15C_4B5E);
+        let organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Take Gross Holdings".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("take-gross organization should validate");
+        let neighborhood = insert_neighborhood(
+            &mut state,
+            NeighborhoodDraft {
+                name: "Take Gross Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: Rating::try_new(50).expect("fixture wealth should validate"),
+                        commercial_activity: Rating::try_new(50)
+                            .expect("fixture commerce should validate"),
+                        illicit_demand: Rating::try_new(50)
+                            .expect("fixture demand should validate"),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: Rating::try_new(30)
+                            .expect("fixture police presence should validate"),
+                    },
+                },
+            },
+        )
+        .expect("take-gross neighborhood should validate");
+        let business = insert_business(
+            &registry,
+            &mut state,
+            BusinessDraft {
+                name: "Take Gross Grocer".to_owned(),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::CustomerAccess,
+                ]),
+                neighborhood,
+                owner: BusinessOwner::Organization(organization),
+            },
+        )
+        .expect("take-gross business should validate");
+
+        let potential = resolve_business_gross_potential(&registry, &state, business)
+            .expect("take basis should resolve before books exist");
+        // A venue that never operated has no disruption horizon to honor.
+        assert_eq!(
+            resolve_take_gross(&registry, &state, business)
+                .expect("bookless take basis should fall back to potential"),
+            potential
+        );
+
+        let operating = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(business),
+                kind: AccountKind::LegitimateOperating,
+            },
+        )
+        .expect("operating account should validate");
+        let settlement = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(business),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .expect("settlement account should validate");
+        validate_establish_business_economy(
+            &registry,
+            &state,
+            BusinessEconomyDraft {
+                business,
+                operating_account: operating,
+                settlement_account: settlement,
+            },
+        )
+        .expect("take-gross books should validate")
+        .commit(&mut state)
+        .expect("take-gross books should commit");
+        assert_eq!(
+            resolve_take_gross(&registry, &state, business)
+                .expect("undisrupted take basis should match potential"),
+            potential
+        );
+
+        validate_disrupt_business_economy(&registry, &state, business)
+            .expect("sabotage disruption should validate")
+            .commit(&mut state)
+            .expect("sabotage disruption should commit");
+        let degraded = resolve_take_gross(&registry, &state, business)
+            .expect("disrupted take basis should resolve");
+        assert!(
+            degraded < potential,
+            "wrecking the shop must leave emptier shelves: degraded {degraded:?} vs potential {potential:?}"
+        );
+        assert_eq!(
+            degraded,
+            resolve_business_current_gross(&registry, &state, business)
+                .expect("take basis must track the degraded books cycles settle on")
         );
     }
 }

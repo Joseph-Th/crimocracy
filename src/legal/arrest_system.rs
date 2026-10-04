@@ -50,14 +50,6 @@ use thiserror::Error;
 pub enum ArrestError {
     #[error("character {0} does not exist")]
     MissingCharacter(CharacterId),
-    #[error(
-        "arrest evidence {evidence} is too weak for custody: strength {strength:?}, reliability {reliability:?}"
-    )]
-    InsufficientEvidence {
-        evidence: EvidenceId,
-        strength: crate::legal::EvidenceStrength,
-        reliability: crate::legal::EvidenceReliability,
-    },
     #[error("arrest evidence {evidence} is inadmissible and cannot justify custody")]
     InadmissibleEvidence {
         evidence: EvidenceId,
@@ -491,17 +483,20 @@ fn validate_arrest_dependencies(
             });
         }
         if !evidence_qualifies_for_custody(evidence) {
+            // Tainted exhibits are a procedural error to cite: reject the draft rather than
+            // silently dropping what the drafter explicitly relied on. Merely weak,
+            // questionable, or multi-source-derived exhibits are simply not custody-grade, so
+            // skip them and let the aggregate independent-source bar judge the remaining
+            // qualifying citations. This matches the autonomous converter, which cites one
+            // qualifying record per independent source; a draft citing {Strong-A, Strong-B,
+            // Weak-C} must arrest exactly like {Strong-A, Strong-B} instead of failing on C.
             if evidence.admissibility() == crate::legal::Admissibility::Inadmissible {
                 return Err(ArrestError::InadmissibleEvidence {
                     evidence: *evidence_id,
                     admissibility: evidence.admissibility(),
                 });
             }
-            return Err(ArrestError::InsufficientEvidence {
-                evidence: *evidence_id,
-                strength: evidence.strength(),
-                reliability: evidence.reliability(),
-            });
+            continue;
         }
         assessment.observe(state, evidence);
     }

@@ -421,7 +421,7 @@ fn resolve_target_snapshot(
                 .world
                 .get_organization(id)
                 .ok_or(SurveillanceError::MissingTarget(target))?;
-            let active_members = state
+            let mut active_members: Vec<_> = state
                 .world
                 .characters_in_organization(id)
                 .filter(|character| {
@@ -432,6 +432,7 @@ fn resolve_target_snapshot(
                 })
                 .map(|character| (character.id(), character.name().to_owned()))
                 .collect();
+            rotate_observation_candidates(&mut active_members, at);
             let law_enforcement_sightline = if is_law_enforcement_authority(organization.kind()) {
                 // Watching an authority may reveal whether it is working a case caused by the
                 // surveiller's own activity. Case selection uses only durable origin ownership,
@@ -441,13 +442,16 @@ fn resolve_target_snapshot(
             } else {
                 None
             };
-            // The organization index is EnterpriseId ordered. Snapshot the bounded selection
-            // itself so additions, lifecycle changes, and every displayed dependency are
-            // re-derived at validation without reading ledgers or institutional case truth.
+            // The organization indexes are ID ordered for deterministic traversal, but creation
+            // order is not a visibility rule. Rotate the bounded observation window by the
+            // simulated observation minute so repeated surveillance can discover later members
+            // and rackets instead of permanently exposing only the lowest IDs.
             let active_enterprises = if organization.kind() == OrganizationKind::Criminal {
-                state
-                    .enterprises
-                    .active_for_organization(id)
+                let mut candidates: Vec<_> =
+                    state.enterprises.active_for_organization(id).collect();
+                rotate_observation_candidates(&mut candidates, at);
+                candidates
+                    .into_iter()
                     .take(3)
                     .map(|enterprise| resolve_enterprise_snapshot(state, enterprise))
                     .collect()
@@ -542,6 +546,17 @@ fn resolve_target_snapshot(
         | EntityRef::DecisionRequest(_)
         | EntityRef::Mandate(_) => Err(SurveillanceError::UnsupportedTarget(target)),
     }
+}
+
+fn rotate_observation_candidates<T>(candidates: &mut [T], at: SimTime) {
+    let len = candidates.len();
+    if len <= 1 {
+        return;
+    }
+    let len_u64 = u64::try_from(len).expect("persisted observation candidates must fit u64");
+    let offset = usize::try_from(at.as_minutes() % len_u64)
+        .expect("observation rotation offset must fit candidate length");
+    candidates.rotate_left(offset);
 }
 
 fn resolve_enterprise_snapshot(

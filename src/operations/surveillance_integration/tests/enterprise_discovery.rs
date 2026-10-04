@@ -279,8 +279,7 @@ fn organization_surveillance_uses_active_enterprise_footprint_for_police_geograp
 }
 
 #[test]
-fn achieved_organization_surveillance_discovers_first_three_active_enterprises_and_unlocks_followup()
- {
+fn achieved_organization_surveillance_discovers_three_active_enterprises_and_unlocks_followup() {
     let mut fixture = fixture(100, false);
     let (rival, authority) = make_test_rival(&mut fixture);
     // Names deliberately disagree with identity order. Inactive low IDs must not consume slots.
@@ -321,17 +320,35 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
         .iter()
         .map(|id| fixture.state.intelligence().get_information(*id).unwrap())
         .collect::<Vec<_>>();
+    assert_eq!(discovered[0].subject(), EntityRef::Organization(rival));
+    let discovered_enterprises = discovered[1..]
+        .iter()
+        .map(|information| match information.subject() {
+            EntityRef::Enterprise(enterprise) => enterprise,
+            other => panic!("expected enterprise observation, found {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(discovered_enterprises.len(), 3);
     assert_eq!(
-        discovered
+        discovered_enterprises
             .iter()
-            .map(|information| information.subject())
-            .collect::<Vec<_>>(),
-        vec![
-            EntityRef::Organization(rival),
-            EntityRef::Enterprise(enterprises[1]),
-            EntityRef::Enterprise(enterprises[3]),
-            EntityRef::Enterprise(enterprises[4])
-        ],
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3,
+        "bounded organization surveillance should select distinct active enterprises"
+    );
+    let active = BTreeSet::from([
+        enterprises[1],
+        enterprises[3],
+        enterprises[4],
+        enterprises[5],
+    ]);
+    assert!(
+        discovered_enterprises
+            .iter()
+            .all(|enterprise| active.contains(enterprise)),
+        "suspended and retired enterprises must not consume a bounded discovery slot"
     );
     assert_eq!(
         discovered[0].signal(),
@@ -339,7 +356,16 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
             characters: BTreeSet::from([authority.manager]),
         })
     );
-    for (information, location) in discovered[1..].iter().zip([names[1], names[3], names[4]]) {
+    for information in &discovered[1..] {
+        let enterprise = match information.subject() {
+            EntityRef::Enterprise(enterprise) => enterprise,
+            other => panic!("expected enterprise observation, found {other:?}"),
+        };
+        let index = enterprises
+            .iter()
+            .position(|candidate| *candidate == enterprise)
+            .expect("discovered enterprise must come from the fixture");
+        let location = names[index];
         assert_eq!(information.topic(), InformationTopic::EnterpriseActivity);
         assert_eq!(
             information.holder(),
@@ -395,9 +421,22 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
             .entities
             .contains(&EntityRef::Organization(rival))
     );
-    assert!(report.entries()[0].summary.contains(
-        "Surveillance produced 4 usable target observations: personnel around Visible Rival; protection activity at Zulu Ward; protection activity at Yarrow Ward; protection activity at Xenia Ward."
-    ));
+    assert!(
+        report.entries()[0]
+            .summary
+            .contains("personnel around Visible Rival")
+    );
+    for enterprise in &discovered_enterprises {
+        let index = enterprises
+            .iter()
+            .position(|candidate| candidate == enterprise)
+            .expect("discovered enterprise must come from the fixture");
+        assert!(
+            report.entries()[0]
+                .summary
+                .contains(&format!("protection activity at {}", names[index]))
+        );
+    }
     // Existing after-action reports carry findings and target links, not source citations.
     assert_eq!(
         report.entries()[0].summary,
@@ -408,11 +447,19 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
             .unwrap()
             .summary()
     );
-    for enterprise in [enterprises[0], enterprises[2], enterprises[5]] {
-        assert_unknown_enterprise(&fixture, enterprise);
+    for enterprise in enterprises {
+        if !discovered_enterprises.contains(&enterprise) {
+            assert_unknown_enterprise(&fixture, enterprise);
+        }
     }
 
-    let followup = authorize_surveillance(&mut fixture, EntityRef::Enterprise(enterprises[1]));
+    let followup_enterprise = discovered_enterprises[0];
+    let followup_index = enterprises
+        .iter()
+        .position(|candidate| *candidate == followup_enterprise)
+        .expect("follow-up enterprise must come from the fixture");
+    let followup_location = names[followup_index];
+    let followup = authorize_surveillance(&mut fixture, EntityRef::Enterprise(followup_enterprise));
     let envelope = build_save(&fixture.registry, &fixture.state).unwrap();
     let decoded: SaveEnvelope =
         bincode::deserialize(&bincode::serialize(&envelope).unwrap()).unwrap();
@@ -454,7 +501,10 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
                 .unwrap(),
         )
         .unwrap();
-    assert_eq!(information.subject(), EntityRef::Enterprise(enterprises[1]));
+    assert_eq!(
+        information.subject(),
+        EntityRef::Enterprise(followup_enterprise)
+    );
     assert_eq!(followup_resolution.discovered_information().len(), 2);
     let police = followup_resolution
         .discovered_information()
@@ -463,17 +513,17 @@ fn achieved_organization_surveillance_discovers_first_three_active_enterprises_a
         .find(|information| information.topic() == InformationTopic::PoliceActivity)
         .unwrap();
     assert_eq!(police.signal(), None);
-    assert!(
-        police
-            .summary()
-            .contains("No stable daily patrol deployment pattern was confirmed around Zulu Ward")
-    );
+    assert!(police.summary().contains(&format!(
+        "No stable daily patrol deployment pattern was confirmed around {followup_location}"
+    )));
     assert_eq!(
         information.summary(),
-        "Observed protection activity at Zulu Ward appears active under Rival Manager for Visible Rival."
+        format!(
+            "Observed protection activity at {followup_location} appears active under Rival Manager for Visible Rival."
+        )
     );
     // Later inactivity cannot retroactively erase the frozen discovery/provenance.
-    validate_suspend_enterprise(&fixture.state, enterprises[1])
+    validate_suspend_enterprise(&fixture.state, followup_enterprise)
         .unwrap()
         .commit(&mut fixture.state)
         .unwrap();
@@ -648,13 +698,17 @@ fn colocated_rackets_remain_distinguishable_in_surveillance_and_after_action() {
         .intelligence()
         .get_information(result.after_action_information())
         .unwrap();
-    for ((observation, enterprise), label) in
-        observations
+    let labels = ["protection", "bookmaking", "loan-sharking"];
+    for observation in &observations {
+        let enterprise = match observation.subject() {
+            EntityRef::Enterprise(enterprise) => enterprise,
+            other => panic!("expected enterprise observation, found {other:?}"),
+        };
+        let index = enterprises
             .iter()
-            .zip(enterprises)
-            .zip(["protection", "bookmaking", "loan-sharking"])
-    {
-        assert_eq!(observation.subject(), EntityRef::Enterprise(enterprise));
+            .position(|candidate| *candidate == enterprise)
+            .expect("discovered enterprise must come from the fixture");
+        let label = labels[index];
         assert_eq!(
             observation.signal(),
             Some(&InformationSignal::EnterpriseLocation(

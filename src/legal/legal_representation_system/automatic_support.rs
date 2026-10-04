@@ -173,7 +173,7 @@ fn plan_automatic_legal_support_retentions(
     registry: &crate::registry::Registry,
     state: &AppState,
 ) -> Result<AutomaticLegalSupportRetentionPlan, LegalRepresentationError> {
-    let candidates = resolve_automatic_legal_support_candidates(state)?;
+    let candidates = resolve_automatic_legal_support_candidates(registry, state)?;
     let fee = registry.legal().automatic_support_retainer();
     let mut projection = AutomaticSupportFinanceProjection::default();
     let mut retentions = Vec::new();
@@ -218,6 +218,7 @@ fn plan_automatic_legal_support_retentions(
 }
 
 fn resolve_automatic_legal_support_candidates(
+    registry: &crate::registry::Registry,
     state: &AppState,
 ) -> Result<Vec<AutomaticLegalSupportCandidate>, LegalRepresentationError> {
     let mut candidates = Vec::new();
@@ -255,6 +256,28 @@ fn resolve_automatic_legal_support_candidates(
             authorization: resolved.authorization,
         });
     }
+    let now = state.now().as_minutes();
+    let decision_delay = u64::from(registry.legal().informant_decision_delay().as_minutes());
+    // Scarce support must follow modeled need, not merely arrest-record creation order. Counsel
+    // can still change the detainee's one-time cooperation outcome through the decision minute,
+    // so protect candidates whose decision is still pending before spending on matters whose
+    // modeled decision has already passed. Among pending decisions, the closest deadline goes
+    // first. Arrest ID breaks only equal decision times; latent personal drives are deliberately
+    // not consulted by this institutional policy.
+    candidates.sort_unstable_by_key(|candidate| {
+        let arrest = state
+            .legal
+            .get_arrest(candidate.arrest)
+            .expect("automatic-support candidate must retain its arrest");
+        let elapsed = now.saturating_sub(arrest.arrested_at().as_minutes());
+        let decision_has_passed = elapsed > decision_delay;
+        let minutes_until_decision = decision_delay.saturating_sub(elapsed);
+        (
+            decision_has_passed,
+            minutes_until_decision,
+            candidate.arrest,
+        )
+    });
     Ok(candidates)
 }
 

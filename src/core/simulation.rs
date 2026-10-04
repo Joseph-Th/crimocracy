@@ -349,7 +349,7 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
                 // retain the authorized plan and let the finite clock reach its canonical end
                 // instead of treating exhaustion of future time as an impossible-state panic.
                 | Err(OperationError::SimulationTimeOverflow) => {}
-                Err(error) if operation_begin_is_terminally_blocked(&error) => {}
+                Err(error) if operation_error_is_terminally_blocked(&error) => {}
                 Err(error) => {
                     panic!(
                         "due authorized operation could not begin through its canonical path: {error}"
@@ -388,10 +388,6 @@ fn operation_error_is_terminally_blocked(error: &OperationError) -> bool {
                 PoliceResponseError::IdExhaustion(_) | PoliceResponseError::VersionCapacity(_)
             )
     )
-}
-
-fn operation_begin_is_terminally_blocked(error: &OperationError) -> bool {
-    operation_error_is_terminally_blocked(error)
 }
 
 fn operation_phase_batch_is_terminally_blocked(error: &OperationPhaseBatchError) -> bool {

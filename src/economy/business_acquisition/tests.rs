@@ -414,6 +414,94 @@ fn acquisition_aggregates_accounted_funds_across_multiple_accounts() {
 }
 
 #[test]
+fn acquisition_debits_largest_accounted_reserve_first() {
+    let mut fixture = make_independent_fixture();
+    let price = hospitality_price(&fixture);
+    let dust = 10_000_i64;
+    assert!(
+        price.cents() > dust,
+        "fixture price must exceed the dust reserve for the ordering probe"
+    );
+    let second_accounted = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("second accounted reserve should validate");
+    // Low-ID dust pocket plus a well-funded higher-ID pocket: largest-first covers the
+    // price from the second account alone instead of draining the dust account first.
+    fund_accounted_from_street(&mut fixture, dust + price.cents());
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Dust reserve split".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.accounted,
+                    amount: Money::from_cents(-price.cents()),
+                },
+                LedgerPosting {
+                    account: second_accounted,
+                    amount: Money::from_cents(price.cents()),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("dust split should validate")
+    .commit(&mut fixture.state)
+    .expect("dust split should commit");
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(second_accounted)
+            .expect("second reserve should persist")
+            .balance(),
+        price,
+        "larger higher-ID reserve must hold the full price before purchase"
+    );
+
+    validate_acquire_business(
+        &fixture.registry,
+        &fixture.state,
+        BusinessAcquisitionDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            funding_accounts: BTreeSet::from([fixture.accounted, second_accounted]),
+        },
+    )
+    .expect("aggregate accounted funds should cover the acquisition")
+    .commit(&mut fixture.state)
+    .expect("ordered acquisition should commit");
+
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.accounted)
+            .expect("dust reserve should persist")
+            .balance(),
+        Money::from_cents(dust),
+        "largest-first payment must leave the low-ID dust pocket untouched"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(second_accounted)
+            .expect("second reserve should persist")
+            .balance(),
+        Money::ZERO
+    );
+    validate_state(&fixture.state).expect("ordered acquisition should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn acquisition_id_preflight_rejects_without_opening_books_or_consuming_account_ids() {
     let mut fixture = make_independent_fixture();
     let price = hospitality_price(&fixture);

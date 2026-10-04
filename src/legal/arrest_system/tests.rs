@@ -818,10 +818,9 @@ fn arrest_rejects_questionable_evidence_even_when_strong() {
     .expect_err("questionable evidence must not justify custody merely because it is strong");
     assert_eq!(
         error,
-        ArrestError::InsufficientEvidence {
-            evidence: questionable,
-            strength: EvidenceStrength::Strong,
-            reliability: EvidenceReliability::Questionable,
+        ArrestError::InsufficientIndependentEvidence {
+            found: 0,
+            required: 2,
         }
     );
     assert!(
@@ -830,6 +829,55 @@ fn arrest_rejects_questionable_evidence_even_when_strong() {
             .legal()
             .active_arrest_for_character(fixture.suspect)
             .is_none()
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn arrest_ignores_extra_weak_citation_when_strong_pair_qualifies() {
+    let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let weak = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.suspect),
+            origin: None,
+            kind: EvidenceKind::Surveillance,
+            strength: EvidenceStrength::Weak,
+            reliability: EvidenceReliability::Questionable,
+            admissibility: Admissibility::Unknown,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("weak material can remain part of an active investigation")
+    .commit(&mut fixture.state)
+    .expect("weak material should persist as investigative evidence");
+
+    let arrest = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence, corroborating, weak]),
+        },
+    )
+    .expect("a superset citing weak material alongside a qualifying pair must arrest")
+    .commit(&mut fixture.state)
+    .expect("superset arrest should commit");
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_some_and(|record| record.id() == arrest)
     );
     validate_invariants(&fixture.state);
 }

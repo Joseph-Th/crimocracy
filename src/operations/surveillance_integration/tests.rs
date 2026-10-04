@@ -1579,6 +1579,74 @@ fn police_org_surveillance_without_notified_case_produces_personnel_and_survives
 }
 
 #[test]
+fn repeated_organization_surveillance_rotates_bounded_personnel_observations() {
+    let mut fixture = fixture(100, false);
+    let rival = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Rotating Personnel Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("rival organization should validate");
+    let members: Vec<_> = (0..5)
+        .map(|index| {
+            insert_character(
+                &mut fixture.state,
+                CharacterDraft {
+                    name: format!("Observed Member {index}"),
+                    organization: Some(rival),
+                    supervisor: None,
+                    autonomy: AutonomyLevel::Guided,
+                    capabilities: BTreeMap::new(),
+                    traits: BTreeSet::new(),
+                    drives: BTreeMap::new(),
+                },
+            )
+            .expect("rival member should validate")
+        })
+        .collect();
+
+    let observe = |fixture: &mut Fixture| {
+        let operation = authorize_surveillance(fixture, EntityRef::Organization(rival));
+        resolve_with_zero_variance(fixture, operation);
+        let resolution = fixture
+            .state
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.resolution())
+            .expect("organization surveillance should resolve");
+        let information = fixture
+            .state
+            .intelligence()
+            .get_information(*resolution.discovered_information().iter().next().unwrap())
+            .expect("personnel observation should persist");
+        let Some(InformationSignal::PersonnelPresence { characters }) = information.signal() else {
+            panic!("successful organization surveillance should carry typed personnel presence");
+        };
+        characters.clone()
+    };
+
+    let first = observe(&mut fixture);
+    let second = observe(&mut fixture);
+    assert_eq!(first.len(), 3);
+    assert_eq!(second.len(), 3);
+    assert_ne!(
+        first, second,
+        "bounded surveillance must not rediscover the same lowest-ID personnel forever"
+    );
+    let discovered: BTreeSet<_> = first.union(&second).copied().collect();
+    assert!(
+        discovered.len() > 3,
+        "repeated successful surveillance should expand personnel knowledge"
+    );
+    assert!(discovered.is_subset(&members.into_iter().collect()));
+    validate_state(&fixture.state).expect("rotating surveillance state should remain valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn organization_surveillance_carries_visible_member_ids_and_excludes_detainees() {
     let mut fixture = fixture(100, false);
     let rival = insert_organization(
