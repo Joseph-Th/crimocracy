@@ -788,6 +788,17 @@ pub fn print_organization_closing_view(
         } else if metrics.second_opportunity_discovered {
             actions.push("let the second score lapse".to_owned());
         }
+        if metrics.posture_suspensions > 0 {
+            actions.push(format!(
+                "suspended the home racket {} time(s) while heat exceeded income{}",
+                metrics.posture_suspensions,
+                if metrics.posture_resumptions > 0 {
+                    ", reopening once the file cooled"
+                } else {
+                    ""
+                }
+            ));
+        }
         if metrics.front_acquired {
             actions.push("bought the harbor club".to_owned());
         }

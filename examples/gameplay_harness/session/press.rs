@@ -504,6 +504,44 @@ mod tests {
     }
 
     #[test]
+    fn posture_suspends_only_a_losing_trailing_book() {
+        assert_eq!(
+            super::choose_racket_posture(-1),
+            super::RacketPosture::Suspend
+        );
+        assert_eq!(
+            super::choose_racket_posture(0),
+            super::RacketPosture::KeepOpen
+        );
+        assert_eq!(
+            super::choose_racket_posture(16_746),
+            super::RacketPosture::KeepOpen
+        );
+    }
+
+    #[test]
+    fn press_posture_governance_reviews_a_paying_book_without_suspending() {
+        let registry = crimocracy::build_registry();
+        let metrics = play_session(
+            &registry,
+            Strategy::Press,
+            ScenarioProfile::NightTrap,
+            EvaluationSeeds::defaults(),
+            SessionRunMode::FullQuiet,
+        )
+        .expect("full quiet press session should complete");
+        assert!(
+            metrics.posture_evaluations > 0,
+            "the stand-down must actually review the home book from settled cycles"
+        );
+        assert_eq!(
+            metrics.posture_suspensions, 0,
+            "a book that stays net-positive under its heat surcharge stays open"
+        );
+        assert_eq!(metrics.posture_resumptions, 0);
+    }
+
+    #[test]
     fn short_purchase_is_a_canonical_rejection_without_state_mutation() {
         let registry = crimocracy::build_registry();
         let mut scenario = build_scenario(
@@ -765,6 +803,100 @@ fn run_daily_capital_management(
     Ok(())
 }
 
+/// A boss's home-racket posture from the trailing settled book alone: while the
+/// observable trailing net is negative, suspending stops the settlements,
+/// surcharges, and new vice draws; otherwise the book stays open and earning.
+/// An exactly break-even book stays open: it costs nothing to hold while its
+/// manager keeps watching the district.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RacketPosture {
+    KeepOpen,
+    Suspend,
+}
+
+fn choose_racket_posture(trailing_net_cents: i64) -> RacketPosture {
+    if trailing_net_cents < 0 {
+        RacketPosture::Suspend
+    } else {
+        RacketPosture::KeepOpen
+    }
+}
+
+/// Daily player-visible posture governance during the stand-down: read the last
+/// two settled home-racket cycles from production state (the same manager
+/// reports leadership holds), suspend through the canonical path while the
+/// trailing book loses money, and reopen once the contact confirms the file
+/// cooled. Runs identically with or without narration; prints are gated.
+fn govern_home_racket_posture(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    use crimocracy::enterprises::EnterpriseStatus;
+    use crimocracy::enterprises::enterprise_execution::{
+        validate_resume_enterprise, validate_suspend_enterprise,
+    };
+    if scenario
+        .state
+        .enterprises()
+        .get_enterprise(scenario.enterprise)
+        .expect("home enterprise must persist")
+        .status()
+        != EnterpriseStatus::Active
+    {
+        // Suspended and still hot: no fresh cycles settle, so there is nothing new
+        // to judge. Once today's contact read confirms the file cooled, reopen
+        // through the canonical path; the heat that sank the book is gone.
+        if metrics.cold_case_confirmed == Some(true) {
+            validate_resume_enterprise(scenario.registry, &scenario.state, scenario.enterprise)?
+                .commit(&mut scenario.state)?;
+            metrics.posture_resumptions = metrics.posture_resumptions.saturating_add(1);
+            if narrative {
+                println!(
+                    "[POSTURE] The file cooled and the home book reopens with a full new cycle ahead; reopening schedules fresh work rather than paying back the quiet weeks."
+                );
+            }
+        }
+        return Ok(());
+    }
+    let trailing: Vec<(i64, i64)> = scenario
+        .state
+        .enterprises()
+        .cycles_for(scenario.enterprise)
+        .rev()
+        .take(2)
+        .map(|cycle| (cycle.net_cash().cents(), cycle.investigation_heat().cents()))
+        .collect();
+    if trailing.is_empty() {
+        return Ok(());
+    }
+    metrics.posture_evaluations = metrics.posture_evaluations.saturating_add(1);
+    let first_review = metrics.posture_evaluations == 1;
+    let trailing_net: i64 = trailing.iter().map(|(net, _)| net).sum();
+    let trailing_heat: i64 = trailing.iter().map(|(_, heat)| heat).sum();
+    if choose_racket_posture(trailing_net) == RacketPosture::Suspend {
+        validate_suspend_enterprise(&scenario.state, scenario.enterprise)?
+            .commit(&mut scenario.state)?;
+        metrics.posture_suspensions = metrics.posture_suspensions.saturating_add(1);
+        if narrative {
+            println!(
+                "[POSTURE] Home book trailing {} over the last {} settled cycle(s) with {} of heat: suspending the racket until the file cools. Wages still come due and the front keeps trading; the bleeding stops.",
+                format_cents(trailing_net),
+                trailing.len(),
+                format_cents(trailing_heat),
+            );
+        }
+    } else if narrative && first_review {
+        println!(
+            "[POSTURE] Home book trailing {} over the last {} settled cycle(s) with {} of heat: keeping it open while it pays. Leadership re-checks daily and suspends if heat pushes the book negative.",
+            format_cents(trailing_net),
+            trailing.len(),
+            format_cents(trailing_heat),
+        );
+    }
+    Ok(())
+}
+
 fn run_stand_down_and_diversify(
     scenario: &mut Scenario,
     burglary: OperationId,
@@ -839,6 +971,7 @@ fn run_stand_down_and_diversify(
         }
         run_daily_capital_management(scenario, police_name, narrative, metrics, &mut stand_down)?;
         let read = poll_case_activity(scenario, burglary, narrative, metrics)?;
+        govern_home_racket_posture(scenario, narrative, metrics)?;
         narrate_stand_down_heartbeat(scenario, &read, narrative, metrics, &stand_down);
         if cold_case_wait_is_complete(narrative, metrics, &mut stand_down) {
             break;

@@ -913,6 +913,15 @@ pub struct RunMetrics {
     /// True once the branch purchased the harbor venue through the canonical acquisition
     /// path: ownership moved, and accounted funds paid the authored price in full.
     pub front_acquired: bool,
+    /// Live home-racket posture governance during the PRESS stand-down. Leadership
+    /// re-evaluates the trailing settled book each day from manager-reported cycles
+    /// and suspends only while the book loses money, resuming once the file cools.
+    /// Current tuning keeps every book positive, so these normally record reviews
+    /// that kept the book open; a nonzero suspension count proves heat actually
+    /// exceeded income and leadership acted on it through canonical paths.
+    pub posture_evaluations: u32,
+    pub posture_suspensions: u32,
+    pub posture_resumptions: u32,
     /// The authored kind price the acquisition actually paid, quoted from production state.
     pub acquisition_price_cents: Option<i64>,
     /// Accounted funds spent on acquisitions; part of the clean-money accounting identity.
