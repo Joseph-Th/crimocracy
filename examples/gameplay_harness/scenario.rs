@@ -1339,7 +1339,10 @@ pub fn acquire_harbor_front(
     );
     metrics.front_acquired = true;
     metrics.acquisition_price_cents = Some(price.cents());
-    metrics.acquisition_spent_cents = price.cents();
+    metrics.acquisition_spent_cents = metrics
+        .acquisition_spent_cents
+        .checked_add(price.cents())
+        .expect("session acquisition spend must fit money range");
     if narrative {
         println!(
             "[ACQUIRE] {}: {front_name} purchased outright for {} from accounted funds: owner withdrawals and washed earnings both build legitimate wealth.",

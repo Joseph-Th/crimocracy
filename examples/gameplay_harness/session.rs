@@ -612,6 +612,18 @@ fn authorize_initial_burglary(
             record.intelligence().len(),
         );
         print_planning_inputs(scenario, burglary);
+        // Player-honest planning ceiling: current casing produces TargetSecurity,
+        // PoliceActivity, and MarketAccess. Personnel, Schedule, and Route stay unknown
+        // in this window, so the standing abort/decision contingencies above are the
+        // cover for that irreducible gap — not a prompt for more recon before the score closes.
+        if metrics
+            .planning_information_topics
+            .contains(&InformationTopic::MarketAccess)
+        {
+            println!(
+                "[PLAN GAP] Personnel, schedule, and route remain unknown after casing; the authorized abort/decision contingencies carry that residual risk."
+            );
+        }
     }
     Ok(burglary)
 }

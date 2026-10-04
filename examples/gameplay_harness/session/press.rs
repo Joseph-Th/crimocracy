@@ -1047,6 +1047,13 @@ pub fn acquire_annex_front(
     metrics.annex_acquired = true;
     metrics.annex_price_cents = Some(price.cents());
     metrics.annex_spent_cents = price.cents();
+    // The clean-money identity in `validate_run_metrics` reconciles every accounted-funds
+    // purchase against the final balance, so the second front joins the same spend total
+    // rather than living in a separate ledger the contract cannot see.
+    metrics.acquisition_spent_cents = metrics
+        .acquisition_spent_cents
+        .checked_add(price.cents())
+        .expect("session acquisition spend must fit money range");
     if narrative {
         println!(
             "[ACQUIRE] {}: {venue_name} purchased outright for {} from accounted surplus: the score we refused becomes infrastructure - legitimate income the case cannot tax, run clean with no book to heat.",

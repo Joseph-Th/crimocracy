@@ -1245,7 +1245,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
     let per_member = scenario.registry.upkeep().per_member_daily();
     let daily_wage = per_member.cents() * member_count as i64;
     println!(
-        "  Legitimate businesses: {} settled cycle(s), total net {}. Parallel business cycles are not elapsed campaign days.",
+        "  Legitimate businesses: {} settled cycle(s), total net {}. Books settle in parallel per venue; daily rates in the closing view normalize each book rather than counting parallel cycles as extra days.",
         view.legitimate_cycle_count,
         format_cents(view.legitimate_net_cents),
     );

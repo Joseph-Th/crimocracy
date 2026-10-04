@@ -102,7 +102,8 @@ pub fn validate_run_metrics(
     }
     // The money state contract: whatever the organization routed through its front's books
     // must reconcile exactly. Accounted funds are laundering gross plus actual owner
-    // withdrawals, minus the front's fee, acquisition spend, and the wage debits that payroll's
+    // withdrawals, minus the front's fee, every canonical acquisition purchase (harbor club
+    // plus any later annex front), and the wage debits that payroll's
     // ledger took from accounted-funds accounts. Payroll is organization-level and can draw
     // any spendable liquidity, so subtracting the whole wage bill would be just as wrong as
     // pretending clean money can never fund wages. A branch that liquidated stolen property
@@ -539,9 +540,14 @@ pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), Har
     if metrics.strategy != Some(Strategy::Press) {
         return Ok(());
     }
+    // `acquisition_spent_cents` accumulates every canonical accounted-funds purchase
+    // (harbor club plus the later annex front), so the harbor chain is proven by the harbor
+    // price being covered inside that total rather than by exact equality with it.
+    let harbor_price = metrics.acquisition_price_cents.unwrap_or_default();
+    let harbor_spend = metrics.acquisition_spent_cents - metrics.annex_spent_cents;
     let acquisition_complete = metrics.front_acquired
-        && metrics.acquisition_price_cents.is_some_and(|price| price > 0)
-        && metrics.acquisition_spent_cents == metrics.acquisition_price_cents.unwrap_or_default()
+        && harbor_price > 0
+        && harbor_spend == harbor_price
         // The legitimacy gate must be visible: the branch attempted the purchase before
         // its accounted books could cover the authored price at least once.
         && metrics.acquisition_rejections > 0;
