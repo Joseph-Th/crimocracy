@@ -888,7 +888,11 @@ fn narrate_stand_down_heartbeat(
     let should_heartbeat = narrative
         && (stand_down.capital_review_days > 1 || stand_down.till_concealed)
         && metrics.cold_case_confirmed.is_none()
-        && (read.is_some() || stand_down.capital_review_days.is_multiple_of(2));
+        // Heartbeat is a governance summary, not a daily log: report only fresh channel
+        // news, the purchase/expansion beats (narrated at their own sites), or a periodic
+        // pulse every fourth review so a week-long cold-case wait reads as stewardship
+        // rather than spam. Routine enterprise/front settlements already narrate above.
+        && (read.is_some() || stand_down.capital_review_days.is_multiple_of(4));
     if !should_heartbeat {
         return;
     }

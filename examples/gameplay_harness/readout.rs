@@ -762,6 +762,43 @@ pub fn print_organization_closing_view(
             println!("  - Standing {audience:?}/{dimension:?}: {band}.");
         }
     }
+    // Player decision ledger: what leadership actually chose this session, in one
+    // place. Holdings above show where the organization ended up; this shows how it
+    // got there through player-visible channels alone.
+    {
+        let mut actions: Vec<String> = Vec::new();
+        if metrics.contact_reads > 0 {
+            actions.push(format!("{} police-contact read(s)", metrics.contact_reads));
+        }
+        if metrics.witness_pressure_attempted {
+            actions.push("one witness-pressure operation".to_owned());
+        }
+        if metrics.win_back_attempted {
+            actions.push(format!(
+                "one win-back pitch ({})",
+                match metrics.win_back_accepted {
+                    Some(true) => "accepted",
+                    Some(false) => "refused",
+                    None => "unresolved",
+                }
+            ));
+        }
+        if metrics.second_burglary.is_some() {
+            actions.push("worked the second score".to_owned());
+        } else if metrics.second_opportunity_discovered {
+            actions.push("let the second score lapse".to_owned());
+        }
+        if metrics.front_acquired {
+            actions.push("bought the harbor club".to_owned());
+        }
+        if metrics.expansion_established {
+            actions.push("opened a second-district book".to_owned());
+        }
+        if actions.is_empty() {
+            actions.push("no follow-up actions beyond the opening score".to_owned());
+        }
+        println!("  - Player actions: {}.", actions.join("; "));
+    }
 }
 
 /// Presentation-only distance from the authored baseline on the 0..=100 score scale.
@@ -1184,7 +1221,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         stamp(scenario.state.now().as_minutes())
     );
     println!(
-        "  Cash states: street cash can fund wages and rackets but cannot buy businesses; accounted funds from laundering and legitimate owner withdrawals can buy businesses; legitimate operating cash remains on the fronts' own books until withdrawn."
+        "  Cash states: street cash funds wages/rackets but cannot buy businesses; accounted funds (laundering net + legitimate owner withdrawals) buy businesses; front operating cash stays on its books until withdrawn."
     );
     let member_count = scenario
         .state

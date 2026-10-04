@@ -98,7 +98,7 @@ fn run_smoke(
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
         println!(
-            "[SMOKE] {:<5} terminal {:>4} | {} | police {} | evidence {} | intel legal {} / police {} / burglary {} | counter-intel {} | follow-up case {} | cold case {} | recruitment {} attempts / {} departures",
+            "[SMOKE] {:<5} terminal {:>4} | {} | police {} | evidence {}\n        intel legal {} / police {} / burglary {} | counter-intel {} | follow-up {} | cold {} | recruitment {} attempts / {} departures",
             strategy.label(),
             optional_minute(metrics.burglary_terminal_minute),
             terminal_label(&metrics),
