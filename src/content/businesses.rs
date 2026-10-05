@@ -389,11 +389,107 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 base_operating_cost: Money::from_cents(10_500),
                 wealth_revenue_per_point: Money::from_cents(30),
                 commerce_revenue_per_point: Money::from_cents(95),
-                police_cost_per_point: Money::from_cents(10),
+                police_cost_per_point: Money::from_cents(15),
                 gross_variance_basis_points: 550,
                 notable_variance_basis_points: 450,
                 losing_cycles_before_suspension: 3,
                 acquisition_cost: Money::from_cents(52_000),
+            },
+        ),
+        (
+            // Neighborhood pharmacies are modest wealth-sensitive businesses whose prescription
+            // records and regular customers make them strategically distinct from generic
+            // professional offices. Authored instances combine cash handling, customer access,
+            // and record handling, anchoring the narcotics network without being a criminal
+            // venue on their own.
+            BusinessKind::Pharmacy,
+            BusinessEconomicsDefinition {
+                cycle: DAY_DURATION,
+                base_gross: Money::from_cents(12_000),
+                base_operating_cost: Money::from_cents(9_500),
+                wealth_revenue_per_point: Money::from_cents(70),
+                commerce_revenue_per_point: Money::from_cents(60),
+                police_cost_per_point: Money::from_cents(20),
+                gross_variance_basis_points: 700,
+                notable_variance_basis_points: 550,
+                losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(42_000),
+            },
+        ),
+        (
+            // Funeral parlors are discreet wealth-sensitive businesses with private meeting
+            // rooms, kept records, and a vehicle fleet of hearses. Authored instances can
+            // support blackmail meetings, document handling, and quiet transport while
+            // drawing little routine police attention.
+            BusinessKind::FuneralParlor,
+            BusinessEconomicsDefinition {
+                cycle: DAY_DURATION,
+                base_gross: Money::from_cents(14_000),
+                base_operating_cost: Money::from_cents(11_500),
+                wealth_revenue_per_point: Money::from_cents(85),
+                commerce_revenue_per_point: Money::from_cents(45),
+                police_cost_per_point: Money::from_cents(15),
+                gross_variance_basis_points: 600,
+                notable_variance_basis_points: 500,
+                losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(55_000),
+            },
+        ),
+        (
+            // Depression charity missions and soup kitchens are the cheapest fronts in the
+            // city: thin legitimate margins but steady crowds, meeting space, and hiring-hall
+            // access. They buy neighborhood tolerance and political goodwill rather than
+            // profit, in the Gangsters tradition of charity for votes.
+            BusinessKind::SoupKitchen,
+            BusinessEconomicsDefinition {
+                cycle: DAY_DURATION,
+                base_gross: Money::from_cents(9_000),
+                base_operating_cost: Money::from_cents(8_000),
+                wealth_revenue_per_point: Money::from_cents(10),
+                commerce_revenue_per_point: Money::from_cents(40),
+                police_cost_per_point: Money::from_cents(10),
+                gross_variance_basis_points: 450,
+                notable_variance_basis_points: 400,
+                losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(22_000),
+            },
+        ),
+        (
+            // Taxi garages sit between a trucking fleet and an auto shop: dispatch records,
+            // a maintained vehicle fleet with workshop capacity, and street-level customer
+            // flow. They move lookouts, hold getaway cars, and watch patrol patterns without
+            // requiring a full transportation company.
+            BusinessKind::TaxiGarage,
+            BusinessEconomicsDefinition {
+                cycle: DAY_DURATION,
+                base_gross: Money::from_cents(16_000),
+                base_operating_cost: Money::from_cents(13_000),
+                wealth_revenue_per_point: Money::from_cents(35),
+                commerce_revenue_per_point: Money::from_cents(105),
+                police_cost_per_point: Money::from_cents(25),
+                gross_variance_basis_points: 750,
+                notable_variance_basis_points: 550,
+                losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(62_000),
+            },
+        ),
+        (
+            // Picture palaces and neighborhood movie houses draw Depression crowds with cash
+            // tills and lobbies distinct from nightlife or sporting venues. Authored
+            // instances combine cash handling, customer access, and meeting space, hosting
+            // gambling, slots, and blackmail crowds that a speakeasy or gym cannot cover.
+            BusinessKind::MovieTheater,
+            BusinessEconomicsDefinition {
+                cycle: DAY_DURATION,
+                base_gross: Money::from_cents(16_000),
+                base_operating_cost: Money::from_cents(12_000),
+                wealth_revenue_per_point: Money::from_cents(75),
+                commerce_revenue_per_point: Money::from_cents(95),
+                police_cost_per_point: Money::from_cents(30),
+                gross_variance_basis_points: 1_100,
+                notable_variance_basis_points: 800,
+                losing_cycles_before_suspension: 3,
+                acquisition_cost: Money::from_cents(68_000),
             },
         ),
     ];

@@ -97,6 +97,8 @@ pub(crate) fn source_information_proves_operation_basis(
         | OperationKind::Surveillance
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
+        | OperationKind::Kidnapping
+        | OperationKind::Infiltration
         | OperationKind::Sabotage
         | OperationKind::Arson => true,
     }

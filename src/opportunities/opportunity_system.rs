@@ -457,6 +457,8 @@ fn source_information_proves_actionable_basis(
         | OperationKind::Surveillance
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
+        | OperationKind::Kidnapping
+        | OperationKind::Infiltration
         | OperationKind::Sabotage
         | OperationKind::Arson => true,
     }
@@ -769,6 +771,8 @@ pub(crate) fn operation_matches_opportunity_basis(
         | OperationKind::Surveillance
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
+        | OperationKind::Kidnapping
+        | OperationKind::Infiltration
         | OperationKind::Sabotage
         | OperationKind::Arson => true,
     }

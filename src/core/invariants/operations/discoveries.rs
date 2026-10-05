@@ -11,7 +11,9 @@ pub(super) fn validate_operation_discoveries(
 ) -> Result<(), StateValidationError> {
     actual_signatures.clear();
     match operation.kind() {
-        OperationKind::Surveillance | OperationKind::DocumentTheft => {
+        OperationKind::Surveillance
+        | OperationKind::DocumentTheft
+        | OperationKind::Infiltration => {
             let OperationObjective::GatherInformation { target } = operation.objective() else {
                 return Err(StateValidationError::InvalidOperationDiscovery {
                     operation: operation.id(),
@@ -19,6 +21,8 @@ pub(super) fn validate_operation_discoveries(
             };
             if (operation.kind() == OperationKind::Surveillance
                 && !is_supported_surveillance_target(*target))
+                || (operation.kind() == OperationKind::Infiltration
+                    && !is_supported_surveillance_target(*target))
                 || (operation.kind() == OperationKind::DocumentTheft
                     && !matches!(target, EntityRef::Business(_)))
             {
@@ -54,6 +58,7 @@ pub(super) fn validate_operation_discoveries(
         | OperationKind::WitnessPressure
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
+        | OperationKind::Kidnapping
         | OperationKind::Sabotage
         | OperationKind::Arson => {
             if !resolution.discovered_information().is_empty() {
@@ -92,7 +97,7 @@ pub(super) fn validate_operation_discoveries(
     // persisted intelligence records must match that set exactly.
     if matches!(
         operation.kind(),
-        OperationKind::Surveillance | OperationKind::DocumentTheft
+        OperationKind::Surveillance | OperationKind::DocumentTheft | OperationKind::Infiltration
     ) && resolution.discovery_signatures() != actual_signatures
     {
         return Err(StateValidationError::InvalidOperationDiscovery {

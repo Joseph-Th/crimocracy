@@ -453,6 +453,98 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 BusinessFunction::DistributionInfrastructure,
             ]),
         ),
+        (
+            // Early-1930s pharmacy and jazz-club narcotics distribution: morphine, heroin, and
+            // cocaine moved through prescription records and nightlife retail. High margin and
+            // high variance, wealth-sensitive on both street and affluent demand, with the
+            // highest vice enforcement attention after brothels. The canonical post-repeal
+            // pivot racket: it survives the alcohol collapse but trades police heat for press
+            // and resident backlash.
+            EnterpriseKind::NarcoticsTrade,
+            EnterpriseEconomicsDefinition {
+                cycle: DAY_DURATION,
+                base_gross: Money::from_cents(11_000),
+                base_operating_cost: Money::from_cents(6_200),
+                demand_revenue_per_point: Money::from_cents(70),
+                commerce_revenue_per_point: Money::from_cents(60),
+                wealth_revenue_per_point: Money::from_cents(140),
+                management_revenue_per_point: Money::from_cents(75),
+                police_cost_per_point: Money::from_cents(55),
+                support_surcharge_per_business: Money::from_cents(5_000),
+                heat_surcharge_per_active_case: Money::from_cents(12_000),
+                enforcement_attention_basis_points_per_active_case: 700,
+                gross_variance_basis_points: 1_800,
+                notable_variance_basis_points: 1_100,
+                losing_cycles_before_suspension: 3,
+            },
+            BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            BTreeSet::from([
+                BusinessFunction::ProfessionalRecords,
+                BusinessFunction::DistributionInfrastructure,
+            ]),
+        ),
+        (
+            // Compromising-material extortion of the wealthy and connected: photographs,
+            // ledgers, and witness statements converted into standing payments. Wealth-driven
+            // and management-heavy rather than violent, with low street visibility but real
+            // enforcement attention once a victim complains. Feeds on surveillance and
+            // document-theft intelligence rather than on foot traffic.
+            EnterpriseKind::Blackmail,
+            EnterpriseEconomicsDefinition {
+                cycle: DAY_DURATION,
+                base_gross: Money::from_cents(6_000),
+                base_operating_cost: Money::from_cents(3_200),
+                demand_revenue_per_point: Money::from_cents(30),
+                commerce_revenue_per_point: Money::from_cents(40),
+                wealth_revenue_per_point: Money::from_cents(185),
+                management_revenue_per_point: Money::from_cents(90),
+                police_cost_per_point: Money::from_cents(25),
+                support_surcharge_per_business: Money::from_cents(4_500),
+                heat_surcharge_per_active_case: Money::from_cents(12_000),
+                enforcement_attention_basis_points_per_active_case: 380,
+                gross_variance_basis_points: 1_500,
+                notable_variance_basis_points: 900,
+                losing_cycles_before_suspension: 3,
+            },
+            BTreeSet::from([
+                BusinessFunction::ProfessionalRecords,
+                BusinessFunction::MeetingSpace,
+            ]),
+            BTreeSet::from([BusinessFunction::CustomerAccess, BusinessFunction::Lodging]),
+        ),
+        (
+            // Depression-era city-hall graft: kickbacks from municipal contracts, licenses,
+            // and inspections skimmed through friendly contractors and offices. Commerce-driven
+            // and unusually stable, with the lowest police cost of the late-game rackets
+            // because protection is the product. Requires a union and financial footprint,
+            // making it the institutional alternative to street violence.
+            EnterpriseKind::MunicipalGraft,
+            EnterpriseEconomicsDefinition {
+                cycle: DAY_DURATION,
+                base_gross: Money::from_cents(10_000),
+                base_operating_cost: Money::from_cents(5_800),
+                demand_revenue_per_point: Money::from_cents(40),
+                commerce_revenue_per_point: Money::from_cents(135),
+                wealth_revenue_per_point: Money::from_cents(50),
+                management_revenue_per_point: Money::from_cents(90),
+                police_cost_per_point: Money::from_cents(20),
+                support_surcharge_per_business: Money::from_cents(5_000),
+                heat_surcharge_per_active_case: Money::from_cents(12_000),
+                enforcement_attention_basis_points_per_active_case: 250,
+                gross_variance_basis_points: 700,
+                notable_variance_basis_points: 500,
+                losing_cycles_before_suspension: 3,
+            },
+            BTreeSet::new(),
+            BTreeSet::from([
+                BusinessFunction::UnionAccess,
+                BusinessFunction::FinancialServices,
+                BusinessFunction::ProfessionalRecords,
+            ]),
+        ),
     ];
     for (kind, economics, required_business_functions, required_network_functions) in definitions {
         let network_mode = match kind {
@@ -475,7 +567,10 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
             | EnterpriseKind::PrizeFighting
             | EnterpriseKind::Fraud
             | EnterpriseKind::AutoTheftRing
-            | EnterpriseKind::Smuggling => EnterpriseNetworkMode::HostMayContribute,
+            | EnterpriseKind::Smuggling
+            | EnterpriseKind::NarcoticsTrade
+            | EnterpriseKind::Blackmail
+            | EnterpriseKind::MunicipalGraft => EnterpriseNetworkMode::HostMayContribute,
         };
         builder
             .register_enterprise(

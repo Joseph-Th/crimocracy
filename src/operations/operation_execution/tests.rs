@@ -1168,6 +1168,8 @@ fn make_exposed_operation_fixture_with_constraints(
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
+        | OperationKind::Kidnapping
+        | OperationKind::Infiltration
         | OperationKind::Arson => panic!("exposure fixture does not support {kind:?}"),
     };
     let operation = validate_authorize_operation(

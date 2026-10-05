@@ -192,7 +192,7 @@ pub(crate) fn validate_surveillance_request(
     kind: OperationKind,
     objective: &OperationObjective,
 ) -> Result<(), SurveillanceRequestError> {
-    if kind != OperationKind::Surveillance {
+    if kind != OperationKind::Surveillance && kind != OperationKind::Infiltration {
         return Ok(());
     }
     let OperationObjective::GatherInformation { target } = objective else {
@@ -226,7 +226,9 @@ pub(crate) fn decide_surveillance_intelligence(
     operation: &OperationRecord,
     outcome: OperationObjectiveOutcome,
 ) -> Result<Option<SurveillanceIntelligencePlan>, SurveillanceError> {
-    if operation.kind() != OperationKind::Surveillance {
+    if operation.kind() != OperationKind::Surveillance
+        && operation.kind() != OperationKind::Infiltration
+    {
         return Ok(None);
     }
     let OperationObjective::GatherInformation { target } = operation.objective() else {
@@ -246,7 +248,7 @@ pub(crate) fn decide_surveillance_intelligence(
     )?;
     let bucket_minutes = u16::try_from(
         registry
-            .get_operation(OperationKind::Surveillance)
+            .get_operation(operation.kind())
             .execution()
             .patrol_observation_bucket()
             .as_minutes(),
@@ -325,7 +327,8 @@ pub(crate) fn is_valid_persisted_surveillance_information(
     else {
         return false;
     };
-    if operation.kind() != OperationKind::Surveillance
+    if (operation.kind() != OperationKind::Surveillance
+        && operation.kind() != OperationKind::Infiltration)
         || information.holder()
             != KnowledgeHolder::Organization(operation.responsible_organization())
         || information.source_kind() != InformationSourceKind::Surveillance

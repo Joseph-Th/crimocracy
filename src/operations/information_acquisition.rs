@@ -58,7 +58,7 @@ pub(crate) fn decide_operation_information(
     outcome: OperationObjectiveOutcome,
 ) -> Result<Option<OperationInformationPlan>, InformationAcquisitionError> {
     match operation.kind() {
-        OperationKind::Surveillance => {
+        OperationKind::Surveillance | OperationKind::Infiltration => {
             decide_surveillance_intelligence(registry, state, operation, outcome)
                 .map(|plan| plan.map(OperationInformationPlan::Surveillance))
                 .map_err(Into::into)
@@ -76,6 +76,7 @@ pub(crate) fn decide_operation_information(
         | OperationKind::WitnessPressure
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
+        | OperationKind::Kidnapping
         | OperationKind::Sabotage
         | OperationKind::Arson => Ok(None),
     }
@@ -134,7 +135,9 @@ pub(crate) fn persisted_operation_information_after_action_clause(
     operation: &OperationRecord,
 ) -> Result<Option<String>, ()> {
     match operation.kind() {
-        OperationKind::Surveillance => persisted_surveillance_after_action_clause(state, operation),
+        OperationKind::Surveillance | OperationKind::Infiltration => {
+            persisted_surveillance_after_action_clause(state, operation)
+        }
         OperationKind::DocumentTheft => {
             persisted_document_theft_after_action_clause(state, operation)
         }
@@ -146,6 +149,7 @@ pub(crate) fn persisted_operation_information_after_action_clause(
         | OperationKind::WitnessPressure
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
+        | OperationKind::Kidnapping
         | OperationKind::Sabotage
         | OperationKind::Arson => Ok(None),
     }
@@ -156,7 +160,7 @@ pub(crate) fn is_valid_persisted_operation_information(
     information: &InformationRecord,
 ) -> bool {
     match operation.kind() {
-        OperationKind::Surveillance => {
+        OperationKind::Surveillance | OperationKind::Infiltration => {
             is_valid_persisted_surveillance_information(operation, information)
         }
         OperationKind::DocumentTheft => {
@@ -170,6 +174,7 @@ pub(crate) fn is_valid_persisted_operation_information(
         | OperationKind::WitnessPressure
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
+        | OperationKind::Kidnapping
         | OperationKind::Sabotage
         | OperationKind::Arson => false,
     }

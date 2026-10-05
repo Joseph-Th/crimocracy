@@ -70,7 +70,7 @@ pub(crate) fn is_valid_operation_objective(
     match objective {
         OperationObjective::AcquireProperty { target } => matches!(target, EntityRef::Business(_)),
         OperationObjective::GatherInformation { target } => match kind {
-            OperationKind::Surveillance => {
+            OperationKind::Surveillance | OperationKind::Infiltration => {
                 crate::operations::surveillance_integration::is_supported_surveillance_target(
                     *target,
                 )
@@ -84,6 +84,7 @@ pub(crate) fn is_valid_operation_objective(
             | OperationKind::WitnessPressure
             | OperationKind::GamblingEvent
             | OperationKind::Extraction
+            | OperationKind::Kidnapping
             | OperationKind::Sabotage
             | OperationKind::Arson => false,
         },
@@ -186,7 +187,7 @@ fn validate_active_field_objective_targets(
             )
         }
         OperationObjective::GatherInformation { target } => match kind {
-            OperationKind::Surveillance => {
+            OperationKind::Surveillance | OperationKind::Infiltration => {
                 validate_surveillance_target_knowledge(state, responsible_organization, *target)
             }
             OperationKind::DocumentTheft => {
@@ -207,6 +208,7 @@ fn validate_active_field_objective_targets(
             | OperationKind::WitnessPressure
             | OperationKind::GamblingEvent
             | OperationKind::Extraction
+            | OperationKind::Kidnapping
             | OperationKind::Sabotage
             | OperationKind::Arson => unreachable!(
                 "gather-information objective kind was validated before target activation"

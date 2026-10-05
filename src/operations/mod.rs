@@ -48,6 +48,8 @@ pub enum OperationKind {
     Extraction,
     Sabotage,
     Arson,
+    Kidnapping,
+    Infiltration,
 }
 
 impl OperationKind {
@@ -57,10 +59,14 @@ impl OperationKind {
     pub(crate) const fn objective_kind(self) -> OperationObjectiveKind {
         match self {
             Self::Burglary | Self::Hijacking => OperationObjectiveKind::AcquireProperty,
-            Self::Robbery | Self::Smuggling | Self::Intimidation | Self::GamblingEvent => {
-                OperationObjectiveKind::ObtainCash
+            Self::Robbery
+            | Self::Smuggling
+            | Self::Intimidation
+            | Self::GamblingEvent
+            | Self::Kidnapping => OperationObjectiveKind::ObtainCash,
+            Self::Surveillance | Self::DocumentTheft | Self::Infiltration => {
+                OperationObjectiveKind::GatherInformation
             }
-            Self::Surveillance | Self::DocumentTheft => OperationObjectiveKind::GatherInformation,
             Self::WitnessPressure => OperationObjectiveKind::Frighten,
             Self::Extraction => OperationObjectiveKind::FreeDetainee,
             Self::Sabotage | Self::Arson => OperationObjectiveKind::DisruptBusiness,
@@ -123,8 +129,11 @@ impl OperationKind {
             | Self::Intimidation
             | Self::DocumentTheft
             | Self::Sabotage
+            | Self::Kidnapping
             | Self::Arson => Some(OperationBusinessTargetOwnership::Foreign),
-            Self::Surveillance | Self::WitnessPressure | Self::Extraction => None,
+            Self::Surveillance | Self::WitnessPressure | Self::Extraction | Self::Infiltration => {
+                None
+            }
         }
     }
 }
@@ -135,7 +144,7 @@ pub(crate) enum OperationBusinessTargetOwnership {
     SponsorOwned,
 }
 
-pub const ALL_OPERATION_KINDS: [OperationKind; 12] = [
+pub const ALL_OPERATION_KINDS: [OperationKind; 14] = [
     OperationKind::Burglary,
     OperationKind::Robbery,
     OperationKind::Hijacking,
@@ -148,6 +157,8 @@ pub const ALL_OPERATION_KINDS: [OperationKind; 12] = [
     OperationKind::Extraction,
     OperationKind::Sabotage,
     OperationKind::Arson,
+    OperationKind::Kidnapping,
+    OperationKind::Infiltration,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

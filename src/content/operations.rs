@@ -54,6 +54,8 @@ fn operation_name(kind: OperationKind) -> &'static str {
         OperationKind::Extraction => "Extraction",
         OperationKind::Sabotage => "Sabotage",
         OperationKind::Arson => "Arson",
+        OperationKind::Kidnapping => "Kidnapping",
+        OperationKind::Infiltration => "Infiltration",
     }
 }
 
@@ -75,6 +77,7 @@ fn supported_operation_approaches(kind: OperationKind) -> &'static [OperationApp
         OperationKind::Hijacking
         | OperationKind::Intimidation
         | OperationKind::WitnessPressure
+        | OperationKind::Kidnapping
         | OperationKind::Extraction => &[
             OperationApproach::Covert,
             OperationApproach::Deceptive,
@@ -83,7 +86,10 @@ fn supported_operation_approaches(kind: OperationKind) -> &'static [OperationApp
             OperationApproach::InsideAssistance,
             OperationApproach::Opportunistic,
         ],
-        OperationKind::Smuggling | OperationKind::Surveillance | OperationKind::GamblingEvent => &[
+        OperationKind::Smuggling
+        | OperationKind::Surveillance
+        | OperationKind::GamblingEvent
+        | OperationKind::Infiltration => &[
             OperationApproach::Covert,
             OperationApproach::Deceptive,
             OperationApproach::InsideAssistance,
@@ -111,6 +117,8 @@ fn required_roles(kind: OperationKind) -> BTreeSet<RoleKind> {
         OperationKind::DocumentTheft => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
         OperationKind::GamblingEvent => &[RoleKind::Coordinator],
         OperationKind::Extraction => &[RoleKind::Coordinator, RoleKind::Driver],
+        OperationKind::Kidnapping => &[RoleKind::Coordinator, RoleKind::Driver],
+        OperationKind::Infiltration => &[RoleKind::Coordinator],
         OperationKind::Sabotage => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
         OperationKind::Arson => &[RoleKind::Coordinator, RoleKind::EntrySpecialist],
     };
@@ -185,6 +193,25 @@ fn supported_operation_roles(kind: OperationKind) -> &'static [RoleKind] {
             RoleKind::InsideContact,
             RoleKind::EntrySpecialist,
         ],
+        // Ransom seizure billed to the victim family's business: muscle takes, driver
+        // moves, lookout watches the drop. Inside knowledge of routines matters more
+        // than safecracking, so no entry or safe roles.
+        OperationKind::Kidnapping => &[
+            RoleKind::Coordinator,
+            RoleKind::Driver,
+            RoleKind::Muscle,
+            RoleKind::Lookout,
+            RoleKind::InsideContact,
+        ],
+        // A planted associate gathering standing intelligence inside a rival crew or
+        // business. Coordination plus a contact on the inside, watched from a distance;
+        // no forced entry, no getaway driving, no muscle.
+        OperationKind::Infiltration => &[
+            RoleKind::Coordinator,
+            RoleKind::InsideContact,
+            RoleKind::Surveillance,
+            RoleKind::Lookout,
+        ],
         OperationKind::Sabotage | OperationKind::Arson => &[
             RoleKind::Coordinator,
             RoleKind::EntrySpecialist,
@@ -213,6 +240,14 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         // Arson is high-risk message violence: short, exposed, and heavily penalized
         // by police presence — the blunt counterpart to sabotage.
         OperationKind::Arson => (30, 60, 55, 62),
+        // Kidnapping is a long ransom seizure billed to the victim family's business:
+        // the hardest take-kind job, hot with police, and deeply exposed. The payoff
+        // is the largest cash take in the book.
+        OperationKind::Kidnapping => (150, 62, 60, 62),
+        // Infiltration plants an associate inside a rival crew or business for standing
+        // intelligence. Slow, quiet work with minimal police pressure and the lowest
+        // exposure of any operation — the patient counterpart to smash-and-grab takes.
+        OperationKind::Infiltration => (300, 52, 20, 30),
     };
     let role_capabilities = supported_operation_roles(kind)
         .iter()
@@ -220,7 +255,7 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         .map(|role| (role, capability_for_operation_role(role)))
         .collect();
     let leader_capability = match kind {
-        OperationKind::Surveillance => CapabilityKind::Surveillance,
+        OperationKind::Surveillance | OperationKind::Infiltration => CapabilityKind::Surveillance,
         OperationKind::WitnessPressure => CapabilityKind::Intimidation,
         OperationKind::Burglary
         | OperationKind::Robbery
@@ -230,6 +265,7 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
+        | OperationKind::Kidnapping
         | OperationKind::Sabotage
         | OperationKind::Arson => CapabilityKind::Management,
     };
@@ -282,6 +318,8 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
         OperationKind::Extraction => (18, 10, Some(8), 18, 24),
         OperationKind::Sabotage => (24, 12, Some(8), 14, 20),
         OperationKind::Arson => (14, 8, Some(5), 20, 26),
+        OperationKind::Kidnapping => (12, 8, Some(6), 20, 26),
+        OperationKind::Infiltration => (45, 18, None, 10, 14),
     };
     OperationExecutionDefinition {
         difficulty: OperationDifficultyDefinition {
@@ -312,11 +350,13 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             | OperationKind::Intimidation
             | OperationKind::DocumentTheft
             | OperationKind::Sabotage
+            | OperationKind::Kidnapping
             | OperationKind::Arson => Some(OperationBusinessTargetDefinition {
                 required_functions: BTreeSet::new(),
             }),
             OperationKind::Surveillance
             | OperationKind::WitnessPressure
+            | OperationKind::Infiltration
             | OperationKind::Extraction => None,
         },
         intelligence: OperationIntelligenceDefinition {
@@ -388,6 +428,8 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             | OperationKind::GamblingEvent
             | OperationKind::Extraction
             | OperationKind::Sabotage
+            | OperationKind::Kidnapping
+            | OperationKind::Infiltration
             | OperationKind::Arson => None,
         },
         cash_proceeds: match kind {
@@ -395,6 +437,14 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             // a gambling event keeps the house edge; a smuggling run is paid on delivery.
             OperationKind::Robbery => Some(OperationCashProceedsDefinition {
                 business_take_basis_points: 40_000,
+                partial_take_basis_points: 8_000,
+                recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
+                immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
+            }),
+            // Kidnapping ransoms the victim family's business: the largest cash take in
+            // the book, sized against the same business gross as a till robbery.
+            OperationKind::Kidnapping => Some(OperationCashProceedsDefinition {
+                business_take_basis_points: 50_000,
                 partial_take_basis_points: 8_000,
                 recent_take_recovery_window: RECENT_TAKE_RECOVERY_WINDOW,
                 immediate_repeat_value_basis_points: IMMEDIATE_REPEAT_TAKE_VALUE_BASIS_POINTS,
@@ -423,6 +473,7 @@ fn operation_execution(kind: OperationKind) -> OperationExecutionDefinition {
             | OperationKind::WitnessPressure
             | OperationKind::DocumentTheft
             | OperationKind::Extraction
+            | OperationKind::Infiltration
             | OperationKind::Sabotage
             | OperationKind::Arson => None,
         },
@@ -436,10 +487,10 @@ fn operation_exposure_evidence_kind(kind: OperationKind) -> EvidenceKind {
         | OperationKind::Hijacking
         | OperationKind::Smuggling
         | OperationKind::Extraction => EvidenceKind::VehicleDescription,
-        OperationKind::Intimidation | OperationKind::WitnessPressure => {
-            EvidenceKind::WitnessTestimony
-        }
-        OperationKind::Surveillance => EvidenceKind::Surveillance,
+        OperationKind::Intimidation
+        | OperationKind::WitnessPressure
+        | OperationKind::Kidnapping => EvidenceKind::WitnessTestimony,
+        OperationKind::Surveillance | OperationKind::Infiltration => EvidenceKind::Surveillance,
         OperationKind::GamblingEvent => EvidenceKind::FinancialRecord,
         // Sabotage and arson leave physical traces at the scene like any other hands-on crime.
         // Intake evidence cannot be ForensicAnalysis: the legal model derives that kind only
@@ -472,7 +523,10 @@ fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationT
             InformationTopic::PoliceActivity,
             InformationTopic::Route,
         ],
-        OperationKind::Hijacking | OperationKind::Smuggling | OperationKind::Extraction => &[
+        OperationKind::Hijacking
+        | OperationKind::Smuggling
+        | OperationKind::Extraction
+        | OperationKind::Kidnapping => &[
             InformationTopic::Schedule,
             InformationTopic::PoliceActivity,
             InformationTopic::Route,
@@ -482,7 +536,7 @@ fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationT
             InformationTopic::Personnel,
             InformationTopic::PoliceActivity,
         ],
-        OperationKind::Surveillance => &[
+        OperationKind::Surveillance | OperationKind::Infiltration => &[
             InformationTopic::Personnel,
             InformationTopic::EnterpriseActivity,
             InformationTopic::Schedule,

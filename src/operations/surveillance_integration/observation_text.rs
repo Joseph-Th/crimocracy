@@ -25,6 +25,9 @@ pub(super) fn enterprise_kind_label(kind: crate::enterprises::EnterpriseKind) ->
         crate::enterprises::EnterpriseKind::Fraud => "commercial fraud",
         crate::enterprises::EnterpriseKind::AutoTheftRing => "stolen-auto ring",
         crate::enterprises::EnterpriseKind::Smuggling => "smuggling network",
+        crate::enterprises::EnterpriseKind::NarcoticsTrade => "narcotics trade",
+        crate::enterprises::EnterpriseKind::Blackmail => "blackmail",
+        crate::enterprises::EnterpriseKind::MunicipalGraft => "municipal graft",
     }
 }
 

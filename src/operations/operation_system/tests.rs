@@ -232,6 +232,81 @@ fn make_test_draft(
 }
 
 #[test]
+fn kidnapping_authorizes_a_ransom_take_against_a_foreign_business() {
+    // The 1932-33 kidnapping wave is the period crime the racket roster was missing:
+    // a ransom seizure billed to the victim family's business, with the largest cash
+    // take in the book balanced by the hardest difficulty and hottest police pressure.
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let driver = insert_test_operation_leader(&mut state, organization, "Wheelman");
+    let draft = OperationDraft {
+        title: "Ward ransom seizure".to_owned(),
+        kind: OperationKind::Kidnapping,
+        responsible_organization: organization,
+        leader,
+        objective: OperationObjective::ObtainCash { target },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Driver, driver)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: SimTime::ZERO,
+    };
+    let operation = validate_authorize_operation(&registry, &state, draft)
+        .expect("ransom seizure should authorize against a foreign business")
+        .commit(&mut state)
+        .expect("authorized kidnapping should commit");
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("kidnapping should persist");
+    assert_eq!(record.kind(), OperationKind::Kidnapping);
+    assert_eq!(
+        record.objective(),
+        &OperationObjective::ObtainCash { target }
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("authorized kidnapping should remain registry-valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn infiltration_authorizes_a_planted_source_using_surveillance_semantics() {
+    // Rival-crew infiltration is the patient counterpart to smash-and-grab takes: a planted
+    // associate reporting through the proven surveillance-intelligence pipeline, feeding the
+    // blackmail racket and case-awareness play without a new information system.
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let draft = OperationDraft {
+        title: "Ward plant".to_owned(),
+        kind: OperationKind::Infiltration,
+        responsible_organization: organization,
+        leader,
+        objective: OperationObjective::GatherInformation { target },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: SimTime::ZERO,
+    };
+    let operation = validate_authorize_operation(&registry, &state, draft)
+        .expect("planted source should authorize like surveillance")
+        .commit(&mut state)
+        .expect("authorized infiltration should commit");
+    let record = state
+        .operations()
+        .get_operation(operation)
+        .expect("infiltration should persist");
+    assert_eq!(record.kind(), OperationKind::Infiltration);
+    assert_eq!(
+        record.objective(),
+        &OperationObjective::GatherInformation { target }
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("authorized infiltration should remain registry-valid");
+    validate_invariants(&state);
+}
+
+#[test]
 fn operation_rejects_character_objective_target_as_crew_participant() {
     let (registry, state, organization, leader, _) = make_test_operation_state();
     let draft = OperationDraft {

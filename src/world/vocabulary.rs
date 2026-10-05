@@ -161,9 +161,14 @@ pub enum BusinessKind {
     GarmentFactory,
     Stevedoring,
     NewsService,
+    Pharmacy,
+    FuneralParlor,
+    SoupKitchen,
+    TaxiGarage,
+    MovieTheater,
 }
 
-pub const ALL_BUSINESS_KINDS: [BusinessKind; 20] = [
+pub const ALL_BUSINESS_KINDS: [BusinessKind; 25] = [
     BusinessKind::Retail,
     BusinessKind::Hospitality,
     BusinessKind::Automotive,
@@ -184,6 +189,11 @@ pub const ALL_BUSINESS_KINDS: [BusinessKind; 20] = [
     BusinessKind::GarmentFactory,
     BusinessKind::Stevedoring,
     BusinessKind::NewsService,
+    BusinessKind::Pharmacy,
+    BusinessKind::FuneralParlor,
+    BusinessKind::SoupKitchen,
+    BusinessKind::TaxiGarage,
+    BusinessKind::MovieTheater,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

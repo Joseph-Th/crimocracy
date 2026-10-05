@@ -398,6 +398,9 @@ pub(super) fn build_cycle_report_summary(
         EnterpriseKind::Fraud => "Commercial fraud",
         EnterpriseKind::AutoTheftRing => "Stolen-auto ring",
         EnterpriseKind::Smuggling => "Smuggling network",
+        EnterpriseKind::NarcoticsTrade => "Narcotics trade",
+        EnterpriseKind::Blackmail => "Blackmail",
+        EnterpriseKind::MunicipalGraft => "Municipal graft",
     };
     let mandate = state
         .delegation

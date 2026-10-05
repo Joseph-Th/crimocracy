@@ -43,9 +43,12 @@ pub enum EnterpriseKind {
     Fraud,
     AutoTheftRing,
     Smuggling,
+    NarcoticsTrade,
+    Blackmail,
+    MunicipalGraft,
 }
 
-pub const ALL_ENTERPRISE_KINDS: [EnterpriseKind; 16] = [
+pub const ALL_ENTERPRISE_KINDS: [EnterpriseKind; 19] = [
     EnterpriseKind::Protection,
     EnterpriseKind::Gambling,
     EnterpriseKind::AlcoholDistribution,
@@ -62,6 +65,9 @@ pub const ALL_ENTERPRISE_KINDS: [EnterpriseKind; 16] = [
     EnterpriseKind::Fraud,
     EnterpriseKind::AutoTheftRing,
     EnterpriseKind::Smuggling,
+    EnterpriseKind::NarcoticsTrade,
+    EnterpriseKind::Blackmail,
+    EnterpriseKind::MunicipalGraft,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

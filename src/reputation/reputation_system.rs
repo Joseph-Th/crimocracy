@@ -255,7 +255,7 @@ fn operation_consequence_deltas(
     let config = registry.reputation();
     let mut deltas = Vec::with_capacity(4);
     let competence_delta = match kind {
-        OperationKind::Surveillance => 0,
+        OperationKind::Surveillance | OperationKind::Infiltration => 0,
         OperationKind::Burglary
         | OperationKind::Robbery
         | OperationKind::Hijacking
@@ -265,6 +265,7 @@ fn operation_consequence_deltas(
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
+        | OperationKind::Kidnapping
         | OperationKind::Sabotage
         | OperationKind::Arson => match objective_outcome {
             OperationObjectiveOutcome::Achieved => config.achieved_underworld_competence(),

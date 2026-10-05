@@ -64,7 +64,9 @@ pub(crate) fn persisted_surveillance_after_action_clause(
     state: &AppState,
     operation: &OperationRecord,
 ) -> Result<Option<String>, ()> {
-    if operation.kind() != OperationKind::Surveillance {
+    if operation.kind() != OperationKind::Surveillance
+        && operation.kind() != OperationKind::Infiltration
+    {
         return Ok(None);
     }
     let resolution = operation.resolution().ok_or(())?;

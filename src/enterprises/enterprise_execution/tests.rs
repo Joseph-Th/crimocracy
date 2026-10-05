@@ -2974,6 +2974,184 @@ fn numbers_racket_uses_a_front_network_without_a_dedicated_gambling_venue() {
 }
 
 #[test]
+fn repeal_pivot_rackets_establish_through_distinct_production_networks() {
+    // Research-backed content: Empire of Sin shipped without drug, elite-extortion, or
+    // city-hall corruption systems, while Gangsters: Organized Crime proved charity, union,
+    // and mayoral paths carry a campaign. These three rackets give the organization a
+    // post-Prohibition future with non-overlapping infrastructure instead of another
+    // interchangeable income node.
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let organization = fixture.organization;
+    let owner = BusinessOwner::Organization(organization);
+
+    // Narcotics is a hosted racket: the pharmacy front holds the cash trade while a
+    // distribution back-office moves supply through the wider network.
+    let pharmacy = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Pharmacy",
+        BusinessKind::Pharmacy,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::ProfessionalRecords,
+        ]),
+        owner,
+    );
+    let depot = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Depot",
+        BusinessKind::Wholesale,
+        BTreeSet::from([BusinessFunction::DistributionInfrastructure]),
+        owner,
+    );
+    let narcotics_location = EnterpriseLocation::Business(pharmacy);
+    let narcotics = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::NarcoticsTrade,
+            organization,
+            authority: fixture.authority,
+            location: narcotics_location,
+            supporting_businesses: BTreeSet::from([depot]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("pharmacy and distribution network should support a narcotics trade")
+    .commit(&mut fixture.state)
+    .expect("validated narcotics trade should commit");
+
+    // Blackmail is a hosted racket: a discreet records office runs the extortion while a
+    // crowd venue supplies victims and lodging supplies compromising premises.
+    let blackmail_settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("blackmail settlement account should validate");
+    let office = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Records Office",
+        BusinessKind::ProfessionalServices,
+        BTreeSet::from([
+            BusinessFunction::ProfessionalRecords,
+            BusinessFunction::MeetingSpace,
+        ]),
+        owner,
+    );
+    let theater = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Picture Palace",
+        BusinessKind::MovieTheater,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::CustomerAccess,
+            BusinessFunction::MeetingSpace,
+        ]),
+        owner,
+    );
+    let boarding = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Boarding House",
+        BusinessKind::Lodging,
+        BTreeSet::from([BusinessFunction::Lodging, BusinessFunction::MeetingSpace]),
+        owner,
+    );
+    let blackmail_location = EnterpriseLocation::Business(office);
+    let blackmail = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Blackmail,
+            organization,
+            authority: fixture.authority,
+            location: blackmail_location,
+            supporting_businesses: BTreeSet::from([theater, boarding]),
+            cash_account: fixture.cash,
+            settlement_account: blackmail_settlement,
+        },
+    )
+    .expect("records office, crowd venue, and lodging should support blackmail")
+    .commit(&mut fixture.state)
+    .expect("validated blackmail should commit");
+
+    // Municipal graft pairs union access with a financial-services office.
+    let graft_settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("graft settlement account should validate");
+    let contractor = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Contractor",
+        BusinessKind::Construction,
+        BTreeSet::from([BusinessFunction::UnionAccess]),
+        owner,
+    );
+    let office = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Ward Finance Office",
+        BusinessKind::FinancialServices,
+        BTreeSet::from([
+            BusinessFunction::FinancialServices,
+            BusinessFunction::ProfessionalRecords,
+        ]),
+        owner,
+    );
+    let graft = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::MunicipalGraft,
+            organization,
+            authority: fixture.authority,
+            location: fixture.location,
+            supporting_businesses: BTreeSet::from([contractor, office]),
+            cash_account: fixture.cash,
+            settlement_account: graft_settlement,
+        },
+    )
+    .expect("union and financial network should support municipal graft")
+    .commit(&mut fixture.state)
+    .expect("validated municipal graft should commit");
+
+    for (id, kind, location) in [
+        (
+            narcotics,
+            EnterpriseKind::NarcoticsTrade,
+            narcotics_location,
+        ),
+        (blackmail, EnterpriseKind::Blackmail, blackmail_location),
+        (graft, EnterpriseKind::MunicipalGraft, fixture.location),
+    ] {
+        let record = fixture
+            .state
+            .enterprises()
+            .get_enterprise(id)
+            .expect("new racket should persist");
+        assert_eq!(record.kind(), kind);
+        assert_eq!(record.location(), location);
+    }
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("new racket networks should satisfy authored content");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn a_drawn_racket_inquiry_settles_notable_and_stays_registry_valid_across_save() {
     // Notability parity: the persisted notability rule and the registry-relative invariant
     // re-derivation both include drawn enforcement attention, so a settlement whose only notability

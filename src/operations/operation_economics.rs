@@ -366,12 +366,16 @@ pub(crate) fn build_held_cash_clause(kind: OperationKind, cents: i64) -> String 
                 "The event cleared {amount} in cash for the house, and the crew held it for later deposit."
             )
         }
+        OperationKind::Kidnapping => {
+            format!("The ransom paid {amount} in cash, and the crew held it for later deposit.")
+        }
         OperationKind::Burglary
         | OperationKind::Hijacking
         | OperationKind::DocumentTheft
         | OperationKind::Surveillance
         | OperationKind::WitnessPressure
         | OperationKind::Extraction
+        | OperationKind::Infiltration
         | OperationKind::Sabotage
         | OperationKind::Arson => {
             unreachable!("operation kind has no authored cash proceeds")
@@ -396,10 +400,14 @@ pub(crate) fn build_depleted_take_clause(kind: OperationKind) -> &'static str {
         OperationKind::GamblingEvent => {
             "The event took in less than usual; betting volume at this venue has not fully recovered from a recent event."
         }
+        OperationKind::Kidnapping => {
+            "The ransom paid less than usual; this family business has not recovered from a recent payment."
+        }
         OperationKind::Surveillance
         | OperationKind::WitnessPressure
         | OperationKind::DocumentTheft
         | OperationKind::Extraction
+        | OperationKind::Infiltration
         | OperationKind::Sabotage
         | OperationKind::Arson => {
             unreachable!("operation kind has no authored take proceeds")
