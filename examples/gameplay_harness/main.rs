@@ -433,15 +433,34 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     }
 
     if detail {
+        println!("\n--- HEAT ESCALATION PROBE ---");
+    }
+    let escalation = run_heat_escalation_probe(&registry, primary_seeds, detail)?;
+    let heat_escalation_demonstrated =
+        escalation.case_evidence_at_close > escalation.opening_evidence;
+    if !detail {
+        println!(
+            "[PROBE PASS] heat escalation ({} evidence on the opening file, {} parallel files, {} home-racket heat)",
+            escalation.case_evidence_at_close,
+            escalation.police_cases_at_close,
+            format_cents(escalation.enterprise_heat_cents),
+        );
+    }
+
+    if detail {
         print_experience_readout(
             &rush,
             &press,
             &recon,
-            self_heat_probe,
-            true,
-            rival_probe.actionable_intervention && rival_probe.material_economic_impact,
-            violence_probe.visible_violence_created_fear
-                && violence_probe.fear_changed_later_intimidation,
+            &ExperienceDemonstrations {
+                self_heat: self_heat_probe,
+                heat_escalation: heat_escalation_demonstrated,
+                racket: true,
+                rival_leverage: rival_probe.actionable_intervention
+                    && rival_probe.material_economic_impact,
+                reputation_leverage: violence_probe.visible_violence_created_fear
+                    && violence_probe.fear_changed_later_intimidation,
+            },
         );
     }
 
@@ -584,6 +603,11 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
                     "fear_changed_later_intimidation": violence_probe.fear_changed_later_intimidation,
                 },
                 "recon_self_heat": self_heat_probe,
+                "heat_escalation": {
+                    "evidence_grew": heat_escalation_demonstrated,
+                    "parallel_files": escalation.police_cases_at_close,
+                    "home_racket_heat_cents": escalation.enterprise_heat_cents,
+                },
                 "repeal_pivot": repeal_pivot_observed,
                 "personnel_retention": retention_observed,
                 "legal_foundation": true,
@@ -635,15 +659,16 @@ mod tests {
         ScenarioTimeline, SessionRunMode, Strategy, bounded_policy_choice,
         choose_lower_risk_start_from_patrol_signal, format_avg_dollars, format_day_minute,
         format_patrol_windows, parse_options, patrol_intervals_from_signal, play_session,
-        recon_patrol_buffer, run_enforcement_attention_probe, run_opportunity_portfolio_probe,
-        run_organizational_capacity_probe, run_recon_self_heat_probe, run_repeal_pivot_probe,
-        stamp, validate_batch_strategy_coverage, validate_branch_financial_isolation,
-        validate_press_witness_counterplay, validate_run_metrics, validate_second_act_evidence,
-        validate_sensitivity_profile_coverage, validate_strategy_evidence, varied_evaluation_seeds,
+        recon_patrol_buffer, run_enforcement_attention_probe, run_heat_escalation_probe,
+        run_opportunity_portfolio_probe, run_organizational_capacity_probe,
+        run_recon_self_heat_probe, run_repeal_pivot_probe, stamp, validate_batch_strategy_coverage,
+        validate_branch_financial_isolation, validate_press_witness_counterplay,
+        validate_run_metrics, validate_second_act_evidence, validate_sensitivity_profile_coverage,
+        validate_strategy_evidence, varied_evaluation_seeds,
     };
     use crimocracy::core::time::{DAY_MINUTES, DAY_MINUTES_U16, SimDuration, SimTime};
     use crimocracy::intelligence::{CaseActivitySignal, InformationSignal, PatrolIntervalSignal};
-    use crimocracy::operations::OperationObjectiveOutcome;
+    use crimocracy::operations::{OperationExposureLevel, OperationObjectiveOutcome};
 
     fn patrol_signal(intervals: &[(u16, u16)]) -> InformationSignal {
         InformationSignal::PatrolPattern {
@@ -717,6 +742,42 @@ mod tests {
                 >= 2,
             "exploratory samples must not replay one RECON timing margin"
         );
+    }
+
+    #[test]
+    fn heat_escalation_probe_reports_the_price_of_pushing_while_hot() {
+        let registry = crimocracy::build_registry();
+        let evidence = run_heat_escalation_probe(&registry, EvaluationSeeds::defaults(), false)
+            .expect("escalation probe should run through production");
+        assert_eq!(
+            evidence.opening_outcome,
+            Some(OperationObjectiveOutcome::Failed),
+            "the treatment starts from a failed, witnessed opening"
+        );
+        assert_eq!(
+            evidence.opening_exposure,
+            Some(OperationExposureLevel::Witnessed)
+        );
+        assert_eq!(evidence.opening_evidence, 1);
+        assert!(!evidence.push_aborted);
+        assert_eq!(
+            evidence.push_outcome,
+            Some(OperationObjectiveOutcome::Failed),
+            "the no-safety push into a hot district must resolve honestly"
+        );
+        assert_eq!(
+            evidence.push_exposure,
+            Some(OperationExposureLevel::Witnessed)
+        );
+        assert_eq!(evidence.case_evidence_at_close, 3);
+        assert_eq!(
+            evidence.police_cases_at_close, 2,
+            "two witnessed scores on consecutive ticks hold two parallel files"
+        );
+        assert_eq!(evidence.enterprise_heat_cents, 72_000);
+        assert_eq!(evidence.member_arrests, 0);
+        assert!(evidence.testimony_produced);
+        assert_eq!(evidence.payroll_short_cents, 0);
     }
 
     #[test]

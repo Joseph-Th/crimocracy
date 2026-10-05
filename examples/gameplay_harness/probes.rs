@@ -1,10 +1,10 @@
 //! Bounded deterministic probes: repeat-take depletion, opportunity portfolio, organizational capacity, legal foundation, and matched-strategy batches.
 
 use crimocracy::core::entity::EntityRef;
-use crimocracy::core::id::{BusinessId, InformationId};
+use crimocracy::core::id::{BusinessId, InformationId, InvestigationId};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::state::AppState;
-use crimocracy::core::time::{DAY_DURATION, SimDuration, SimTime};
+use crimocracy::core::time::{DAY_DURATION, DAY_MINUTES, SimDuration, SimTime};
 use crimocracy::delegation::delegation_system::MandateRevisionDraft;
 use crimocracy::delegation::delegation_system::validate_revise_mandate;
 use crimocracy::delegation::{ResponsibilityFunction, ResponsibilityScope};
@@ -18,6 +18,7 @@ use crimocracy::intelligence::{
     InformationDraft, InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
     LegalPersonStatusSignal, Reliability, Specificity,
 };
+use crimocracy::legal::InvestigationWorkKind;
 use crimocracy::legal::investigation_system::{
     validate_assign_investigator, validate_incident_intake,
 };
@@ -34,8 +35,8 @@ use crimocracy::legal::{
 };
 use crimocracy::operations::operation_system::{OperationError, validate_authorize_operation};
 use crimocracy::operations::{
-    OperationApproach, OperationContingency, OperationDraft, OperationKind, OperationObjective,
-    OperationObjectiveOutcome, OperationStatus, RoleKind,
+    OperationApproach, OperationContingency, OperationDraft, OperationExposureLevel, OperationKind,
+    OperationObjective, OperationObjectiveOutcome, OperationStatus, RoleKind,
 };
 use crimocracy::opportunities::opportunity_system::{
     validate_convert_opportunity, validate_discover_operation_opportunity,
@@ -1981,4 +1982,314 @@ pub fn run_organizational_capacity_probe(
         );
     }
     Ok(())
+}
+
+/// What pushing while hot actually costs. The narrative branches always play a disciplined
+/// boss: RUSH aborts, PRESS stands down for a week, RECON only moves when clear. No branch
+/// ever answers the player's real question - what happens if I keep scoring while the file
+/// is hot? This probe plays the impatient treatment through production paths: the same
+/// witnessed PRESS-style opening, then the crew goes back to the same target the same
+/// night with no fresh casing and no safety contingencies, and the tail runs three full
+/// days so investigation work, custody, recruitment, and enterprise heat all play out.
+/// The opening runs quiet; only the push and its consequences narrate.
+pub struct HeatEscalationEvidence {
+    pub opening_outcome: Option<OperationObjectiveOutcome>,
+    pub opening_exposure: Option<OperationExposureLevel>,
+    pub opening_evidence: usize,
+    pub push_outcome: Option<OperationObjectiveOutcome>,
+    pub push_aborted: bool,
+    pub push_exposure: Option<OperationExposureLevel>,
+    pub case_evidence_at_close: usize,
+    pub police_cases_at_close: usize,
+    pub member_arrests: u32,
+    pub testimony_produced: bool,
+    pub enterprise_heat_cents: i64,
+    pub payroll_short_cents: i64,
+}
+
+fn case_evidence_len(scenario: &Scenario, investigation: InvestigationId) -> usize {
+    scenario
+        .state
+        .legal()
+        .get_investigation(investigation)
+        .map(|case| case.evidence().len())
+        .unwrap_or_default()
+}
+
+pub fn run_heat_escalation_probe(
+    registry: &Registry,
+    seeds: EvaluationSeeds,
+    detail: bool,
+) -> Result<HeatEscalationEvidence, Box<dyn Error>> {
+    let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)?;
+    let mut metrics = RunMetrics {
+        strategy: Some(Strategy::Press),
+        variation: Some(scenario.variation),
+        ..RunMetrics::default()
+    };
+    // PRESS policy presses through the opening police response, so the treatment starts
+    // from a completed, witnessed score with a real case instead of an abort.
+    let opening = run_initial_burglary(&mut scenario, Strategy::Press, false, &mut metrics)?
+        .ok_or("heat-escalation treatment requires its opening burglary")?;
+    let opening_record = scenario
+        .state
+        .operations()
+        .get_operation(opening)
+        .expect("opening burglary must persist");
+    let opening_outcome = opening_record
+        .resolution()
+        .map(|resolution| resolution.objective_outcome());
+    let opening_exposure = opening_record
+        .resolution()
+        .map(|resolution| resolution.exposure().level());
+    let investigation = scenario
+        .investigation
+        .ok_or("heat-escalation treatment requires the opening to open a case")?;
+    if !matches!(
+        opening_exposure,
+        Some(OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying)
+    ) {
+        return Err("heat-escalation treatment requires a witnessed-level opening exposure".into());
+    }
+    let opening_evidence = case_evidence_len(&scenario, investigation);
+    if detail {
+        println!(
+            "[ESCALATION] Opening: {} -> {:?} (exposure {:?}); case opened with {} evidence item(s).",
+            scenario
+                .state
+                .operations()
+                .get_operation(opening)
+                .expect("opening persists")
+                .title(),
+            opening_outcome,
+            opening_exposure,
+            opening_evidence,
+        );
+        println!(
+            "[DECIDE]  The file is hot and leadership knows it. An impatient boss sends the crew back to the same target tonight anyway: no fresh casing, no abort contingency, no decision pause. What the week of standing down would have protected is now risked for one more score."
+        );
+    }
+    // The reckless push: same target, same crew, the original street rumor as its only
+    // planning fact, and deliberately no contingencies, so a police arrival cannot pause
+    // the job for a leadership decision the impatient treatment would never honor.
+    let push_at = scenario.state.now() + SimDuration::ONE_MINUTE;
+    let push = validate_authorize_operation(
+        registry,
+        &scenario.state,
+        OperationDraft {
+            title: format!(
+                "{} second push (same night, no safety)",
+                scenario.variation.target_name()
+            ),
+            kind: OperationKind::Burglary,
+            responsible_organization: scenario.player,
+            leader: scenario.lieutenant,
+            objective: OperationObjective::AcquireProperty {
+                target: EntityRef::Business(scenario.target),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, scenario.lieutenant),
+                (RoleKind::EntrySpecialist, scenario.burglar),
+            ]),
+            intelligence: BTreeSet::from([scenario.opportunity_information]),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: push_at,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    run_until_operation_terminal(&mut scenario, push, detail, &mut metrics)?;
+    let push_record = scenario
+        .state
+        .operations()
+        .get_operation(push)
+        .expect("push burglary must persist");
+    let push_aborted = push_record.status() == OperationStatus::Aborted;
+    let push_outcome = push_record
+        .resolution()
+        .map(|resolution| resolution.objective_outcome());
+    let push_exposure = push_record
+        .resolution()
+        .map(|resolution| resolution.exposure().level());
+    if push_aborted || push_outcome != Some(OperationObjectiveOutcome::Failed) {
+        return Err(format!(
+            "the no-safety push into a hot district must resolve honestly, not abort: aborted {push_aborted}, outcome {push_outcome:?}"
+        )
+        .into());
+    }
+    if !matches!(
+        push_exposure,
+        Some(OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying)
+    ) {
+        return Err(format!(
+            "the no-safety push must be seen like the opening was: observed {push_exposure:?}"
+        )
+        .into());
+    }
+    if detail {
+        match push_record.resolution() {
+            Some(resolution) => println!(
+                "[ESCALATION] Second push: {:?} (margin {}, intel quality {}), exposure {:?}.",
+                resolution.objective_outcome(),
+                resolution.execution_margin(),
+                resolution.factors().intelligence_quality().value(),
+                resolution.exposure().level(),
+            ),
+            None => println!("[ESCALATION] Second push aborted before resolution."),
+        }
+    }
+    // Three full days of consequences: investigation work schedules and resolves,
+    // autonomous custody can fire, the rival can poach, payroll comes due daily, and
+    // the home racket settles under whatever heat the push created.
+    run_until(
+        &mut scenario,
+        SimTime::from_minutes(3 * DAY_MINUTES),
+        detail,
+        &mut metrics,
+    )?;
+    let case_evidence_at_close = case_evidence_len(&scenario, investigation);
+    let police_cases_at_close = scenario
+        .state
+        .legal()
+        .investigations_for_owner(scenario.police)
+        .count();
+    let testimony_produced = scenario
+        .state
+        .legal()
+        .work_for_investigation(investigation)
+        .any(|work| work.kind() == InvestigationWorkKind::WitnessInterview)
+        && scenario
+            .state
+            .legal()
+            .get_investigation(investigation)
+            .is_some_and(|case| {
+                case.evidence().iter().any(|evidence_id| {
+                    scenario
+                        .state
+                        .legal()
+                        .get_evidence(*evidence_id)
+                        .is_some_and(|evidence| {
+                            evidence.kind() == crimocracy::legal::EvidenceKind::WitnessTestimony
+                        })
+                })
+            });
+    let enterprise_heat_cents: i64 = scenario
+        .state
+        .enterprises()
+        .cycles_for(scenario.enterprise)
+        .map(|cycle| cycle.investigation_heat().cents())
+        .sum();
+    validate_harness_state(registry, &scenario.state)?;
+    // The escalation contract, from production state. Two witnessed jobs on consecutive
+    // ticks do not fold into one file: continuation resumes suspended shelves, and the
+    // opening file was still active when the push landed, so the push opens a parallel
+    // originated case. Every active district case taxes every home-racket cycle at the
+    // authored per-case rate, so the tail must pay double heat on every settled cycle.
+    // Three losing cycles under that heat suspend the book through the chronic-loss path.
+    // Nobody was ever identified (Witnessed, never Identifying), so there is no custody
+    // target: the price is economic and investigative, not cuffs.
+    if case_evidence_at_close <= opening_evidence {
+        return Err(format!(
+            "pushing while hot must grow the institutional file: opened with {opening_evidence} evidence item(s), closed with {case_evidence_at_close}"
+        )
+        .into());
+    }
+    if police_cases_at_close != 2 {
+        return Err(format!(
+            "two witnessed scores on consecutive ticks must hold two parallel active files: observed {police_cases_at_close} police case(s)"
+        )
+        .into());
+    }
+    let settled_cycles = scenario
+        .state
+        .enterprises()
+        .cycles_for(scenario.enterprise)
+        .count();
+    let per_case_rate = registry
+        .get_enterprise(
+            scenario
+                .state
+                .enterprises()
+                .get_enterprise(scenario.enterprise)
+                .expect("home enterprise must persist")
+                .kind(),
+        )
+        .economics()
+        .heat_surcharge_per_active_case()
+        .cents();
+    let expected_heat = per_case_rate * 2 * settled_cycles as i64;
+    if enterprise_heat_cents != expected_heat {
+        return Err(format!(
+            "two active district files must double the per-cycle heat on every tail settlement: expected {} over {settled_cycles} cycle(s), observed {}",
+            format_cents(expected_heat),
+            format_cents(enterprise_heat_cents),
+        )
+        .into());
+    }
+    let cycle_nets: Vec<i64> = scenario
+        .state
+        .enterprises()
+        .cycles_for(scenario.enterprise)
+        .map(|cycle| cycle.net_cash().cents())
+        .collect();
+    let home_suspended = scenario
+        .state
+        .enterprises()
+        .get_enterprise(scenario.enterprise)
+        .is_some_and(|record| {
+            record.status() == crimocracy::enterprises::EnterpriseStatus::Suspended
+        });
+    if cycle_nets.iter().all(|net| *net < 0) && !home_suspended {
+        return Err(format!(
+            "a home book that lost money on every tail cycle ({cycle_nets:?}) must suspend through the chronic-loss path"
+        )
+        .into());
+    }
+    if metrics.player_member_arrests != 0 {
+        return Err(format!(
+            "witnessed-but-never-identifying exposure names no crew member, so pushing while hot must cost heat and the book, not cuffs: observed {} member arrest(s)",
+            metrics.player_member_arrests,
+        )
+        .into());
+    }
+    let evidence = HeatEscalationEvidence {
+        opening_outcome,
+        opening_exposure,
+        opening_evidence,
+        push_outcome,
+        push_aborted,
+        push_exposure,
+        case_evidence_at_close,
+        police_cases_at_close,
+        member_arrests: metrics.player_member_arrests,
+        testimony_produced,
+        enterprise_heat_cents,
+        payroll_short_cents: metrics.payroll_short_cents,
+    };
+    if detail {
+        println!(
+            "[ESCALATION] Three-day tail: opening case carries {} evidence item(s) (was {}); {} police case(s) open; {} member arrest(s); testimony {}; home-racket heat {} to date (double the single-file rate on every tail cycle); home book {}; unpaid wages {}.",
+            evidence.case_evidence_at_close,
+            evidence.opening_evidence,
+            evidence.police_cases_at_close,
+            evidence.member_arrests,
+            if evidence.testimony_produced {
+                "recorded"
+            } else {
+                "none"
+            },
+            format_cents(evidence.enterprise_heat_cents),
+            if home_suspended {
+                "suspended after three losing cycles"
+            } else {
+                "still open"
+            },
+            format_cents(evidence.payroll_short_cents),
+        );
+        println!(
+            "[READ] Impatience compounds. A second witnessed score while the file is hot opens a parallel file instead of folding in, every active file taxes the home racket, and the doubled heat suspends the book the disciplined branches keep earning from. Nobody was identified, so there are no cuffs - the punishment is economic strangulation plus a thicker file."
+        );
+    }
+    Ok(evidence)
 }

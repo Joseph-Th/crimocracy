@@ -2135,14 +2135,22 @@ pub fn optional_minute(value: Option<u64>) -> String {
     value.map_or_else(|| "-".to_owned(), |minute| format!("{minute}m"))
 }
 
+/// Which controlled probes demonstrated their consequence chain in this full-mode run.
+/// Bundles the probe flags so the experience readout keeps one presentation parameter
+/// instead of growing a boolean per probe.
+pub struct ExperienceDemonstrations {
+    pub self_heat: bool,
+    pub heat_escalation: bool,
+    pub racket: bool,
+    pub rival_leverage: bool,
+    pub reputation_leverage: bool,
+}
+
 pub fn print_experience_readout(
     rush: &RunMetrics,
     press: &RunMetrics,
     recon: &RunMetrics,
-    self_heat_demonstrated: bool,
-    racket_demonstrated: bool,
-    rival_leverage_demonstrated: bool,
-    reputation_leverage_demonstrated: bool,
+    demonstrations: &ExperienceDemonstrations,
 ) {
     println!("\n--- PLAYER LOOP READOUT ---");
     println!(
@@ -2259,7 +2267,7 @@ pub fn print_experience_readout(
         (recon.self_heat_check_required
             && recon.self_heat_case_active != Some(false)
             && recon.second_burglary.is_none())
-            || self_heat_demonstrated,
+            || demonstrations.self_heat,
         "casing carries risk both ways: when the crew's own casing reports exposure, leadership asks its standing police contact whether a file exists and stands down unless the channel explicitly says the matter is shelved",
     );
     checkpoint(
@@ -2271,6 +2279,11 @@ pub fn print_experience_readout(
         "discipline cost",
         press.second_opportunity_expired && press.second_burglary.is_none(),
         "choosing to stand down has a real price: the second score lapses while the hot case stays protected",
+    );
+    checkpoint(
+        "indiscipline price",
+        demonstrations.heat_escalation,
+        "pushing a second score while the file is hot opens a parallel file instead of folding in, doubles district heat on every home-racket cycle, and can suspend the book the disciplined branches keep earning from",
     );
     checkpoint(
         "diversify",
@@ -2375,7 +2388,7 @@ pub fn print_experience_readout(
         wealth_loop_shown,
         "accounted wealth from laundering and legitimate owner withdrawals converts into an owned asset through the canonical acquisition path: the short book first surfaces as a visible rejection, the purchase lands at the authored price, and owning the venue unlocks the second-district racket - the money loop closes",
     );
-    let any_enforcement = racket_demonstrated
+    let any_enforcement = demonstrations.racket
         || [rush, press, recon]
             .iter()
             .any(|run| run.racket_inquiries_drawn > 0);
@@ -2386,12 +2399,12 @@ pub fn print_experience_readout(
     );
     checkpoint(
         "rival leverage",
-        rival_leverage_demonstrated,
+        demonstrations.rival_leverage,
         "player-held rival intelligence can identify an exact operating venue, focused surveillance can add local patrol knowledge, and a resulting sabotage can materially reduce that rival business's next-cycle economics without reading hidden rival state",
     );
     checkpoint(
         "fear leverage",
-        reputation_leverage_demonstrated,
+        demonstrations.reputation_leverage,
         "publicly visible violence can make later intimidation easier through contextual business-owner fear, while the violent act still pays its own police and exposure costs and the advantage stays bounded",
     );
     if missing > 0 {

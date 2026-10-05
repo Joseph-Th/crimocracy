@@ -155,21 +155,40 @@ pub fn launder_through_front(
         Err(LaunderingError::CapacityExceeded { capacity_cents, .. }) => {
             metrics.laundering_capacity_rejections =
                 metrics.laundering_capacity_rejections.saturating_add(1);
+            // The first refusal teaches the plausibility rule; later ones in the same
+            // session are bookkeeping, so they stay one line instead of repeating the
+            // whole explanation every cycle.
+            let first_explanation = metrics.laundering_capacity_rejections == 1;
             if capacity_cents <= 0 {
                 if narrative {
-                    println!(
-                        "[LAUNDER] {front_name}'s books already carry this cycle's plausible volume; {} stays street cash.",
-                        format_cents(requested_cents),
-                    );
+                    if first_explanation {
+                        println!(
+                            "[LAUNDER] {front_name}'s books already carry this cycle's plausible volume; {} stays street cash. Plausible volume tracks the front's own legitimate trade - bigger books, or more of them, would carry more per cycle.",
+                            format_cents(requested_cents),
+                        );
+                    } else {
+                        println!(
+                            "[LAUNDER] {front_name}'s books are full this cycle; {} stays street cash.",
+                            format_cents(requested_cents),
+                        );
+                    }
                 }
                 return Ok(None);
             }
             if narrative {
-                println!(
-                    "[LAUNDER] {front_name}'s books can plausibly absorb only {} of the requested {} this cycle; the rest stays street cash. Plausible volume tracks the front's own legitimate trade - bigger books, or more of them, would carry more per cycle.",
-                    format_cents(capacity_cents),
-                    format_cents(requested_cents),
-                );
+                if first_explanation {
+                    println!(
+                        "[LAUNDER] {front_name}'s books can plausibly absorb only {} of the requested {} this cycle; the rest stays street cash. Plausible volume tracks the front's own legitimate trade - bigger books, or more of them, would carry more per cycle.",
+                        format_cents(capacity_cents),
+                        format_cents(requested_cents),
+                    );
+                } else {
+                    println!(
+                        "[LAUNDER] {front_name}'s books absorb {} of {}; the rest stays street cash.",
+                        format_cents(capacity_cents),
+                        format_cents(requested_cents),
+                    );
+                }
             }
             match validate_launder_funds(
                 scenario.registry,
