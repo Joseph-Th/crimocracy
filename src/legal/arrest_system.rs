@@ -283,11 +283,8 @@ impl ValidatedArrest {
             preemption.abort.ensure_current_before_detention(state)?;
         }
 
-        let mut id_budget = vec![(IdKind::Arrest, 1)];
-        for preemption in &self.operation_preemptions {
-            id_budget.extend(preemption.abort.id_budget());
-        }
-        id_budget.extend(self.counsel_representation_ends.id_budget());
+        let id_budget =
+            self.id_budget_excluding_duplicate_operation_preemptions(&mut BTreeSet::new());
         state.ids.reserve_many(&id_budget)?;
 
         let id = state

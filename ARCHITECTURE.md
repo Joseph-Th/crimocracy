@@ -331,7 +331,7 @@ Single vocabulary across subsystems:
 | checked command | `validate_*` → `Validated*` | `validate_authorize_operation` → `ValidatedOperation::commit` |
 | resolved mutation | `apply_*` or consuming `commit` | `apply_daily_payroll`, `Validated*::commit` |
 
-Predicates use `is_`, `has_`, or `can_`. Do not introduce new `create_*`, `make_*`, `execute_*`, `perform_*`, or `attempt_*` when an established role already fits.
+Predicates use `is_`, `has_`, or `can_`. Do not introduce new `create_*`, `make_*`, `execute_*`, `perform_*`, or `attempt_*` in production code when an established role already fits. Test-only fixtures under `#[cfg(test)]` keep the `make_test_*` form sanctioned by [`TESTING.md`](TESTING.md).
 
 Multi-file suffixes use established roles: `_execution`, `_integration`, `_loader`, `_ui`, `_adapter`. Every `src/` file starts with a concise `//!` purpose statement; multi-file subsystems state sibling relationships where not obvious. Comments explain constraints, ordering, safety, invariants, or non-obvious intent — not history or commented-out code.
 
