@@ -822,6 +822,11 @@ pub struct RunMetrics {
     pub investigation_work_scheduled: u32,
     pub investigation_work_resolved: u32,
     pub burglary_information_quality: Option<u8>,
+    /// Production execution margin for the opening burglary when it resolved.
+    /// Positive margins clear the authored achieved threshold; aborts have none.
+    /// Quoted in the narrative so a player can see how decisive a success or
+    /// failure was, not just its outcome label.
+    pub burglary_execution_margin: Option<i16>,
     pub property_acquired_value_cents: Option<i64>,
     pub property_realized_cash_cents: Option<i64>,
     pub burglary_terminal_minute: Option<u64>,
@@ -878,6 +883,9 @@ pub struct RunMetrics {
     pub second_burglary_aborted: bool,
     pub second_burglary_outcome: Option<OperationObjectiveOutcome>,
     pub second_burglary_terminal_minute: Option<u64>,
+    /// Production execution margin for the second-score burglary when it resolved.
+    /// Lets the closing recap compare how decisive each act was.
+    pub second_burglary_execution_margin: Option<i16>,
     pub second_act_recon_information: usize,
     /// Actual canonical second-scout schedule and the held observation used to choose it.
     pub second_scout_scheduled_minute: Option<u64>,

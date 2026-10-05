@@ -367,6 +367,7 @@ fn record_second_act_burglary_terminal(
     metrics.second_burglary_aborted = record.status() == OperationStatus::Aborted;
     if let Some(resolution) = record.resolution() {
         metrics.second_burglary_outcome = Some(resolution.objective_outcome());
+        metrics.second_burglary_execution_margin = Some(resolution.execution_margin());
         metrics.second_act_property_acquired_value_cents = resolution
             .property_proceeds()
             .map(|proceeds| proceeds.estimated_value().cents());

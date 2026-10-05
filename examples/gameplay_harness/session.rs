@@ -667,6 +667,7 @@ fn resolve_initial_burglary(
             .map(|investigation| investigation.opened_at().as_minutes());
         metrics.burglary_information_quality =
             Some(resolution.factors().intelligence_quality().value());
+        metrics.burglary_execution_margin = Some(resolution.execution_margin());
         metrics.property_acquired_value_cents = resolution
             .property_proceeds()
             .map(|proceeds| proceeds.estimated_value().cents());
@@ -1068,6 +1069,37 @@ fn run_post_burglary_campaign(
     }
     if scenario.state.now() < observation_end {
         run_until(scenario, observation_end, narrative, metrics)?;
+    }
+    // RUSH and RECON wash once after a score and then leave the remainder sitting
+    // while the books renew. A real boss would keep pushing street cash through the
+    // front's books each cycle until the plausibility ceiling stops them, so close
+    // the loop once more before the final bookkeeping. PRESS already sweeps daily
+    // through its capital-management pass, so it needs no extra beat here. The wash
+    // runs in quiet mode too so FullQuiet and FullNarrative keep identical metrics;
+    // only the printed [LAUNDER] line is presentation.
+    if full_arc && !matches!(strategy, Strategy::Press) {
+        let remaining = scenario
+            .state
+            .finance()
+            .get_account(scenario.liquidation_cash)
+            .map(|account| account.balance().cents())
+            .unwrap_or_default();
+        if remaining > 0 {
+            // Keep a small street reserve for ongoing wages the way PRESS keeps its
+            // $50 float; wash only the surplus so the till never reads as stranded.
+            // launder_through_front narrates what fit and what the books refused.
+            let reserve = 5_000.min(remaining);
+            let washable = remaining - reserve;
+            if washable > 0 {
+                launder_through_front(
+                    scenario,
+                    narrative,
+                    metrics,
+                    scenario.liquidation_cash,
+                    washable,
+                )?;
+            }
+        }
     }
 
     let mut financials = resolve_financial_view(scenario, metrics)?;

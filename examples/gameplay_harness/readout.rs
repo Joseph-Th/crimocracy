@@ -143,8 +143,9 @@ pub fn print_second_act_recap(scenario: &Scenario, strategy: Strategy, metrics: 
                 .unwrap_or_else(|| "no resolution".to_owned());
             let realized = optional_dollars(metrics.second_act_property_realized_cash_cents);
             println!(
-                "\n[ACT 2] {target} second score: {} at minute {}, liquidating {}.",
+                "\n[ACT 2] {target} second score: {} (margin {:?}) at minute {}, liquidating {}.",
                 outcome,
+                metrics.second_burglary_execution_margin,
                 metrics
                     .second_burglary_terminal_minute
                     .map(|minute| minute.to_string())
@@ -1978,10 +1979,11 @@ pub fn print_metrics(metrics: &RunMetrics) {
         metrics.abort_cause,
     );
     println!(
-        "        intel: plan items {} {:?}, quality {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}",
+        "        intel: plan items {} {:?}, quality {:?}, margin {:?}, exposure {:?}/{:?}, property {} -> {} cash at {}",
         metrics.planning_information_count,
         metrics.planning_information_topics,
         metrics.burglary_information_quality,
+        metrics.burglary_execution_margin,
         metrics.exposure_level,
         metrics.exposure_score,
         property_acquired,
@@ -2021,13 +2023,14 @@ pub fn print_metrics(metrics: &RunMetrics) {
         optional_dollars(metrics.matched_enterprise_net_cents),
     );
     println!(
-        "        act 2: second score discovered {}, expired {}, replacement {}, second burglary {} @ {} (outcome {:?}, aborted {}), recon info {}, property {} -> {}, self-heat case opened {} read {:?}",
+        "        act 2: second score discovered {}, expired {}, replacement {}, second burglary {} @ {} (outcome {:?}, margin {:?}, aborted {}), recon info {}, property {} -> {}, self-heat case opened {} read {:?}",
         metrics.second_opportunity_discovered,
         metrics.second_opportunity_expired,
         metrics.replacement_recruited,
         metrics.second_burglary.is_some(),
         optional_minute(metrics.second_burglary_terminal_minute),
         metrics.second_burglary_outcome,
+        metrics.second_burglary_execution_margin,
         metrics.second_burglary_aborted,
         metrics.second_act_recon_information,
         optional_dollars(metrics.second_act_property_acquired_value_cents),
@@ -2398,11 +2401,14 @@ pub fn print_experience_readout(
     }
     println!("Observed decision leverage:");
     println!(
-        "  - Information leverage: RECON selected {} planning item(s) versus RUSH's {} and finished as {} versus {}.",
+        "  - Information leverage: RECON selected {} planning item(s) versus RUSH's {} and finished as {} (margin {:?}, intel {}) versus {} (margin {:?}).",
         recon.planning_information_count,
         rush.planning_information_count,
         terminal_label(recon),
+        recon.burglary_execution_margin,
+        optional_scalar(recon.burglary_information_quality),
         terminal_label(rush),
+        rush.burglary_execution_margin,
     );
     println!(
         "  - Information risk: {} (contact case read: {:?}). No disclosed file is not proof of no institutional attention.",

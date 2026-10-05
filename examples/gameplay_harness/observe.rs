@@ -467,10 +467,12 @@ fn narrate_resolutions_and_enterprise_cycles(
             .resolution()
             .expect("resolved operation must have result");
         println!(
-            "[RESULT]  {}: {} -> {:?}, exposure {:?}.",
+            "[RESULT]  {}: {} -> {:?} (margin {}, intel quality {}), exposure {:?}.",
             stamp(outcome.now.as_minutes()),
             record.title(),
             resolution.objective_outcome(),
+            resolution.execution_margin(),
+            resolution.factors().intelligence_quality().value(),
             resolution.exposure().level(),
         );
     }
