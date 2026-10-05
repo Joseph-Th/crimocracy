@@ -23,6 +23,7 @@ mod options;
 mod posture;
 mod probes;
 mod readout;
+mod repeal_pivot;
 mod retention;
 mod rival_intelligence;
 mod scenario;
@@ -35,6 +36,7 @@ pub use observe::*;
 pub use options::*;
 pub use probes::*;
 pub use readout::*;
+pub use repeal_pivot::*;
 pub use rival_intelligence::*;
 pub use scenario::*;
 pub use session::*;
@@ -411,6 +413,15 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     }
 
     if detail {
+        println!("\n--- REPEAL-PIVOT PROBE ---");
+    }
+    run_repeal_pivot_probe(&registry, primary_seeds, detail)?;
+    let repeal_pivot_observed = true;
+    if !detail {
+        println!("[PROBE PASS] repeal-pivot content");
+    }
+
+    if detail {
         println!("\n--- RECON SELF-HEAT PROBE ---");
     }
     let self_heat_probe = run_recon_self_heat_probe(&registry, primary_seeds, detail)?;
@@ -570,6 +581,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
                     "fear_changed_later_intimidation": violence_probe.fear_changed_later_intimidation,
                 },
                 "recon_self_heat": self_heat_probe,
+                "repeal_pivot": repeal_pivot_observed,
                 "personnel_retention": retention_observed,
                 "legal_foundation": true,
             },
@@ -621,8 +633,8 @@ mod tests {
         choose_lower_risk_start_from_patrol_signal, format_avg_dollars, format_day_minute,
         format_patrol_windows, parse_options, patrol_intervals_from_signal, play_session,
         recon_patrol_buffer, run_enforcement_attention_probe, run_opportunity_portfolio_probe,
-        run_organizational_capacity_probe, run_recon_self_heat_probe, stamp,
-        validate_batch_strategy_coverage, validate_branch_financial_isolation,
+        run_organizational_capacity_probe, run_recon_self_heat_probe, run_repeal_pivot_probe,
+        stamp, validate_batch_strategy_coverage, validate_branch_financial_isolation,
         validate_press_witness_counterplay, validate_run_metrics, validate_second_act_evidence,
         validate_sensitivity_profile_coverage, validate_strategy_evidence, varied_evaluation_seeds,
     };
@@ -715,6 +727,17 @@ mod tests {
             )
             .expect("controlled self-heat probe should run through production")
         );
+    }
+
+    #[test]
+    fn repeal_pivot_probe_plays_new_content_through_production_paths() {
+        let registry = crimocracy::build_registry();
+        run_repeal_pivot_probe(
+            &registry,
+            EvaluationSeeds::new(DEFAULT_WORLD_SEED, DEFAULT_POLICY_SEED),
+            false,
+        )
+        .expect("repeal-pivot probe should run through production");
     }
 
     #[test]
