@@ -1080,6 +1080,9 @@ fn run_post_burglary_campaign(
     if narrative {
         print_organization_closing_view(scenario, metrics, &financials);
         print_second_act_recap(scenario, strategy, metrics);
+        // Open threads read the pre-move books, so resolve them before the
+        // financial view consumes the value.
+        let threads = open_threads(scenario, metrics, &financials);
         print_financial_view(scenario, financials);
         print_executive_briefs(
             scenario
@@ -1088,6 +1091,8 @@ fn run_post_burglary_campaign(
                 .reports_for(scenario.player)
                 .filter(|report| report.kind() == ReportKind::ExecutiveBrief),
         );
+        print_attention_triage(scenario, metrics);
+        print_open_threads(&threads);
     }
     Ok(())
 }

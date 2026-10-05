@@ -413,12 +413,131 @@ pub fn print_starting_player_view(scenario: &Scenario) {
     println!(
         "[STATE] If police exposure ever makes {burglar_name} a poaching target, leadership can rely on the established Marrow relationship for one personal appeal without pretending that relationship reveals fresh private motive information."
     );
+    // Opening information position: what leadership does not know yet, stated
+    // explicitly so the first decision is read against its unknowns rather than a
+    // presumed map. Every count below comes from organization-held information only.
+    for line in opening_unknowns(scenario) {
+        println!("{line}");
+    }
+    // Opening capital math a boss can do on day one: what clean money exists, how
+    // far the street treasury stretches at current headcount, and how large the
+    // clean-money gap to the harbor goal remains.
+    for line in opening_ledger(scenario) {
+        println!("{line}");
+    }
 }
 
 fn capability_band(rating: Option<Rating>) -> &'static str {
     rating
         .map(|rating| qualitative_band_label(rating.qualitative_band()))
         .unwrap_or("not demonstrated")
+}
+
+/// Opening information position from organization-held records only: patrol
+/// timing, target detail, case state, rival books, and laundering capacity.
+/// Called once per narrative set alongside the shared fixture view, so the first
+/// decision in every branch is read against the same unknowns.
+pub fn opening_unknowns(scenario: &Scenario) -> Vec<String> {
+    let mut target_security = 0_usize;
+    let mut police_activity = 0_usize;
+    let mut patrol_patterns = 0_usize;
+    let mut legal_activity = 0_usize;
+    let mut enterprise_activity = 0_usize;
+    for record in scenario
+        .state
+        .intelligence()
+        .information_for_holder(KnowledgeHolder::Organization(scenario.player))
+    {
+        match record.topic() {
+            InformationTopic::TargetSecurity => target_security += 1,
+            InformationTopic::PoliceActivity => {
+                police_activity += 1;
+                if let Some(signal) = record.signal()
+                    && let crimocracy::intelligence::InformationSignal::PatrolPattern { .. } =
+                        signal
+                {
+                    patrol_patterns += 1;
+                }
+            }
+            InformationTopic::LegalActivity => legal_activity += 1,
+            InformationTopic::EnterpriseActivity => enterprise_activity += 1,
+            InformationTopic::Personnel
+            | InformationTopic::Schedule
+            | InformationTopic::Route
+            | InformationTopic::FinancialPerformance
+            | InformationTopic::MarketAccess
+            | InformationTopic::OperationalOutcome => {}
+        }
+    }
+    let mut lines = Vec::with_capacity(5);
+    lines.push(if patrol_patterns > 0 {
+        format!("[UNKNOWN] patrol timing: {patrol_patterns} patrol observation(s) held; timing can be planned around the known rhythm.")
+    } else if police_activity > 0 {
+        format!("[UNKNOWN] patrol timing: {police_activity} police-activity item(s) held but no usable patrol rhythm; timing stays a gamble until casing or a debrief earns one.")
+    } else {
+        "[UNKNOWN] patrol timing: unknown, no police observation held; casing or a debrief must earn it.".to_owned()
+    });
+    lines.push(if target_security > 0 {
+        format!("[UNKNOWN] target detail: {target_security} TargetSecurity item(s) held; alarm, staff, and patrol coverage remain unconfirmed.")
+    } else {
+        "[UNKNOWN] target detail: unknown, no target observation held.".to_owned()
+    });
+    lines.push(if legal_activity > 0 {
+        format!("[UNKNOWN] case state: {legal_activity} LegalActivity item(s) held; anything older may already be shelved.")
+    } else {
+        "[UNKNOWN] case state: no open file known; the first exposure will have to teach it.".to_owned()
+    });
+    lines.push(if enterprise_activity > 0 {
+        format!("[UNKNOWN] rival books: {enterprise_activity} EnterpriseActivity item(s) held; whole portfolios and earnings stay unknown.")
+    } else {
+        "[UNKNOWN] rival books: unknown; watching a rival reveals a bounded footprint, never its earnings.".to_owned()
+    });
+    lines.push(
+        "[UNKNOWN] laundering capacity: unproven until the first front book settles; plausible volume tracks the front's own trade."
+            .to_owned(),
+    );
+    lines
+}
+
+/// Opening capital math from production accounts: clean holdings, street-treasury
+/// runway at current headcount, and the clean-money gap to the harbor goal.
+pub fn opening_ledger(scenario: &Scenario) -> Vec<String> {
+    let member_count = scenario
+        .state
+        .world()
+        .characters_in_organization(scenario.player)
+        .count()
+        .max(1);
+    let daily_wage = scenario.registry.upkeep().per_member_daily().cents() * member_count as i64;
+    let treasury = scenario
+        .state
+        .finance()
+        .get_account(scenario.liquidation_cash)
+        .expect("starting street treasury must exist")
+        .balance()
+        .cents();
+    let clean = scenario
+        .state
+        .finance()
+        .get_account(scenario.accounted_funds)
+        .expect("accounted-funds account must exist")
+        .balance()
+        .cents();
+    let harbor_price = scenario
+        .registry
+        .get_business(crimocracy::world::BusinessKind::Hospitality)
+        .economics()
+        .acquisition_cost();
+    let runway_days = treasury / daily_wage.max(1);
+    vec![format!(
+        "[LEDGER] clean holdings {}; street treasury {} covers ~{} day(s) of wages at {} /day; harbor goal {} leaves a {} clean-money gap street scores must close through the front's books.",
+        format_cents(clean),
+        format_cents(treasury),
+        runway_days,
+        format_cents(daily_wage),
+        format_cents(harbor_price.cents()),
+        format_cents(harbor_price.cents() - clean.min(harbor_price.cents())),
+    )]
 }
 
 fn qualitative_band_label(band: QualitativeBand) -> &'static str {
@@ -853,6 +972,182 @@ pub fn print_organization_closing_view(
     }
 }
 
+/// Attention triage over every player report entry this session, plus decisions
+/// still awaiting leadership at close. Routine and Notable surface in reports;
+/// only Exception and Crisis may pause the game, so the split shows whether the
+/// session demanded attention or ran itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AttentionTriage {
+    pub routine: usize,
+    pub notable: usize,
+    pub exception: usize,
+    pub crisis: usize,
+    pub pending_decisions: usize,
+}
+
+pub fn attention_triage(scenario: &Scenario) -> AttentionTriage {
+    let mut triage = AttentionTriage::default();
+    for report in scenario.state.reports().reports_for(scenario.player) {
+        for entry in report.entries() {
+            match entry.attention {
+                AttentionClass::Routine => triage.routine += 1,
+                AttentionClass::Notable => triage.notable += 1,
+                AttentionClass::Exception => triage.exception += 1,
+                AttentionClass::Crisis => triage.crisis += 1,
+            }
+        }
+    }
+    triage.pending_decisions = scenario
+        .state
+        .decisions()
+        .pending_for_recipient(scenario.player)
+        .count();
+    triage
+}
+
+pub fn print_attention_triage(scenario: &Scenario, metrics: &RunMetrics) {
+    let triage = attention_triage(scenario);
+    println!(
+        "\n[ATTENTION] {} player report entries: {} routine / {} notable / {} exception / {} crisis; {} leadership exception(s) answered this session; {} decision(s) still pending.",
+        triage.routine + triage.notable + triage.exception + triage.crisis,
+        triage.routine,
+        triage.notable,
+        triage.exception,
+        triage.crisis,
+        metrics.decision_requests,
+        triage.pending_decisions,
+    );
+}
+
+/// Unresolved threads a boss carries forward, from player-visible state only:
+/// live files, heated books, an unrestored crew, lapsed scores, money waiting on
+/// front-book capacity, unlearned patrol timing, watched rivals, and unanswered
+/// decisions. Priority-ordered and capped so the close names next moves instead
+/// of reprinting the books above.
+pub fn open_threads(
+    scenario: &Scenario,
+    metrics: &RunMetrics,
+    financials: &FinancialView,
+) -> Vec<String> {
+    let mut threads: Vec<String> = Vec::new();
+    // The shelved confirmation supersedes the earlier hot read: a file the channel
+    // confirmed shelved is resolved, while lingering surcharges keep their own
+    // thread below. Only an unconfirmed hot read carries forward.
+    if metrics.cold_case_confirmed != Some(true) && metrics.followup_case_active == Some(true) {
+        threads
+            .push("the burglary file still reads hot; new street jobs risk feeding it".to_owned());
+    }
+    if metrics.self_heat_case_active == Some(true) {
+        threads.push("casing drew its own live file; the scout's caution bought a case".to_owned());
+    }
+    if metrics.followup_case_active.is_none()
+        && metrics.self_heat_case_active.is_none()
+        && metrics.contact_reads > 0
+    {
+        threads.push(
+            "the last contact read was inconclusive; heat state stays unconfirmed".to_owned(),
+        );
+    }
+    if metrics.player_personnel_departures > 0
+        && metrics.win_back_accepted != Some(true)
+        && !metrics.replacement_recruited
+    {
+        threads.push("the crew is still short one specialist after the departure".to_owned());
+    }
+    for line in &financials.enterprise_lines {
+        if line.heat_cents > 0 {
+            threads.push(format!(
+                "{} paid {} in district heat to date, the price of operating while casework stayed active",
+                line.label,
+                format_cents(line.heat_cents)
+            ));
+        }
+        if line.cash_kind == AccountKind::ConcealedCash {
+            threads.push(format!(
+                "{} till holds concealed cash: funds wages and floats but cannot be laundered, so only front withdrawals build clean money",
+                line.label
+            ));
+        }
+    }
+    if metrics.second_opportunity_expired && metrics.second_burglary.is_none() {
+        threads.push(
+            "the second score lapsed untaken; standing down protected the case at a real price"
+                .to_owned(),
+        );
+    }
+    let street_balances: i64 = financials
+        .cash_position
+        .iter()
+        .filter(|(kind, _)| matches!(kind, AccountKind::StreetCash | AccountKind::ConcealedCash))
+        .map(|(_, cents)| *cents)
+        .sum();
+    if financials.laundering_capacity_rejections > 0 && street_balances > 0 {
+        threads.push(format!(
+            "{} in street cash waits on front-book plausibility after {} over-capacity refusal(s)",
+            format_cents(street_balances),
+            financials.laundering_capacity_rejections
+        ));
+    }
+    let mut patrol_patterns = 0_usize;
+    for record in scenario
+        .state
+        .intelligence()
+        .information_for_holder(KnowledgeHolder::Organization(scenario.player))
+    {
+        if record.topic() == InformationTopic::PoliceActivity
+            && let Some(signal) = record.signal()
+            && let crimocracy::intelligence::InformationSignal::PatrolPattern { .. } = signal
+        {
+            patrol_patterns += 1;
+        }
+    }
+    if patrol_patterns == 0 {
+        threads.push(
+            "patrol timing still unlearned; the next score's timing stays a gamble".to_owned(),
+        );
+    }
+    if !metrics.known_rackets.is_empty() {
+        threads.push(format!(
+            "{} rival venue(s) observed; no field action taken this session",
+            metrics.known_rackets.len()
+        ));
+    }
+    let pending = scenario
+        .state
+        .decisions()
+        .pending_for_recipient(scenario.player)
+        .count();
+    if pending > 0 {
+        threads.push(if pending == 1 {
+            "1 leadership decision still awaits an answer".to_owned()
+        } else {
+            format!("{pending} leadership decisions still await answers")
+        });
+    }
+    if threads.is_empty() {
+        threads.push(
+            "no open threads: books settled clean, crew whole, no known live file".to_owned(),
+        );
+    }
+    // Six threads name next moves; anything beyond that is bookkeeping the briefs
+    // already itemize.
+    if threads.len() > 6 {
+        let rest = threads.len() - 6;
+        threads.truncate(6);
+        threads.push(format!(
+            "and {rest} more thread(s) in the books and briefs above"
+        ));
+    }
+    threads
+}
+
+pub fn print_open_threads(threads: &[String]) {
+    println!("\n[OPEN] Unresolved threads a boss carries forward:");
+    for thread in threads {
+        println!("  - {thread}.");
+    }
+}
+
 /// Presentation-only distance from the authored baseline on the 0..=100 score scale.
 /// A few ordinary successes are a slight shift, not an extreme standing. These bands
 /// are not gameplay thresholds; neutral wording works for both competence and fear.
@@ -865,6 +1160,149 @@ fn standing_band(score: u8, baseline: u8) -> Option<&'static str> {
         (std::cmp::Ordering::Less, 1..=9) => Some("slightly below baseline"),
         (std::cmp::Ordering::Less, 10..=24) => Some("noticeably below baseline"),
         (std::cmp::Ordering::Less, _) => Some("far below baseline"),
+    }
+}
+
+#[cfg(test)]
+mod closing_tests {
+    use super::*;
+
+    fn with_fresh_night_trap(check: impl FnOnce(&Scenario)) {
+        let registry = crimocracy::build_registry();
+        let scenario = build_scenario(
+            &registry,
+            EvaluationSeeds::defaults(),
+            ScenarioProfile::NightTrap,
+        )
+        .expect("fresh fixture must build through production paths");
+        check(&scenario);
+    }
+
+    fn empty_financials() -> FinancialView {
+        FinancialView {
+            legitimate_cycle_count: 0,
+            legitimate_net_cents: 0,
+            enterprise_cycle_count: 0,
+            enterprise_net_cents: 0,
+            enterprise_lines: Vec::new(),
+            liquidation_cash_cents: 0,
+            held_property_operations: 0,
+            held_property_value_cents: 0,
+            liquidated_property_operations: 0,
+            liquidated_property_cash_cents: 0,
+            cash_position: Vec::new(),
+            laundered_gross_cents: 0,
+            launder_fee_cents: 0,
+            business_profits_swept_cents: 0,
+            laundering_capacity_rejections: 0,
+            payroll_paid_cents: 0,
+            payroll_short_cents: 0,
+        }
+    }
+
+    #[test]
+    fn opening_unknowns_name_everything_the_first_decision_gambles() {
+        with_fresh_night_trap(|scenario| {
+            let unknowns = opening_unknowns(scenario);
+            assert_eq!(unknowns.len(), 5);
+            assert!(unknowns.iter().all(|line| line.starts_with("[UNKNOWN]")));
+            assert!(unknowns[0].contains("patrol timing"));
+            // The opening fixtures hold no patrol rhythm yet: timing is a gamble.
+            assert!(unknowns[0].contains("unknown"));
+        });
+    }
+
+    #[test]
+    fn opening_ledger_quantifies_runway_and_clean_money_gap() {
+        with_fresh_night_trap(|scenario| {
+            let ledger = opening_ledger(scenario);
+            assert_eq!(ledger.len(), 1);
+            assert!(ledger[0].starts_with("[LEDGER]"));
+            // $800 treasury at $160/day across 4 members is exactly five days.
+            assert!(
+                ledger[0].contains("5 day(s)"),
+                "treasury runway must derive from production accounts: {}",
+                ledger[0]
+            );
+            assert!(ledger[0].contains("$480.00"));
+        });
+    }
+
+    #[test]
+    fn fresh_session_triage_and_threads_start_quiet_but_uninformed() {
+        with_fresh_night_trap(|scenario| {
+            let triage = attention_triage(scenario);
+            assert_eq!(
+                triage,
+                AttentionTriage {
+                    routine: 0,
+                    notable: 0,
+                    exception: 0,
+                    crisis: 0,
+                    pending_decisions: 0,
+                }
+            );
+            let metrics = RunMetrics::default();
+            let threads = open_threads(scenario, &metrics, &empty_financials());
+            assert!(
+                threads
+                    .iter()
+                    .any(|thread| thread.contains("patrol timing still unlearned")),
+                "a fresh organization must carry the patrol unknown forward: {threads:?}"
+            );
+            assert!(threads.len() <= 6);
+        });
+    }
+
+    #[test]
+    fn heated_book_and_short_crew_surface_as_priority_threads() {
+        with_fresh_night_trap(|scenario| {
+            let mut financials = empty_financials();
+            financials.enterprise_lines.push(EnterpriseLine {
+                label: "Gambling at Marlowe Club (Canal District)".to_owned(),
+                cash_kind: AccountKind::StreetCash,
+                cycle_count: 2,
+                net_cents: 20_861,
+                heat_cents: 24_000,
+                cash_cents: 0,
+            });
+            let metrics = RunMetrics {
+                followup_case_active: Some(true),
+                player_personnel_departures: 1,
+                ..RunMetrics::default()
+            };
+            let threads = open_threads(scenario, &metrics, &financials);
+            assert!(threads[0].contains("burglary file still reads hot"));
+            assert!(
+                threads
+                    .iter()
+                    .any(|thread| thread.contains("short one specialist"))
+            );
+            assert!(
+                threads
+                    .iter()
+                    .any(|thread| thread.contains("district heat"))
+            );
+            assert!(threads.len() <= 6);
+            // A channel-confirmed shelved file resolves the hot read; lingering
+            // heat keeps its own thread but the file itself carries no warning.
+            let shelved_metrics = RunMetrics {
+                cold_case_confirmed: Some(true),
+                ..metrics
+            };
+            let shelved_threads = open_threads(scenario, &shelved_metrics, &financials);
+            assert!(
+                shelved_threads
+                    .iter()
+                    .all(|thread| !thread.contains("still reads hot")),
+                "shelved confirmation must retire the hot-file thread: {shelved_threads:?}"
+            );
+            assert!(
+                shelved_threads
+                    .iter()
+                    .any(|thread| thread.contains("district heat"))
+            );
+        });
     }
 }
 
