@@ -57,6 +57,10 @@ use std::error::Error;
 
 use crate::*;
 
+/// Opening street-treasury seed. The financial view excludes this from earned flow so the
+/// readout shows what the organization produced, not its starting stake.
+pub(crate) const STARTING_TREASURY_CENTS: i64 = 80_000;
+
 pub fn build_scenario(
     registry: &Registry,
     seeds: EvaluationSeeds,
@@ -696,11 +700,11 @@ pub fn build_scenario(
             postings: vec![
                 LedgerPosting {
                     account: liquidation_settlement,
-                    amount: Money::from_cents(-80_000),
+                    amount: Money::from_cents(-STARTING_TREASURY_CENTS),
                 },
                 LedgerPosting {
                     account: liquidation_cash,
-                    amount: Money::from_cents(80_000),
+                    amount: Money::from_cents(STARTING_TREASURY_CENTS),
                 },
             ],
             authorization: None,

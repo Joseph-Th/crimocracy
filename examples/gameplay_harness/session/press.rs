@@ -727,7 +727,7 @@ fn launder_enterprise_till(
 /// Withdraw only settled legitimate earnings, never laundering fees or opening capital. The
 /// production sweep checks real liquidity and ownership; this policy caps the draw to earned
 /// surplus so profitable books remain operating assets.
-fn sweep_front_profits(
+pub(crate) fn sweep_front_profits(
     scenario: &mut Scenario,
     narrative: bool,
     metrics: &mut RunMetrics,

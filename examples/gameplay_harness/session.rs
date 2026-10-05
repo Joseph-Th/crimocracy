@@ -5,6 +5,8 @@ mod defector;
 mod press;
 mod second_act;
 
+pub(crate) use press::sweep_front_profits;
+
 #[cfg(test)]
 mod casing_tests;
 

@@ -316,6 +316,22 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             format_cents(treasury),
             format_cents(daily_wage),
         );
+        let harbor_price = scenario
+            .registry
+            .get_business(crimocracy::world::BusinessKind::Hospitality)
+            .economics()
+            .acquisition_cost();
+        let harbor_name = scenario
+            .state
+            .world()
+            .get_business(scenario.expansion_front)
+            .expect("expansion venue must exist")
+            .name()
+            .to_owned();
+        println!(
+            "[GOAL] {harbor_name} in Harbor District is for sale at {}; only accounted funds buy legitimate businesses, so street scores must pass through the front's books first. Routine trade covers payroll while heat stays low; growth is what scores pay for.",
+            format_cents(harbor_price.cents()),
+        );
     }
     let (contact_name, handler_name) = {
         let record = scenario
@@ -1340,6 +1356,27 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
         format_cents(view.business_profits_swept_cents),
         format_cents(laundering_net + view.business_profits_swept_cents),
     );
+    // Earned flow excludes the opening treasury seed and internal transfers (laundry fees,
+    // owner draws): this is what the organization produced since the first minute, the
+    // number a boss judges scores against. Cash position above still includes unspent seed.
+    {
+        let racket_net: i64 = view
+            .enterprise_lines
+            .iter()
+            .map(|line| line.net_cents)
+            .sum();
+        let earned = view.legitimate_net_cents + racket_net + view.liquidated_property_cash_cents
+            - view.payroll_paid_cents;
+        println!(
+            "  Earned since start (excl. {} seed capital): legitimate {} + rackets {} + scores {} - wages {} = {}.",
+            format_cents(crate::scenario::STARTING_TREASURY_CENTS),
+            format_cents(view.legitimate_net_cents),
+            format_cents(racket_net),
+            format_cents(view.liquidated_property_cash_cents),
+            format_cents(view.payroll_paid_cents),
+            format_cents(earned),
+        );
+    }
     let payroll_status = if view.payroll_short_cents > 0 {
         format!(
             "SHORTFALL — crew resentment rising ({} unpaid)",

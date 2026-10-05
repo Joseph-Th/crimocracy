@@ -6,7 +6,7 @@ use crate::{
 };
 use crimocracy::core::{
     id::CharacterId,
-    time::{DAY_MINUTES, SimTime},
+    time::{DAY_DURATION, DAY_MINUTES, SimTime},
 };
 use crimocracy::registry::Registry;
 use crimocracy::world::world_system::validate_set_character_supervisor;
@@ -63,7 +63,22 @@ fn run_arm(
         restore_reporting_line(&mut scenario, member)?;
     }
     let mut metrics = RunMetrics::default();
-    run_until(&mut scenario, end, false, &mut metrics)?;
+    // Routine governance is held constant across both arms: each day's settled front
+    // profits are swept into organization funds the way a playing boss keeps the tills
+    // from stranding payroll. Without this, legitimate earnings sit locked on the
+    // business books while wages drain the street treasury, and the resulting
+    // resentment-driven departure would masquerade as a supervision effect. The only
+    // difference between the arms is who the returned member reports to.
+    let mut next = start + DAY_DURATION;
+    loop {
+        let target = next.min(end);
+        run_until(&mut scenario, target, false, &mut metrics)?;
+        crate::session::sweep_front_profits(&mut scenario, false, &mut metrics)?;
+        if target >= end {
+            break;
+        }
+        next = next + DAY_DURATION;
+    }
     let reports = scenario
         .state
         .reports()
@@ -157,7 +172,7 @@ pub(crate) fn run_retention_probe(
     };
     if detail {
         println!(
-            "[RETENTION] Matched continuation from {} to {}; no new street jobs, routine wages and rivals continue. Only the returned member's supervisor changes.",
+            "[RETENTION] Matched continuation from {} to {}; no new street jobs, routine wages and rivals continue. Both arms sweep settled front profits daily so payroll draws on full legitimate earnings; only the returned member's supervisor changes.",
             stamp(evidence.start_minute),
             stamp(evidence.end_minute)
         );
