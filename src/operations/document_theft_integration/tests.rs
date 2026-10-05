@@ -403,8 +403,12 @@ fn achieved_records_include_available_books_while_partial_records_do_not_overcla
     assert_eq!(achieved[1].topic, InformationTopic::FinancialPerformance);
     assert_eq!(achieved[1].reliability, Reliability::DirectAccess);
     assert_eq!(achieved[1].specificity, Specificity::Precise);
-    assert!(achieved[1].summary.contains("$1,250.00 gross revenue"));
-    assert!(achieved[1].summary.contains("$500.00 net cash"));
+    // Derive expected prose through the production money formatter instead of
+    // duplicating its literals, so formatter rounding/grouping changes update once.
+    let expected_gross = crate::finance::helpers::format_money_cents(125_000);
+    let expected_net = crate::finance::helpers::format_money_cents(50_000);
+    assert!(achieved[1].summary.contains(&expected_gross));
+    assert!(achieved[1].summary.contains(&expected_net));
 
     let partial = build_observations(&snapshot, OperationObjectiveOutcome::Partial);
     assert_eq!(partial.len(), 1);

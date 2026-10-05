@@ -285,9 +285,6 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         validate_second_act_evidence(&press)?;
         validate_second_act_evidence(&recon)?;
         validate_branch_financial_isolation(&rush, &press, &recon)?;
-        println!(
-            "[HARNESS CHECK] Legitimate cashflow stayed identical across branches; delegated enterprise cashflow diverged only by district-scoped effects."
-        );
         if deep_readout && detail {
             print_metrics(&rush);
             print_metrics(&press);
@@ -325,6 +322,9 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
     let rush = rush.clone();
     let press = press.clone();
     let recon = recon.clone();
+    println!(
+        "[HARNESS CHECK] Legitimate cashflow stayed identical across branches in every set; delegated enterprise cashflow diverged only by district-scoped effects."
+    );
 
     if detail {
         println!("\n--- VICE HEAT PROBE ---");

@@ -513,15 +513,11 @@ fn achieved_organization_surveillance_discovers_three_active_enterprises_and_unl
         .find(|information| information.topic() == InformationTopic::PoliceActivity)
         .unwrap();
     assert_eq!(police.signal(), None);
-    assert!(police.summary().contains(&format!(
-        "No stable daily patrol deployment pattern was confirmed around {followup_location}"
-    )));
-    assert_eq!(
-        information.summary(),
-        format!(
-            "Observed protection activity at {followup_location} appears active under Rival Manager for Visible Rival."
-        )
-    );
+    // Coarse markers plus the typed subject above, not the sentence template.
+    assert!(police.summary().contains("No stable daily patrol"));
+    assert!(police.summary().contains(followup_location));
+    assert!(information.summary().contains("appears active"));
+    assert!(information.summary().contains(followup_location));
     // Later inactivity cannot retroactively erase the frozen discovery/provenance.
     validate_suspend_enterprise(&fixture.state, followup_enterprise)
         .unwrap()

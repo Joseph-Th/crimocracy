@@ -6,11 +6,14 @@
 # CARGO_INCREMENTAL, so focused and repeated local runs can reuse the repository's normal cache.
 #
 # Stages (broad gate, in order, fail-fast):
-#   1. compile-free documentation contracts
-#   2. cargo fmt --check (all files; Fast/Check lanes check changed files only)
+#   1. compile-free documentation contracts (skipped when no doc/version files changed)
+#   2. fmt on changed .rs files (full scan only for a clean checkpoint tree or unreadable git state)
 #   3. cargo test --locked --lib --quiet -- --skip soak
-#   4. gameplay-harness smoke executable (--mode smoke)
+#   4. gameplay-harness smoke executable (--mode smoke; skipped when no src/harness files changed)
 #   5. cargo clippy --locked --lib --example gameplay_harness -- -D warnings
+#
+# Docs/smoke skipping is fail-closed: unreadable git state or a clean tree runs
+# everything. Skips are printed as SKIP lines with reasons, never silent.
 #
 # The broad gate intentionally stops at canonical smoke. Harness implementation
 # contracts (`cargo test-harness`, ~12s of full-arc sessions) stay in the
@@ -21,8 +24,9 @@
 # for sub-second harness iteration.
 #
 # Soak-class stress (`soak` substring) stays explicit (`cargo soak`) in every
-# lane, including the broad gate: it costs ~4s of simulated mixed-state work
-# and must not tax unrelated checkpoints.
+# lane, including filtered lanes: `-Filter <pat>` excludes soak unless the
+# filter itself contains `soak` (a broad filter like `state` would otherwise
+# drag in the ~4s mixed-state stress test). Soak must not tax unrelated checkpoints.
 #
 # Tests run before clippy so the hot test cache is not invalidated by clippy's
 # driver hash. Clippy is last: you get test signal even if lint fails.
@@ -185,23 +189,73 @@ function Skip-Stage {
     $script:GateStagesSkipped++
 }
 
+function Get-ChangedFiles {
+    # Shared changed-file source for lane decisions (fmt scope, docs/smoke skipping).
+    # Returns $null when git state is unreadable so callers can fail closed (run everything).
+    $prevGitEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    try {
+        $tracked = (& git diff --name-only HEAD 2>$null)
+        $untracked = (& git ls-files --others --exclude-standard 2>$null)
+        if ($LASTEXITCODE -ne 0 -and -not $tracked -and -not $untracked) { return $null }
+        $files = @($tracked) + @($untracked) | Where-Object { $_ } | Sort-Object -Unique
+        return $files
+    } catch {
+        return $null
+    } finally {
+        $ErrorActionPreference = $prevGitEAP
+    }
+}
+
+$script:ChangedLoaded = $false
+$script:ChangedCache = $null
+
+function Get-ChangeSet {
+    # Cached changed-file list shared by lane decisions. $null means git
+    # state is unreadable, so callers fail closed and run everything.
+    if (-not $script:ChangedLoaded) {
+        $script:ChangedCache = Get-ChangedFiles
+        $script:ChangedLoaded = $true
+    }
+    return $script:ChangedCache
+}
+
+function Test-ChangesTouch {
+    param([Parameter(Mandatory = $true)][string[]]$Patterns)
+    $changes = Get-ChangeSet
+    if ($null -eq $changes) { return $true }
+    foreach ($file in $changes) {
+        foreach ($pattern in $Patterns) {
+            if ($file -like $pattern) { return $true }
+        }
+    }
+    return $false
+}
+
+$script:DocsRelevant = @('*.md', '.cargo/*', 'src/core/state.rs', 'src/content/mod.rs', 'scripts/check-docs.*')
+$script:SmokeRelevant = @('src/*', 'examples/*', 'Cargo.toml', 'Cargo.lock', '.cargo/*', 'rust-toolchain*', 'scripts/verify.*')
+
 function Invoke-FmtStage {
+    # Changed-only by default, so fmt stays sub-second on a warm tree
+    # (full `cargo fmt --check` scans ~240 files, ~1.5s on Windows).
+    # Without -ChangedOnly (broad and harness lanes), a clean tree at an
+    # explicit checkpoint still proves the whole tree once; dirty trees check
+    # only what changed. With -ChangedOnly (iteration lanes), a clean tree
+    # skips: there is nothing outstanding to prove.
+    # Unreadable git state always falls back to a full scan (fail-closed).
     param([switch]$ChangedOnly)
-    if (-not $ChangedOnly) {
+    $changed = Get-ChangeSet
+    if ($null -eq $changed) {
         Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false
         return
     }
-    # Fast lanes check only changed .rs files so fmt stays sub-second on a
-    # warm tree (full `cargo fmt --check` scans ~240 files, ~1.5s on Windows).
-    # The broad and harness completion lanes still check every file.
-    $changed = @()
-    $prevGitEAP = $ErrorActionPreference
-    $ErrorActionPreference = "SilentlyContinue"
-    try { $changed += (& git diff --name-only HEAD -- '*.rs' 2>$null) } catch {}
-    try { $changed += (& git ls-files --others --exclude-standard -- '*.rs' 2>$null) } catch {}
-    $ErrorActionPreference = $prevGitEAP
-    $files = @($changed | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object -Unique)
+    $files = @($changed | Where-Object { $_ -like '*.rs' -and (Test-Path -LiteralPath $_) } | Sort-Object -Unique)
     if ($files.Count -eq 0) {
+        if (-not $ChangedOnly -and @($changed).Count -eq 0) {
+            # Clean tree at an explicit completion checkpoint: prove it all once.
+            Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false
+            return
+        }
         Skip-Stage -Name "fmt (changed)" -Reason "no changed .rs"
         return
     }
@@ -293,7 +347,7 @@ if ($Harness) {
         exit 0
     }
     Write-Host "HARNESS LANE: implementation contracts + canonical smoke" -ForegroundColor Yellow
-    if (-not $NoFmt) { Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false }
+    if (-not $NoFmt) { Invoke-FmtStage }
     Invoke-CargoStage "harness contracts" @("test", "--locked", "--quiet", "--example", "gameplay_harness")
     Invoke-CargoStage "harness smoke" @("run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke")
     $gate.Stop()
@@ -312,7 +366,13 @@ if ($Fast) {
     if ($Filter) {
         Write-Host "FAST: focused lib tests matching '$Filter'" -ForegroundColor Yellow
         if (-not $NoFmt) { Invoke-FmtStage -ChangedOnly }
-        Invoke-CargoStage "test-focused $Filter" @("test", "--locked", "--lib", "--quiet", $Filter) -MinimumPassed 1 -ShowOutputOnPass:$Detail
+        if ($Filter -like '*soak*') {
+            Invoke-CargoStage "test-focused $Filter" @("test", "--locked", "--lib", "--quiet", $Filter) -MinimumPassed 1 -ShowOutputOnPass:$Detail
+        } else {
+            # Filtered iteration stays soak-free like the unfiltered fast lane;
+            # an explicit `-Filter soak` (or `cargo soak`) still runs the stress test.
+            Invoke-CargoStage "test-focused $Filter" @("test", "--locked", "--lib", "--quiet", $Filter, "--", "--skip", "soak") -MinimumPassed 1 -ShowOutputOnPass:$Detail
+        }
         $gate.Stop()
         Write-Host "FAST PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  filter: $Filter" -ForegroundColor Green
         Write-Host "  broader gate is required only for persistence, invariants, cross-domain work, or verification infrastructure" -ForegroundColor DarkGray
@@ -340,12 +400,19 @@ $gate = [System.Diagnostics.Stopwatch]::StartNew()
 $jobsDisplay = if ($Jobs -eq 0) { "auto" } else { "$Jobs" }
 Write-Host "BROAD GATE  (docs -> fmt -> lib -> smoke -> clippy)  [Jobs=$jobsDisplay]" -ForegroundColor Cyan
 
-Invoke-DocsStage
+# Docs and smoke prove surfaces the change may not touch. Both stay
+# fail-closed: unreadable git state, a clean checkpoint tree, or a relevant
+# change runs them; only a dirty tree with no relevant change skips.
+if (Test-ChangesTouch $script:DocsRelevant) {
+    Invoke-DocsStage
+} else {
+    Skip-Stage -Name "docs contracts" -Reason "no doc/version changes"
+}
 
 if ($NoFmt) {
     Skip-Stage -Name "fmt --check" -Reason "--NoFmt"
 } else {
-    Invoke-CargoStage "fmt --check" @("fmt", "--check") -AllowJobs:$false
+    Invoke-FmtStage
 }
 
 Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet", "--", "--skip", "soak")
@@ -353,7 +420,11 @@ Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet"
 # The broad gate proves systemic behavior through the canonical smoke executable,
 # not by rerunning every harness implementation contract. Harness contracts stay
 # in the Harness lane (`verify -Harness`), where harness code itself is the change.
-Invoke-CargoStage "harness smoke" @("run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke")
+if (Test-ChangesTouch $script:SmokeRelevant) {
+    Invoke-CargoStage "harness smoke" @("run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke")
+} else {
+    Skip-Stage -Name "harness smoke" -Reason "no src/harness changes"
+}
 
 if ($NoClippy) {
     Skip-Stage -Name "clippy (lib+harness)" -Reason "--NoClippy"

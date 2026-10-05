@@ -199,7 +199,19 @@ fn operation_consequences_move_exactly_the_modeled_audiences() {
         .filter(|record| record.score() != registry.reputation().baseline())
         .map(|record| record.audience())
         .collect();
-    assert_eq!(touched.len(), 4);
+    // Assert the expected audiences are present with correct scores without
+    // pinning the exact vocabulary size: a new AudienceKind must not break this.
+    for expected in [
+        AudienceKind::Underworld,
+        AudienceKind::Police,
+        AudienceKind::Businesses,
+        AudienceKind::Residents,
+    ] {
+        assert!(
+            touched.contains(&expected),
+            "violent identifying success should move {expected:?}"
+        );
+    }
     for audience in &touched {
         let record = state
             .reputation

@@ -56,7 +56,11 @@ invariants, serialization, deterministic continuation, and failure paths.
   overflow arithmetic), derive expected display prose from the test's own production
   values (e.g. format the asserted cents through the production money formatter)
   instead of duplicating literals, and assert a coarse marker plus the typed record
-  rather than a full sentence when the sentence is not the contract.
+  rather than a full sentence when the sentence is not the contract. Formatter
+  output itself is pinned only in the formatter's own tests; consumers assert the
+  typed signal and at most one coarse marker. Content values (prices, margins)
+  are pinned only where the registry test is the deliberate content contract;
+  behavior tests derive from the registry instead of duplicating its numbers.
 - Persistence tests distinguish authoritative bytes from derived runtime indexes: save bytes omit
   owner-maintained lookup/scheduling projections, and restore must rebuild them before indexed reads.
 
@@ -96,7 +100,7 @@ cannot silently drop deep coverage. These deeper tiers are evidence, not prerequ
 | Check lane | `.\scripts\verify.cmd -Check` | fmt (changed files) + lib type-check |
 | Fast lane (fmt + lib) | `.\scripts\verify.cmd -Fast` | library completion gate; fmt checks changed files only |
 | Harness lane | `.\scripts\verify.cmd -Harness` | fmt + harness contracts + executable smoke |
-| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pat>` | fail-closed focused lib tests + fmt (changed) |
+| Filtered fast lane | `.\scripts\verify.cmd -Fast -Filter <pat>` | fail-closed focused lib tests (soak excluded unless the filter contains `soak`) + fmt (changed) |
 | Filtered harness lane | `.\scripts\verify.cmd -Harness -Filter <pat>` | fail-closed focused harness tests, no smoke + fmt (changed) |
 | Soak only | `cargo soak` | mixed-state invariant stress |
 
@@ -123,11 +127,14 @@ This document owns behavioral proof selection, not machine-specific timing claim
 
 Fail-fast stages, in order (see [`scripts/verify.ps1`](scripts/verify.ps1)):
 
-1. Compile-free documentation/route/alias/version contracts (`scripts/check-docs.ps1`)
-2. `cargo fmt --check`
-3. `cargo test --locked --lib --quiet -- --skip soak` (soak stays explicit via `cargo soak`)
-4. Gameplay-harness smoke executable (`--mode smoke`): canonical strategies plus the legal-foundation chain
+1. Compile-free documentation/route/alias/version contracts (`scripts/check-docs.ps1`; skipped when no doc/version files changed)
+2. fmt on changed `.rs` files (full scan only for a clean checkpoint tree or unreadable git state)
+3. `cargo test --locked --lib --quiet -- --skip soak` (soak stays explicit via `cargo soak`; filtered lanes also exclude soak unless the filter contains `soak`)
+4. Gameplay-harness smoke executable (`--mode smoke`; skipped when no `src/`/harness files changed)
 5. `cargo clippy --locked --lib --example gameplay_harness -- -D warnings`
+
+Skips are fail-closed and printed as `SKIP` lines with reasons: unreadable git
+state or a clean checkpoint tree runs every stage.
 
 [`scripts/verify.ps1`](scripts/verify.ps1) owns the broad gate; [`scripts/verify.cmd`](scripts/verify.cmd) wraps it. The broad gate proves systemic behavior through smoke, not by rerunning every harness implementation contract: harness contracts stay in the Harness lane so persistence or cross-domain checkpoints do not rebuild and rerun the example test binary. Scenario-scale harness comparisons stay explicit instead of taxing every persistence or cross-domain change. `scripts/check-docs.ps1` replaces the former Rust integration test for authority/link/route/alias/version checks, so documentation-only completion does not compile the crate.
 

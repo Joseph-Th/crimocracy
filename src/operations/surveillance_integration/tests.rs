@@ -442,7 +442,8 @@ fn achieved_business_surveillance_creates_actionable_patrol_and_access_intellige
         })
     );
     assert!(police.summary().contains("recurring patrol rhythm"));
-    assert!(police.summary().contains("roughly 02:00-04:00"));
+    // The exact clock rendering is the production formatter's contract (covered
+    // by its own tests); the typed signal above pins the (120, 240) interval.
     assert!(!police.summary().contains("patrol-deployment"));
 
     let access = discovered
@@ -459,9 +460,14 @@ fn achieved_business_surveillance_creates_actionable_patrol_and_access_intellige
         .intelligence()
         .get_information(resolution.after_action_information())
         .expect("after-action information should persist");
-    assert!(after_action.summary().contains(
-    "Surveillance produced 2 usable target observations: police activity around Northside Market; access intelligence at Market Social Club."
-  ));
+    // Assert the coarse observation count plus the typed record, not the full
+    // sentence: the sentence template is not the contract (the count itself is
+    // already pinned with the resolution above).
+    assert!(
+        after_action
+            .summary()
+            .contains("2 usable target observations")
+    );
 
     let envelope = build_save(&fixture.registry, &fixture.state)
         .expect("surveillance discoveries should save");

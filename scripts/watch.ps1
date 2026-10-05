@@ -40,7 +40,12 @@ $title = if ($Filter -and $Harness) {
 $cargoArgs = if ($Filter -and $Harness) {
     @("test", "--locked", "--quiet", "--example", "gameplay_harness", $Filter)
 } elseif ($Filter) {
-    @("test", "--locked", "--lib", "--quiet", $Filter)
+    if ($Filter -like '*soak*') {
+        @("test", "--locked", "--lib", "--quiet", $Filter)
+    } else {
+        # Focused iteration stays soak-free; use -Filter soak (or cargo soak) for the stress test.
+        @("test", "--locked", "--lib", "--quiet", $Filter, "--", "--skip", "soak")
+    }
 } elseif ($Harness) {
     @("run", "--locked", "--quiet", "--example", "gameplay_harness",
         "--", "--mode", "smoke")
@@ -104,6 +109,7 @@ $onOverflow = { $global:WatchOverflow = $true }
 $subscriptions = @(
     (Register-ObjectEvent $watcher Changed -Action $onChange),
     (Register-ObjectEvent $watcher Created -Action $onChange),
+    (Register-ObjectEvent $watcher Deleted -Action $onChange),
     (Register-ObjectEvent $watcher Renamed -Action $onChange),
     (Register-ObjectEvent $watcher Error -Action $onOverflow)
 )
