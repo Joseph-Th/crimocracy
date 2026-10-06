@@ -1021,6 +1021,9 @@ pub fn authorize_burglary(
 /// the witness's registered cooperation on every active case run by another authority, which
 /// discounts any testimony they later give. The organization sends the lieutenant who actually
 /// carries the intimidation capability - leadership coordination alone does not frighten anyone.
+/// Production supports only the decision contingency for this kind (no standing pre-entry
+/// abort): a police arrival always costs leadership a decision, which is why blind
+/// counter-play in a watched district gambles.
 pub fn authorize_witness_pressure(
     scenario: &mut Scenario,
     witness: CharacterId,

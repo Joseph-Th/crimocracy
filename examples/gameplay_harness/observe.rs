@@ -268,19 +268,28 @@ fn transfer_press_police_observations(
     // Press is the branch where the leader chooses to continue after police arrival. The
     // response also creates direct observations for the participating people; report those
     // observations through the canonical transfer path so the player-facing organization view
-    // contains the lived consequence without reading hidden case state.
+    // contains the lived consequence without reading hidden case state. Every participant
+    // present holds their own first-hand record - the entry specialist and the coordinating
+    // lieutenant debrief separately - so the transfer covers the whole crew, including the
+    // quiet-word crew that is only the lieutenant.
     if metrics.strategy == Some(Strategy::Press) && metrics.police_arrived {
-        let sources: Vec<_> = scenario
-            .state
-            .intelligence()
-            .information_for_holder_by_topic(
-                KnowledgeHolder::Character(scenario.burglar),
-                InformationTopic::PoliceActivity,
-            )
-            .filter(|information| information.observed_at() == outcome.now)
-            .map(|information| information.id())
+        let crew = [scenario.burglar, scenario.lieutenant];
+        let sources: Vec<_> = crew
+            .into_iter()
+            .flat_map(|member| {
+                scenario
+                    .state
+                    .intelligence()
+                    .information_for_holder_by_topic(
+                        KnowledgeHolder::Character(member),
+                        InformationTopic::PoliceActivity,
+                    )
+                    .filter(|information| information.observed_at() == outcome.now)
+                    .map(|information| (member, information.id()))
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        for source in sources {
+        for (member, source) in sources {
             let already_reported = scenario
                 .state
                 .intelligence()
@@ -302,8 +311,14 @@ fn transfer_press_police_observations(
             metrics.player_police_activity_information =
                 metrics.player_police_activity_information.saturating_add(1);
             if narrative {
+                let member_name = scenario
+                    .state
+                    .world()
+                    .get_character(member)
+                    .map(|record| record.name().to_owned())
+                    .unwrap_or_else(|| "the crew".to_owned());
                 println!(
-                    "[PLAYER ACTION] {}: the crew reported the police response back to Marrow Organization; the organization now knows what the burglar directly experienced.",
+                    "[PLAYER ACTION] {}: {member_name} reported the police response back to Marrow Organization; the organization now knows what its crew directly experienced.",
                     stamp(outcome.now.as_minutes()),
                 );
             }

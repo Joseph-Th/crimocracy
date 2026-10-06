@@ -103,7 +103,7 @@ fn run_smoke(
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
         println!(
-            "[SMOKE] {:<5} terminal {:>4} | {} | police {} | evidence {} | take {} (margin {:?}, intel {})\n        intel legal {} / police {} / burglary {} | counter-intel {} | follow-up {} | cold {} | recruitment {} attempts / {} departures",
+            "[SMOKE] {:<5} terminal {:>4} | {} | police {} | evidence {} | take {} (margin {:?}, intel {})\n        intel legal {} / police {} | counter-intel {} | follow-up {} | cold {} | recruitment {} attempts / {} departures",
             strategy.label(),
             optional_minute(metrics.burglary_terminal_minute),
             terminal_label(&metrics),
@@ -118,7 +118,6 @@ fn run_smoke(
             optional_scalar(metrics.burglary_information_quality),
             metrics.player_legal_activity_information,
             metrics.player_police_activity_information,
-            optional_scalar(metrics.burglary_information_quality),
             objective_label(metrics.counterintelligence_outcome).unwrap_or("-"),
             tri_state(metrics.followup_case_active),
             tri_state(metrics.cold_case_confirmed),
@@ -152,7 +151,7 @@ fn run_smoke(
             recon.player_personnel_departures,
         );
         println!(
-            "[SMOKE READOUT] Run `cargo harness-full --samples 2` for the full player narrative, financial view, and structured diagnostic artifacts."
+            "[SMOKE READOUT] Run `cargo harness-full-detail --samples 2` for the full player narrative, financial view, and structured diagnostic artifacts."
         );
     }
     match selected_strategy {
