@@ -182,6 +182,44 @@ pub(super) fn resolve_laundering_split(
     Ok((fee, credited))
 }
 
+/// Read-only planning query: how much more street cash the front's books can plausibly
+/// absorb this cycle. Returns `None` when the business is missing, foreign-owned, not
+/// cash-intensive, or has no active operating economy — the same conditions that make
+/// `validate_launder_funds` reject — and `Some(Money::ZERO)` when the budget is spent.
+/// Leadership can size a transfer from its own books before drafting, instead of learning
+/// the ceiling only through a rejected over-capacity attempt.
+pub fn remaining_laundering_capacity(
+    registry: &Registry,
+    state: &AppState,
+    organization: crate::core::id::OrganizationId,
+    business: crate::core::id::BusinessId,
+) -> Option<Money> {
+    let record = state.world.get_business(business)?;
+    if record.owner() != BusinessOwner::Organization(organization) {
+        return None;
+    }
+    if !record
+        .functions()
+        .contains(&crate::world::BusinessFunction::CashIntensive)
+    {
+        return None;
+    }
+    let economy = state.economy.get_business_economy(business)?;
+    if economy.status() != BusinessOperatingStatus::Active {
+        return None;
+    }
+    let gross_potential = resolve_business_current_gross(registry, state, business).ok()?;
+    let capacity = apply_basis_point_multiplier(
+        gross_potential,
+        registry.laundering().plausibility_gross_basis_points(),
+    )?;
+    Some(
+        capacity
+            .checked_sub(economy.laundered_this_cycle())
+            .unwrap_or(Money::ZERO),
+    )
+}
+
 pub fn validate_launder_funds(
     registry: &Registry,
     state: &AppState,

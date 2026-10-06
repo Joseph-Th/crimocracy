@@ -1085,7 +1085,7 @@ pub fn open_threads(
         .sum();
     if financials.laundering_capacity_rejections > 0 && street_balances > 0 {
         threads.push(format!(
-            "{} in street cash waits on front-book plausibility after {} over-capacity refusal(s)",
+            "{} in street cash waits on the next settled cycle's books ({} capped transfer(s) this session)",
             format_cents(street_balances),
             financials.laundering_capacity_rejections
         ));
@@ -1779,7 +1779,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
     let laundering_net = view.laundered_gross_cents - view.launder_fee_cents;
     if view.laundered_gross_cents > 0 || view.laundering_capacity_rejections > 0 {
         println!(
-            "  Laundered to date: {} gross through the front's books, {} paid as laundering costs, {} cumulative net credited to accounted funds (not the current balance); the books refused {} over-capacity request(s).",
+            "  Laundered to date: {} gross through the front's books, {} paid as laundering costs, {} cumulative net credited to accounted funds (not the current balance); the books capped {} transfer(s) at plausible volume.",
             format_cents(view.laundered_gross_cents),
             format_cents(view.launder_fee_cents),
             format_cents(laundering_net),
@@ -2047,7 +2047,7 @@ pub fn print_metrics(metrics: &RunMetrics) {
         );
     }
     println!(
-        "        money: laundered {} gross through the front's books (laundering cost {}, cumulative net credited {}), owner withdrawals {}, acquisition spend {}, accounted-payroll spend {}, current accounted balance {}, books refused {} over-capacity request(s), vice inquiries drawn {}",
+        "        money: laundered {} gross through the front's books (laundering cost {}, cumulative net credited {}), owner withdrawals {}, acquisition spend {}, accounted-payroll spend {}, current accounted balance {}, books capped {} transfer(s) at plausible volume, vice inquiries drawn {}",
         optional_dollars(Some(metrics.laundered_gross_cents)),
         optional_dollars(Some(metrics.launder_fee_cents)),
         format_cents(metrics.laundered_gross_cents - metrics.launder_fee_cents),
@@ -2504,7 +2504,7 @@ pub fn print_experience_readout(
         optional_dollars(press.enterprise_net_cents),
     );
     println!(
-        "  - Money-state leverage: resale cash can pay wages and capitalize rackets, but only accounted funds can buy legitimate businesses; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume rejected the over-capacity remainder {} time(s) across branches. PRESS credited {} laundering net plus {} actual owner withdrawals from earned front surplus, then spent {} on acquisition and {} on accounted-funded payroll, leaving {} accounted. Laundering capacity limits dirty-money conversion, while legitimate withdrawals also help finance acquisition; clean wealth is not supplied by laundering alone.",
+        "  - Money-state leverage: resale cash can pay wages and capitalize rackets, but only accounted funds can buy legitimate businesses; every branch routes proceeds through its front's books ({} gross for RECON), and the front's per-cycle plausible volume capped the remainder {} time(s) across branches. PRESS credited {} laundering net plus {} actual owner withdrawals from earned front surplus, then spent {} on acquisition and {} on accounted-funded payroll, leaving {} accounted. Laundering capacity limits dirty-money conversion, while legitimate withdrawals also help finance acquisition; clean wealth is not supplied by laundering alone.",
         optional_dollars(Some(recon.laundered_gross_cents)),
         rush.laundering_capacity_rejections
             + press.laundering_capacity_rejections

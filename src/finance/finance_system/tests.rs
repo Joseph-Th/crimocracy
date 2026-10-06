@@ -2907,6 +2907,72 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
 }
 
 #[test]
+fn remaining_laundering_capacity_tracks_the_plausibility_budget() {
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+    let before = remaining_laundering_capacity(
+        &registry,
+        &fixture.state,
+        fixture.organization,
+        fixture.business,
+    )
+    .expect("owned active cash-intensive front should report capacity");
+    assert!(before.cents() > 0);
+    let reserve = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::ConcealedCash,
+        },
+    )
+    .expect("reserve account should validate");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Fund capacity probe".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: reserve,
+                    amount: Money::from_cents(-(before.cents() + 1)),
+                },
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: Money::from_cents(before.cents() + 1),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("fixture funding should validate")
+    .commit(&mut fixture.state)
+    .expect("fixture funding should commit");
+    let error = match validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: Money::from_cents(before.cents() + 1),
+        },
+    ) {
+        Ok(_) => panic!("over-capacity laundering must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        LaunderingError::CapacityExceeded {
+            business: fixture.business,
+            requested_cents: before.cents() + 1,
+            capacity_cents: before.cents(),
+        }
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn laundering_token_rejects_after_front_changes_owner() {
     let registry = build_registry();
     let mut fixture = make_laundering_fixture();

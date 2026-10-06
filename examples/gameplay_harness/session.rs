@@ -20,7 +20,8 @@ use crimocracy::core::id::{
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::time::{DAY_MINUTES, SimDuration, SimTime};
 use crimocracy::finance::finance_system::{
-    LaunderingDraft, LaunderingError, ValidatedLaundering, validate_launder_funds,
+    LaunderingDraft, LaunderingError, ValidatedLaundering, remaining_laundering_capacity,
+    validate_launder_funds,
 };
 use crimocracy::finance::{AccountKind, FinancialOwner, Money};
 use crimocracy::intelligence::{InformationSignal, InformationTopic, KnowledgeHolder};
@@ -118,10 +119,11 @@ pub fn read_police_contact(
 pub const LAUNDERING_FLOAT_FLOOR_CENTS: i64 = 5_000;
 
 /// Runs street cash through an owned cash-intensive front's books via the canonical
-/// laundering path. The organization asks for the full amount first; a capacity rejection is
-/// player-visible accounting information - the front's books can only plausibly absorb an
-/// authored share of its legitimate volume per cycle - so the beat launders what fits and
-/// leaves the rest where it sits. Returns the committed gross amount, if any.
+/// laundering path. Leadership sizes the request from the front's remaining plausible
+/// capacity before drafting — the same planning query a player uses from their own books —
+/// so the beat launders what fits and leaves the rest where it sits. A spent budget is
+/// player-visible bookkeeping, not a failed attempt. Returns the committed gross amount,
+/// if any.
 pub fn launder_through_front(
     scenario: &mut Scenario,
     narrative: bool,
@@ -139,6 +141,42 @@ pub fn launder_through_front(
         .expect("laundering front must persist")
         .name()
         .to_owned();
+    let street_balance = scenario
+        .state
+        .finance()
+        .get_account(source_account)
+        .expect("laundering source must persist")
+        .balance()
+        .cents();
+    // Size the draft to what the books can plausibly carry this cycle. The remaining
+    // capacity is organization-visible planning information derived from the front's own
+    // settled trade, so competent play never drafts a transfer the books cannot explain.
+    let remaining = remaining_laundering_capacity(
+        scenario.registry,
+        &scenario.state,
+        scenario.player,
+        scenario.front,
+    )
+    .map(|capacity| capacity.cents())
+    .unwrap_or(0);
+    let sized_cents = requested_cents.min(street_balance).min(remaining);
+    if sized_cents <= 0 {
+        metrics.laundering_capacity_rejections =
+            metrics.laundering_capacity_rejections.saturating_add(1);
+        if narrative {
+            if remaining <= 0 {
+                println!(
+                    "[LAUNDER] {front_name}'s books already carry this cycle's plausible volume; {} stays street cash until the next settled cycle frees room. Plausible volume tracks the front's own legitimate trade - bigger books, or more of them, would carry more per cycle.",
+                    format_cents(requested_cents.min(street_balance.max(0))),
+                );
+            } else {
+                println!(
+                    "[LAUNDER] {front_name}'s books have no street cash to carry this cycle; nothing to wash.",
+                );
+            }
+        }
+        return Ok(None);
+    }
     let draft = |amount: Money| LaunderingDraft {
         organization: scenario.player,
         street_account: source_account,
@@ -149,46 +187,30 @@ pub fn launder_through_front(
     let validated = match validate_launder_funds(
         scenario.registry,
         &scenario.state,
-        draft(Money::from_cents(requested_cents)),
+        draft(Money::from_cents(sized_cents)),
     ) {
         Ok(validated) => Some(validated),
         Err(LaunderingError::CapacityExceeded { capacity_cents, .. }) => {
+            // Sized drafts fit the queried budget, so reaching here means the front's
+            // books moved between the planning query and validation. Retry once at the
+            // reported capacity rather than failing the run.
             metrics.laundering_capacity_rejections =
                 metrics.laundering_capacity_rejections.saturating_add(1);
-            // The first refusal teaches the plausibility rule; later ones in the same
-            // session are bookkeeping, so they stay one line instead of repeating the
-            // whole explanation every cycle.
-            let first_explanation = metrics.laundering_capacity_rejections == 1;
             if capacity_cents <= 0 {
                 if narrative {
-                    if first_explanation {
-                        println!(
-                            "[LAUNDER] {front_name}'s books already carry this cycle's plausible volume; {} stays street cash. Plausible volume tracks the front's own legitimate trade - bigger books, or more of them, would carry more per cycle.",
-                            format_cents(requested_cents),
-                        );
-                    } else {
-                        println!(
-                            "[LAUNDER] {front_name}'s books are full this cycle; {} stays street cash.",
-                            format_cents(requested_cents),
-                        );
-                    }
+                    println!(
+                        "[LAUNDER] {front_name}'s books filled before the transfer drafted; {} stays street cash until the next settled cycle frees room.",
+                        format_cents(sized_cents),
+                    );
                 }
                 return Ok(None);
             }
             if narrative {
-                if first_explanation {
-                    println!(
-                        "[LAUNDER] {front_name}'s books can plausibly absorb only {} of the requested {} this cycle; the rest stays street cash. Plausible volume tracks the front's own legitimate trade - bigger books, or more of them, would carry more per cycle.",
-                        format_cents(capacity_cents),
-                        format_cents(requested_cents),
-                    );
-                } else {
-                    println!(
-                        "[LAUNDER] {front_name}'s books absorb {} of {}; the rest stays street cash.",
-                        format_cents(capacity_cents),
-                        format_cents(requested_cents),
-                    );
-                }
+                println!(
+                    "[LAUNDER] {front_name}'s books absorb {} of {}; the rest stays street cash until the next settled cycle frees room.",
+                    format_cents(capacity_cents),
+                    format_cents(sized_cents),
+                );
             }
             match validate_launder_funds(
                 scenario.registry,
@@ -200,7 +222,7 @@ pub fn launder_through_front(
                     if narrative {
                         println!(
                             "[LAUNDER] {front_name}'s remaining plausible capacity is too small to produce both a real laundering fee and accounted funds; {} stays street cash.",
-                            format_cents(requested_cents),
+                            format_cents(sized_cents),
                         );
                     }
                     return Ok(None);

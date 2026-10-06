@@ -687,7 +687,8 @@ mod laundering;
 #[cfg(test)]
 use laundering::resolve_laundering_split;
 pub use laundering::{
-    LaunderingDraft, LaunderingError, ValidatedLaundering, validate_launder_funds,
+    LaunderingDraft, LaunderingError, ValidatedLaundering, remaining_laundering_capacity,
+    validate_launder_funds,
 };
 
 #[cfg(test)]

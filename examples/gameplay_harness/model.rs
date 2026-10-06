@@ -977,7 +977,9 @@ pub struct RunMetrics {
     /// The authored laundering cost paid out of every absorbed transfer.
     pub launder_fee_cents: i64,
     pub business_profits_swept_cents: i64,
-    /// Times the books refused a request because it exceeded the cycle's plausible volume:
+    /// Times the front's per-cycle plausible volume capped a transfer (spent budget or
+    /// too-small remainder): leadership sizes requests from the planning query, so this
+    /// counts genuinely capped cycles rather than blind over-requests.
     /// the player-visible shape of the laundering constraint.
     pub laundering_capacity_rejections: u32,
     /// Final accounted-funds balance, for the clean-money accounting identity contract.

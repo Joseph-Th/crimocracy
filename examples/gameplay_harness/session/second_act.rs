@@ -144,6 +144,26 @@ fn run_recon_second_act(
         })
         .max_by_key(|record| (record.observed_at(), record.recorded_at(), record.id()))
         .ok_or("RECON has no held district patrol pattern for planning its second scout")?;
+    // Patrol deployments are stable unless leadership revises them, so a second casing of
+    // the same district usually re-reads the same rhythm. Snapshot the typed intervals now
+    // (owned, before any mutable borrow): the fresh value in the re-casing is target
+    // detail at the new venue, not a new patrol map. Comparison uses typed intervals,
+    // never display prose.
+    let opening_intervals: Vec<(u16, u16)> = patrol
+        .signal()
+        .and_then(|signal| {
+            if let InformationSignal::PatrolPattern { intervals } = signal {
+                Some(
+                    intervals
+                        .iter()
+                        .map(|interval| (interval.start_minute(), interval.end_minute()))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
     let duration = scenario
         .registry
         .get_operation(OperationKind::Surveillance)
@@ -253,6 +273,35 @@ fn run_recon_second_act(
             learned_patrol_information = Some(*information);
         }
         burglary_intelligence.insert(*information);
+    }
+    if let Some(patrol_information) = learned_patrol_information
+        && narrative
+    {
+        let fresh = scenario
+            .state
+            .intelligence()
+            .get_information(patrol_information)
+            .expect("second-score patrol-pattern information must persist");
+        let fresh_intervals = fresh
+            .signal()
+            .and_then(|signal| {
+                if let InformationSignal::PatrolPattern { intervals } = signal {
+                    Some(
+                        intervals
+                            .iter()
+                            .map(|interval| (interval.start_minute(), interval.end_minute()))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+        if fresh_intervals == opening_intervals {
+            println!(
+                "[NOTE] Second casing re-reads the same patrol rhythm as the opening watch — stable deployment, no new timing learned; the fresh value is target detail at the new venue."
+            );
+        }
     }
 
     if !assessment.permits_burglary() {

@@ -108,6 +108,14 @@ struct PlayerVisibleEvidence {
 }
 
 #[derive(Debug, Serialize)]
+struct RivalResponse {
+    window_minutes: u64,
+    poach_warnings: usize,
+    player_departures: usize,
+    new_rival_books: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct ProbeEvidence {
     world_seed: u64,
     policy_seed: u64,
@@ -115,6 +123,7 @@ struct ProbeEvidence {
     timing_policy: &'static str,
     player_visible: PlayerVisibleEvidence,
     evaluation: Option<InterventionEvaluation>,
+    response: Option<RivalResponse>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +212,29 @@ pub fn run_rival_intelligence_probe(
         if let Some(absence) = evidence.player_visible.absence {
             println!("[OBSERVED ABSENCE] {absence}");
         }
+        if let Some(response) = &evidence.response {
+            if response.poach_warnings == 0
+                && response.player_departures == 0
+                && response.new_rival_books.is_empty()
+            {
+                println!(
+                    "[RIVAL RESPONSE] One day past the sabotage: no poach warnings, no departures, no new rival books. Observed absence — retaliation is slow or aimed elsewhere, not proof the rival is passive everywhere."
+                );
+            } else {
+                println!(
+                    "[RIVAL RESPONSE] One day past the sabotage: {} poach warning(s), {} departure(s), {} new rival book(s).",
+                    response.poach_warnings,
+                    response.player_departures,
+                    response.new_rival_books.len(),
+                );
+                for book in &response.new_rival_books {
+                    println!("[RIVAL RESPONSE] New rival book: {book}.");
+                }
+            }
+            println!(
+                "[READ] Sabotage buys a damaged rival cycle, not a free one: the venue's books carry the loss, and the rival keeps playing its own daily game on the other side of the window."
+            );
+        }
     }
     if let Some(directory) = artifact_dir {
         let path = persist_evidence(directory, &evidence)?;
@@ -283,6 +315,16 @@ fn collect_probe(
             )
         })
         .transpose()?;
+    // Sabotage without a visible answer teaches the wrong lesson: rivals recruit, expand,
+    // and retaliate under the same rules. Watch one day past the economic comparison and
+    // report what the rival actually did — including observed absence — so the probe shows
+    // a living opponent rather than a passive target dummy. This window is evaluation-only
+    // and never feeds acting policy.
+    let response = intervention
+        .as_ref()
+        .map(|_| watch_rival_response(registry, &mut scenario, &mut metrics))
+        .transpose()?
+        .flatten();
     validate_harness_state(registry, &scenario.state)?;
     Ok(ProbeEvidence {
         world_seed: seeds.world,
@@ -299,6 +341,7 @@ fn collect_probe(
             ),
         },
         evaluation,
+        response,
     })
 }
 
@@ -548,6 +591,93 @@ fn evaluate_intervention(
         gross_reduction_cents,
         net_reduction_cents,
     })
+}
+
+/// One-day evaluation-only watch after the sabotage economics are compared: does the
+/// rival answer? Counts player poach warnings and departures inside the window plus rival
+/// books established there, described from production records. Observed absence is honest
+/// evidence that retaliation is slow or targeted elsewhere — never a claim the rival is
+/// passive everywhere.
+fn watch_rival_response(
+    registry: &Registry,
+    scenario: &mut Scenario,
+    metrics: &mut RunMetrics,
+) -> Result<Option<RivalResponse>, Box<dyn Error>> {
+    use crimocracy::enterprises::EnterpriseLocation;
+    use std::collections::BTreeSet as IdSet;
+
+    let rivals = [scenario.rival, scenario.second_rival];
+    let before_books: IdSet<_> = rivals
+        .iter()
+        .flat_map(|rival| {
+            scenario
+                .state
+                .enterprises()
+                .enterprises_for_organization(*rival)
+                .map(|record| record.id())
+        })
+        .collect();
+    let warnings_before = metrics.player_poach_warnings;
+    let departures_before = metrics.player_personnel_departures;
+    let window_end = scenario.state.now() + crimocracy::core::time::DAY_DURATION;
+    run_until(scenario, window_end, false, metrics)?;
+    let after_books: IdSet<_> = rivals
+        .iter()
+        .flat_map(|rival| {
+            scenario
+                .state
+                .enterprises()
+                .enterprises_for_organization(*rival)
+                .map(|record| record.id())
+        })
+        .collect();
+    let mut new_rival_books = Vec::new();
+    for id in after_books.difference(&before_books) {
+        let Some(record) = scenario.state.enterprises().get_enterprise(*id) else {
+            continue;
+        };
+        let owner_name = scenario
+            .state
+            .world()
+            .get_organization(record.organization())
+            .map(|organization| organization.name().to_owned())
+            .unwrap_or_else(|| "?".to_owned());
+        let place = match record.location() {
+            EnterpriseLocation::Business(business) => scenario
+                .state
+                .world()
+                .get_business(business)
+                .map(|venue| {
+                    let district = scenario
+                        .state
+                        .world()
+                        .get_neighborhood(venue.neighborhood())
+                        .map(|neighborhood| neighborhood.name().to_owned())
+                        .unwrap_or_else(|| "?".to_owned());
+                    format!("{} ({})", venue.name(), district)
+                })
+                .unwrap_or_else(|| "?".to_owned()),
+            EnterpriseLocation::Neighborhood(neighborhood) => scenario
+                .state
+                .world()
+                .get_neighborhood(neighborhood)
+                .map(|district| district.name().to_owned())
+                .unwrap_or_else(|| "?".to_owned()),
+        };
+        new_rival_books.push(format!("{:?} at {} ({})", record.kind(), place, owner_name));
+    }
+    new_rival_books.sort();
+    validate_harness_state(registry, &scenario.state)?;
+    Ok(Some(RivalResponse {
+        window_minutes: DAY_MINUTES,
+        poach_warnings: metrics
+            .player_poach_warnings
+            .saturating_sub(warnings_before) as usize,
+        player_departures: metrics
+            .player_personnel_departures
+            .saturating_sub(departures_before) as usize,
+        new_rival_books,
+    }))
 }
 
 fn run_watch(
