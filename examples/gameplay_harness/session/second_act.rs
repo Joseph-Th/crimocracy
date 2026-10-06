@@ -469,6 +469,25 @@ fn liquidate_second_act_property(
             format_cents(estimated_value.cents()),
             format_cents(disposition.realized_value.cents())
         );
+        let (venue_district, venue_police) = scenario
+            .state
+            .world()
+            .get_business(scenario.resale_venue)
+            .map(|venue| {
+                let neighborhood = scenario
+                    .state
+                    .world()
+                    .get_neighborhood(venue.neighborhood())
+                    .expect("resale venue district must persist");
+                (
+                    neighborhood.name().to_owned(),
+                    neighborhood.profile().institutions.police_presence.value(),
+                )
+            })
+            .unwrap_or_else(|| ("unknown district".to_owned(), 50));
+        println!(
+            "[FENCE] {venue_district} policing ({venue_police}/100) sets the haircut: quiet venues pay closer to the estimate, watched ones take more. The fence, not the score, decides what the haul is worth."
+        );
     }
     launder_through_front(
         scenario,

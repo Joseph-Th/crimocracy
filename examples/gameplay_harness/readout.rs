@@ -734,6 +734,7 @@ pub fn print_organization_closing_view(
     {
         let mut by_topic: BTreeMap<InformationTopic, usize> = BTreeMap::new();
         let mut patrol_windows: Vec<(u64, u64)> = Vec::new();
+        let mut patrol_newest_observed: Option<u64> = None;
         for record in scenario
             .state
             .intelligence()
@@ -751,6 +752,8 @@ pub fn print_organization_closing_view(
                         u64::from(interval.end_minute()),
                     ));
                 }
+                let observed = record.observed_at().as_minutes();
+                patrol_newest_observed = Some(patrol_newest_observed.unwrap_or(0).max(observed));
             }
         }
         let held: Vec<String> = by_topic
@@ -769,8 +772,18 @@ pub fn print_organization_closing_view(
         if !patrol_windows.is_empty() {
             patrol_windows.sort();
             patrol_windows.dedup();
+            let age = patrol_newest_observed.map(|observed| {
+                let now = scenario.state.now().as_minutes();
+                let days = now.saturating_sub(observed) / DAY_MINUTES;
+                format!(
+                    " observed {}, {} day(s) ago",
+                    format_day_minute(observed),
+                    days
+                )
+            });
             println!(
-                "  - Known patrol rhythm: {}.",
+                "  - Known patrol rhythm{}: {}. Timing can be planned around the known rhythm, but deployment may have shifted since the watch.",
+                age.map(|text| text).unwrap_or_default(),
                 format_patrol_windows(&patrol_windows)
             );
         }

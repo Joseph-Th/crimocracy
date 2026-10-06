@@ -245,6 +245,14 @@ fn schedule_witness_pressure(
             println!(
                 "[DECIDE]  The after-action says the job was witnessed and the police contact confirms {witness_name} is on the case. Do not follow the failed score immediately; send Carlo with one quiet word only from that learned legal status, and accept that the follow-up carries its own exposure risk."
             );
+            match metrics.exposure_level {
+                Some(crimocracy::operations::OperationExposureLevel::Identifying) => println!(
+                    "[STAKES]  The crew may have been identified: testimony plus the incident record can corroborate toward custody. The quiet word risks a second case, but leaving a cooperative witness unanswered risks the file growing teeth."
+                ),
+                _ => println!(
+                    "[STAKES]  The job was witnessed but nobody was identified: testimony names the score, not a member, so no arrest follows from this file alone. The quiet word still risks opening a second case to deny the file future corroboration — a gamble, not a rescue."
+                ),
+            }
         }
         // The lull anchor is player-visible reasoning: the crew's own field report places the
         // heavy enforcement in the small hours, so leadership schedules the quiet word inside
@@ -1258,13 +1266,21 @@ fn narrate_stand_down_heartbeat(
         // otherwise the last confirmed read stands and new street jobs stay on hold.
         None => "no fresh word - no new street jobs, racket still open",
     };
+    let harbor_price_cents = scenario
+        .registry
+        .get_business(crimocracy::world::BusinessKind::Hospitality)
+        .economics()
+        .acquisition_cost()
+        .cents();
     println!(
-        "[WAIT] {}: {}; {} capital review(s) so far, accounted books at {}, racket reserve at {}.",
+        "[WAIT] {}: {}; {} capital review(s) so far, accounted books at {}, racket reserve at {}. Harbor goal {} leaves {} to go.",
         stamp(scenario.state.now().as_minutes()),
         channel_line,
         stand_down.capital_review_days,
         format_cents(accounted.cents()),
         format_cents(till_cents),
+        format_cents(harbor_price_cents),
+        format_cents((harbor_price_cents - accounted.cents()).max(0)),
     );
 }
 
