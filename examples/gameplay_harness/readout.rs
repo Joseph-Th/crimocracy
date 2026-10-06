@@ -783,7 +783,7 @@ pub fn print_organization_closing_view(
             });
             println!(
                 "  - Known patrol rhythm{}: {}. Timing can be planned around the known rhythm, but deployment may have shifted since the watch.",
-                age.map(|text| text).unwrap_or_default(),
+                age.unwrap_or_default(),
                 format_patrol_windows(&patrol_windows)
             );
         }
