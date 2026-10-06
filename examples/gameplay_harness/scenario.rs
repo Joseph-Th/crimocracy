@@ -1075,7 +1075,7 @@ pub fn discover_second_opportunity(
             targets: BTreeSet::from([EntityRef::Business(scenario.alternate_target)]),
             source_information: BTreeSet::from([scenario.alternate_opportunity_information]),
             summary: format!(
-                "{} is moving high-value stock again; the second score on {} is available until the window closes.",
+                "{} has been restocked; the second score on {} is available until the window closes.",
                 scenario.variation.alternate_target_name(),
                 scenario
                     .state

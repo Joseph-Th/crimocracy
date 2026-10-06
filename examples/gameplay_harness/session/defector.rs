@@ -147,9 +147,8 @@ fn observe_defector_watch(
                     && matches!(record.subject(), EntityRef::Enterprise(_))))
         {
             println!(
-                "[LEARN]   {:?} / {:?}: {}",
-                record.reliability(),
-                record.specificity(),
+                "[LEARN]   {}: {}",
+                format_information_grade(record.reliability(), record.specificity()),
                 record.summary()
             );
         }

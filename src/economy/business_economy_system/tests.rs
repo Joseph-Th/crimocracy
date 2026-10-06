@@ -1589,8 +1589,29 @@ fn transferred_business_cycles_remain_attributed_to_the_owner_at_commit() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let first_cycle = decide_business_cycle(&registry, &fixture.state, fixture.business, 900)
-        .expect("first due business cycle should resolve");
+    // Draw exactly the authored notable-variance threshold so the attribution fixture
+    // keeps exercising a Notable cycle as content tuning moves the threshold.
+    let notable_variance = i16::try_from(
+        registry
+            .get_business(
+                fixture
+                    .state
+                    .world()
+                    .get_business(fixture.business)
+                    .expect("fixture business must persist")
+                    .kind(),
+            )
+            .economics()
+            .notable_variance_basis_points(),
+    )
+    .expect("authored notable variance must fit i16");
+    let first_cycle = decide_business_cycle(
+        &registry,
+        &fixture.state,
+        fixture.business,
+        notable_variance,
+    )
+    .expect("first due business cycle should resolve");
     let first_cycle = validate_business_cycle_plan(&fixture.state, first_cycle)
         .expect("first business cycle should validate")
         .commit(&mut fixture.state)
@@ -1650,8 +1671,13 @@ fn transferred_business_cycles_remain_attributed_to_the_owner_at_commit() {
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
-    let second_cycle = decide_business_cycle(&registry, &fixture.state, fixture.business, 900)
-        .expect("second due business cycle should resolve");
+    let second_cycle = decide_business_cycle(
+        &registry,
+        &fixture.state,
+        fixture.business,
+        notable_variance,
+    )
+    .expect("second due business cycle should resolve");
     let second_cycle = validate_business_cycle_plan(&fixture.state, second_cycle)
         .expect("second business cycle should validate")
         .commit(&mut fixture.state)
@@ -1783,7 +1809,22 @@ fn notable_owned_business_cycle_creates_accounting_information_for_owner() {
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
 
-    let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 900)
+    // Draw exactly the authored notable-variance threshold so the test moves with
+    // content tuning instead of pinning a variance number.
+    let variance = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .expect("fixture business must persist")
+        .kind();
+    let variance = i16::try_from(
+        registry
+            .get_business(variance)
+            .economics()
+            .notable_variance_basis_points(),
+    )
+    .expect("authored notable variance must fit i16");
+    let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, variance)
         .expect("material business variance should resolve");
     assert_eq!(plan.economics.attention, AttentionClass::Notable);
     let cycle = validate_business_cycle_plan(&fixture.state, plan)

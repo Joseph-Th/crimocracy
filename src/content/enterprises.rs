@@ -7,6 +7,11 @@ use crate::registry::{EnterpriseEconomicsDefinition, EnterpriseNetworkMode, Regi
 use crate::world::BusinessFunction;
 use std::collections::BTreeSet;
 
+/// Variance-notable thresholds sit near the top of each racket's modeled variance band
+/// (roughly its 95th-percentile magnitude) so a variance-driven Notable report is a rare,
+/// worth-reading swing rather than routine noise. The manager still reports every
+/// settlement through the cycle summary; losses, heat changes, and enforcement attention
+/// make a cycle Notable on their own regardless of variance.
 pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
     let definitions = [
         (
@@ -24,7 +29,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 450,
                 gross_variance_basis_points: 800,
-                notable_variance_basis_points: 600,
+                notable_variance_basis_points: 760,
                 losing_cycles_before_suspension: 3,
             },
             // No special standing-order authority is required to manage a protection racket.
@@ -46,7 +51,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 620,
                 gross_variance_basis_points: 1_200,
-                notable_variance_basis_points: 900,
+                notable_variance_basis_points: 1_140,
                 losing_cycles_before_suspension: 3,
             },
             super::businesses::gambling_venue_functions(),
@@ -67,7 +72,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 600,
                 gross_variance_basis_points: 1_800,
-                notable_variance_basis_points: 1_200,
+                notable_variance_basis_points: 1_710,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::new(),
@@ -101,7 +106,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 650,
                 gross_variance_basis_points: 2_200,
-                notable_variance_basis_points: 1_400,
+                notable_variance_basis_points: 2_090,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -127,7 +132,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 250,
                 gross_variance_basis_points: 700,
-                notable_variance_basis_points: 550,
+                notable_variance_basis_points: 660,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([BusinessFunction::CashIntensive]),
@@ -150,7 +155,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 180,
                 gross_variance_basis_points: 1_000,
-                notable_variance_basis_points: 750,
+                notable_variance_basis_points: 950,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -178,7 +183,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 720,
                 gross_variance_basis_points: 1_600,
-                notable_variance_basis_points: 1_100,
+                notable_variance_basis_points: 1_520,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -208,7 +213,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 280,
                 gross_variance_basis_points: 900,
-                notable_variance_basis_points: 650,
+                notable_variance_basis_points: 850,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::new(),
@@ -233,7 +238,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 360,
                 gross_variance_basis_points: 700,
-                notable_variance_basis_points: 500,
+                notable_variance_basis_points: 660,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::new(),
@@ -264,7 +269,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 500,
                 gross_variance_basis_points: 1_000,
-                notable_variance_basis_points: 700,
+                notable_variance_basis_points: 950,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::new(),
@@ -294,7 +299,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 760,
                 gross_variance_basis_points: 1_100,
-                notable_variance_basis_points: 800,
+                notable_variance_basis_points: 1_040,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -323,7 +328,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 420,
                 gross_variance_basis_points: 2_000,
-                notable_variance_basis_points: 1_200,
+                notable_variance_basis_points: 1_900,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -352,7 +357,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 550,
                 gross_variance_basis_points: 1_400,
-                notable_variance_basis_points: 900,
+                notable_variance_basis_points: 1_330,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -384,7 +389,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 400,
                 gross_variance_basis_points: 1_500,
-                notable_variance_basis_points: 900,
+                notable_variance_basis_points: 1_420,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -412,7 +417,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 520,
                 gross_variance_basis_points: 1_300,
-                notable_variance_basis_points: 850,
+                notable_variance_basis_points: 1_230,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -443,7 +448,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 600,
                 gross_variance_basis_points: 1_600,
-                notable_variance_basis_points: 1_000,
+                notable_variance_basis_points: 1_520,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([BusinessFunction::DockAccess, BusinessFunction::Warehousing]),
@@ -474,7 +479,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 700,
                 gross_variance_basis_points: 1_800,
-                notable_variance_basis_points: 1_100,
+                notable_variance_basis_points: 1_710,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -506,7 +511,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 380,
                 gross_variance_basis_points: 1_500,
-                notable_variance_basis_points: 900,
+                notable_variance_basis_points: 1_420,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::from([
@@ -535,7 +540,7 @@ pub(super) fn register_enterprises(builder: &mut RegistryBuilder) {
                 heat_surcharge_per_active_case: Money::from_cents(12_000),
                 enforcement_attention_basis_points_per_active_case: 250,
                 gross_variance_basis_points: 700,
-                notable_variance_basis_points: 500,
+                notable_variance_basis_points: 660,
                 losing_cycles_before_suspension: 3,
             },
             BTreeSet::new(),

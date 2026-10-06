@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     EvaluationSeeds, RunMetrics, Scenario, ScenarioProfile, authorize_surveillance_target,
-    build_scenario, format_cents, run_until, run_until_operation_terminal, stamp,
-    validate_harness_state,
+    build_scenario, format_cents, format_information_grade, format_information_topic, run_until,
+    run_until_operation_terminal, stamp, validate_harness_state,
 };
 
 #[derive(Debug, Serialize)]
@@ -740,18 +740,11 @@ fn print_watch(label: &str, watch: &WatchEvidence) {
     );
     for observation in watch.after_action.iter().chain(&watch.observations) {
         println!(
-            "[LEARN] {:?}: {:?} / {:?}, {:?} / {:?}, observed {}, recorded {}; source {:?} {:?}, lineage {:?}: {}",
-            observation.information,
-            observation.topic,
-            observation.subject,
-            observation.reliability,
-            observation.specificity,
+            "[LEARN] {} [{}, {}]: {}",
             stamp(observation.observed_minute),
-            stamp(observation.recorded_minute),
-            observation.source_kind,
-            observation.source_entity,
-            observation.derived_from,
-            observation.summary,
+            format_information_topic(observation.topic),
+            format_information_grade(observation.reliability, observation.specificity),
+            observation.summary
         );
     }
 }

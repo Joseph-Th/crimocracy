@@ -10,6 +10,11 @@
 //! departed member resurfaces, instead of the departure report leaking the recruiting organization.
 //! The follow-up win-back pitch uses the player's established boss-member relationship rather
 //! than hidden candidate drives or traits; production scoring still decides whether it works.
+//! The PRESS stand-down continues past the shelved case read into a war-chest phase: daily
+//! capital reviews sweep every owned front's earned surplus, launder each racket's till
+//! through its own front's plausible volume, and accumulate clean books toward the authored
+//! harbor and annex prices, so legitimate property reads as the weeks-long milestone the
+//! money loop intends rather than a same-week purchase.
 //! Timeline anchors use authored operation durations and the canonical campaign-day boundary so
 //! session timing tracks the game instead of a second hard-coded ruleset. World/simulation and
 //! evaluation-policy seeds are independent; full-mode sampling varies both streams reproducibly

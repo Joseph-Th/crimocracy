@@ -7,7 +7,7 @@ use crimocracy::core::time::{DAY_MINUTES, SimTime};
 use crimocracy::economy::business_reporting::resolve_organization_business_financial_summary;
 use crimocracy::enterprises::EnterpriseLocation;
 use crimocracy::finance::{AccountKind, FinancialOwner, Money};
-use crimocracy::intelligence::{InformationTopic, KnowledgeHolder};
+use crimocracy::intelligence::{InformationTopic, KnowledgeHolder, Reliability, Specificity};
 use crimocracy::operations::{
     OperationAbortCause, OperationAbortPhase, OperationExposureLevel, OperationObjectiveBlocker,
     OperationObjectiveOutcome,
@@ -331,7 +331,7 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             .name()
             .to_owned();
         println!(
-            "[GOAL] {harbor_name} in Harbor District is for sale at {}; only accounted funds buy legitimate businesses, so street scores must pass through the front's books first. Routine trade covers payroll while heat stays low; growth is what scores pay for.",
+            "[GOAL] {harbor_name} in Harbor District is for sale at {}; only accounted funds buy legitimate businesses, so street money must pass through the front's books first. Routine trade covers payroll while heat stays low; a venue like this takes weeks of clean accumulation, so scores speed the war chest - they do not replace it.",
             format_cents(harbor_price.cents()),
         );
     }
@@ -532,7 +532,7 @@ pub fn opening_ledger(scenario: &Scenario) -> Vec<String> {
         .acquisition_cost();
     let runway_days = treasury / daily_wage.max(1);
     vec![format!(
-        "[LEDGER] clean holdings {}; street treasury {} covers ~{} day(s) of wages at {} /day; harbor goal {} leaves a {} clean-money gap street scores must close through the front's books.",
+        "[LEDGER] clean holdings {}; street treasury {} covers ~{} day(s) of wages at {} /day; harbor goal {} leaves a {} clean-money gap that washed scores and front profits must close.",
         format_cents(clean),
         format_cents(treasury),
         runway_days,
@@ -565,10 +565,9 @@ pub fn print_planning_inputs(scenario: &Scenario, operation: OperationId) {
             .get_information(*information_id)
             .expect("selected planning information must persist");
         println!(
-            "[PLAN INPUT] {:?} ({:?}/{:?}): {}",
-            information.topic(),
-            information.reliability(),
-            information.specificity(),
+            "[PLAN INPUT] {} ({}): {}",
+            format_information_topic(information.topic()),
+            format_information_grade(information.reliability(), information.specificity()),
             information.summary(),
         );
     }
@@ -857,18 +856,16 @@ pub fn print_organization_closing_view(
                     });
                 if let Some(location) = actionable_location {
                     println!(
-                        "      {} [{:?}/{:?}] ({location}): {}",
+                        "      {} [{}] ({location}): {}",
                         format_day_minute(observation.observed_minute),
-                        observation.reliability,
-                        observation.specificity,
+                        format_information_grade(observation.reliability, observation.specificity),
                         observation.summary,
                     );
                 } else {
                     println!(
-                        "      {} [{:?}/{:?}]: {}",
+                        "      {} [{}]: {}",
                         format_day_minute(observation.observed_minute),
-                        observation.reliability,
-                        observation.specificity,
+                        format_information_grade(observation.reliability, observation.specificity),
                         observation.summary,
                     );
                 }
@@ -1239,7 +1236,18 @@ mod closing_tests {
                 "treasury runway must derive from production accounts: {}",
                 ledger[0]
             );
-            assert!(ledger[0].contains("$480.00"));
+            // The stated goal is the authored venue price through the production money
+            // formatter, so this pin moves with authored content rather than duplicating it.
+            let harbor_price = scenario
+                .registry
+                .get_business(crimocracy::world::BusinessKind::Hospitality)
+                .economics()
+                .acquisition_cost();
+            assert!(
+                ledger[0].contains(&format_cents(harbor_price.cents())),
+                "the opening ledger must quote the authored harbor price: {}",
+                ledger[0]
+            );
         });
     }
 
@@ -1792,7 +1800,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
     let laundering_net = view.laundered_gross_cents - view.launder_fee_cents;
     if view.laundered_gross_cents > 0 || view.laundering_capacity_rejections > 0 {
         println!(
-            "  Laundered to date: {} gross through the front's books, {} paid as laundering costs, {} cumulative net credited to accounted funds (not the current balance); the books capped {} transfer(s) at plausible volume.",
+            "  Laundered to date: {} gross through the organization's front businesses, {} paid as laundering costs, {} cumulative net credited to accounted funds (not the current balance); the books capped {} transfer(s) at plausible volume.",
             format_cents(view.laundered_gross_cents),
             format_cents(view.launder_fee_cents),
             format_cents(laundering_net),
@@ -2060,7 +2068,7 @@ pub fn print_metrics(metrics: &RunMetrics) {
         );
     }
     println!(
-        "        money: laundered {} gross through the front's books (laundering cost {}, cumulative net credited {}), owner withdrawals {}, acquisition spend {}, accounted-payroll spend {}, current accounted balance {}, books capped {} transfer(s) at plausible volume, vice inquiries drawn {}",
+        "        money: laundered {} gross through the organization's front businesses (laundering cost {}, cumulative net credited {}), owner withdrawals {}, acquisition spend {}, accounted-payroll spend {}, current accounted balance {}, books capped {} transfer(s) at plausible volume, vice inquiries drawn {}",
         optional_dollars(Some(metrics.laundered_gross_cents)),
         optional_dollars(Some(metrics.launder_fee_cents)),
         format_cents(metrics.laundered_gross_cents - metrics.launder_fee_cents),
@@ -2701,13 +2709,85 @@ pub fn stamp(minute: u64) -> String {
     format!("minute {}, {}", minute, format_day_minute(minute))
 }
 
-/// Renders cents as a player-facing dollar amount, e.g. `23019` -> `$230.19`.
+/// Renders cents as the player-facing dollar amount the production reports use, e.g.
+/// `23019` -> `$230.19`, `600000` -> `$6,000.00`, with the same thousands grouping as
+/// the game's own report formatter.
 pub fn format_cents(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let magnitude = cents.unsigned_abs();
-    format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
+    let whole = magnitude / 100;
+    let fraction = magnitude % 100;
+    let digits = whole.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("{sign}${grouped}.{fraction:02}")
 }
 
 pub fn optional_dollars(value: Option<i64>) -> String {
     value.map_or_else(|| "-".to_owned(), format_cents)
+}
+
+/// Renders information reliability the way a field report reads (`generally reliable`)
+/// instead of the typed enum's debug casing.
+pub fn format_reliability(reliability: Reliability) -> &'static str {
+    match reliability {
+        Reliability::Unknown => "unknown reliability",
+        Reliability::Unreliable => "unreliable",
+        Reliability::Mixed => "mixed reliability",
+        Reliability::GenerallyReliable => "generally reliable",
+        Reliability::DirectAccess => "direct access",
+    }
+}
+
+/// Renders information specificity the way a field report reads (`specific`).
+pub fn format_specificity(specificity: Specificity) -> &'static str {
+    match specificity {
+        Specificity::Vague => "vague",
+        Specificity::General => "general",
+        Specificity::Specific => "specific",
+        Specificity::Precise => "precise",
+    }
+}
+
+/// One compact player-facing grade, e.g. `generally reliable / specific`.
+pub fn format_information_grade(reliability: Reliability, specificity: Specificity) -> String {
+    format!(
+        "{} / {}",
+        format_reliability(reliability),
+        format_specificity(specificity)
+    )
+}
+
+/// Renders an information topic the way a report headline reads (`target security`)
+/// instead of the typed enum's debug casing.
+pub fn format_information_topic(topic: InformationTopic) -> &'static str {
+    match topic {
+        InformationTopic::TargetSecurity => "target security",
+        InformationTopic::Personnel => "personnel",
+        InformationTopic::Schedule => "schedule",
+        InformationTopic::PoliceActivity => "police activity",
+        InformationTopic::Route => "route",
+        InformationTopic::FinancialPerformance => "financial performance",
+        InformationTopic::LegalActivity => "legal activity",
+        InformationTopic::MarketAccess => "market access",
+        InformationTopic::OperationalOutcome => "operational outcome",
+        InformationTopic::EnterpriseActivity => "enterprise activity",
+    }
+}
+
+/// Renders a district police-presence rating as the qualitative band a boss actually
+/// hears on the street instead of a raw internal score.
+pub fn format_police_band(presence: u8) -> &'static str {
+    match presence {
+        0..=15 => "nearly unpoliced",
+        16..=35 => "lightly policed",
+        36..=55 => "moderately policed",
+        56..=75 => "heavily policed",
+        _ => "saturated with police",
+    }
 }

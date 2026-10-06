@@ -5170,7 +5170,17 @@ fn organization_financial_reporting_rederives_cycle_totals_without_cached_state(
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let enterprise = establish_protection(&registry, &mut fixture);
-    for variance in [0, 700] {
+    // The second cycle draws exactly the authored notable-variance threshold so the
+    // reporting fixture keeps containing one routine and one notable settlement as
+    // content tuning moves the threshold.
+    let notable_variance = i16::try_from(
+        registry
+            .get_enterprise(EnterpriseKind::Protection)
+            .economics()
+            .notable_variance_basis_points(),
+    )
+    .expect("authored notable variance must fit i16");
+    for variance in [0, notable_variance] {
         fixture
             .state
             .advance_clock(SimDuration::from_minutes(1_440));

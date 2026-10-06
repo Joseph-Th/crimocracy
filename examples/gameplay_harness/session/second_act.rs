@@ -258,9 +258,8 @@ fn run_recon_second_act(
             .expect("second-score surveillance information must persist");
         if narrative {
             println!(
-                "[LEARN]   {:?} / {:?}: {}",
-                record.reliability(),
-                record.specificity(),
+                "[LEARN]   {}: {}",
+                format_information_grade(record.reliability(), record.specificity()),
                 record.summary()
             );
         }
@@ -486,7 +485,8 @@ fn liquidate_second_act_property(
             })
             .unwrap_or_else(|| ("unknown district".to_owned(), 50));
         println!(
-            "[FENCE] {venue_district} policing ({venue_police}/100) sets the haircut: quiet venues pay closer to the estimate, watched ones take more. The fence, not the score, decides what the haul is worth."
+            "[FENCE] {venue_district} is {}; the fence prices that risk into the haircut - quieter districts pay closer to the estimate, watched ones take more. The fence, not the score, decides what the haul is worth.",
+            format_police_band(venue_police)
         );
     }
     launder_through_front(

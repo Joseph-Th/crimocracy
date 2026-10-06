@@ -1589,7 +1589,7 @@ pub fn run_opportunity_portfolio_probe(
             targets: BTreeSet::from([EntityRef::Business(scenario.alternate_target)]),
             source_information: BTreeSet::from([scenario.alternate_opportunity_information]),
             summary: format!(
-                "{} has directly observed high-value stock available after midnight.",
+                "{} has fresh stock on hand after midnight.",
                 scenario.variation.alternate_target_name()
             ),
             valid_until,

@@ -15,7 +15,7 @@ use crimocracy::contacts::contact_system::{
 };
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{
-    FinancialAccountId, InformationId, OperationId, OpportunityId, OrganizationId,
+    BusinessId, FinancialAccountId, InformationId, OperationId, OpportunityId, OrganizationId,
 };
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::time::{DAY_MINUTES, SimDuration, SimTime};
@@ -106,9 +106,8 @@ pub fn read_police_contact(
     let summary = record.summary().to_owned();
     if narrative {
         println!(
-            "[LEARN]   {:?} / {:?}: {}",
-            record.reliability(),
-            record.specificity(),
+            "[LEARN]   {}: {}",
+            format_information_grade(record.reliability(), record.specificity()),
             record.summary()
         );
     }
@@ -119,15 +118,37 @@ pub fn read_police_contact(
 pub const LAUNDERING_FLOAT_FLOOR_CENTS: i64 = 5_000;
 
 /// Runs street cash through an owned cash-intensive front's books via the canonical
-/// laundering path. Leadership sizes the request from the front's remaining plausible
-/// capacity before drafting — the same planning query a player uses from their own books —
-/// so the beat launders what fits and leaves the rest where it sits. A spent budget is
-/// player-visible bookkeeping, not a failed attempt. Returns the committed gross amount,
-/// if any.
+/// laundering path, using the organization's original home front. See
+/// [`launder_through_owned_front`] for the multi-front generalization.
 pub fn launder_through_front(
     scenario: &mut Scenario,
     narrative: bool,
     metrics: &mut RunMetrics,
+    source_account: FinancialAccountId,
+    requested_cents: i64,
+) -> Result<Option<i64>, Box<dyn Error>> {
+    launder_through_owned_front(
+        scenario,
+        narrative,
+        metrics,
+        scenario.front,
+        source_account,
+        requested_cents,
+    )
+}
+
+/// The multi-front laundering path: once the organization owns more than one
+/// cash-intensive venue, each front's own plausible volume can wash a different
+/// racket's till. Leadership sizes the request from that front's remaining plausible
+/// capacity before drafting - the same planning query a player uses from their own
+/// books - so the beat launders what fits and leaves the rest where it sits. A spent
+/// budget is player-visible bookkeeping, not a failed attempt. Returns the committed
+/// gross amount, if any.
+pub fn launder_through_owned_front(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+    front: BusinessId,
     source_account: FinancialAccountId,
     requested_cents: i64,
 ) -> Result<Option<i64>, Box<dyn Error>> {
@@ -137,7 +158,7 @@ pub fn launder_through_front(
     let front_name = scenario
         .state
         .world()
-        .get_business(scenario.front)
+        .get_business(front)
         .expect("laundering front must persist")
         .name()
         .to_owned();
@@ -151,14 +172,10 @@ pub fn launder_through_front(
     // Size the draft to what the books can plausibly carry this cycle. The remaining
     // capacity is organization-visible planning information derived from the front's own
     // settled trade, so competent play never drafts a transfer the books cannot explain.
-    let remaining = remaining_laundering_capacity(
-        scenario.registry,
-        &scenario.state,
-        scenario.player,
-        scenario.front,
-    )
-    .map(|capacity| capacity.cents())
-    .unwrap_or(0);
+    let remaining =
+        remaining_laundering_capacity(scenario.registry, &scenario.state, scenario.player, front)
+            .map(|capacity| capacity.cents())
+            .unwrap_or(0);
     let sized_cents = requested_cents.min(street_balance).min(remaining);
     if sized_cents <= 0 {
         metrics.laundering_capacity_rejections =
@@ -180,7 +197,7 @@ pub fn launder_through_front(
     let draft = |amount: Money| LaunderingDraft {
         organization: scenario.player,
         street_account: source_account,
-        business: scenario.front,
+        business: front,
         accounted_account: scenario.accounted_funds,
         amount,
     };
@@ -477,9 +494,8 @@ fn prepare_initial_burglary_plan(
                     .expect("surveillance information must persist");
                 if narrative {
                     println!(
-                        "[LEARN]   {:?} / {:?}: {}",
-                        record.reliability(),
-                        record.specificity(),
+                        "[LEARN]   {}: {}",
+                        format_information_grade(record.reliability(), record.specificity()),
                         record.summary()
                     );
                 }
@@ -781,9 +797,8 @@ fn resolve_initial_burglary(
                     "[DECIDE]  Debrief the crew before anyone plans around that response; what they saw becomes organizational knowledge."
                 );
                 println!(
-                    "[LEARN]   {:?} / {:?}: {}",
-                    record.reliability(),
-                    record.specificity(),
+                    "[LEARN]   {}: {}",
+                    format_information_grade(record.reliability(), record.specificity()),
                     record.summary()
                 );
             }
@@ -855,7 +870,8 @@ fn liquidate_initial_property(
             })
             .unwrap_or_else(|| ("unknown district".to_owned(), 50));
         println!(
-            "[FENCE] {venue_district} policing ({venue_police}/100) sets the haircut: quiet venues pay closer to the estimate, watched ones take more. The fence, not the score, decides what the haul is worth."
+            "[FENCE] {venue_district} is {}; the fence prices that risk into the haircut - quieter districts pay closer to the estimate, watched ones take more. The fence, not the score, decides what the haul is worth.",
+            format_police_band(venue_police)
         );
         let front_name = scenario
             .state
@@ -1056,6 +1072,42 @@ pub(crate) fn run_personnel_recovery(
     Ok(())
 }
 
+/// The canonical post-win-back reassignment: the returned member goes back to his trusted
+/// lieutenant's reporting line, exactly once per session no matter which arc phase scheduled
+/// the recovery. Recovery itself never silently grants loyalty, immunity, or relationships.
+pub(crate) fn restore_defector_reporting_line(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    if metrics.reporting_line_restored || metrics.win_back_accepted != Some(true) {
+        return Ok(());
+    }
+    let member = metrics
+        .defector
+        .expect("an accepted win-back must name the recovered member");
+    crate::retention::restore_reporting_line(scenario, member)?;
+    metrics.reporting_line_restored = true;
+    if narrative {
+        let member_name = scenario
+            .state
+            .world()
+            .get_character(member)
+            .expect("recovered member must persist")
+            .name();
+        let manager_name = scenario
+            .state
+            .world()
+            .get_character(scenario.lieutenant)
+            .expect("lieutenant must persist")
+            .name();
+        println!(
+            "[REORGANIZE] {member_name} returns to {manager_name}'s reporting line. The boss won him back, but his strongest existing bond is with his lieutenant. Keep that bond in charge; a successful pitch alone does not guarantee retention, and fresh exposure can renew his fear."
+        );
+    }
+    Ok(())
+}
+
 fn run_post_burglary_campaign(
     scenario: &mut Scenario,
     strategy: Strategy,
@@ -1109,22 +1161,7 @@ fn run_post_burglary_campaign(
     }
     if full_arc {
         run_personnel_recovery(scenario, narrative, metrics)?;
-        if metrics.win_back_accepted == Some(true) {
-            let member = metrics.defector.expect("accepted recovery names a member");
-            crate::retention::restore_reporting_line(scenario, member)?;
-            if narrative {
-                let member_name = scenario.state.world().get_character(member).unwrap().name();
-                let manager_name = scenario
-                    .state
-                    .world()
-                    .get_character(scenario.lieutenant)
-                    .unwrap()
-                    .name();
-                println!(
-                    "[REORGANIZE] {member_name} returns to {manager_name}'s reporting line. The boss won him back, but his strongest existing bond is with his lieutenant. Keep that bond in charge; a successful pitch alone does not guarantee retention, and fresh exposure can renew his fear."
-                );
-            }
-        }
+        restore_defector_reporting_line(scenario, narrative, metrics)?;
         second_act::run_second_act(scenario, strategy, narrative, metrics)?;
     }
     if scenario.state.now() < observation_end {

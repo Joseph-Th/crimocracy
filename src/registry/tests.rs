@@ -801,7 +801,7 @@ fn authored_alcohol_distribution_requires_concrete_commercial_network() {
     );
     assert_eq!(economics.police_cost_per_point(), Money::from_cents(40));
     assert_eq!(economics.gross_variance_basis_points(), 1_800);
-    assert_eq!(economics.notable_variance_basis_points(), 1_200);
+    assert_eq!(economics.notable_variance_basis_points(), 1_710);
 }
 
 #[test]
@@ -990,7 +990,7 @@ fn authored_construction_business_is_commerce_driven_and_capital_heavy() {
         Money::from_cents(130)
     );
     assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(25));
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(105_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(1_310_000));
 }
 
 #[test]
@@ -1007,7 +1007,7 @@ fn authored_wholesale_business_is_a_stable_commerce_driven_distribution_front() 
     );
     assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(15));
     assert_eq!(economics.gross_variance_basis_points(), 650);
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(82_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(1_025_000));
 }
 
 #[test]
@@ -1023,7 +1023,7 @@ fn authored_pawnshop_is_a_low_capital_neighborhood_commercial_front() {
         economics.commerce_revenue_per_point(),
         Money::from_cents(65)
     );
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(38_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(475_000));
 }
 
 #[test]
@@ -1038,7 +1038,7 @@ fn authored_coin_machine_distributor_is_commerce_driven_route_infrastructure() {
         Money::from_cents(105)
     );
     assert_eq!(economics.gross_variance_basis_points(), 750);
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(68_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(850_000));
 }
 
 #[test]
@@ -1053,7 +1053,7 @@ fn authored_lodging_business_is_wealth_driven_and_capital_intensive() {
         economics.commerce_revenue_per_point(),
         Money::from_cents(55)
     );
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(76_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(950_000));
 }
 
 #[test]
@@ -1065,7 +1065,7 @@ fn authored_athletic_club_is_a_mid_market_recreation_business() {
     assert_eq!(economics.base_gross(), Money::from_cents(12_500));
     assert_eq!(economics.base_operating_cost(), Money::from_cents(10_000));
     assert_eq!(economics.gross_variance_basis_points(), 900);
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(45_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(560_000));
 }
 
 #[test]
@@ -1077,7 +1077,7 @@ fn authored_laundry_is_a_stable_low_capital_front() {
     assert_eq!(economics.base_gross(), Money::from_cents(11_000));
     assert_eq!(economics.base_operating_cost(), Money::from_cents(9_000));
     assert_eq!(economics.gross_variance_basis_points(), 550);
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(34_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(425_000));
 }
 
 #[test]
@@ -1093,7 +1093,7 @@ fn authored_printing_business_is_a_stable_commercial_records_front() {
         Money::from_cents(85)
     );
     assert_eq!(economics.gross_variance_basis_points(), 650);
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(48_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(600_000));
 }
 
 #[test]
@@ -1109,7 +1109,7 @@ fn authored_financial_services_business_is_wealth_driven_and_record_heavy() {
         economics.commerce_revenue_per_point(),
         Money::from_cents(45)
     );
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(72_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(900_000));
 }
 
 #[test]
@@ -1126,7 +1126,7 @@ fn authored_garment_factory_is_capital_heavy_industrial_commerce() {
     );
     assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(20));
     assert_eq!(economics.gross_variance_basis_points(), 700);
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(88_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(1_100_000));
 }
 
 #[test]
@@ -1143,7 +1143,7 @@ fn authored_stevedoring_is_capital_heavy_waterfront_commerce() {
     );
     assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(15));
     assert_eq!(economics.gross_variance_basis_points(), 650);
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(96_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(1_200_000));
 }
 
 #[test]
@@ -1160,7 +1160,7 @@ fn authored_news_service_is_commerce_driven_information_infrastructure() {
     );
     assert_eq!(economics.wealth_revenue_per_point(), Money::from_cents(30));
     assert_eq!(economics.gross_variance_basis_points(), 550);
-    assert_eq!(economics.acquisition_cost(), Money::from_cents(52_000));
+    assert_eq!(economics.acquisition_cost(), Money::from_cents(650_000));
 }
 
 #[test]

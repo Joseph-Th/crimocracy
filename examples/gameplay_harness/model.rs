@@ -353,13 +353,13 @@ impl FixtureVariation {
     pub fn alternate_source_summary(self) -> &'static str {
         match self {
             Self::Clockwork => {
-                "A delivery clerk directly observed the Bellmore service annex receiving high-value consignments after midnight."
+                "A delivery clerk directly observed the Bellmore service annex taking fresh consignments in after midnight."
             }
             Self::Crowded => {
-                "A delivery clerk directly observed Calder's receiving house storing high-value consignments after midnight."
+                "A delivery clerk directly observed Calder's receiving house taking fresh consignments in after midnight."
             }
             Self::Quiet => {
-                "A delivery clerk directly observed the Vesper annex storing high-value consignments after midnight."
+                "A delivery clerk directly observed the Vesper annex taking fresh consignments in after midnight."
             }
         }
     }
@@ -391,13 +391,13 @@ impl FixtureVariation {
     pub fn opportunity_summary(self) -> &'static str {
         match self {
             Self::Clockwork => {
-                "Bellmore Jewelry closes with valuable stock still on site; the rear service access may be workable."
+                "Bellmore Jewelry closes with stock still on site; the rear service access may be workable."
             }
             Self::Crowded => {
-                "Calder's Jewelers closes with valuable stock still on site; a loading-bay access may be workable."
+                "Calder's Jewelers closes with stock still on site; a loading-bay access may be workable."
             }
             Self::Quiet => {
-                "Vesper Gold closes with valuable stock still on site; a side-street access may be workable."
+                "Vesper Gold closes with stock still on site; a side-street access may be workable."
             }
         }
     }
@@ -405,13 +405,13 @@ impl FixtureVariation {
     pub fn source_summary(self) -> &'static str {
         match self {
             Self::Clockwork => {
-                "Lena Orr says Bellmore keeps valuable stock overnight and uses a rear service entrance; she does not know the alarm or patrol pattern."
+                "Lena Orr says Bellmore keeps its stock overnight and uses a rear service entrance; she does not know the alarm or patrol pattern."
             }
             Self::Crowded => {
-                "Lena Orr says Calder's keeps valuable stock overnight and uses a loading bay; she does not know the alarm or patrol pattern."
+                "Lena Orr says Calder's keeps its stock overnight and uses a loading bay; she does not know the alarm or patrol pattern."
             }
             Self::Quiet => {
-                "Lena Orr says Vesper keeps valuable stock overnight and uses a side street; she does not know the alarm or patrol pattern."
+                "Lena Orr says Vesper keeps its stock overnight and uses a side street; she does not know the alarm or patrol pattern."
             }
         }
     }
@@ -870,6 +870,9 @@ pub struct RunMetrics {
     /// On refusal, production rules deliver a loyalty report to the recruiting organization
     /// naming our recruiter: reaching out carries an intelligence cost. `None` when not refused.
     pub win_back_refusal_leaked_to_rival: Option<bool>,
+    /// The accepted win-back's canonical reassignment back to the trusted lieutenant happened
+    /// exactly once, wherever the arc scheduled it.
+    pub reporting_line_restored: bool,
     // Act-2 (second wind) evidence: RUSH rebuilds and works the reopened score, PRESS deliberately
     // lets it lapse, and RECON follows fresh evidence, recovering value only when clear or
     // explicitly shelved and standing down when its own casing creates a case the channel cannot

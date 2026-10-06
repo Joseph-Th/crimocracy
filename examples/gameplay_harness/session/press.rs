@@ -1,8 +1,10 @@
 //! PRESS strategy response arc built only from player-visible information and canonical game APIs.
 
 use super::*;
+use crimocracy::core::id::{BusinessId, EnterpriseId};
 use crimocracy::core::time::DAY_MINUTES;
 use crimocracy::legal::ALL_INVESTIGATION_WORK_KINDS;
+use std::collections::BTreeMap;
 
 pub(super) fn run_press_response(
     scenario: &mut Scenario,
@@ -235,9 +237,8 @@ fn schedule_witness_pressure(
                 .get_information(disclosed_information)
                 .expect("disclosed witness-status information must persist");
             println!(
-                "[LEARN]   {:?} / {:?}: {}",
-                information.reliability(),
-                information.specificity(),
+                "[LEARN]   {}: {}",
+                format_information_grade(information.reliability(), information.specificity()),
                 information.summary()
             );
         }
@@ -513,7 +514,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(metrics.enterprise_till_concealed, Some(true));
-        assert_eq!(metrics.laundered_gross_cents, 0);
+        // The home racket's concealed reserve is never laundered directly. Any laundering
+        // that does happen must be post-diversification flow washing the harbor racket's
+        // own street till through the harbor club - bounded by that book's earnings, never
+        // by the concealed home reserve.
+        assert!(
+            metrics.laundered_gross_cents <= metrics.expansion_net_cents.unwrap_or(0),
+            "concealed home reserves must stay concealed: {} laundered against a harbor book worth {}",
+            metrics.laundered_gross_cents,
+            metrics.expansion_net_cents.unwrap_or(0)
+        );
         assert!(metrics.business_profits_swept_cents >= metrics.acquisition_spent_cents);
         assert!(metrics.acquisition_rejections > 0);
         assert!(metrics.front_acquired && metrics.expansion_established);
@@ -553,11 +563,18 @@ mod tests {
             metrics.posture_evaluations > 0,
             "the stand-down must actually review the home book from settled cycles"
         );
-        assert_eq!(
-            metrics.posture_suspensions, 0,
-            "a book that stays net-positive under its heat surcharge stays open"
+        // Over a war-chest-scale stand-down the district can carry heat the burglary-file
+        // channel never sees (vice inquiries on our own racket, rivals' files), so a
+        // losing book may legitimately suspend. The honest posture contract is one
+        // recovery-interval reopen probe per suspension - no daily whipsaw - with at most
+        // one probe still pending when the session ends.
+        assert!(
+            metrics.posture_suspensions == metrics.posture_resumptions
+                || metrics.posture_suspensions == metrics.posture_resumptions + 1,
+            "each suspension must pair with exactly one recovery-interval reopen probe: {} suspensions vs {} resumptions",
+            metrics.posture_suspensions,
+            metrics.posture_resumptions
         );
-        assert_eq!(metrics.posture_resumptions, 0);
         assert!(
             metrics.front_acquired && metrics.expansion_established,
             "the harbor escape must open before surplus allocation"
@@ -630,9 +647,12 @@ mod tests {
         .expect("scenario builds");
         let mut metrics = RunMetrics::default();
         let mut stand_down = StandDownState::new(false);
+        // The deadline is the same price-derived accumulation horizon the arc uses, not a
+        // fixed day count, so authored price changes move the test bound with them.
+        let deadline = stand_down_day_bound(&scenario);
         // Actual daily settlement and the live launder -> buy -> capitalize policy,
         // not a synthetic balance or a separate test implementation of that policy.
-        for day in 1..=10 {
+        for day in 1..=deadline {
             run_until(
                 &mut scenario,
                 SimTime::from_minutes(day * DAY_MINUTES),
@@ -667,15 +687,33 @@ mod tests {
                 return;
             }
         }
-        panic!("settled books never funded the purchase");
+        panic!("settled books never funded the purchase inside the price-derived horizon");
     }
 }
 
 struct StandDownState {
     capital_review_days: u32,
     last_absorbed: Option<i64>,
-    final_purchase_beat: bool,
     till_concealed: bool,
+    /// Per-front cap on owner draws: each venue's earned surplus can be withdrawn exactly
+    /// once, so a multi-front organization tracks its draw ledger per business rather than
+    /// double-counting a single session total across venues.
+    swept_per_front: BTreeMap<BusinessId, i64>,
+    /// Pace window for the war-chest heartbeat: the last review's accounted balance, plus
+    /// the acquisition spend at that moment so a purchase resets the projection instead of
+    /// reading as a negative income day.
+    last_heartbeat: Option<(u32, i64, i64)>,
+    /// One-time narration for the day a second front's own books start adding volume.
+    harbor_volume_narrated: bool,
+    /// Whether the defector hunt already ran inside this stand-down. The case-cooling
+    /// beat triggers it once; later reviews must not repeat the watches or the appeal.
+    personnel_recovered: bool,
+    /// When the home book was last suspended (campaign minute), so the reopen probe waits
+    /// a full authored recovery interval instead of whipsawing on a latched cold read.
+    home_suspended_since: Option<u64>,
+    /// When the home book was last resumed (campaign minute). Cycles settled before it
+    /// are stale for posture judgments; only the probe's own results decide the next move.
+    home_resumed_at: Option<u64>,
 }
 
 impl StandDownState {
@@ -683,8 +721,13 @@ impl StandDownState {
         Self {
             capital_review_days: 0,
             last_absorbed: None,
-            final_purchase_beat: false,
             till_concealed,
+            swept_per_front: BTreeMap::new(),
+            last_heartbeat: None,
+            harbor_volume_narrated: false,
+            personnel_recovered: false,
+            home_suspended_since: None,
+            home_resumed_at: None,
         }
     }
 }
@@ -704,20 +747,31 @@ fn till_is_concealed(scenario: &Scenario) -> bool {
         .is_some_and(|account| account.kind() == crimocracy::finance::AccountKind::StreetCash)
 }
 
-fn launder_enterprise_till(
+/// Wash one racket's street till through a chosen owned front, keeping the standing float
+/// reserve in the till. Concealed reserves cannot be laundered directly - that is the
+/// production rule the home branch narrates - so a concealed till returns nothing rather
+/// than fabricating a conversion path.
+fn launder_enterprise_till_through(
     scenario: &mut Scenario,
     narrative: bool,
     metrics: &mut RunMetrics,
+    enterprise: EnterpriseId,
+    front: BusinessId,
 ) -> Result<Option<i64>, Box<dyn Error>> {
-    if till_is_concealed(scenario) {
-        return Ok(None);
-    }
     let cash_account = scenario
         .state
         .enterprises()
-        .get_enterprise(scenario.enterprise)
-        .expect("canal enterprise must persist")
+        .get_enterprise(enterprise)
+        .expect("enterprise must persist")
         .cash_account();
+    if !scenario
+        .state
+        .finance()
+        .get_account(cash_account)
+        .is_some_and(|account| account.kind() == AccountKind::StreetCash)
+    {
+        return Ok(None);
+    }
     let launderable = scenario
         .state
         .finance()
@@ -729,29 +783,53 @@ fn launder_enterprise_till(
     if launderable <= 0 {
         return Ok(None);
     }
-    launder_through_front(scenario, narrative, metrics, cash_account, launderable)
+    launder_through_owned_front(
+        scenario,
+        narrative,
+        metrics,
+        front,
+        cash_account,
+        launderable,
+    )
 }
 
-/// Withdraw only settled legitimate earnings, never laundering fees or opening capital. The
-/// production sweep checks real liquidity and ownership; this policy caps the draw to earned
-/// surplus so profitable books remain operating assets.
-pub(crate) fn sweep_front_profits(
+/// The home racket's till still washes through the original front.
+fn launder_enterprise_till(
     scenario: &mut Scenario,
     narrative: bool,
     metrics: &mut RunMetrics,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Option<i64>, Box<dyn Error>> {
+    launder_enterprise_till_through(
+        scenario,
+        narrative,
+        metrics,
+        scenario.enterprise,
+        scenario.front,
+    )
+}
+
+/// Withdraw only settled legitimate earnings, never laundering fees or opening capital. The
+/// production sweep checks real liquidity and ownership; this policy caps the draw to each
+/// venue's earned surplus so profitable books remain operating assets. The cap is tracked
+/// per business by the caller, so a multi-front organization draws each front's profit
+/// exactly once. Returns the cents actually swept.
+pub(crate) fn sweep_front_profits_of(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+    business: BusinessId,
+    already_swept_cents: i64,
+) -> Result<i64, Box<dyn Error>> {
     use crimocracy::economy::business_economy_system::{
         BusinessProfitSweepDraft, validate_sweep_business_profits,
     };
-    let economy = scenario
-        .state
-        .economy()
-        .get_business_economy(scenario.front)
-        .expect("owned front economy persists");
+    let Some(economy) = scenario.state.economy().get_business_economy(business) else {
+        return Ok(0);
+    };
     let earned: i64 = scenario
         .state
         .economy()
-        .cycles_for(scenario.front)
+        .cycles_for(business)
         .map(|cycle| cycle.net_cash().cents())
         .sum();
     let available = scenario
@@ -762,11 +840,9 @@ pub(crate) fn sweep_front_profits(
         .balance()
         .cents()
         .max(0);
-    let amount = (earned - metrics.business_profits_swept_cents)
-        .max(0)
-        .min(available);
+    let amount = (earned - already_swept_cents).max(0).min(available);
     if amount == 0 {
-        return Ok(());
+        return Ok(0);
     }
     let before = scenario
         .state
@@ -779,7 +855,7 @@ pub(crate) fn sweep_front_profits(
         &scenario.state,
         BusinessProfitSweepDraft {
             organization: scenario.player,
-            business: scenario.front,
+            business,
             destination: scenario.accounted_funds,
             amount: Money::from_cents(amount),
         },
@@ -792,13 +868,39 @@ pub(crate) fn sweep_front_profits(
         .expect("accounted books persist")
         .balance()
         .cents();
-    metrics.business_profits_swept_cents += after - before;
+    let swept = after - before;
+    debug_assert_eq!(
+        swept, amount,
+        "the committed owner draw must move exactly the validated amount"
+    );
+    metrics.business_profits_swept_cents = metrics
+        .business_profits_swept_cents
+        .checked_add(swept)
+        .expect("session owner-draw total must fit money range");
     if narrative {
         println!(
             "[OWNER DRAW] Withdraw {} of earned front profits into accounted funds. Legitimate trade can finance the purchase too; opening capital stays in the business.",
-            format_cents(after - before)
+            format_cents(swept)
         );
     }
+    Ok(swept)
+}
+
+/// Single-front convenience for callers that keep their draw ledger in the shared session
+/// total (the retention probe): sweeps the original home front with the accumulated
+/// metrics counter as its per-front cap.
+pub(crate) fn sweep_front_profits(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    sweep_front_profits_of(
+        scenario,
+        narrative,
+        metrics,
+        scenario.front,
+        metrics.business_profits_swept_cents,
+    )?;
     Ok(())
 }
 
@@ -832,7 +934,10 @@ fn run_daily_capital_management(
     if !metrics.front_acquired && metrics.acquisition_rejections == 0 {
         acquire_harbor_front(scenario, narrative, metrics)?;
     }
-    sweep_front_profits(scenario, narrative && first_laundry, metrics)?;
+    // Owner draws from every front the organization owns: each venue's earned surplus
+    // enters the war chest exactly once, tracked per business so a growing portfolio
+    // cannot double-draw the same profit.
+    sweep_owned_front_profits(scenario, narrative && first_laundry, metrics, stand_down)?;
 
     if metrics.front_acquired && !metrics.expansion_established {
         // Capitalize before sweeping fresh income. Otherwise the same till funds laundering
@@ -848,7 +953,35 @@ fn run_daily_capital_management(
             "[DECIDE]  Keep a $50 street reserve for the new book; wash only the surplus. Withdraw earned front profits as well: legitimate income and washed money both buy the harbor venue."
         );
     }
-    let absorbed = launder_enterprise_till(scenario, narrative && first_laundry, metrics)?;
+    // A second cash-intensive front multiplies laundering volume the way ownership should:
+    // the harbor racket's own till washes through the harbor club's books while the home
+    // book keeps its original channel. Each front's plausible volume is its own.
+    let home_absorbed = launder_enterprise_till(scenario, narrative && first_laundry, metrics)?;
+    let harbor_absorbed = match metrics.expansion_enterprise {
+        Some(expansion) if metrics.expansion_established => {
+            let absorbed = launder_enterprise_till_through(
+                scenario,
+                false,
+                metrics,
+                expansion,
+                scenario.expansion_front,
+            )?;
+            if absorbed.is_some() && narrative && !stand_down.harbor_volume_narrated {
+                stand_down.harbor_volume_narrated = true;
+                println!(
+                    "[LAUNDER] The harbor club's own books now wash the harbor racket's take as well; a second front roughly doubles how fast dirty money turns clean."
+                );
+            }
+            absorbed
+        }
+        _ => None,
+    };
+    let absorbed = match (home_absorbed, harbor_absorbed) {
+        (Some(home), Some(harbor)) => Some(home + harbor),
+        (Some(home), None) => Some(home),
+        (None, Some(harbor)) => Some(harbor),
+        (None, None) => None,
+    };
     record_daily_laundering(absorbed, narrative && !first_laundry, stand_down);
 
     if !metrics.front_acquired && acquire_harbor_front(scenario, narrative, metrics)? {
@@ -867,6 +1000,37 @@ fn run_daily_capital_management(
         && metrics.second_opportunity_expired
     {
         acquire_annex_front(scenario, narrative, metrics)?;
+    }
+    Ok(())
+}
+
+/// Sweeps earned surplus from every business the organization currently owns that has a
+/// live operating economy - the home front, the acquired harbor club, and the annex
+/// front once it is bought - using the per-front draw ledger in `stand_down`.
+fn sweep_owned_front_profits(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+    stand_down: &mut StandDownState,
+) -> Result<(), Box<dyn Error>> {
+    let owned: Vec<BusinessId> = scenario
+        .state
+        .world()
+        .businesses_owned_by_organization(scenario.player)
+        .map(|record| record.id())
+        .collect();
+    for business in owned {
+        let already_swept = stand_down
+            .swept_per_front
+            .get(&business)
+            .copied()
+            .unwrap_or(0);
+        let swept = sweep_front_profits_of(scenario, narrative, metrics, business, already_swept)?;
+        if swept > 0 {
+            stand_down
+                .swept_per_front
+                .insert(business, already_swept + swept);
+        }
     }
     Ok(())
 }
@@ -893,17 +1057,26 @@ fn choose_racket_posture(trailing_net_cents: i64) -> RacketPosture {
 /// Daily player-visible posture governance during the stand-down: read the last
 /// two settled home-racket cycles from production state (the same manager
 /// reports leadership holds), suspend through the canonical path while the
-/// trailing book loses money, and reopen once the contact confirms the file
-/// cooled. Runs identically with or without narration; prints are gated.
+/// trailing book loses money, and probe the district with a single reopen only
+/// after an authored recovery interval has passed. The interval equals the
+/// production cold-case window because that is how long a boss knows an
+/// institutional file takes to shelf on its own; district heat can come from
+/// vice inquiries and rivals' files the contact channel never sees, so a
+/// shelved burglary file alone is not proof the books will pay again. A freshly
+/// reopened book is judged only on cycles settled since the resume, so stale
+/// pre-suspension losses cannot whipsaw it straight back down. Runs identically
+/// with or without narration; prints are gated.
 fn govern_home_racket_posture(
     scenario: &mut Scenario,
     narrative: bool,
     metrics: &mut RunMetrics,
+    stand_down: &mut StandDownState,
 ) -> Result<(), Box<dyn Error>> {
     use crimocracy::enterprises::EnterpriseStatus;
     use crimocracy::enterprises::enterprise_execution::{
         validate_resume_enterprise, validate_suspend_enterprise,
     };
+    let now = scenario.state.now().as_minutes();
     if scenario
         .state
         .enterprises()
@@ -912,30 +1085,41 @@ fn govern_home_racket_posture(
         .status()
         != EnterpriseStatus::Active
     {
-        // Suspended and still hot: no fresh cycles settle, so there is nothing new
-        // to judge. Once today's contact read confirms the file cooled, reopen
-        // through the canonical path; the heat that sank the book is gone.
-        if metrics.cold_case_confirmed == Some(true) {
+        // Suspended: no fresh cycles settle, so trailing numbers are stale. Wait a full
+        // recovery interval (the authored cold-case window) before spending one reopen
+        // probe on the district; the probe's own settled cycle then reports honestly
+        // whether the heat has cleared.
+        if let Some(suspended_at) = stand_down.home_suspended_since
+            && now
+                >= suspended_at
+                    + u64::from(scenario.registry.legal().cold_case_window().as_minutes())
+        {
             validate_resume_enterprise(scenario.registry, &scenario.state, scenario.enterprise)?
                 .commit(&mut scenario.state)?;
             metrics.posture_resumptions = metrics.posture_resumptions.saturating_add(1);
+            stand_down.home_suspended_since = None;
+            stand_down.home_resumed_at = Some(now);
             if narrative {
                 println!(
-                    "[POSTURE] The file cooled and the home book reopens with a full new cycle ahead; reopening schedules fresh work rather than paying back the quiet weeks."
+                    "[POSTURE] A recovery interval has passed since the book closed; leadership probes the district with one reopened cycle. The next settled book reports whether the heat has actually cleared."
                 );
             }
         }
         return Ok(());
     }
+    // Judge only cycles settled since the last resume probe, so a freshly reopened
+    // book is measured on its own results rather than on pre-suspension losses.
+    let resumed_at = stand_down.home_resumed_at.unwrap_or(0);
     let trailing: Vec<(i64, i64)> = scenario
         .state
         .enterprises()
         .cycles_for(scenario.enterprise)
         .rev()
         .take(2)
+        .filter(|cycle| cycle.occurred_at().as_minutes() >= resumed_at)
         .map(|cycle| (cycle.net_cash().cents(), cycle.investigation_heat().cents()))
         .collect();
-    if trailing.is_empty() {
+    if trailing.len() < 2 {
         return Ok(());
     }
     metrics.posture_evaluations = metrics.posture_evaluations.saturating_add(1);
@@ -946,6 +1130,7 @@ fn govern_home_racket_posture(
         validate_suspend_enterprise(&scenario.state, scenario.enterprise)?
             .commit(&mut scenario.state)?;
         metrics.posture_suspensions = metrics.posture_suspensions.saturating_add(1);
+        stand_down.home_suspended_since = Some(now);
         if narrative {
             println!(
                 "[POSTURE] Home book trailing {} over the last {} settled cycle(s) with {} of heat: suspending the racket until the file cools. Wages still come due and the front keeps trading; the bleeding stops.",
@@ -1083,12 +1268,39 @@ pub fn acquire_annex_front(
     Ok(true)
 }
 
-/// Daily stand-down reviews bounded by production timing: the authored cold-case window
-/// plus margin for the daily polling cadence, custody-deferred decay, and the final
-/// purchase beat. A fixed day count would go stale if the authored window ever changes.
+/// Bounded daily reviews derived from production timing and authored prices: the
+/// cold-case window for the file to shelve, plus a war-chest horizon long enough for
+/// accounted funds to cover the harbor venue and the later annex at their authored
+/// prices at a conservative floor of clean accumulation per review. A fixed day count
+/// would go stale whenever authored prices or economics change.
 fn stand_down_day_bound(scenario: &Scenario) -> u64 {
     let cold_window_minutes = u64::from(scenario.registry.legal().cold_case_window().as_minutes());
-    cold_window_minutes.div_ceil(DAY_MINUTES).saturating_add(8)
+    let cold_days = cold_window_minutes.div_ceil(DAY_MINUTES);
+    let harbor_price = scenario
+        .registry
+        .get_business(crimocracy::world::BusinessKind::Hospitality)
+        .economics()
+        .acquisition_cost()
+        .cents();
+    let annex_price = scenario
+        .registry
+        .get_business(crimocracy::world::BusinessKind::Retail)
+        .economics()
+        .acquisition_cost()
+        .cents();
+    // Conservative clean-accumulation floor per review day: roughly one small front's
+    // plausible laundering net plus a modest owner draw. Observed pacing on the authored
+    // fixture runs well above this floor, so honest worlds finish early; the floor keeps
+    // slow worlds from being cut off mid-accumulation instead of ending their arcs early.
+    const CLEAN_ACCUMULATION_FLOOR_CENTS: i64 = 15_000;
+    let war_chest_target = harbor_price + annex_price;
+    let war_chest_days = u64::try_from(
+        (war_chest_target + CLEAN_ACCUMULATION_FLOOR_CENTS - 1) / CLEAN_ACCUMULATION_FLOOR_CENTS,
+    )
+    .expect("authored prices must fit the review-day bound");
+    // Margin covers daily polling cadence, custody-deferred case decay, and the final
+    // purchase/settlement beats after the last review.
+    cold_days + war_chest_days + 8
 }
 
 /// Latest start for a patrol-informed quiet word, derived from production: institutional
@@ -1121,9 +1333,11 @@ fn run_stand_down_and_diversify(
     // front's books and asks its standing precinct contact whether anything moved on
     // the case - daily tradecraft, not calendar math: leadership cannot know when the
     // file will go cold, so it keeps asking until the channel itself carries the
-    // shelved read. The loop is bounded past the authored cold-case window (plus margin
-    // for daily polling, custody-deferred decay, and the final purchase beat), so both
-    // waits terminate through production disclosures.
+    // shelved read. Once the file is shelved the war chest becomes the only remaining
+    // gate: reviews continue while clean books accumulate toward the harbor venue and
+    // the later annex at their authored prices. The loop is bounded by production
+    // timing plus a price-derived accumulation horizon, so every world ends either in
+    // the completed diversification chain or an honest "another season" ending.
     // PRESS notices the reopened second score at the same canonical minute every narrative
     // branch does, while it is still standing down. The branch then deliberately schedules
     // nothing on it: the discipline that protects the open case is also an opportunity cost.
@@ -1185,9 +1399,34 @@ fn run_stand_down_and_diversify(
         }
         run_daily_capital_management(scenario, police_name, narrative, metrics, &mut stand_down)?;
         let read = poll_case_activity(scenario, burglary, narrative, metrics)?;
-        govern_home_racket_posture(scenario, narrative, metrics)?;
-        narrate_stand_down_heartbeat(scenario, &read, narrative, metrics, &stand_down);
-        if cold_case_wait_is_complete(narrative, metrics, &mut stand_down) {
+        // The file is shelved: street work is safe again, and finding the missing
+        // specialist outranks real estate. A boss hunts for his man the moment the
+        // district quiets, not after the war chest is finished.
+        if metrics.cold_case_confirmed == Some(true)
+            && !stand_down.personnel_recovered
+            && metrics.defector.is_some()
+        {
+            stand_down.personnel_recovered = true;
+            let member = metrics
+                .defector
+                .expect("a departure record names the missing member");
+            if narrative {
+                let member_name = scenario
+                    .state
+                    .world()
+                    .get_character(member)
+                    .expect("departed member must persist")
+                    .name();
+                println!(
+                    "[DECIDE]  The file is shelved and street work is safe again. Before the books absorb leadership's whole attention: find where {member_name} landed, and make the one appeal his history with the family earns."
+                );
+            }
+            super::run_personnel_recovery(scenario, narrative, metrics)?;
+            super::restore_defector_reporting_line(scenario, narrative, metrics)?;
+        }
+        govern_home_racket_posture(scenario, narrative, metrics, &mut stand_down)?;
+        narrate_stand_down_heartbeat(scenario, &read, narrative, metrics, &mut stand_down);
+        if stand_down_wait_is_complete(metrics, &stand_down) {
             break;
         }
         day_at = day_at
@@ -1198,6 +1437,14 @@ fn run_stand_down_and_diversify(
     }
     if narrative && metrics.cold_case_confirmed.is_none() {
         println!("[VERIFY]  The channel never produced a dependable read on the case's activity.");
+    }
+    if narrative
+        && metrics.cold_case_confirmed == Some(true)
+        && !stand_down_wait_is_complete(metrics, &stand_down)
+    {
+        println!(
+            "[DECIDE]  The file cooled but the war chest never carried the full chain of prices; diversification waits for another season of clean books."
+        );
     }
     settle_expansion_proof(scenario, campaign_day_minutes, narrative, metrics)
 }
@@ -1230,15 +1477,16 @@ fn narrate_stand_down_heartbeat(
     read: &Option<(bool, String)>,
     narrative: bool,
     metrics: &RunMetrics,
-    stand_down: &StandDownState,
+    stand_down: &mut StandDownState,
 ) {
     let should_heartbeat = narrative
-        && (stand_down.capital_review_days > 1 || stand_down.till_concealed)
-        && metrics.cold_case_confirmed.is_none()
+        && stand_down.capital_review_days > 1
         // Heartbeat is a governance summary, not a daily log: report only fresh channel
         // news, the purchase/expansion beats (narrated at their own sites), or a periodic
-        // pulse every fourth review so a week-long cold-case wait reads as stewardship
-        // rather than spam. Routine enterprise/front settlements already narrate above.
+        // pulse every fourth review so a multi-week wait reads as stewardship rather than
+        // spam. Routine enterprise/front settlements already narrate above. The pulse
+        // continues after the file cools because the war chest, not the case, is then the
+        // only remaining gate.
         && (read.is_some() || stand_down.capital_review_days.is_multiple_of(4));
     if !should_heartbeat {
         return;
@@ -1248,63 +1496,116 @@ fn narrate_stand_down_heartbeat(
         .finance()
         .get_account(scenario.accounted_funds)
         .expect("accounted-funds account must persist")
-        .balance();
-    // Both sides of the money loop, from books leadership actually holds: washed
-    // money accumulating toward the harbor price, and street cash still waiting.
-    let till_cents = scenario
+        .balance()
+        .cents();
+    // Both sides of the money loop, from books leadership actually holds: washed money
+    // accumulating toward the next purchase, and street cash still waiting its turn.
+    let street_cents: i64 = scenario
         .state
-        .enterprises()
-        .get_enterprise(scenario.enterprise)
-        .and_then(|record| scenario.state.finance().get_account(record.cash_account()))
-        .map(|account| account.balance().cents())
-        .unwrap_or_default()
-        .max(0);
-    let channel_line = match read {
-        Some((true, _)) => "the case is still developing - no new street jobs, racket still open",
-        Some((false, _)) => "the channel confirms the case has cooled",
+        .finance()
+        .accounts_for(FinancialOwner::Organization(scenario.player))
+        .filter(|account| {
+            matches!(
+                account.kind(),
+                AccountKind::StreetCash | AccountKind::ConcealedCash
+            )
+        })
+        .map(|account| account.balance().cents().max(0))
+        .sum();
+    let channel_line = match (read, metrics.cold_case_confirmed) {
+        (Some((true, _)), _) => {
+            "the case is still developing - no new street jobs, racket still open"
+        }
+        (Some((false, _)), _) => "the channel confirms the case has cooled",
+        (None, Some(true)) => "the file is shelved; the war chest is the only gate now",
         // Leadership cannot know when the file will go cold; until the channel says
         // otherwise the last confirmed read stands and new street jobs stay on hold.
-        None => "no fresh word - no new street jobs, racket still open",
+        (None, _) => "no fresh word - no new street jobs, racket still open",
     };
-    let harbor_price_cents = scenario
-        .registry
-        .get_business(crimocracy::world::BusinessKind::Hospitality)
-        .economics()
-        .acquisition_cost()
-        .cents();
+    // The next capital target: the harbor club until it is owned, then the lapsed annex
+    // score as income property. Prices come from the authored registry, not constants.
+    let (target_name, target_price) = if !metrics.front_acquired {
+        let price = scenario
+            .registry
+            .get_business(crimocracy::world::BusinessKind::Hospitality)
+            .economics()
+            .acquisition_cost()
+            .cents();
+        ("the harbor club", price)
+    } else {
+        let price = scenario
+            .registry
+            .get_business(
+                scenario
+                    .state
+                    .world()
+                    .get_business(scenario.alternate_target)
+                    .expect("annex target must persist")
+                    .kind(),
+            )
+            .economics()
+            .acquisition_cost()
+            .cents();
+        ("the annex front", price)
+    };
+    let gap = (target_price - accounted).max(0);
+    // Pace from the last pulse, reset by any purchase so a spend never reads as a
+    // negative income day. This is the same arithmetic a boss does on the books.
+    let mut pace_note = String::new();
+    if let Some((last_reviews, last_accounted, last_spend)) = stand_down.last_heartbeat
+        && last_spend == metrics.acquisition_spent_cents
+        && stand_down.capital_review_days > last_reviews
+    {
+        let reviews_elapsed = stand_down.capital_review_days - last_reviews;
+        let pace = (accounted - last_accounted) / i64::from(reviews_elapsed);
+        if pace > 0 {
+            let days_out = (gap + pace - 1) / pace;
+            pace_note = format!(
+                "; clean books grow about {} per review, roughly {} review(s) away at this pace",
+                format_cents(pace),
+                days_out,
+            );
+        } else if gap > 0 {
+            pace_note = format!(
+                "; the books are not gaining on {} at this pace",
+                target_name
+            );
+        }
+    }
+    stand_down.last_heartbeat = Some((
+        stand_down.capital_review_days,
+        accounted,
+        metrics.acquisition_spent_cents,
+    ));
     println!(
-        "[WAIT] {}: {}; {} capital review(s) so far, accounted books at {}, racket reserve at {}. Harbor goal {} leaves {} to go.",
+        "[WAIT] {}: {}; {} capital review(s) so far - clean books at {}, street liquidity {}. Next purchase: {} at {}, {} to go{}.",
         stamp(scenario.state.now().as_minutes()),
         channel_line,
         stand_down.capital_review_days,
-        format_cents(accounted.cents()),
-        format_cents(till_cents),
-        format_cents(harbor_price_cents),
-        format_cents((harbor_price_cents - accounted.cents()).max(0)),
+        format_cents(accounted),
+        format_cents(street_cents),
+        target_name,
+        format_cents(target_price),
+        format_cents(gap),
+        pace_note,
     );
 }
 
-fn cold_case_wait_is_complete(
-    narrative: bool,
-    metrics: &RunMetrics,
-    stand_down: &mut StandDownState,
-) -> bool {
-    if metrics.cold_case_confirmed != Some(true) {
-        return false;
-    }
-    if metrics.front_acquired {
-        return true;
-    }
-    if stand_down.final_purchase_beat {
-        if narrative {
-            println!(
-                "[DECIDE]  The case is cooled but the books never carried the price; diversification waits for another season."
-            );
-        }
-        return true;
-    }
-    stand_down.final_purchase_beat = true;
-    false
+/// The stand-down's diversification chain is complete when the harbor venue is owned,
+/// its second-district book is open, and the lapsed annex score has been converted (it
+/// stops being a live conversion target only once bought, because the opportunity
+/// lapsed long before any purchase could happen). Completion still requires the cooled
+/// read: a boss keeps asking the channel until the file is actually shelved, even when
+/// the money arrived first. When the war chest cannot carry an authored price inside
+/// the bounded horizon, the loop simply exhausts and the caller narrates the honest
+/// "another season" ending instead of inventing a purchase.
+fn stand_down_wait_is_complete(metrics: &RunMetrics, stand_down: &StandDownState) -> bool {
+    let annex_resolved = metrics.annex_acquired || !metrics.second_opportunity_expired;
+    metrics.front_acquired
+        && metrics.expansion_established
+        && annex_resolved
+        && stand_down.capital_review_days > 0
+        && metrics.cold_case_confirmed == Some(true)
 }
 
 fn settle_expansion_proof(
@@ -1324,7 +1625,18 @@ fn settle_expansion_proof(
             .expect("authored campaign day must fit the duration type"),
     );
     for _ in 0..10 {
-        if scenario.state.enterprises().cycles_for(expansion).count() >= 2 {
+        // The harbor book needs two settled cycles to show real ongoing earnings, and a
+        // purchased annex front needs its first clean settlement so the closing view
+        // reports income property that actually earns, not a just-bought shell.
+        let harbor_ready = scenario.state.enterprises().cycles_for(expansion).count() >= 2;
+        let annex_ready = !metrics.annex_acquired
+            || scenario
+                .state
+                .economy()
+                .cycles_for(scenario.alternate_target)
+                .count()
+                >= 1;
+        if harbor_ready && annex_ready {
             break;
         }
         run_until(scenario, scenario.state.now() + day, narrative, metrics)?;

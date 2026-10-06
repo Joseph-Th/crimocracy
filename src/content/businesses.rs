@@ -42,6 +42,17 @@ pub(super) fn register_laundering(builder: &mut RegistryBuilder) {
         .unwrap_or_else(|error| panic!("invalid laundering registry: {error}"));
 }
 
+/// Acquisition prices are period-plausible sale prices for the whole business, not
+/// convenience-store sticker amounts: roughly two to four months of the venue's own
+/// base gross. Daily operating economics, wages, and take sizes stay at 1929-1935
+/// street scale, so owning legitimate property is a milestone the organization must
+/// accumulate clean wealth toward over weeks. A single burglary take must never exceed
+/// the price of buying the same class of business outright.
+///
+/// Variance-notable thresholds sit near the top of each venue's modeled variance band
+/// (roughly its 95th-percentile magnitude) so a variance-driven Notable report is rare
+/// enough to be worth a boss's attention; ordinary profitable cycles settle as routine
+/// summaries, and losses still make a cycle Notable on their own.
 pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
     let definitions = [
         (
@@ -54,9 +65,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(80),
                 police_cost_per_point: Money::from_cents(25),
                 gross_variance_basis_points: 1_000,
-                notable_variance_basis_points: 800,
+                notable_variance_basis_points: 950,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(36_000),
+                acquisition_cost: Money::from_cents(450_000),
             },
         ),
         (
@@ -69,9 +80,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(90),
                 police_cost_per_point: Money::from_cents(30),
                 gross_variance_basis_points: 1_200,
-                notable_variance_basis_points: 900,
+                notable_variance_basis_points: 1_140,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(48_000),
+                acquisition_cost: Money::from_cents(600_000),
             },
         ),
         (
@@ -84,9 +95,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(70),
                 police_cost_per_point: Money::from_cents(25),
                 gross_variance_basis_points: 800,
-                notable_variance_basis_points: 700,
+                notable_variance_basis_points: 760,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(56_000),
+                acquisition_cost: Money::from_cents(700_000),
             },
         ),
         (
@@ -99,9 +110,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(100),
                 police_cost_per_point: Money::from_cents(35),
                 gross_variance_basis_points: 700,
-                notable_variance_basis_points: 600,
+                notable_variance_basis_points: 660,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(90_000),
+                acquisition_cost: Money::from_cents(1_125_000),
             },
         ),
         (
@@ -114,9 +125,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(60),
                 police_cost_per_point: Money::from_cents(15),
                 gross_variance_basis_points: 500,
-                notable_variance_basis_points: 450,
+                notable_variance_basis_points: 470,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(27_000),
+                acquisition_cost: Money::from_cents(340_000),
             },
         ),
         (
@@ -129,9 +140,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(40),
                 police_cost_per_point: Money::from_cents(20),
                 gross_variance_basis_points: 900,
-                notable_variance_basis_points: 700,
+                notable_variance_basis_points: 850,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(64_000),
+                acquisition_cost: Money::from_cents(800_000),
             },
         ),
         (
@@ -146,9 +157,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(70),
                 police_cost_per_point: Money::from_cents(45),
                 gross_variance_basis_points: 1_800,
-                notable_variance_basis_points: 1_200,
+                notable_variance_basis_points: 1_710,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(85_000),
+                acquisition_cost: Money::from_cents(1_060_000),
             },
         ),
         (
@@ -165,9 +176,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(110),
                 police_cost_per_point: Money::from_cents(50),
                 gross_variance_basis_points: 1_400,
-                notable_variance_basis_points: 1_000,
+                notable_variance_basis_points: 1_330,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(70_000),
+                acquisition_cost: Money::from_cents(875_000),
             },
         ),
         (
@@ -185,9 +196,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(130),
                 police_cost_per_point: Money::from_cents(25),
                 gross_variance_basis_points: 900,
-                notable_variance_basis_points: 650,
+                notable_variance_basis_points: 850,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(105_000),
+                acquisition_cost: Money::from_cents(1_310_000),
             },
         ),
         (
@@ -204,9 +215,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(115),
                 police_cost_per_point: Money::from_cents(25),
                 gross_variance_basis_points: 650,
-                notable_variance_basis_points: 500,
+                notable_variance_basis_points: 620,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(82_000),
+                acquisition_cost: Money::from_cents(1_025_000),
             },
         ),
         (
@@ -223,9 +234,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(65),
                 police_cost_per_point: Money::from_cents(30),
                 gross_variance_basis_points: 850,
-                notable_variance_basis_points: 650,
+                notable_variance_basis_points: 800,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(38_000),
+                acquisition_cost: Money::from_cents(475_000),
             },
         ),
         (
@@ -241,9 +252,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(105),
                 police_cost_per_point: Money::from_cents(25),
                 gross_variance_basis_points: 750,
-                notable_variance_basis_points: 550,
+                notable_variance_basis_points: 710,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(68_000),
+                acquisition_cost: Money::from_cents(850_000),
             },
         ),
         (
@@ -260,9 +271,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(55),
                 police_cost_per_point: Money::from_cents(20),
                 gross_variance_basis_points: 800,
-                notable_variance_basis_points: 600,
+                notable_variance_basis_points: 760,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(76_000),
+                acquisition_cost: Money::from_cents(950_000),
             },
         ),
         (
@@ -278,9 +289,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(70),
                 police_cost_per_point: Money::from_cents(20),
                 gross_variance_basis_points: 900,
-                notable_variance_basis_points: 650,
+                notable_variance_basis_points: 850,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(45_000),
+                acquisition_cost: Money::from_cents(560_000),
             },
         ),
         (
@@ -297,9 +308,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(55),
                 police_cost_per_point: Money::from_cents(15),
                 gross_variance_basis_points: 550,
-                notable_variance_basis_points: 450,
+                notable_variance_basis_points: 520,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(34_000),
+                acquisition_cost: Money::from_cents(425_000),
             },
         ),
         (
@@ -316,9 +327,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(85),
                 police_cost_per_point: Money::from_cents(15),
                 gross_variance_basis_points: 650,
-                notable_variance_basis_points: 500,
+                notable_variance_basis_points: 620,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(48_000),
+                acquisition_cost: Money::from_cents(600_000),
             },
         ),
         (
@@ -335,9 +346,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(45),
                 police_cost_per_point: Money::from_cents(15),
                 gross_variance_basis_points: 800,
-                notable_variance_basis_points: 600,
+                notable_variance_basis_points: 760,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(72_000),
+                acquisition_cost: Money::from_cents(900_000),
             },
         ),
         (
@@ -354,9 +365,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(125),
                 police_cost_per_point: Money::from_cents(20),
                 gross_variance_basis_points: 700,
-                notable_variance_basis_points: 500,
+                notable_variance_basis_points: 660,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(88_000),
+                acquisition_cost: Money::from_cents(1_100_000),
             },
         ),
         (
@@ -373,9 +384,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(140),
                 police_cost_per_point: Money::from_cents(20),
                 gross_variance_basis_points: 650,
-                notable_variance_basis_points: 500,
+                notable_variance_basis_points: 620,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(96_000),
+                acquisition_cost: Money::from_cents(1_200_000),
             },
         ),
         (
@@ -391,9 +402,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(95),
                 police_cost_per_point: Money::from_cents(15),
                 gross_variance_basis_points: 550,
-                notable_variance_basis_points: 450,
+                notable_variance_basis_points: 520,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(52_000),
+                acquisition_cost: Money::from_cents(650_000),
             },
         ),
         (
@@ -411,9 +422,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(60),
                 police_cost_per_point: Money::from_cents(20),
                 gross_variance_basis_points: 700,
-                notable_variance_basis_points: 550,
+                notable_variance_basis_points: 660,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(42_000),
+                acquisition_cost: Money::from_cents(525_000),
             },
         ),
         (
@@ -430,9 +441,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(45),
                 police_cost_per_point: Money::from_cents(15),
                 gross_variance_basis_points: 600,
-                notable_variance_basis_points: 500,
+                notable_variance_basis_points: 570,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(55_000),
+                acquisition_cost: Money::from_cents(690_000),
             },
         ),
         (
@@ -449,9 +460,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(40),
                 police_cost_per_point: Money::from_cents(10),
                 gross_variance_basis_points: 450,
-                notable_variance_basis_points: 400,
+                notable_variance_basis_points: 430,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(22_000),
+                acquisition_cost: Money::from_cents(275_000),
             },
         ),
         (
@@ -468,9 +479,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(105),
                 police_cost_per_point: Money::from_cents(25),
                 gross_variance_basis_points: 750,
-                notable_variance_basis_points: 550,
+                notable_variance_basis_points: 710,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(62_000),
+                acquisition_cost: Money::from_cents(775_000),
             },
         ),
         (
@@ -487,9 +498,9 @@ pub(super) fn register_businesses(builder: &mut RegistryBuilder) {
                 commerce_revenue_per_point: Money::from_cents(95),
                 police_cost_per_point: Money::from_cents(30),
                 gross_variance_basis_points: 1_100,
-                notable_variance_basis_points: 800,
+                notable_variance_basis_points: 1_040,
                 losing_cycles_before_suspension: 3,
-                acquisition_cost: Money::from_cents(68_000),
+                acquisition_cost: Money::from_cents(850_000),
             },
         ),
     ];
