@@ -8,8 +8,11 @@
 //! then runs one infiltration (the surveillance intel pipeline) and one kidnapping (the
 //! largest cash take) to terminal through the canonical authorization path.
 //! Acting policy uses only player-visible state; outcomes stay honest production results
-//! rather than pinned successes. Operation approaches and targets vary on the policy seed
-//! so repeated runs do not replay one exact treatment.
+//! rather than pinned successes. Infiltration approaches and rival targets vary on the
+//! policy seed so repeated runs do not replay one exact treatment; the kidnapping
+//! approach varies the same way while its ransom target stays fixed to the low-pressure
+//! harbor venue so the take economics are demonstrated rather than decided by home-district
+//! police timing.
 
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::time::{SimDuration, SimTime};
@@ -21,6 +24,11 @@ use crimocracy::enterprises::{
 };
 use crimocracy::finance::finance_system::insert_account;
 use crimocracy::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+use crimocracy::intelligence::intelligence_system::validate_record_information;
+use crimocracy::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
+};
 use crimocracy::operations::operation_system::validate_authorize_operation;
 use crimocracy::operations::{
     OperationApproach, OperationContingency, OperationDraft, OperationKind, OperationObjective,
@@ -38,7 +46,6 @@ use crate::*;
 const INFILTRATION_APPROACH_SALT: u64 = 0xB16B_00B5;
 const KIDNAPPING_APPROACH_SALT: u64 = 0x5EED_C0DE;
 const INFILTRATION_TARGET_SALT: u64 = 0x0B5E_2A11;
-const KIDNAPPING_TARGET_SALT: u64 = 0x2A15_0EED;
 
 /// Policy-seeded approach treatment: covert, deceptive, or opportunistic. Inside assistance
 /// is excluded because this probe staffs no inside contact; the three remaining postures
@@ -263,9 +270,43 @@ pub fn run_repeal_pivot_probe(
         );
     }
 
+    // Competent preparation a player would actually do: the organization watches
+    // its own targets first so the new operations plan from held facts instead of
+    // blind authorization. The same DirectObservation recording path the repeat-take
+    // probe uses keeps this player-visible with no hidden state.
+    let prepare_probe_intelligence =
+        |scenario: &mut Scenario,
+         subject: EntityRef,
+         topics: &[InformationTopic]|
+         -> Result<BTreeSet<crimocracy::core::id::InformationId>, Box<dyn Error>> {
+            let mut intelligence = BTreeSet::new();
+            for topic in topics {
+                let information = validate_record_information(
+                    &scenario.state,
+                    InformationDraft {
+                        holder: KnowledgeHolder::Organization(scenario.player),
+                        source_kind: InformationSourceKind::DirectObservation,
+                        topic: *topic,
+                        source_entity: Some(EntityRef::Character(scenario.scout)),
+                        subject,
+                        observed_at: scenario.state.now(),
+                        reliability: Reliability::DirectAccess,
+                        specificity: Specificity::Precise,
+                        summary: format!("Prepared pivot planning observation: {topic:?}."),
+                    },
+                )?
+                .commit(&mut scenario.state)?;
+                intelligence.insert(information);
+            }
+            Ok(intelligence)
+        };
+
     // Infiltration: plant the scout inside a rival organization through the canonical
     // surveillance intel pipeline. Both rivals are organization-visible, so the
-    // policy-seeded choice between them uses no hidden knowledge.
+    // policy-seeded choice between them uses no hidden knowledge. The lieutenant
+    // coordinates (management) while the scout watches (surveillance): staffing the
+    // roles the operation actually scores instead of asking the scout to coordinate
+    // a placement alone, which taught that infiltration produces nothing.
     let infiltration_approach = varied_probe_approach(seeds.policy, INFILTRATION_APPROACH_SALT);
     let infiltrated_rival = if bounded_policy_choice(seeds.policy, INFILTRATION_TARGET_SALT, 2) == 0
     {
@@ -280,6 +321,13 @@ pub fn run_repeal_pivot_probe(
         .expect("probe rival must persist")
         .name()
         .to_owned();
+    let infiltration_intelligence = prepare_probe_intelligence(
+        &mut scenario,
+        EntityRef::Organization(infiltrated_rival),
+        // Personnel is the organization-subject fact the rival watch itself produces;
+        // schedule/route observations attach to business venues, not organizations.
+        &[InformationTopic::Personnel],
+    )?;
     let infiltration = validate_authorize_operation(
         scenario.registry,
         &scenario.state,
@@ -292,8 +340,11 @@ pub fn run_repeal_pivot_probe(
                 target: EntityRef::Organization(infiltrated_rival),
             },
             approach: infiltration_approach,
-            roles: BTreeMap::from([(RoleKind::Coordinator, scenario.scout)]),
-            intelligence: BTreeSet::new(),
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, scenario.lieutenant),
+                (RoleKind::Surveillance, scenario.scout),
+            ]),
+            intelligence: infiltration_intelligence,
             constraints: Vec::new(),
             contingencies: Vec::new(),
             scheduled_for: scenario.state.now() + SimDuration::ONE_MINUTE,
@@ -323,17 +374,16 @@ pub fn run_repeal_pivot_probe(
         );
     }
 
-    // Kidnapping: ransom a foreign family business. Both the character-owned score and
-    // the independent annex are foreign Retail targets with no venue-function gate, so the
-    // policy-seeded choice between them stays a valid production authorization either way.
-    // The lieutenant coordinates while the entry specialist drives; any terminal outcome
-    // is honest production evidence rather than a pinned success.
+    // Kidnapping: ransom the harbor family business. The low-pressure second
+    // district has no jurisdictional response route in this fixture, so the seizure
+    // demonstrates the ransom-take economics without the NightTrap home-district
+    // police timing deciding it first — the same isolation the repeat-take probe
+    // uses. The lieutenant coordinates while the entry specialist drives (now a
+    // competent driver through the fixture); the plan carries prepared
+    // schedule/route/personnel facts the way a player casing a seizure would.
+    // Any terminal outcome is honest production evidence rather than a pinned success.
     let kidnapping_approach = varied_probe_approach(seeds.policy, KIDNAPPING_APPROACH_SALT);
-    let ransom_target = if bounded_policy_choice(seeds.policy, KIDNAPPING_TARGET_SALT, 2) == 0 {
-        scenario.alternate_target
-    } else {
-        scenario.target
-    };
+    let ransom_target = scenario.expansion_front;
     let ransom_name = scenario
         .state
         .world()
@@ -341,6 +391,15 @@ pub fn run_repeal_pivot_probe(
         .expect("probe ransom target must persist")
         .name()
         .to_owned();
+    let kidnapping_intelligence = prepare_probe_intelligence(
+        &mut scenario,
+        EntityRef::Business(ransom_target),
+        &[
+            InformationTopic::Schedule,
+            InformationTopic::Route,
+            InformationTopic::Personnel,
+        ],
+    )?;
     let kidnapping = validate_authorize_operation(
         scenario.registry,
         &scenario.state,
@@ -357,7 +416,7 @@ pub fn run_repeal_pivot_probe(
                 (RoleKind::Coordinator, scenario.lieutenant),
                 (RoleKind::Driver, scenario.burglar),
             ]),
-            intelligence: BTreeSet::new(),
+            intelligence: kidnapping_intelligence,
             constraints: Vec::new(),
             contingencies: vec![OperationContingency::RequestDecisionOnPoliceArrival],
             scheduled_for: scenario.state.now() + SimDuration::ONE_MINUTE,
@@ -377,12 +436,22 @@ pub fn run_repeal_pivot_probe(
         return Err("kidnapping did not reach terminal state".into());
     }
     if detail {
+        let ransom_cash = kidnapping_record
+            .resolution()
+            .and_then(|resolution| resolution.cash_proceeds())
+            .map(|proceeds| proceeds.amount().cents())
+            .unwrap_or_default();
         println!(
-            "[PIVOT] Kidnapping ({kidnapping_approach:?}) reached {:?} with outcome {:?}; the ransom take path resolves through production economics.",
+            "[PIVOT] Kidnapping ({kidnapping_approach:?}) reached {:?} with outcome {:?}{}; the ransom take path resolves through production economics.",
             kidnapping_record.status(),
             kidnapping_record
                 .resolution()
                 .map(|resolution| resolution.objective_outcome()),
+            if ransom_cash > 0 {
+                format!(" for {}", format_cents(ransom_cash))
+            } else {
+                String::new()
+            },
         );
     }
 

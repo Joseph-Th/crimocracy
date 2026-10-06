@@ -172,7 +172,12 @@ fn collect_system_information_owners(state: &AppState) -> SystemInformationOwner
         owners
             .after_action
             .insert(resolution.after_action_information());
-        if operation.kind() == OperationKind::Surveillance {
+        // Infiltration shares the surveillance intel pipeline: its findings carry the
+        // Surveillance source kind through the same canonical dispatch, so the
+        // ownership set must cover both producing operation kinds.
+        if operation.kind() == OperationKind::Surveillance
+            || operation.kind() == OperationKind::Infiltration
+        {
             owners
                 .surveillance
                 .extend(resolution.discovered_information().iter().copied());

@@ -220,13 +220,14 @@ pub fn print_starting_player_view(scenario: &Scenario) {
             .collect::<Vec<_>>()
             .join(", ");
         println!(
-            "  - {:<14} autonomy {:?}; management {}; burglary {}; surveillance {}; stealth {}",
+            "  - {:<14} autonomy {:?}; management {}; burglary {}; surveillance {}; stealth {}; driving {}",
             record.name(),
             record.autonomy(),
             capability_band(record.capability(CapabilityKind::Management)),
             capability_band(record.capability(CapabilityKind::Burglary)),
             capability_band(record.capability(CapabilityKind::Surveillance)),
             capability_band(record.capability(CapabilityKind::Stealth)),
+            capability_band(record.capability(CapabilityKind::Driving)),
         );
         println!(
             "      traits [{}]; drives [{}]",

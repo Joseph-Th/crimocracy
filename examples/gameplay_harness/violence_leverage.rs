@@ -168,6 +168,33 @@ fn run_branch(
     first_approach: OperationApproach,
     follow_up_intelligence: InformationId,
 ) -> Result<BranchEvidence, Box<dyn Error>> {
+    // A player torching a venue for a message would still case it first: attach
+    // prepared target/personnel/schedule facts so the arson is judged on approach
+    // (covert vs visible violence) rather than on blind authorization. Without this
+    // the probe taught that arson always fails and fear comes free with failure.
+    let mut arson_intelligence = BTreeSet::new();
+    for topic in [
+        InformationTopic::TargetSecurity,
+        InformationTopic::Personnel,
+        InformationTopic::Schedule,
+    ] {
+        let information = validate_record_information(
+            &scenario.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(scenario.player),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic,
+                source_entity: Some(EntityRef::Character(scenario.scout)),
+                subject: EntityRef::Business(scenario.target),
+                observed_at: scenario.state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: format!("Prepared arson planning observation: {topic:?}."),
+            },
+        )?
+        .commit(&mut scenario.state)?;
+        arson_intelligence.insert(information);
+    }
     let first = validate_authorize_operation(
         scenario.registry,
         &scenario.state,
@@ -184,7 +211,7 @@ fn run_branch(
                 (RoleKind::Coordinator, scenario.lieutenant),
                 (RoleKind::EntrySpecialist, scenario.burglar),
             ]),
-            intelligence: BTreeSet::new(),
+            intelligence: arson_intelligence,
             constraints: Vec::new(),
             contingencies: Vec::new(),
             scheduled_for: scenario.state.now() + SimDuration::ONE_MINUTE,

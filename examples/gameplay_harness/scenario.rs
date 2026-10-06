@@ -224,6 +224,11 @@ pub fn build_scenario(
             capabilities: BTreeMap::from([
                 (CapabilityKind::Burglary, rating(profile.burglar_burglary())),
                 (CapabilityKind::Stealth, rating(profile.burglar_stealth())),
+                // The entry specialist doubles as the getaway driver so driver-role
+                // operations (kidnapping, extraction) have a competent crew member.
+                // Burglary itself never uses this capability; the repeal-pivot probe
+                // was staffing an unskilled driver and teaching that new operations fail.
+                (CapabilityKind::Driving, rating(65)),
             ]),
             traits: BTreeSet::from([TraitKind::EasilyFrightened]),
             drives: BTreeMap::from([(DriveKind::Safety, rating(88))]),
