@@ -961,6 +961,21 @@ fn capture_campaign_audit_metrics(scenario: &Scenario, metrics: &mut RunMetrics)
         metrics.expansion_net_cents = Some(net.cents());
         metrics.expansion_heat_cents = Some(heat.cents());
     }
+    if let Some(loan) = metrics.loan_enterprise {
+        let (net, heat) = scenario
+            .state
+            .enterprises()
+            .cycles_for(loan)
+            .try_fold((Money::ZERO, Money::ZERO), |(net, heat), cycle| {
+                Some((
+                    net.checked_add(cycle.net_cash())?,
+                    heat.checked_add(cycle.investigation_heat())?,
+                ))
+            })
+            .expect("lending book totals must fit money range");
+        metrics.loan_net_cents = Some(net.cents());
+        metrics.loan_heat_cents = Some(heat.cents());
+    }
     if let Some(investigation) = scenario.investigation {
         let interview_ran = scenario
             .state

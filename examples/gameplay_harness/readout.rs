@@ -959,7 +959,7 @@ pub fn print_organization_closing_view(
         }
         if metrics.posture_suspensions > 0 {
             actions.push(format!(
-                "suspended the home racket {} time(s) while heat exceeded income{}",
+                "suspended home book(s) {} time(s) while heat exceeded income{}",
                 metrics.posture_suspensions,
                 if metrics.posture_resumptions > 0 {
                     ", reopening once the file cooled"
@@ -967,6 +967,9 @@ pub fn print_organization_closing_view(
                     ""
                 }
             ));
+        }
+        if metrics.loan_established {
+            actions.push("put idle cash to work as a lending book at the home front".to_owned());
         }
         if metrics.front_acquired {
             actions.push("bought the harbor club".to_owned());
@@ -1086,6 +1089,82 @@ pub fn open_threads(
             "the second score lapsed untaken; standing down protected the case at a real price"
                 .to_owned(),
         );
+    }
+    // The authored growth goal, priced from the registry: what the clean books hold
+    // against the next purchase and the session's own accumulation pace. This is the
+    // closing view's forward answer to "what would playing on buy" - the same money
+    // loop every branch shares, not a score for one strategy.
+    if !metrics.front_acquired || !metrics.annex_acquired {
+        let annex_kind = scenario
+            .state
+            .world()
+            .get_business(scenario.alternate_target)
+            .map(|business| business.kind());
+        let (target_name, target_price) = if !metrics.front_acquired {
+            (
+                "the harbor club",
+                scenario
+                    .registry
+                    .get_business(crimocracy::world::BusinessKind::Hospitality)
+                    .economics()
+                    .acquisition_cost()
+                    .cents(),
+            )
+        } else {
+            (
+                "the annex front",
+                annex_kind
+                    .map(|kind| {
+                        scenario
+                            .registry
+                            .get_business(kind)
+                            .economics()
+                            .acquisition_cost()
+                            .cents()
+                    })
+                    .unwrap_or_default(),
+            )
+        };
+        if target_price > 0 {
+            // Read the clean position from production state directly: the final metric
+            // capture runs after the closing view prints.
+            let accounted_now = scenario
+                .state
+                .finance()
+                .accounts_for(FinancialOwner::Organization(scenario.player))
+                .filter(|account| account.kind() == AccountKind::AccountedFunds)
+                .try_fold(0_i64, |total, account| {
+                    total.checked_add(account.balance().cents())
+                })
+                .expect("organization accounted-funds total must fit money range")
+                .max(0);
+            let gap = (target_price - accounted_now).max(0);
+            let session_days = (scenario.state.now().as_minutes() / DAY_MINUTES).max(1);
+            // Clean accumulation the session actually produced: what the books still
+            // hold, plus what purchases and clean-funded payroll already consumed.
+            let accumulated = accounted_now
+                + metrics.acquisition_spent_cents
+                + metrics.payroll_accounted_spent_cents;
+            let pace = accumulated / (session_days as i64);
+            let goal_line = format!(
+                "clean books hold {} toward {} at {}; scores speed the war chest, they do not replace it",
+                format_cents(accounted_now),
+                target_name,
+                format_cents(target_price),
+            );
+            if pace > 0 {
+                let days_out = (gap + pace - 1) / pace;
+                threads.push(format!(
+                    "{goal_line}; this session's pace (~{}/day) reaches it in roughly {} more day(s) of clean accumulation",
+                    format_cents(pace),
+                    days_out,
+                ));
+            } else {
+                threads.push(format!(
+                    "{goal_line}; the books are not gaining on it at this session's pace",
+                ));
+            }
+        }
     }
     let street_balances: i64 = financials
         .cash_position
@@ -1601,6 +1680,34 @@ pub fn host_district_label(scenario: &Scenario, business: BusinessId) -> String 
         .unwrap_or_else(|| "unknown district".to_owned())
 }
 
+/// Player-readable racket names for the financial view, matching the manager cycle
+/// reports the books already quote, so two rackets sharing one front stay
+/// distinguishable in money lines ("Loan sharking at Marlowe Club" vs "Gambling at
+/// Marlowe Club") instead of differing only in their invisible record kind.
+pub fn racket_kind_label(kind: crimocracy::enterprises::EnterpriseKind) -> &'static str {
+    match kind {
+        crimocracy::enterprises::EnterpriseKind::Protection => "Protection",
+        crimocracy::enterprises::EnterpriseKind::Gambling => "Gambling",
+        crimocracy::enterprises::EnterpriseKind::AlcoholDistribution => "Alcohol distribution",
+        crimocracy::enterprises::EnterpriseKind::Bookmaking => "Bookmaking",
+        crimocracy::enterprises::EnterpriseKind::LoanSharking => "Loan sharking",
+        crimocracy::enterprises::EnterpriseKind::Fencing => "Fencing",
+        crimocracy::enterprises::EnterpriseKind::Speakeasy => "Speakeasy",
+        crimocracy::enterprises::EnterpriseKind::LaborRacketeering => "Labor racketeering",
+        crimocracy::enterprises::EnterpriseKind::NumbersRacket => "Numbers racket",
+        crimocracy::enterprises::EnterpriseKind::SlotMachineRoute => "Slot-machine route",
+        crimocracy::enterprises::EnterpriseKind::Brothel => "Brothel",
+        crimocracy::enterprises::EnterpriseKind::PrizeFighting => "Prizefighting",
+        crimocracy::enterprises::EnterpriseKind::Counterfeiting => "Counterfeiting",
+        crimocracy::enterprises::EnterpriseKind::Fraud => "Commercial fraud",
+        crimocracy::enterprises::EnterpriseKind::AutoTheftRing => "Stolen-auto ring",
+        crimocracy::enterprises::EnterpriseKind::Smuggling => "Smuggling network",
+        crimocracy::enterprises::EnterpriseKind::NarcoticsTrade => "Narcotics trade",
+        crimocracy::enterprises::EnterpriseKind::Blackmail => "Blackmail",
+        crimocracy::enterprises::EnterpriseKind::MunicipalGraft => "Municipal graft",
+    }
+}
+
 pub fn resolve_financial_view(
     scenario: &Scenario,
     metrics: &RunMetrics,
@@ -1639,7 +1746,11 @@ pub fn resolve_financial_view(
             })
             .expect("enterprise heat totals must fit money range");
         enterprise_lines.push(EnterpriseLine {
-            label: enterprise_label(scenario, id),
+            label: format!(
+                "{} at {}",
+                racket_kind_label(record.kind()),
+                enterprise_label(scenario, id),
+            ),
             cash_kind: scenario
                 .state
                 .finance()
@@ -1750,7 +1861,7 @@ pub fn print_financial_view(scenario: &Scenario, view: FinancialView) {
     );
     for line in &view.enterprise_lines {
         println!(
-            "  Enterprise at {}: {} cycle(s), net {}, racket till ({:?}) {} (avg {} /settled cycle){}.",
+            "  {}: {} cycle(s), net {}, racket till ({:?}) {} (avg {} /settled cycle){}.",
             line.label,
             line.cycle_count,
             format_cents(line.net_cents),
@@ -2203,9 +2314,15 @@ pub fn print_experience_readout(
     }
     println!("Evidence coverage (not a game-quality score):");
     let mut missing = 0u32;
+    let mut shown_labels: Vec<String> = Vec::new();
+    let mut absent: Vec<(String, String)> = Vec::new();
     let mut checkpoint = |label: &str, present: bool, evidence: &str| {
         missing += u32::from(!present);
-        print_loop_checkpoint(label, present, evidence);
+        if present {
+            shown_labels.push(label.to_owned());
+        } else {
+            absent.push((label.to_owned(), evidence.to_owned()));
+        }
     };
     checkpoint(
         "learn",
@@ -2429,9 +2546,24 @@ pub fn print_experience_readout(
         demonstrations.reputation_leverage,
         "publicly visible violence can make later intimidation easier through contextual business-owner fear, while the violent act still pays its own police and exposure costs and the advantage stays bounded",
     );
+    // Shown axes collapse to one wrapped list so a clean run reads as coverage, not a
+    // wall of "shown" lines; an absent axis keeps its full lesson text because that
+    // is the line an evaluator actually needs to read.
+    println!(
+        "  shown ({}): {}",
+        shown_labels.len(),
+        if shown_labels.is_empty() {
+            "none".to_owned()
+        } else {
+            shown_labels.join(", ")
+        },
+    );
+    for (label, evidence) in absent {
+        println!("  [{label:>12}] missing - {evidence}");
+    }
     if missing > 0 {
         println!(
-            "[NOTE] {missing} checkpoint(s) absent in this comparison. Check rotated runs and explicit probes; absence here is neither a failure nor proof of coverage elsewhere."
+            "[NOTE] {missing} absent checkpoint(s) above: check rotated runs and explicit probes; absence here is neither a failure nor proof of coverage elsewhere."
         );
     }
     println!("Observed decision leverage:");
@@ -2574,14 +2706,62 @@ pub fn print_experience_readout(
     );
 }
 
-pub fn print_loop_checkpoint(label: &str, present: bool, evidence: &str) -> bool {
-    println!(
-        "  [{:>12}] {:<5} - {}",
-        label,
-        if present { "shown" } else { "missing" },
-        evidence,
-    );
-    present
+/// Player-language one-line story of the opening score, for smoke readouts: what the
+/// branch chose, what the world did, and what it carried home. Composed from the same
+/// evidence fields the raw smoke line quotes, so a fast glance reads like a player's
+/// summary instead of record jargon.
+pub fn smoke_story_line(metrics: &RunMetrics) -> String {
+    let take = metrics
+        .property_realized_cash_cents
+        .map(|cents| format!(" and liquidated {}", format_cents(cents)))
+        .unwrap_or_default();
+    if metrics.opening_stood_down {
+        let reason = match metrics.opening_standdown_reason {
+            Some(OpeningStanddownReason::OpportunityExpiredDuringCasing)
+            | Some(OpeningStanddownReason::NoLowerRiskWindowBeforeExpiry) => {
+                "scouting consumed the window"
+            }
+            Some(OpeningStanddownReason::CasingRisk) | None => "the casing read too much risk",
+        };
+        return format!("stood down before the score: {reason}, so no burglary ran");
+    }
+    if metrics.aborted {
+        return match metrics.abort_cause {
+            Some(OperationAbortCause::PoliceArrival(_)) =>
+                "police reached the score first; the standing abort walked the crew away with nothing".to_owned(),
+            Some(OperationAbortCause::Decision(_)) =>
+                "leadership aborted the score on a field decision".to_owned(),
+            Some(OperationAbortCause::OpportunityExpired(_)) =>
+                "the opportunity closed before the crew committed".to_owned(),
+            _ => "the score aborted before resolution".to_owned(),
+        };
+    }
+    match (metrics.outcome, metrics.exposure_level) {
+        (Some(outcome), exposure) => {
+            let verdict = match outcome {
+                OperationObjectiveOutcome::Achieved => "took the score",
+                OperationObjectiveOutcome::Partial => "took a partial score",
+                OperationObjectiveOutcome::Failed => "failed the score",
+            };
+            match exposure {
+                Some(OperationExposureLevel::None) | None => format!("{verdict} clean{take}"),
+                Some(exposure) => {
+                    let exposure_note = exposure_story(exposure);
+                    format!("{verdict}, leaving {exposure_note}{take}")
+                }
+            }
+        }
+        (None, _) => "the score never resolved".to_owned(),
+    }
+}
+
+fn exposure_story(level: OperationExposureLevel) -> &'static str {
+    match level {
+        OperationExposureLevel::None => "no exposure",
+        OperationExposureLevel::Trace => "trace exposure",
+        OperationExposureLevel::Witnessed => "a witness",
+        OperationExposureLevel::Identifying => "someone identified",
+    }
 }
 
 pub fn terminal_label(metrics: &RunMetrics) -> String {

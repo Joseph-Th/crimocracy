@@ -580,6 +580,39 @@ pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), Har
     }
 }
 
+/// Full-mode narrative PRESS must put shelved-file idle cash to work inside the home
+/// district: once the channel confirms the case shelved and the crew is whole, a
+/// lending book opens at the owned home front through the canonical establishment
+/// path (LoanSharking needs only a cash-intensive venue, and one front can carry two
+/// racket kinds), funded by idle cash leadership actually holds. The primary set must
+/// show the book live with at least one settled positive cycle and its take sharing
+/// the home front's laundering window - the bottleneck that makes a second set of
+/// front books worth buying. Rotated worlds report honestly: a book that never opened
+/// or never settled positive is observed absence, not a failure, as long as the wait
+/// itself ended honestly.
+pub fn validate_press_lending_book_evidence(
+    metrics: &RunMetrics,
+) -> Result<(), HarnessContractError> {
+    if metrics.strategy != Some(Strategy::Press) {
+        return Ok(());
+    }
+    if !metrics.primary_narrative_set {
+        // Rotated sets accept honest absence: stalled economics may defer the float
+        // or the whole session window; the expansion contract already governs how
+        // those waits must end.
+        return Ok(());
+    }
+    let settled_positive = metrics.loan_net_cents.is_some_and(|net| net > 0);
+    if metrics.loan_established && settled_positive {
+        Ok(())
+    } else {
+        Err(HarnessContractError::MissingStrategyEvidence {
+            strategy: Strategy::Press,
+            evidence: "the primary stand-down must open a lending book at the owned home front once the file is shelved, through the canonical establishment path, and it must settle at least one positive cycle while its take shares the home front's laundering window",
+        })
+    }
+}
+
 /// Full-mode narrative PRESS must answer a witnessed job with the canonical counter-play:
 /// the case names its on-scene witness at intake and leadership runs one WitnessPressure
 /// operation against that person. Both terminal shapes are honest evidence:

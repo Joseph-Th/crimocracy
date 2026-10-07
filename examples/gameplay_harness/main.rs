@@ -10,11 +10,15 @@
 //! departed member resurfaces, instead of the departure report leaking the recruiting organization.
 //! The follow-up win-back pitch uses the player's established boss-member relationship rather
 //! than hidden candidate drives or traits; production scoring still decides whether it works.
-//! The PRESS stand-down continues past the shelved case read into a war-chest phase: daily
-//! capital reviews sweep every owned front's earned surplus, launder each racket's till
-//! through its own front's plausible volume, and accumulate clean books toward the authored
-//! harbor and annex prices, so legitimate property reads as the weeks-long milestone the
-//! money loop intends rather than a same-week purchase.
+//! The PRESS stand-down continues past the shelved case read into a war-chest phase: once
+//! the file is confirmed shelved and the crew is whole, idle street cash capitalizes a
+//! lending book at the owned home front (one front can carry two racket kinds, and the
+//! new take shares the same front's laundering window - the bottleneck that makes a
+//! second set of front books worth buying), while daily capital reviews sweep every
+//! owned front's earned surplus, launder each racket's till through its front's
+//! plausible volume, and accumulate clean books toward the authored harbor and annex
+//! prices, so legitimate property reads as the weeks-long milestone the money loop
+//! intends rather than a same-week purchase.
 //! Timeline anchors use authored operation durations and the canonical campaign-day boundary so
 //! session timing tracks the game instead of a second hard-coded ruleset. World/simulation and
 //! evaluation-policy seeds are independent; full-mode sampling varies both streams reproducibly
@@ -108,19 +112,21 @@ fn run_smoke(
         validate_run_metrics(&metrics, false)?;
         validate_strategy_evidence(ScenarioProfile::NightTrap, &metrics)?;
         println!(
-            "[SMOKE] {:<5} terminal {:>4} | {} | police {} | evidence {} | take {} (margin {:?}, intel {})\n        intel legal {} / police {} | counter-intel {} | follow-up {} | cold {} | recruitment {} attempts / {} departures",
+            "[SMOKE] {:<5} {} | {} (margin {:?}, plan intel {}) | case evidence {} | {}",
             strategy.label(),
+            smoke_story_line(&metrics),
             optional_minute(metrics.burglary_terminal_minute),
-            terminal_label(&metrics),
-            if metrics.police_arrived {
-                "arrived"
-            } else {
-                "none"
-            },
-            metrics.evidence_count,
-            optional_dollars(metrics.property_realized_cash_cents),
             metrics.burglary_execution_margin,
             optional_scalar(metrics.burglary_information_quality),
+            metrics.evidence_count,
+            if metrics.police_arrived {
+                "police arrived"
+            } else {
+                "no police response"
+            },
+        );
+        println!(
+            "        intel legal {} / patrol {} | counter-intel {} | follow-up {} | cold {} | recruitment {} attempts / {} departures",
             metrics.player_legal_activity_information,
             metrics.player_police_activity_information,
             objective_label(metrics.counterintelligence_outcome).unwrap_or("-"),
@@ -282,6 +288,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         validate_night_trap_evidence(&recon)?;
         validate_press_consequence_arc(&press)?;
         validate_press_witness_counterplay(&press)?;
+        validate_press_lending_book_evidence(&press)?;
         validate_press_expansion_evidence(&press)?;
         validate_press_second_front_evidence(&press)?;
         validate_defector_trail_evidence(&rush)?;
@@ -300,8 +307,15 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
             print_metrics(&recon);
         } else {
             for metrics in [&rush, &press, &recon] {
+                let lending_book = if metrics.loan_established {
+                    "open"
+                } else if metrics.strategy == Some(Strategy::Press) {
+                    "not funded"
+                } else {
+                    "-"
+                };
                 println!(
-                    "[SET SUMMARY] {:<5}: {}, police arrival {}, case staffed {}, departures {}, win-back {:?}, act-2 burglary {} ({:?}), self-heat read {:?}",
+                    "[SET SUMMARY] {:<5}: {}, police arrival {}, case staffed {}, departures {}, win-back {:?}, act-2 burglary {} ({:?}), lending book {}, self-heat read {:?}",
                     metrics.strategy.expect("strategy must be set").label(),
                     terminal_label(metrics),
                     metrics.police_arrived,
@@ -310,6 +324,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
                     metrics.win_back_accepted,
                     metrics.second_burglary.is_some(),
                     metrics.second_burglary_outcome,
+                    lending_book,
                     metrics.self_heat_case_active,
                 );
             }

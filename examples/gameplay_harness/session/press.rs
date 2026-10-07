@@ -3,6 +3,11 @@
 use super::*;
 use crimocracy::core::id::{BusinessId, EnterpriseId};
 use crimocracy::core::time::DAY_MINUTES;
+use crimocracy::delegation::{MandateAuthority, ResponsibilityScope};
+use crimocracy::enterprises::enterprise_execution::validate_establish_enterprise;
+use crimocracy::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
+use crimocracy::finance::finance_system::validate_record_transaction;
+use crimocracy::finance::{LedgerPosting, LedgerTransactionDraft};
 use crimocracy::legal::ALL_INVESTIGATION_WORK_KINDS;
 use std::collections::BTreeMap;
 
@@ -361,8 +366,6 @@ mod tests {
 
     #[test]
     fn laundering_preserves_reserve_even_when_capacity_exceeds_surplus() {
-        use crimocracy::finance::finance_system::validate_record_transaction;
-        use crimocracy::finance::{LedgerPosting, LedgerTransactionDraft};
         let registry = crimocracy::build_registry();
         let mut scenario = build_scenario(
             &registry,
@@ -514,15 +517,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(metrics.enterprise_till_concealed, Some(true));
-        // The home racket's concealed reserve is never laundered directly. Any laundering
-        // that does happen must be post-diversification flow washing the harbor racket's
-        // own street till through the harbor club - bounded by that book's earnings, never
-        // by the concealed home reserve.
+        // The home racket's concealed reserve is never laundered directly - and it is
+        // never spent as float either, so it cannot reach the wash through the lending
+        // book. Any laundering that does happen must be post-diversification flow: the
+        // harbor racket's own street till through the harbor club, or the lending
+        // book's street take through the home front - bounded by those books' honest
+        // earnings, never by the concealed home reserve.
+        let launderable_book_earnings =
+            metrics.expansion_net_cents.unwrap_or(0) + metrics.loan_net_cents.unwrap_or(0);
         assert!(
-            metrics.laundered_gross_cents <= metrics.expansion_net_cents.unwrap_or(0),
-            "concealed home reserves must stay concealed: {} laundered against a harbor book worth {}",
+            metrics.laundered_gross_cents <= launderable_book_earnings,
+            "concealed home reserves must stay concealed: {} laundered against launderable book earnings of {}",
             metrics.laundered_gross_cents,
-            metrics.expansion_net_cents.unwrap_or(0)
+            launderable_book_earnings
         );
         assert!(metrics.business_profits_swept_cents >= metrics.acquisition_spent_cents);
         assert!(metrics.acquisition_rejections > 0);
@@ -708,12 +715,15 @@ struct StandDownState {
     /// Whether the defector hunt already ran inside this stand-down. The case-cooling
     /// beat triggers it once; later reviews must not repeat the watches or the appeal.
     personnel_recovered: bool,
-    /// When the home book was last suspended (campaign minute), so the reopen probe waits
-    /// a full authored recovery interval instead of whipsawing on a latched cold read.
-    home_suspended_since: Option<u64>,
-    /// When the home book was last resumed (campaign minute). Cycles settled before it
-    /// are stale for posture judgments; only the probe's own results decide the next move.
-    home_resumed_at: Option<u64>,
+    /// One-time narration for the first laundering cap the lending book hits: two
+    /// home books share one front's plausible-volume window, which is exactly why
+    /// the harbor club's separate books matter to more than district heat.
+    loan_cap_narrated: bool,
+    /// Per-book posture governance state: the gambling book and the later lending
+    /// book are each judged on their own trailing settled cycles, with their own
+    /// suspension clock and resume-probe floor.
+    gambling_posture: BookPostureState,
+    loan_posture: BookPostureState,
 }
 
 impl StandDownState {
@@ -726,8 +736,9 @@ impl StandDownState {
             last_heartbeat: None,
             harbor_volume_narrated: false,
             personnel_recovered: false,
-            home_suspended_since: None,
-            home_resumed_at: None,
+            loan_cap_narrated: false,
+            gambling_posture: BookPostureState::default(),
+            loan_posture: BookPostureState::default(),
         }
     }
 }
@@ -934,6 +945,18 @@ fn run_daily_capital_management(
     if !metrics.front_acquired && metrics.acquisition_rejections == 0 {
         acquire_harbor_front(scenario, narrative, metrics)?;
     }
+    // The stand-down's one in-district growth move, once the channel confirms the file
+    // shelved and the crew is whole: idle cash from the day's unwashed take goes to
+    // work as a lending book at the owned home front. This fills the quiet stretch
+    // between the cold read and the harbor purchase with a real capital-allocation
+    // decision - the same accumulation the [GOAL] line promises, earned by governance
+    // rather than street risk.
+    if metrics.cold_case_confirmed == Some(true)
+        && !metrics.loan_established
+        && (stand_down.personnel_recovered || metrics.defector.is_none())
+    {
+        establish_home_lending_book(scenario, narrative, metrics)?;
+    }
     // Owner draws from every front the organization owns: each venue's earned surplus
     // enters the war chest exactly once, tracked per business so a growing portfolio
     // cannot double-draw the same profit.
@@ -957,6 +980,55 @@ fn run_daily_capital_management(
     // the harbor racket's own till washes through the harbor club's books while the home
     // book keeps its original channel. Each front's plausible volume is its own.
     let home_absorbed = launder_enterprise_till(scenario, narrative && first_laundry, metrics)?;
+    // The lending book's take shares the home front's plausible-volume window with the
+    // gambling take, so a full window queues the loan till's surplus as street cash -
+    // the honest bottleneck that makes a second set of front books worth buying. Wash
+    // only after the book has settled real earnings; the float is working capital, not
+    // a sum to be washed straight back out on the day it was raised.
+    let loan_absorbed = if metrics.loan_established
+        && metrics
+            .loan_enterprise
+            .is_some_and(|loan| scenario.state.enterprises().cycles_for(loan).count() >= 1)
+    {
+        let cash_account = scenario.loan_cash;
+        let launderable = scenario
+            .state
+            .finance()
+            .get_account(cash_account)
+            .expect("lending book till must persist")
+            .balance()
+            .cents()
+            .saturating_sub(LAUNDERING_FLOAT_FLOOR_CENTS)
+            .max(0);
+        if launderable <= 0 {
+            None
+        } else {
+            let absorbed = launder_through_owned_front(
+                scenario,
+                false,
+                metrics,
+                scenario.front,
+                cash_account,
+                launderable,
+            )?;
+            if absorbed.is_none() && narrative && !stand_down.loan_cap_narrated {
+                stand_down.loan_cap_narrated = true;
+                let front_name = scenario
+                    .state
+                    .world()
+                    .get_business(scenario.front)
+                    .expect("home front must persist")
+                    .name()
+                    .to_owned();
+                println!(
+                    "[LAUNDER] {front_name}'s books are carrying all the volume they plausibly can this cycle; the lending take waits as street cash. Two rackets share one front's window - a second set of books would double how much can wash per day."
+                );
+            }
+            absorbed
+        }
+    } else {
+        None
+    };
     let harbor_absorbed = match metrics.expansion_enterprise {
         Some(expansion) if metrics.expansion_established => {
             let absorbed = launder_enterprise_till_through(
@@ -976,11 +1048,15 @@ fn run_daily_capital_management(
         }
         _ => None,
     };
-    let absorbed = match (home_absorbed, harbor_absorbed) {
-        (Some(home), Some(harbor)) => Some(home + harbor),
-        (Some(home), None) => Some(home),
-        (None, Some(harbor)) => Some(harbor),
-        (None, None) => None,
+    let absorbed = match (home_absorbed, loan_absorbed, harbor_absorbed) {
+        (Some(home), Some(loan), Some(harbor)) => Some(home + loan + harbor),
+        (Some(home), Some(loan), None) => Some(home + loan),
+        (Some(home), None, Some(harbor)) => Some(home + harbor),
+        (None, Some(loan), Some(harbor)) => Some(loan + harbor),
+        (Some(home), None, None) => Some(home),
+        (None, Some(loan), None) => Some(loan),
+        (None, None, Some(harbor)) => Some(harbor),
+        (None, None, None) => None,
     };
     record_daily_laundering(absorbed, narrative && !first_laundry, stand_down);
 
@@ -1000,6 +1076,156 @@ fn run_daily_capital_management(
         && metrics.second_opportunity_expired
     {
         acquire_annex_front(scenario, narrative, metrics)?;
+    }
+    Ok(())
+}
+
+/// Authored working-capital target for the stand-down's lending book, and the floor
+/// below which opening the book would just be an empty gesture. The float is small on
+/// purpose: it is idle cash put to work, not a second treasury.
+const LENDING_FLOAT_TARGET_CENTS: i64 = 10_000;
+const LENDING_FLOAT_MINIMUM_CENTS: i64 = 2_500;
+
+/// The stand-down's in-district growth play. Once the channel confirms the burglary file
+/// shelved and the crew is whole, idle street cash stops sitting still: leadership opens a
+/// quiet lending book at the home front. LoanSharking needs only a cash-intensive venue,
+/// and the club already hosts the gambling book, so one front carries two rackets. The
+/// float comes from cash leadership can actually reach - the general street treasury
+/// first, then the gambling till's surplus above its standing float - and establishment
+/// runs through the canonical enterprise path under the existing home-district mandate.
+/// No new authority, no invented conversion: the same mandate that governs the gambling
+/// book admits a second kind at the same venue, and the new book's take is still dirty
+/// street cash that must wash through the same front's plausible-volume window.
+fn establish_home_lending_book(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<(), Box<dyn Error>> {
+    if metrics.loan_established {
+        return Ok(());
+    }
+    let treasury_balance = scenario
+        .state
+        .finance()
+        .get_account(scenario.liquidation_cash)
+        .expect("general street treasury must exist")
+        .balance()
+        .cents();
+    let gambling_cash = scenario
+        .state
+        .enterprises()
+        .get_enterprise(scenario.enterprise)
+        .expect("home gambling book must persist")
+        .cash_account();
+    let gambling_account = scenario
+        .state
+        .finance()
+        .get_account(gambling_cash)
+        .expect("gambling till must persist");
+    // Concealed reserves stay concealed: a buried hoard is not working capital for a new
+    // book, because every dollar that cycles through the loan till's daily wash would
+    // effectively launder it. Only genuinely launderable street cash may fund the float.
+    let gambling_surplus = if gambling_account.kind() == AccountKind::StreetCash {
+        (gambling_account.balance().cents() - LAUNDERING_FLOAT_FLOOR_CENTS).max(0)
+    } else {
+        0
+    };
+    let treasury_contribution = treasury_balance.clamp(0, LENDING_FLOAT_TARGET_CENTS);
+    let gambling_contribution = (LENDING_FLOAT_TARGET_CENTS - treasury_contribution)
+        .min(gambling_surplus)
+        .max(0);
+    let float_cents = treasury_contribution + gambling_contribution;
+    let till_concealed = gambling_account.kind() != AccountKind::StreetCash;
+    if float_cents < LENDING_FLOAT_MINIMUM_CENTS {
+        metrics.loan_funding_deferred_days = metrics.loan_funding_deferred_days.saturating_add(1);
+        if narrative && metrics.loan_funding_deferred_days == 1 {
+            if till_concealed {
+                println!(
+                    "[EXPAND]   The lending book waits for idle street cash: the street treasury holds {} and the gambling take sits concealed where it cannot fund or wash anything. Legitimate front profits keep building the war chest in the meantime.",
+                    format_cents(treasury_balance.max(0)),
+                );
+            } else {
+                println!(
+                    "[EXPAND]   The lending book waits for idle cash: the street treasury holds {} and the gambling till {} above its standing float. The next settled cycle funds the float.",
+                    format_cents(treasury_balance.max(0)),
+                    format_cents(gambling_surplus),
+                );
+            }
+        }
+        return Ok(());
+    }
+    let front_name = scenario
+        .state
+        .world()
+        .get_business(scenario.front)
+        .expect("home front must persist")
+        .name()
+        .to_owned();
+    let lieutenant_name = scenario
+        .state
+        .world()
+        .get_character(scenario.lieutenant)
+        .expect("lieutenant must persist")
+        .name()
+        .to_owned();
+    if narrative {
+        println!(
+            "[DECIDE]  The file is shelved and the crew is whole. Standing down from street work does not mean idle cash sits idle: the club's back room can run a quiet lending book under {lieutenant_name}'s standing home-district authority."
+        );
+    }
+    let mut float_postings = Vec::new();
+    if treasury_contribution > 0 {
+        float_postings.push(LedgerPosting {
+            account: scenario.liquidation_cash,
+            amount: Money::from_cents(-treasury_contribution),
+        });
+    }
+    if gambling_contribution > 0 {
+        float_postings.push(LedgerPosting {
+            account: gambling_cash,
+            amount: Money::from_cents(-gambling_contribution),
+        });
+    }
+    float_postings.push(LedgerPosting {
+        account: scenario.loan_cash,
+        amount: Money::from_cents(float_cents),
+    });
+    validate_record_transaction(
+        &scenario.state,
+        LedgerTransactionDraft {
+            occurred_at: scenario.state.now(),
+            memo: "Capitalize the lending book".to_owned(),
+            postings: float_postings,
+            authorization: None,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    let loan = validate_establish_enterprise(
+        scenario.registry,
+        &scenario.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::LoanSharking,
+            organization: scenario.player,
+            authority: MandateAuthority {
+                mandate: scenario.lieutenant_mandate,
+                manager: scenario.lieutenant,
+                scope: ResponsibilityScope::Neighborhood(scenario.neighborhood),
+            },
+            location: EnterpriseLocation::Business(scenario.front),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: scenario.loan_cash,
+            settlement_account: scenario.loan_settlement,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    metrics.loan_enterprise = Some(loan);
+    metrics.loan_established = true;
+    metrics.loan_open_minute = Some(scenario.state.now().as_minutes());
+    if narrative {
+        println!(
+            "[EXPAND]   Lending book established at {front_name} with a {} float: two rackets now share one front, and their combined take still has to wash through the same set of books.",
+            format_cents(float_cents),
+        );
     }
     Ok(())
 }
@@ -1054,23 +1280,34 @@ fn choose_racket_posture(trailing_net_cents: i64) -> RacketPosture {
     }
 }
 
-/// Daily player-visible posture governance during the stand-down: read the last
-/// two settled home-racket cycles from production state (the same manager
-/// reports leadership holds), suspend through the canonical path while the
-/// trailing book loses money, and probe the district with a single reopen only
-/// after an authored recovery interval has passed. The interval equals the
-/// production cold-case window because that is how long a boss knows an
-/// institutional file takes to shelf on its own; district heat can come from
-/// vice inquiries and rivals' files the contact channel never sees, so a
-/// shelved burglary file alone is not proof the books will pay again. A freshly
-/// reopened book is judged only on cycles settled since the resume, so stale
-/// pre-suspension losses cannot whipsaw it straight back down. Runs identically
+/// Per-book posture memory: when the book was suspended (so the reopen probe waits a
+/// full authored recovery interval instead of whipsawing on a latched cold read) and
+/// when it was last resumed (cycles settled before the resume are stale for posture
+/// judgments; only the probe's own results decide the next move).
+#[derive(Clone, Copy, Debug, Default)]
+struct BookPostureState {
+    suspended_since: Option<u64>,
+    resumed_at: Option<u64>,
+}
+
+/// Daily player-visible posture governance during the stand-down, applied to every home
+/// book the organization runs: read the last two settled cycles from production state
+/// (the same manager reports leadership holds), suspend through the canonical path while
+/// the trailing book loses money, and probe the district with a single reopen only after
+/// an authored recovery interval has passed. The interval equals the production cold-case
+/// window because that is how long a boss knows an institutional file takes to shelf on
+/// its own; district heat can come from vice inquiries and rivals' files the contact
+/// channel never sees, so a shelved burglary file alone is not proof the books will pay
+/// again. A freshly reopened book is judged only on cycles settled since the resume, so
+/// stale pre-suspension losses cannot whipsaw it straight back down. Runs identically
 /// with or without narration; prints are gated.
-fn govern_home_racket_posture(
+fn govern_home_book_posture(
     scenario: &mut Scenario,
+    enterprise: EnterpriseId,
+    label: &str,
     narrative: bool,
     metrics: &mut RunMetrics,
-    stand_down: &mut StandDownState,
+    posture: &mut BookPostureState,
 ) -> Result<(), Box<dyn Error>> {
     use crimocracy::enterprises::EnterpriseStatus;
     use crimocracy::enterprises::enterprise_execution::{
@@ -1080,7 +1317,7 @@ fn govern_home_racket_posture(
     if scenario
         .state
         .enterprises()
-        .get_enterprise(scenario.enterprise)
+        .get_enterprise(enterprise)
         .expect("home enterprise must persist")
         .status()
         != EnterpriseStatus::Active
@@ -1089,19 +1326,19 @@ fn govern_home_racket_posture(
         // recovery interval (the authored cold-case window) before spending one reopen
         // probe on the district; the probe's own settled cycle then reports honestly
         // whether the heat has cleared.
-        if let Some(suspended_at) = stand_down.home_suspended_since
+        if let Some(suspended_at) = posture.suspended_since
             && now
                 >= suspended_at
                     + u64::from(scenario.registry.legal().cold_case_window().as_minutes())
         {
-            validate_resume_enterprise(scenario.registry, &scenario.state, scenario.enterprise)?
+            validate_resume_enterprise(scenario.registry, &scenario.state, enterprise)?
                 .commit(&mut scenario.state)?;
             metrics.posture_resumptions = metrics.posture_resumptions.saturating_add(1);
-            stand_down.home_suspended_since = None;
-            stand_down.home_resumed_at = Some(now);
+            posture.suspended_since = None;
+            posture.resumed_at = Some(now);
             if narrative {
                 println!(
-                    "[POSTURE] A recovery interval has passed since the book closed; leadership probes the district with one reopened cycle. The next settled book reports whether the heat has actually cleared."
+                    "[POSTURE] A recovery interval has passed since the {label} closed; leadership probes the district with one reopened cycle. The next settled book reports whether the heat has actually cleared."
                 );
             }
         }
@@ -1109,11 +1346,11 @@ fn govern_home_racket_posture(
     }
     // Judge only cycles settled since the last resume probe, so a freshly reopened
     // book is measured on its own results rather than on pre-suspension losses.
-    let resumed_at = stand_down.home_resumed_at.unwrap_or(0);
+    let resumed_at = posture.resumed_at.unwrap_or(0);
     let trailing: Vec<(i64, i64)> = scenario
         .state
         .enterprises()
-        .cycles_for(scenario.enterprise)
+        .cycles_for(enterprise)
         .rev()
         .take(2)
         .filter(|cycle| cycle.occurred_at().as_minutes() >= resumed_at)
@@ -1127,13 +1364,12 @@ fn govern_home_racket_posture(
     let trailing_net: i64 = trailing.iter().map(|(net, _)| net).sum();
     let trailing_heat: i64 = trailing.iter().map(|(_, heat)| heat).sum();
     if choose_racket_posture(trailing_net) == RacketPosture::Suspend {
-        validate_suspend_enterprise(&scenario.state, scenario.enterprise)?
-            .commit(&mut scenario.state)?;
+        validate_suspend_enterprise(&scenario.state, enterprise)?.commit(&mut scenario.state)?;
         metrics.posture_suspensions = metrics.posture_suspensions.saturating_add(1);
-        stand_down.home_suspended_since = Some(now);
+        posture.suspended_since = Some(now);
         if narrative {
             println!(
-                "[POSTURE] Home book trailing {} over the last {} settled cycle(s) with {} of heat: suspending the racket until the file cools. Wages still come due and the front keeps trading; the bleeding stops.",
+                "[POSTURE] {label} trailing {} over the last {} settled cycle(s) with {} of heat: suspending the racket until the file cools. Wages still come due and the front keeps trading; the bleeding stops.",
                 format_cents(trailing_net),
                 trailing.len(),
                 format_cents(trailing_heat),
@@ -1141,11 +1377,42 @@ fn govern_home_racket_posture(
         }
     } else if narrative && first_review {
         println!(
-            "[POSTURE] Home book trailing {} over the last {} settled cycle(s) with {} of heat: keeping it open while it pays. Leadership re-checks daily and suspends if heat pushes the book negative.",
+            "[POSTURE] {label} trailing {} over the last {} settled cycle(s) with {} of heat: keeping it open while it pays. Leadership re-checks daily and suspends if heat pushes the book negative.",
             format_cents(trailing_net),
             trailing.len(),
             format_cents(trailing_heat),
         );
+    }
+    Ok(())
+}
+
+/// Posture governance for every home book: the gambling book the fixture opens with and
+/// the lending book the stand-down adds. Each book is judged on its own trailing
+/// results; district heat taxes all of them, and a boss suspends whichever books bleed.
+fn govern_home_racket_posture(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+    stand_down: &mut StandDownState,
+) -> Result<(), Box<dyn Error>> {
+    let gambling = scenario.enterprise;
+    govern_home_book_posture(
+        scenario,
+        gambling,
+        "gambling book",
+        narrative,
+        metrics,
+        &mut stand_down.gambling_posture,
+    )?;
+    if let Some(loan) = metrics.loan_enterprise.filter(|_| metrics.loan_established) {
+        govern_home_book_posture(
+            scenario,
+            loan,
+            "lending book",
+            narrative,
+            metrics,
+            &mut stand_down.loan_posture,
+        )?;
     }
     Ok(())
 }

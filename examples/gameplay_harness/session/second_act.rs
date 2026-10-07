@@ -484,10 +484,16 @@ fn liquidate_second_act_property(
                 )
             })
             .unwrap_or_else(|| ("unknown district".to_owned(), 50));
-        println!(
-            "[FENCE] {venue_district} is {}; the fence prices that risk into the haircut - quieter districts pay closer to the estimate, watched ones take more. The fence, not the score, decides what the haul is worth.",
-            format_police_band(venue_police)
-        );
+        // The fence lesson prints once per session; a repeat liquidation quotes only
+        // the take and the district's read because the mechanic was already taught.
+        if metrics.liquidation_minute.is_none() {
+            println!(
+                "[FENCE] {venue_district} is {}; the fence prices that risk into the haircut - quieter districts pay closer to the estimate, watched ones take more. The fence, not the score, decides what the haul is worth.",
+                format_police_band(venue_police)
+            );
+        } else {
+            println!("[FENCE] Same {venue_district} fence, same watched-district haircut.");
+        }
     }
     launder_through_front(
         scenario,

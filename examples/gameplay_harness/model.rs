@@ -720,6 +720,11 @@ pub struct Scenario<'registry> {
     pub expansion_front: BusinessId,
     pub expansion_cash: FinancialAccountId,
     pub expansion_settlement: FinancialAccountId,
+    /// Idle-cash lending book: the second home-district racket's till and settlement
+    /// counterparty. The accounts exist in every fixture; the PRESS stand-down opens
+    /// the LoanSharking enterprise on them once the burglary file is confirmed shelved.
+    pub loan_cash: FinancialAccountId,
+    pub loan_settlement: FinancialAccountId,
     /// Rival-held fixture assets the delegated rival-expansion pass governs: a home-district
     /// venue plus the Rosetti treasury accounts it draws cash and settlement from.
     pub rival_venue: BusinessId,
@@ -908,6 +913,21 @@ pub struct RunMetrics {
     // legally hot.
     pub expansion_enterprise: Option<EnterpriseId>,
     pub expansion_established: bool,
+    /// Idle-cash lending book: the second home-district racket opened at the owned
+    /// home front once the burglary file was confirmed shelved. Stand-down discipline
+    /// stops street work; it does not require idle cash to sit idle.
+    pub loan_enterprise: Option<EnterpriseId>,
+    pub loan_established: bool,
+    /// Minute the lending book opened, quoted from production establishment time.
+    pub loan_open_minute: Option<u64>,
+    /// Net the lending book settled across its observed cycles (raw evidence).
+    pub loan_net_cents: Option<i64>,
+    /// District-heat surcharge the lending book paid (raw evidence; the home district's
+    /// rival files tax every book in it, which is the honest price of staying home).
+    pub loan_heat_cents: Option<i64>,
+    /// Days the stand-down tried to fund the lending book before idle cash covered the
+    /// float; observed absence on stalled worlds, not a failure.
+    pub loan_funding_deferred_days: u32,
     /// Whether this session ran in the primary narrative comparison set. The strict
     /// legitimate-wealth demonstration is anchored there so every full run proves the
     /// chain deterministically; rotated sets accept whatever ending their authored
@@ -1044,6 +1064,9 @@ pub struct Aggregate {
     pub player_member_arrests: u64,
     pub rival_home_enterprises_total: u64,
     pub front_acquisitions: u64,
+    /// Sessions that opened the stand-down lending book at the home front: the
+    /// in-district growth play a disciplined boss has while street work stays down.
+    pub lending_books: u64,
     pub laundered_gross_total_cents: i128,
     pub accounted_balance_total_cents: i128,
     pub accounted_balance_samples: u64,
@@ -1131,6 +1154,7 @@ impl Aggregate {
         self.player_member_arrests += u64::from(metrics.player_member_arrests);
         self.rival_home_enterprises_total += u64::from(metrics.rival_home_enterprises);
         self.front_acquisitions += u64::from(metrics.front_acquired);
+        self.lending_books += u64::from(metrics.loan_established);
         self.laundered_gross_total_cents += i128::from(metrics.laundered_gross_cents);
         if let Some(balance) = metrics.accounted_balance_cents {
             self.accounted_balance_total_cents += i128::from(balance);

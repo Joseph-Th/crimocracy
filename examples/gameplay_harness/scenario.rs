@@ -611,6 +611,24 @@ pub fn build_scenario(
             kind: AccountKind::Settlement,
         },
     )?;
+    // Idle-cash lending book: a street-cash till and settlement counterparty for the
+    // second home-district racket the PRESS stand-down opens once the file cools. The
+    // accounts exist in every branch's fixture (like the expansion pair) so IDs stay
+    // comparable across matched branches; only the stand-down policy ever uses them.
+    let loan_cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::StreetCash,
+        },
+    )?;
+    let loan_settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::Settlement,
+        },
+    )?;
 
     let business_operating = insert_account(
         &mut state,
@@ -879,6 +897,8 @@ pub fn build_scenario(
         expansion_front,
         expansion_cash,
         expansion_settlement,
+        loan_cash,
+        loan_settlement,
         rival_venue,
         rival_cash,
         rival_settlement,
