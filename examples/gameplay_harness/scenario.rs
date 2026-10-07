@@ -597,6 +597,25 @@ pub fn build_scenario(
             owner: BusinessOwner::Independent,
         },
     )?;
+    // Empire-ladder fixture: an independent racing-wire office in the home district. Owning
+    // it is the only way the organization can ever run a bookmaking book - the wire is a
+    // network dependency no amount of cash at the club substitutes for - so buying it is a
+    // capability unlock, not just one more venue. Starts independent so the empire beat pays
+    // the authored price through the same canonical acquisition path as the harbor club.
+    let wire_front = insert_business(
+        registry,
+        &mut state,
+        BusinessDraft {
+            name: "Continental Racing Wire".to_owned(),
+            kind: BusinessKind::NewsService,
+            functions: BTreeSet::from([
+                BusinessFunction::ProfessionalRecords,
+                BusinessFunction::RacingWire,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Independent,
+        },
+    )?;
     let expansion_cash = insert_account(
         &mut state,
         FinancialAccountDraft {
@@ -623,6 +642,22 @@ pub fn build_scenario(
         },
     )?;
     let loan_settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::Settlement,
+        },
+    )?;
+    // Bookmaking book (empire ladder): the wire-service purchase's paired racket account.
+    // The book runs at the club, but its money is its own street-cash till.
+    let bookmaking_cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::StreetCash,
+        },
+    )?;
+    let bookmaking_settlement = insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
@@ -899,6 +934,9 @@ pub fn build_scenario(
         expansion_settlement,
         loan_cash,
         loan_settlement,
+        wire_front,
+        bookmaking_cash,
+        bookmaking_settlement,
         rival_venue,
         rival_cash,
         rival_settlement,

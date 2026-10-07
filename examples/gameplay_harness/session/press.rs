@@ -519,12 +519,13 @@ mod tests {
         assert_eq!(metrics.enterprise_till_concealed, Some(true));
         // The home racket's concealed reserve is never laundered directly - and it is
         // never spent as float either, so it cannot reach the wash through the lending
-        // book. Any laundering that does happen must be post-diversification flow: the
-        // harbor racket's own street till through the harbor club, or the lending
-        // book's street take through the home front - bounded by those books' honest
-        // earnings, never by the concealed home reserve.
-        let launderable_book_earnings =
-            metrics.expansion_net_cents.unwrap_or(0) + metrics.loan_net_cents.unwrap_or(0);
+        // book or the off-track book. Any laundering that does happen must be
+        // post-diversification flow: the harbor racket's own street till through the
+        // harbor club, or a later home book's street take through the home front -
+        // bounded by those books' honest earnings, never by the concealed home reserve.
+        let launderable_book_earnings = metrics.expansion_net_cents.unwrap_or(0)
+            + metrics.loan_net_cents.unwrap_or(0)
+            + metrics.bookmaking_net_cents.unwrap_or(0);
         assert!(
             metrics.laundered_gross_cents <= launderable_book_earnings,
             "concealed home reserves must stay concealed: {} laundered against launderable book earnings of {}",
@@ -719,11 +720,14 @@ struct StandDownState {
     /// home books share one front's plausible-volume window, which is exactly why
     /// the harbor club's separate books matter to more than district heat.
     loan_cap_narrated: bool,
+    /// One-time narration while the off-track book's float waits for idle cash.
+    book_wait_narrated: bool,
     /// Per-book posture governance state: the gambling book and the later lending
     /// book are each judged on their own trailing settled cycles, with their own
     /// suspension clock and resume-probe floor.
     gambling_posture: BookPostureState,
     loan_posture: BookPostureState,
+    bookmaking_posture: BookPostureState,
 }
 
 impl StandDownState {
@@ -737,8 +741,10 @@ impl StandDownState {
             harbor_volume_narrated: false,
             personnel_recovered: false,
             loan_cap_narrated: false,
+            book_wait_narrated: false,
             gambling_posture: BookPostureState::default(),
             loan_posture: BookPostureState::default(),
+            bookmaking_posture: BookPostureState::default(),
         }
     }
 }
@@ -817,6 +823,45 @@ fn launder_enterprise_till(
         scenario.enterprise,
         scenario.front,
     )
+}
+
+/// Wash one of the later home books' street tills (the lending book, then the off-track
+/// book) through the home front's shared plausible-volume window. Returns the absorbed
+/// amount and whether the front's window was too full to carry any of the till's
+/// launderable surplus this cycle. Books wash only after settling real earnings; the
+/// float is working capital, not a sum to be washed straight back out the day it was
+/// raised. Concealed tills never reach this path - their reserve stays buried.
+fn wash_auxiliary_home_till(
+    scenario: &mut Scenario,
+    metrics: &mut RunMetrics,
+    enterprise: Option<EnterpriseId>,
+    till: FinancialAccountId,
+) -> Result<(Option<i64>, bool), Box<dyn Error>> {
+    let has_settled_earnings = enterprise
+        .is_some_and(|enterprise| scenario.state.enterprises().cycles_for(enterprise).count() >= 1);
+    if !has_settled_earnings {
+        return Ok((None, false));
+    }
+    let account = scenario
+        .state
+        .finance()
+        .get_account(till)
+        .expect("auxiliary home book till must persist");
+    if account.kind() != AccountKind::StreetCash {
+        return Ok((None, false));
+    }
+    let launderable = account
+        .balance()
+        .cents()
+        .saturating_sub(LAUNDERING_FLOAT_FLOOR_CENTS)
+        .max(0);
+    if launderable <= 0 {
+        return Ok((None, false));
+    }
+    let absorbed =
+        launder_through_owned_front(scenario, false, metrics, scenario.front, till, launderable)?;
+    let capped = absorbed.is_none();
+    Ok((absorbed, capped))
 }
 
 /// Withdraw only settled legitimate earnings, never laundering fees or opening capital. The
@@ -980,54 +1025,41 @@ fn run_daily_capital_management(
     // the harbor racket's own till washes through the harbor club's books while the home
     // book keeps its original channel. Each front's plausible volume is its own.
     let home_absorbed = launder_enterprise_till(scenario, narrative && first_laundry, metrics)?;
-    // The lending book's take shares the home front's plausible-volume window with the
-    // gambling take, so a full window queues the loan till's surplus as street cash -
-    // the honest bottleneck that makes a second set of front books worth buying. Wash
-    // only after the book has settled real earnings; the float is working capital, not
-    // a sum to be washed straight back out on the day it was raised.
-    let loan_absorbed = if metrics.loan_established
-        && metrics
-            .loan_enterprise
-            .is_some_and(|loan| scenario.state.enterprises().cycles_for(loan).count() >= 1)
-    {
-        let cash_account = scenario.loan_cash;
-        let launderable = scenario
+    // The later home books (lending, then the off-track book) share the home front's
+    // plausible-volume window with the gambling take, so a full window queues their
+    // surplus as street cash - the honest bottleneck that makes a second set of front
+    // books worth buying. Wash only after a book has settled real earnings; the float
+    // is working capital, not a sum to be washed straight back out on the day it was
+    // raised.
+    let (loan_absorbed, loan_capped) = wash_auxiliary_home_till(
+        scenario,
+        metrics,
+        metrics.loan_enterprise,
+        scenario.loan_cash,
+    )?;
+    let (book_absorbed, book_capped) = wash_auxiliary_home_till(
+        scenario,
+        metrics,
+        metrics.bookmaking_enterprise,
+        scenario.bookmaking_cash,
+    )?;
+    if (loan_capped || book_capped) && narrative && !stand_down.loan_cap_narrated {
+        stand_down.loan_cap_narrated = true;
+        let front_name = scenario
             .state
-            .finance()
-            .get_account(cash_account)
-            .expect("lending book till must persist")
-            .balance()
-            .cents()
-            .saturating_sub(LAUNDERING_FLOAT_FLOOR_CENTS)
-            .max(0);
-        if launderable <= 0 {
-            None
-        } else {
-            let absorbed = launder_through_owned_front(
-                scenario,
-                false,
-                metrics,
-                scenario.front,
-                cash_account,
-                launderable,
-            )?;
-            if absorbed.is_none() && narrative && !stand_down.loan_cap_narrated {
-                stand_down.loan_cap_narrated = true;
-                let front_name = scenario
-                    .state
-                    .world()
-                    .get_business(scenario.front)
-                    .expect("home front must persist")
-                    .name()
-                    .to_owned();
-                println!(
-                    "[LAUNDER] {front_name}'s books are carrying all the volume they plausibly can this cycle; the lending take waits as street cash. Two rackets share one front's window - a second set of books would double how much can wash per day."
-                );
-            }
-            absorbed
-        }
-    } else {
-        None
+            .world()
+            .get_business(scenario.front)
+            .expect("home front must persist")
+            .name()
+            .to_owned();
+        println!(
+            "[LAUNDER] {front_name}'s books are carrying all the volume they plausibly can this cycle; the surplus waits as street cash. Every racket on one front shares its window - more fronts, or a second set of front books, would carry more per day."
+        );
+    }
+    let auxiliary_absorbed = match (loan_absorbed, book_absorbed) {
+        (Some(loan), Some(book)) => Some(loan + book),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => None,
     };
     let harbor_absorbed = match metrics.expansion_enterprise {
         Some(expansion) if metrics.expansion_established => {
@@ -1048,13 +1080,13 @@ fn run_daily_capital_management(
         }
         _ => None,
     };
-    let absorbed = match (home_absorbed, loan_absorbed, harbor_absorbed) {
-        (Some(home), Some(loan), Some(harbor)) => Some(home + loan + harbor),
-        (Some(home), Some(loan), None) => Some(home + loan),
+    let absorbed = match (home_absorbed, auxiliary_absorbed, harbor_absorbed) {
+        (Some(home), Some(auxiliary), Some(harbor)) => Some(home + auxiliary + harbor),
+        (Some(home), Some(auxiliary), None) => Some(home + auxiliary),
         (Some(home), None, Some(harbor)) => Some(home + harbor),
-        (None, Some(loan), Some(harbor)) => Some(loan + harbor),
+        (None, Some(auxiliary), Some(harbor)) => Some(auxiliary + harbor),
         (Some(home), None, None) => Some(home),
-        (None, Some(loan), None) => Some(loan),
+        (None, Some(auxiliary), None) => Some(auxiliary),
         (None, None, Some(harbor)) => Some(harbor),
         (None, None, None) => None,
     };
@@ -1077,6 +1109,17 @@ fn run_daily_capital_management(
     {
         acquire_annex_front(scenario, narrative, metrics)?;
     }
+    // Empire ladder: with income property secured, surplus clean money buys the wire
+    // office - the capability unlock for off-track bookmaking - and the book opens as
+    // soon as idle cash covers its float. The purchase and the book opening are separate
+    // gates: the establishment retries on later reviews until idle street cash actually
+    // covers the float.
+    if metrics.annex_acquired && !metrics.wire_acquired {
+        acquire_wire_service(scenario, narrative, metrics)?;
+    }
+    if metrics.wire_acquired && !metrics.bookmaking_established {
+        establish_bookmaking_book(scenario, narrative, metrics, stand_down)?;
+    }
     Ok(())
 }
 
@@ -1085,6 +1128,68 @@ fn run_daily_capital_management(
 /// purpose: it is idle cash put to work, not a second treasury.
 const LENDING_FLOAT_TARGET_CENTS: i64 = 10_000;
 const LENDING_FLOAT_MINIMUM_CENTS: i64 = 2_500;
+
+/// Idle street cash a boss can actually move into a new book's float: the general
+/// street treasury in full, plus each street-cash racket till's surplus above its
+/// standing laundering float. Concealed tills are skipped entirely - a buried hoard
+/// funds nothing - and a destination account is never a source for its own float.
+/// Returns balanced debit postings plus the destination credit, up to the target.
+fn plan_idle_street_float(
+    scenario: &Scenario,
+    target_cents: i64,
+    destination: FinancialAccountId,
+) -> (Vec<LedgerPosting>, i64) {
+    let mut postings = Vec::new();
+    let mut remaining = target_cents.max(0);
+    // The general treasury has no float obligation: every cent of it is idle.
+    let mut sources = vec![(scenario.liquidation_cash, 0_i64)];
+    // Racket tills keep their standing laundering float; only the surplus above it is
+    // idle. Ordered home books first, then the second-district book, so the funding
+    // choice is deterministic across runs.
+    sources.extend([
+        (
+            scenario
+                .state
+                .enterprises()
+                .get_enterprise(scenario.enterprise)
+                .expect("home gambling book must persist")
+                .cash_account(),
+            LAUNDERING_FLOAT_FLOOR_CENTS,
+        ),
+        (scenario.loan_cash, LAUNDERING_FLOAT_FLOOR_CENTS),
+        (scenario.bookmaking_cash, LAUNDERING_FLOAT_FLOOR_CENTS),
+        (scenario.expansion_cash, LAUNDERING_FLOAT_FLOOR_CENTS),
+    ]);
+    for (account_id, floor) in sources {
+        if remaining <= 0 {
+            break;
+        }
+        if account_id == destination {
+            continue;
+        }
+        let Some(account) = scenario.state.finance().get_account(account_id) else {
+            continue;
+        };
+        if account.kind() != AccountKind::StreetCash {
+            continue;
+        }
+        let surplus = (account.balance().cents() - floor).max(0);
+        let draw = remaining.min(surplus);
+        if draw > 0 {
+            postings.push(LedgerPosting {
+                account: account_id,
+                amount: Money::from_cents(-draw),
+            });
+            remaining -= draw;
+        }
+    }
+    let funded = target_cents.max(0) - remaining;
+    postings.push(LedgerPosting {
+        account: destination,
+        amount: Money::from_cents(funded),
+    });
+    (postings, funded)
+}
 
 /// The stand-down's in-district growth play. Once the channel confirms the burglary file
 /// shelved and the crew is whole, idle street cash stops sitting still: leadership opens a
@@ -1104,13 +1209,12 @@ fn establish_home_lending_book(
     if metrics.loan_established {
         return Ok(());
     }
-    let treasury_balance = scenario
-        .state
-        .finance()
-        .get_account(scenario.liquidation_cash)
-        .expect("general street treasury must exist")
-        .balance()
-        .cents();
+    let (float_postings, float_cents) =
+        plan_idle_street_float(scenario, LENDING_FLOAT_TARGET_CENTS, scenario.loan_cash);
+    // Concealed reserves stay concealed: a buried hoard is not working capital for a new
+    // book, because every dollar that cycles through the loan till's daily wash would
+    // effectively launder it. Only genuinely launderable street cash may fund the float,
+    // which `plan_idle_street_float` enforces by skipping concealed tills.
     let gambling_cash = scenario
         .state
         .enterprises()
@@ -1122,33 +1226,17 @@ fn establish_home_lending_book(
         .finance()
         .get_account(gambling_cash)
         .expect("gambling till must persist");
-    // Concealed reserves stay concealed: a buried hoard is not working capital for a new
-    // book, because every dollar that cycles through the loan till's daily wash would
-    // effectively launder it. Only genuinely launderable street cash may fund the float.
-    let gambling_surplus = if gambling_account.kind() == AccountKind::StreetCash {
-        (gambling_account.balance().cents() - LAUNDERING_FLOAT_FLOOR_CENTS).max(0)
-    } else {
-        0
-    };
-    let treasury_contribution = treasury_balance.clamp(0, LENDING_FLOAT_TARGET_CENTS);
-    let gambling_contribution = (LENDING_FLOAT_TARGET_CENTS - treasury_contribution)
-        .min(gambling_surplus)
-        .max(0);
-    let float_cents = treasury_contribution + gambling_contribution;
     let till_concealed = gambling_account.kind() != AccountKind::StreetCash;
     if float_cents < LENDING_FLOAT_MINIMUM_CENTS {
         metrics.loan_funding_deferred_days = metrics.loan_funding_deferred_days.saturating_add(1);
         if narrative && metrics.loan_funding_deferred_days == 1 {
             if till_concealed {
                 println!(
-                    "[EXPAND]   The lending book waits for idle street cash: the street treasury holds {} and the gambling take sits concealed where it cannot fund or wash anything. Legitimate front profits keep building the war chest in the meantime.",
-                    format_cents(treasury_balance.max(0)),
+                    "[EXPAND]   The lending book waits for idle street cash: the gambling take sits concealed where it cannot fund or wash anything. Legitimate front profits keep building the war chest in the meantime."
                 );
             } else {
                 println!(
-                    "[EXPAND]   The lending book waits for idle cash: the street treasury holds {} and the gambling till {} above its standing float. The next settled cycle funds the float.",
-                    format_cents(treasury_balance.max(0)),
-                    format_cents(gambling_surplus),
+                    "[EXPAND]   The lending book waits for idle cash; the next settled cycle funds the float."
                 );
             }
         }
@@ -1173,23 +1261,8 @@ fn establish_home_lending_book(
             "[DECIDE]  The file is shelved and the crew is whole. Standing down from street work does not mean idle cash sits idle: the club's back room can run a quiet lending book under {lieutenant_name}'s standing home-district authority."
         );
     }
-    let mut float_postings = Vec::new();
-    if treasury_contribution > 0 {
-        float_postings.push(LedgerPosting {
-            account: scenario.liquidation_cash,
-            amount: Money::from_cents(-treasury_contribution),
-        });
-    }
-    if gambling_contribution > 0 {
-        float_postings.push(LedgerPosting {
-            account: gambling_cash,
-            amount: Money::from_cents(-gambling_contribution),
-        });
-    }
-    float_postings.push(LedgerPosting {
-        account: scenario.loan_cash,
-        amount: Money::from_cents(float_cents),
-    });
+    // The posting plan was derived from live balances above and nothing mutated state
+    // in between (only read-only name lookups and narration), so commit it directly.
     validate_record_transaction(
         &scenario.state,
         LedgerTransactionDraft {
@@ -1414,6 +1487,19 @@ fn govern_home_racket_posture(
             &mut stand_down.loan_posture,
         )?;
     }
+    if let Some(book) = metrics
+        .bookmaking_enterprise
+        .filter(|_| metrics.bookmaking_established)
+    {
+        govern_home_book_posture(
+            scenario,
+            book,
+            "off-track book",
+            narrative,
+            metrics,
+            &mut stand_down.bookmaking_posture,
+        )?;
+    }
     Ok(())
 }
 
@@ -1535,6 +1621,214 @@ pub fn acquire_annex_front(
     Ok(true)
 }
 
+/// The empire-ladder purchase: once the annex is owned and the books keep compounding,
+/// clean money buys the independent racing-wire office. This is not one more venue - it
+/// is the only way into off-track bookmaking, because the wire is a network dependency
+/// and cash at the club cannot substitute for it. Ownership transfer, the live operating
+/// economy, and the accounted-funds price run through the same canonical acquisition
+/// path as the harbor club and the annex; the wire keeps its own price/spend/rejection
+/// accounting the same way the annex does.
+pub fn acquire_wire_service(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+) -> Result<bool, Box<dyn Error>> {
+    use crimocracy::economy::business_acquisition::{
+        BusinessAcquisitionDraft, validate_acquire_business,
+    };
+    use crimocracy::finance::{AccountKind, FinancialOwner};
+    if !metrics.annex_acquired || metrics.wire_acquired {
+        return Ok(false);
+    }
+    let price = scenario
+        .registry
+        .get_business(
+            scenario
+                .state
+                .world()
+                .get_business(scenario.wire_front)
+                .expect("wire office must persist")
+                .kind(),
+        )
+        .economics()
+        .acquisition_cost();
+    let funding_accounts: BTreeSet<_> = scenario
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(scenario.player))
+        .filter(|account| account.kind() == AccountKind::AccountedFunds)
+        .map(|account| account.id())
+        .collect();
+    if narrative && metrics.wire_rejections == 0 {
+        println!(
+            "[DECIDE]  The books compound faster than the club can spend them. The next purchase is not another venue: the racing-wire office is the only door into off-track bookmaking, and no amount of cash at the club substitutes for its track reports."
+        );
+    }
+    let purchase = validate_acquire_business(
+        scenario.registry,
+        &scenario.state,
+        BusinessAcquisitionDraft {
+            organization: scenario.player,
+            business: scenario.wire_front,
+            funding_accounts,
+        },
+    );
+    let purchase = match purchase {
+        Ok(purchase) => purchase,
+        Err(
+            crimocracy::economy::business_acquisition::BusinessAcquisitionError::InsufficientFunds {
+                available_cents,
+                price_cents,
+            },
+        ) => {
+            if metrics.wire_rejections == 0 && narrative {
+                println!(
+                    "[ACQUIRE] The wire office wants {}; our accounted books hold only {}. The track reports wait for surplus.",
+                    format_cents(price_cents),
+                    format_cents(available_cents),
+                );
+            }
+            metrics.wire_rejections = metrics.wire_rejections.saturating_add(1);
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let wire_name = scenario
+        .state
+        .world()
+        .get_business(scenario.wire_front)
+        .expect("wire office must persist")
+        .name()
+        .to_owned();
+    purchase.commit(&mut scenario.state)?;
+    assert_eq!(
+        scenario
+            .state
+            .world()
+            .get_business(scenario.wire_front)
+            .expect("acquired wire must persist")
+            .owner(),
+        crimocracy::world::BusinessOwner::Organization(scenario.player),
+        "a committed acquisition must transfer venue ownership"
+    );
+    assert!(
+        scenario
+            .state
+            .economy()
+            .get_business_economy(scenario.wire_front)
+            .is_some(),
+        "a committed acquisition must open the venue's operating economy"
+    );
+    metrics.wire_acquired = true;
+    metrics.wire_price_cents = Some(price.cents());
+    metrics.wire_spent_cents = price.cents();
+    // The clean-money identity in `validate_run_metrics` reconciles every accounted-funds
+    // purchase against the final balance, so the wire joins the same spend total.
+    metrics.acquisition_spent_cents = metrics
+        .acquisition_spent_cents
+        .checked_add(price.cents())
+        .expect("session acquisition spend must fit money range");
+    if narrative {
+        println!(
+            "[ACQUIRE] {}: {wire_name} purchased outright for {} from accounted surplus: a legitimate newsroom by day, and by night the only thing standing between this organization and the off-track betting market.",
+            stamp(scenario.state.now().as_minutes()),
+            format_cents(price.cents()),
+        );
+    }
+    Ok(true)
+}
+
+/// The empire-ladder racket the wire unlock makes possible: an off-track book at the
+/// home front, with the owned wire office as its network dependency. The float comes
+/// from idle street cash the same way the lending book's does (concealed reserves stay
+/// buried), and establishment runs under the standing two-district mandate - the wire
+/// sits in the home district, so the home-district scope covers the dependency too.
+fn establish_bookmaking_book(
+    scenario: &mut Scenario,
+    narrative: bool,
+    metrics: &mut RunMetrics,
+    stand_down: &mut StandDownState,
+) -> Result<(), Box<dyn Error>> {
+    if metrics.bookmaking_established {
+        return Ok(());
+    }
+    // The float draws on every idle street till the organization holds - treasury plus
+    // each racket till's surplus above its standing float - because the organization's
+    // idle cash is spread across its books while the home laundering window caps daily
+    // washing. Concealed tills stay buried by the same rule as the lending book.
+    let (float_postings, float_cents) = plan_idle_street_float(
+        scenario,
+        LENDING_FLOAT_TARGET_CENTS,
+        scenario.bookmaking_cash,
+    );
+    if float_cents < LENDING_FLOAT_MINIMUM_CENTS {
+        if narrative && !stand_down.book_wait_narrated {
+            stand_down.book_wait_narrated = true;
+            println!(
+                "[EXPAND]   The off-track book waits for idle street cash to cover the float; the wire reports keep coming either way."
+            );
+        }
+        return Ok(());
+    }
+    let front_name = scenario
+        .state
+        .world()
+        .get_business(scenario.front)
+        .expect("home front must persist")
+        .name()
+        .to_owned();
+    let wire_name = scenario
+        .state
+        .world()
+        .get_business(scenario.wire_front)
+        .expect("wire office must persist")
+        .name()
+        .to_owned();
+    // The posting plan was derived from live balances above and nothing mutated state
+    // in between (only read-only name lookups), so commit it directly.
+    validate_record_transaction(
+        &scenario.state,
+        LedgerTransactionDraft {
+            occurred_at: scenario.state.now(),
+            memo: "Capitalize the off-track book".to_owned(),
+            postings: float_postings,
+            authorization: None,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    let book = validate_establish_enterprise(
+        scenario.registry,
+        &scenario.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Bookmaking,
+            organization: scenario.player,
+            authority: MandateAuthority {
+                mandate: scenario.lieutenant_mandate,
+                manager: scenario.lieutenant,
+                scope: ResponsibilityScope::Neighborhood(scenario.neighborhood),
+            },
+            location: EnterpriseLocation::Business(scenario.front),
+            supporting_businesses: BTreeSet::from([scenario.wire_front]),
+            cash_account: scenario.bookmaking_cash,
+            settlement_account: scenario.bookmaking_settlement,
+        },
+    )?
+    .commit(&mut scenario.state)?;
+    metrics.bookmaking_enterprise = Some(book);
+    metrics.bookmaking_established = true;
+    metrics.bookmaking_open_minute = Some(scenario.state.now().as_minutes());
+    if narrative {
+        println!(
+            "[EXPAND]   Off-track book established at {front_name} with a {} float, taking {wire_name}'s track reports as its information dependency: a market the organization could not enter at any price before owning the wire.",
+            format_cents(float_cents),
+        );
+        println!(
+            "[NARRATION] The organization that started with one club and one card game now runs three books - cards, loans, and the track - across two districts, with its own wire service feeding the third. None of it needed a single new street job; it needed clean money, owned venues, and the discipline to keep taking them."
+        );
+    }
+    Ok(())
+}
+
 /// Bounded daily reviews derived from production timing and authored prices: the
 /// cold-case window for the file to shelve, plus a war-chest horizon long enough for
 /// accounted funds to cover the harbor venue and the later annex at their authored
@@ -1555,12 +1849,18 @@ fn stand_down_day_bound(scenario: &Scenario) -> u64 {
         .economics()
         .acquisition_cost()
         .cents();
+    let wire_price = scenario
+        .registry
+        .get_business(crimocracy::world::BusinessKind::NewsService)
+        .economics()
+        .acquisition_cost()
+        .cents();
     // Conservative clean-accumulation floor per review day: roughly one small front's
     // plausible laundering net plus a modest owner draw. Observed pacing on the authored
     // fixture runs well above this floor, so honest worlds finish early; the floor keeps
     // slow worlds from being cut off mid-accumulation instead of ending their arcs early.
     const CLEAN_ACCUMULATION_FLOOR_CENTS: i64 = 15_000;
-    let war_chest_target = harbor_price + annex_price;
+    let war_chest_target = harbor_price + annex_price + wire_price;
     let war_chest_days = u64::try_from(
         (war_chest_target + CLEAN_ACCUMULATION_FLOOR_CENTS - 1) / CLEAN_ACCUMULATION_FLOOR_CENTS,
     )
@@ -1789,17 +2089,19 @@ fn narrate_stand_down_heartbeat(
         // otherwise the last confirmed read stands and new street jobs stay on hold.
         (None, _) => "no fresh word - no new street jobs, racket still open",
     };
-    // The next capital target: the harbor club until it is owned, then the lapsed annex
-    // score as income property. Prices come from the authored registry, not constants.
-    let (target_name, target_price) = if !metrics.front_acquired {
+    // The next capital target on the empire ladder: the harbor club until it is owned,
+    // then the lapsed annex score as income property, then the racing-wire office whose
+    // ownership unlocks off-track bookmaking. Once the whole ladder is owned there is no
+    // next purchase and the heartbeat says so. Prices come from the authored registry.
+    let next_purchase = if !metrics.front_acquired {
         let price = scenario
             .registry
             .get_business(crimocracy::world::BusinessKind::Hospitality)
             .economics()
             .acquisition_cost()
             .cents();
-        ("the harbor club", price)
-    } else {
+        Some(("the harbor club", price))
+    } else if !metrics.annex_acquired {
         let price = scenario
             .registry
             .get_business(
@@ -1813,7 +2115,40 @@ fn narrate_stand_down_heartbeat(
             .economics()
             .acquisition_cost()
             .cents();
-        ("the annex front", price)
+        Some(("the annex front", price))
+    } else if !metrics.wire_acquired {
+        let price = scenario
+            .registry
+            .get_business(
+                scenario
+                    .state
+                    .world()
+                    .get_business(scenario.wire_front)
+                    .expect("wire office must persist")
+                    .kind(),
+            )
+            .economics()
+            .acquisition_cost()
+            .cents();
+        Some(("the racing-wire office", price))
+    } else {
+        None
+    };
+    let Some((target_name, target_price)) = next_purchase else {
+        println!(
+            "[WAIT] {}: {}; {} capital review(s) so far - clean books at {}, street liquidity {}. The purchase ladder is complete: harbor club, annex, and wire office all owned; the books now earn faster than the organization spends.",
+            stamp(scenario.state.now().as_minutes()),
+            channel_line,
+            stand_down.capital_review_days,
+            format_cents(accounted),
+            format_cents(street_cents),
+        );
+        stand_down.last_heartbeat = Some((
+            stand_down.capital_review_days,
+            accounted,
+            metrics.acquisition_spent_cents,
+        ));
+        return;
     };
     let gap = (target_price - accounted).max(0);
     // Pace from the last pulse, reset by any purchase so a spend never reads as a
@@ -1861,16 +2196,23 @@ fn narrate_stand_down_heartbeat(
 /// The stand-down's diversification chain is complete when the harbor venue is owned,
 /// its second-district book is open, and the lapsed annex score has been converted (it
 /// stops being a live conversion target only once bought, because the opportunity
-/// lapsed long before any purchase could happen). Completion still requires the cooled
-/// read: a boss keeps asking the channel until the file is actually shelved, even when
-/// the money arrived first. When the war chest cannot carry an authored price inside
-/// the bounded horizon, the loop simply exhausts and the caller narrates the honest
-/// "another season" ending instead of inventing a purchase.
+/// lapsed long before any purchase could happen). The empire ladder extends the same
+/// logic: once the annex is owned, the chain is complete when the wire office is bought
+/// AND the off-track book it unlocks is actually open - owning the wire without the book
+/// it feeds is a half-finished rung, and the loop keeps reviewing until idle cash covers
+/// the float. Completion still requires the cooled read: a boss keeps asking the channel
+/// until the file is actually shelved, even when the money arrived first. When the war
+/// chest cannot carry an authored price inside the bounded horizon, the loop simply
+/// exhausts and the caller narrates the honest "another season" ending instead of
+/// inventing a purchase.
 fn stand_down_wait_is_complete(metrics: &RunMetrics, stand_down: &StandDownState) -> bool {
     let annex_resolved = metrics.annex_acquired || !metrics.second_opportunity_expired;
+    let empire_resolved =
+        !metrics.annex_acquired || (metrics.wire_acquired && metrics.bookmaking_established);
     metrics.front_acquired
         && metrics.expansion_established
         && annex_resolved
+        && empire_resolved
         && stand_down.capital_review_days > 0
         && metrics.cold_case_confirmed == Some(true)
 }
@@ -1892,9 +2234,10 @@ fn settle_expansion_proof(
             .expect("authored campaign day must fit the duration type"),
     );
     for _ in 0..10 {
-        // The harbor book needs two settled cycles to show real ongoing earnings, and a
-        // purchased annex front needs its first clean settlement so the closing view
-        // reports income property that actually earns, not a just-bought shell.
+        // The harbor book needs two settled cycles to show real ongoing earnings, a
+        // purchased annex front needs its first clean settlement, and the off-track
+        // book needs two of its own cycles so the closing view reports a wire-fed
+        // market that actually earns, not a just-opened shell.
         let harbor_ready = scenario.state.enterprises().cycles_for(expansion).count() >= 2;
         let annex_ready = !metrics.annex_acquired
             || scenario
@@ -1903,7 +2246,11 @@ fn settle_expansion_proof(
                 .cycles_for(scenario.alternate_target)
                 .count()
                 >= 1;
-        if harbor_ready && annex_ready {
+        let book_ready = !metrics.bookmaking_established
+            || metrics
+                .bookmaking_enterprise
+                .is_some_and(|book| scenario.state.enterprises().cycles_for(book).count() >= 2);
+        if harbor_ready && annex_ready && book_ready {
             break;
         }
         run_until(scenario, scenario.state.now() + day, narrative, metrics)?;

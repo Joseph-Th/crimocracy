@@ -725,6 +725,13 @@ pub struct Scenario<'registry> {
     /// the LoanSharking enterprise on them once the burglary file is confirmed shelved.
     pub loan_cash: FinancialAccountId,
     pub loan_settlement: FinancialAccountId,
+    /// Empire ladder: an independent racing-wire office whose purchase is the only way
+    /// to make bookmaking possible, plus the paired book account. The wire is a network
+    /// dependency - cash at the club cannot substitute for it - so owning it unlocks a
+    /// vice market the organization could not enter at any price before.
+    pub wire_front: BusinessId,
+    pub bookmaking_cash: FinancialAccountId,
+    pub bookmaking_settlement: FinancialAccountId,
     /// Rival-held fixture assets the delegated rival-expansion pass governs: a home-district
     /// venue plus the Rosetti treasury accounts it draws cash and settlement from.
     pub rival_venue: BusinessId,
@@ -928,6 +935,20 @@ pub struct RunMetrics {
     /// Days the stand-down tried to fund the lending book before idle cash covered the
     /// float; observed absence on stalled worlds, not a failure.
     pub loan_funding_deferred_days: u32,
+    /// Empire-ladder evidence: the racing-wire purchase that unlocks bookmaking. Clean
+    /// money buys the wire the same canonical way as the harbor club; the price, spend,
+    /// and short-book rejections keep their own accounting like the annex.
+    pub wire_acquired: bool,
+    pub wire_price_cents: Option<i64>,
+    pub wire_spent_cents: i64,
+    pub wire_rejections: u32,
+    /// The bookmaking book the wire makes possible: established at the home front with
+    /// the owned wire as its network dependency, settled through production cycles.
+    pub bookmaking_enterprise: Option<EnterpriseId>,
+    pub bookmaking_established: bool,
+    pub bookmaking_open_minute: Option<u64>,
+    pub bookmaking_net_cents: Option<i64>,
+    pub bookmaking_heat_cents: Option<i64>,
     /// Whether this session ran in the primary narrative comparison set. The strict
     /// legitimate-wealth demonstration is anchored there so every full run proves the
     /// chain deterministically; rotated sets accept whatever ending their authored

@@ -541,10 +541,12 @@ pub fn validate_press_expansion_evidence(metrics: &RunMetrics) -> Result<(), Har
         return Ok(());
     }
     // `acquisition_spent_cents` accumulates every canonical accounted-funds purchase
-    // (harbor club plus the later annex front), so the harbor chain is proven by the harbor
-    // price being covered inside that total rather than by exact equality with it.
+    // (harbor club, the later annex front, and the later racing-wire office), so the
+    // harbor chain is proven by the harbor price being isolated from that total after
+    // the later purchases are subtracted, rather than by exact equality with it.
     let harbor_price = metrics.acquisition_price_cents.unwrap_or_default();
-    let harbor_spend = metrics.acquisition_spent_cents - metrics.annex_spent_cents;
+    let harbor_spend =
+        metrics.acquisition_spent_cents - metrics.annex_spent_cents - metrics.wire_spent_cents;
     let acquisition_complete = metrics.front_acquired
         && harbor_price > 0
         && harbor_spend == harbor_price
@@ -609,6 +611,38 @@ pub fn validate_press_lending_book_evidence(
         Err(HarnessContractError::MissingStrategyEvidence {
             strategy: Strategy::Press,
             evidence: "the primary stand-down must open a lending book at the owned home front once the file is shelved, through the canonical establishment path, and it must settle at least one positive cycle while its take shares the home front's laundering window",
+        })
+    }
+}
+
+/// Full-mode narrative PRESS must close its empire ladder once the annex is owned: with
+/// income property secured, surplus clean money buys the independent racing-wire office
+/// through the canonical acquisition path, and owning it unlocks the off-track book a
+/// player could not enter at any price before - bookmaking needs the wire as a network
+/// dependency, and cash at the club is not a substitute. The primary set must complete
+/// the chain with the book settled positive through production cycles; rotated worlds
+/// report honestly, since a war chest that never carries the wire price is observed
+/// absence rather than a fabricated empire.
+pub fn validate_press_empire_evidence(metrics: &RunMetrics) -> Result<(), HarnessContractError> {
+    if metrics.strategy != Some(Strategy::Press) {
+        return Ok(());
+    }
+    if !metrics.primary_narrative_set {
+        // Rotated sets accept honest absence: the expansion contract already governs
+        // how a stalled wait must end.
+        return Ok(());
+    }
+    let wire_bought = metrics.wire_acquired
+        && metrics.wire_price_cents.is_some_and(|price| price > 0)
+        && metrics.wire_spent_cents == metrics.wire_price_cents.unwrap_or_default();
+    let book_live =
+        metrics.bookmaking_established && metrics.bookmaking_net_cents.is_some_and(|net| net > 0);
+    if metrics.annex_acquired && wire_bought && book_live {
+        Ok(())
+    } else {
+        Err(HarnessContractError::MissingStrategyEvidence {
+            strategy: Strategy::Press,
+            evidence: "with the annex owned, the primary stand-down must buy the racing-wire office at its authored price from accounted funds and open the off-track book it makes possible, which must settle at least one positive cycle through the wire's network dependency",
         })
     }
 }

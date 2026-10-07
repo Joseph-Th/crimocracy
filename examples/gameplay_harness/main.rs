@@ -17,8 +17,12 @@
 //! second set of front books worth buying), while daily capital reviews sweep every
 //! owned front's earned surplus, launder each racket's till through its front's
 //! plausible volume, and accumulate clean books toward the authored harbor and annex
-//! prices, so legitimate property reads as the weeks-long milestone the money loop
-//! intends rather than a same-week purchase.
+//! prices. The arc then climbs the empire ladder: with income property secured, clean
+//! money buys the independent racing-wire office - the only door into off-track
+//! bookmaking, because the wire is a network dependency cash at the club cannot
+//! substitute for - and the off-track book opens on it, so the session closes on an
+//! organization that earned each new market through owned infrastructure rather than
+//! street work.
 //! Timeline anchors use authored operation durations and the canonical campaign-day boundary so
 //! session timing tracks the game instead of a second hard-coded ruleset. World/simulation and
 //! evaluation-policy seeds are independent; full-mode sampling varies both streams reproducibly
@@ -291,6 +295,7 @@ fn run_full(options: HarnessOptions) -> Result<(), Box<dyn Error>> {
         validate_press_lending_book_evidence(&press)?;
         validate_press_expansion_evidence(&press)?;
         validate_press_second_front_evidence(&press)?;
+        validate_press_empire_evidence(&press)?;
         validate_defector_trail_evidence(&rush)?;
         validate_defector_trail_evidence(&press)?;
         validate_defector_trail_evidence(&recon)?;

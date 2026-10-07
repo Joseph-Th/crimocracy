@@ -907,6 +907,35 @@ pub fn print_organization_closing_view(
                 "payroll uncovered at this burn rate"
             },
         );
+        // The empire line every boss runs in their head: what the organization is now
+        // against the authored starting point (one club, one exchange, one card game).
+        // Growth read from owned venues and active books, not from hidden valuations.
+        {
+            let venues = scenario
+                .state
+                .world()
+                .businesses_owned_by_organization(scenario.player)
+                .count();
+            let active_books = scenario
+                .state
+                .enterprises()
+                .enterprises_for_organization(scenario.player)
+                .filter(|record| {
+                    record.status() == crimocracy::enterprises::EnterpriseStatus::Active
+                })
+                .count();
+            let districts = scenario
+                .state
+                .world()
+                .businesses_owned_by_organization(scenario.player)
+                .map(|business| business.neighborhood())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            println!(
+                "  - Empire: started with 2 venues, 1 book, and {} in street cash; now {venues} venues across {districts} district(s) running {active_books} active book(s).",
+                format_cents(STARTING_TREASURY_CENTS),
+            );
+        }
     }
     // Player-visible street standing so a leader can see what the city thinks.
     // Only touched impressions exist; absent means unremarkable baseline. Scores print as
@@ -976,6 +1005,15 @@ pub fn print_organization_closing_view(
         }
         if metrics.annex_acquired {
             actions.push("bought the lapsed annex score as a clean second front".to_owned());
+        }
+        if metrics.wire_acquired {
+            actions.push("bought the racing-wire office".to_owned());
+        }
+        if metrics.bookmaking_established {
+            actions.push(
+                "opened the off-track book the wire makes possible - a market no amount of cash could enter before owning it"
+                    .to_owned(),
+            );
         }
         if metrics.expansion_established {
             actions.push("opened a second-district book".to_owned());
@@ -1090,11 +1128,12 @@ pub fn open_threads(
                 .to_owned(),
         );
     }
-    // The authored growth goal, priced from the registry: what the clean books hold
+    // The authored growth ladder, priced from the registry: what the clean books hold
     // against the next purchase and the session's own accumulation pace. This is the
     // closing view's forward answer to "what would playing on buy" - the same money
-    // loop every branch shares, not a score for one strategy.
-    if !metrics.front_acquired || !metrics.annex_acquired {
+    // loop every branch shares, not a score for one strategy. Read from production
+    // state directly because the final metric capture runs after the closing view.
+    if !metrics.front_acquired || !metrics.annex_acquired || !metrics.wire_acquired {
         let annex_kind = scenario
             .state
             .world()
@@ -1110,7 +1149,7 @@ pub fn open_threads(
                     .acquisition_cost()
                     .cents(),
             )
-        } else {
+        } else if !metrics.annex_acquired {
             (
                 "the annex front",
                 annex_kind
@@ -1123,6 +1162,23 @@ pub fn open_threads(
                             .cents()
                     })
                     .unwrap_or_default(),
+            )
+        } else {
+            (
+                "the racing-wire office",
+                scenario
+                    .registry
+                    .get_business(
+                        scenario
+                            .state
+                            .world()
+                            .get_business(scenario.wire_front)
+                            .expect("wire office must persist")
+                            .kind(),
+                    )
+                    .economics()
+                    .acquisition_cost()
+                    .cents(),
             )
         };
         if target_price > 0 {
@@ -2545,6 +2601,13 @@ pub fn print_experience_readout(
         "fear leverage",
         demonstrations.reputation_leverage,
         "publicly visible violence can make later intimidation easier through contextual business-owner fear, while the violent act still pays its own police and exposure costs and the advantage stays bounded",
+    );
+    checkpoint(
+        "empire ladder",
+        press.wire_acquired
+            && press.bookmaking_established
+            && press.bookmaking_net_cents.is_some_and(|net| net > 0),
+        "clean money buys the racing-wire office - a capability unlock, not just a venue - and the off-track book it makes possible settles positive cycles: the organization ends owning markets it could not enter at any price before",
     );
     // Shown axes collapse to one wrapped list so a clean run reads as coverage, not a
     // wall of "shown" lines; an absent axis keeps its full lesson text because that
