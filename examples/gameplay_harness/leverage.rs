@@ -193,6 +193,22 @@ pub fn print_and_write_comparison(
             format_cents(windows[2].earned_after_paid_wages_cents),
         );
     }
+    let earned = branches
+        .iter()
+        .zip(&windows)
+        .map(|(run, window)| {
+            Ok((
+                run.strategy.ok_or("comparison strategy missing")?.label(),
+                window.earned_after_paid_wages_cents,
+            ))
+        })
+        .collect::<Result<Vec<_>, &'static str>>()?;
+    for finding in below_baseline_findings(baseline.earned_after_paid_wages_cents, &earned) {
+        println!(
+            "{finding} (world {:#x}, same first {minute} minutes)",
+            seeds.world
+        );
+    }
     std::fs::create_dir_all(artifact_dir)?;
     let path = artifact_dir.join(format!(
         "leverage-w{:016x}-p{:016x}.json",
@@ -214,10 +230,38 @@ pub fn print_and_write_comparison(
     Ok(())
 }
 
+/// One finding per strategy that earned less than taking no street jobs at all over the same
+/// window. A table row shows the figure; the finding says the strategy lost to waiting.
+fn below_baseline_findings(baseline_cents: i64, earned: &[(&str, i64)]) -> Vec<String> {
+    earned
+        .iter()
+        .filter(|(_, cents)| *cents < baseline_cents)
+        .map(|(label, cents)| {
+            format!(
+                "[FINDING] below-baseline: {label} earned {}, {} less than taking no street jobs",
+                format_cents(*cents),
+                format_cents(baseline_cents - cents)
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{SessionRunMode, Strategy, play_session};
+
+    #[test]
+    fn only_strategies_that_lost_to_the_quiet_baseline_are_findings() {
+        let findings = below_baseline_findings(
+            32_636,
+            &[("RUSH", 57_811), ("PRESS", 12_636), ("RECON", 32_636)],
+        );
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].starts_with("[FINDING] below-baseline: PRESS earned "));
+        assert!(findings[0].ends_with("less than taking no street jobs"));
+    }
 
     #[test]
     #[ignore = "scenario-scale matched-window comparison; run cargo test-harness-deep or cargo harness-full"]
