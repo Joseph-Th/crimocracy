@@ -14,8 +14,10 @@ use super::operation_execution::OperationResolutionError;
 use crate::core::entity::EntityRef;
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
+use crate::economy::business_economy_system::resolve_business_gross_at_disruption;
+#[cfg(test)]
 use crate::economy::business_economy_system::{
-    BusinessEconomyError, resolve_business_current_gross, resolve_business_gross_potential,
+    resolve_business_current_gross, resolve_business_gross_potential,
 };
 use crate::finance::Money;
 use crate::finance::helpers::apply_basis_point_multiplier;
@@ -59,11 +61,19 @@ struct TakeEconomics {
     immediate_repeat_value_basis_points: u16,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TakeTarget {
+    business: crate::core::id::BusinessId,
+    historical_disrupted: Option<bool>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PropertyProceedsPlan {
     pub(crate) proceeds: Option<OperationPropertyProceedsRecord>,
     /// True when a recent successful same-kind take on the same target reduced this haul.
     pub(crate) depleted_by_recent_take: bool,
+    /// The target's damage state when this take was priced, including empty hauls.
+    pub(crate) take_disrupted: Option<bool>,
 }
 
 /// Shared take-proceeds derivation: gross basis, recency depletion, and cent rounding for
@@ -74,14 +84,20 @@ fn resolve_take_proceeds_cents(
     registry: &Registry,
     state: &AppState,
     operation: &crate::operations::OperationRecord,
-    business: crate::core::id::BusinessId,
+    target: TakeTarget,
     economics: TakeEconomics,
     outcome: OperationObjectiveOutcome,
     overflow: fn(crate::core::id::OperationId) -> OperationResolutionError,
-) -> Result<(i64, bool), OperationResolutionError> {
-    let gross = resolve_take_gross(registry, state, business)?;
+) -> Result<(i64, bool, bool), OperationResolutionError> {
+    let (gross, disrupted) = resolve_take_gross(
+        registry,
+        state,
+        target.business,
+        target.historical_disrupted,
+    )?;
     let reference_at = take_reference_time(state, operation);
-    let recent_hits = recent_take_times(state, operation, business, economics.recovery_window);
+    let recent_hits =
+        recent_take_times(state, operation, target.business, economics.recovery_window);
     let cents = resolve_take_cents(
         operation.id(),
         gross.cents(),
@@ -91,7 +107,7 @@ fn resolve_take_proceeds_cents(
         &recent_hits,
         overflow,
     )?;
-    Ok((cents, !recent_hits.is_empty()))
+    Ok((cents, !recent_hits.is_empty(), disrupted))
 }
 
 pub(crate) fn resolve_property_proceeds(
@@ -99,6 +115,7 @@ pub(crate) fn resolve_property_proceeds(
     state: &AppState,
     operation: &crate::operations::OperationRecord,
     outcome: OperationObjectiveOutcome,
+    historical_disrupted: Option<bool>,
 ) -> Result<PropertyProceedsPlan, OperationResolutionError> {
     let Some(definition) = registry
         .get_operation(operation.kind())
@@ -108,6 +125,7 @@ pub(crate) fn resolve_property_proceeds(
         return Ok(PropertyProceedsPlan {
             proceeds: None,
             depleted_by_recent_take: false,
+            take_disrupted: None,
         });
     };
     let OperationObjective::AcquireProperty {
@@ -117,20 +135,25 @@ pub(crate) fn resolve_property_proceeds(
         return Ok(PropertyProceedsPlan {
             proceeds: None,
             depleted_by_recent_take: false,
+            take_disrupted: None,
         });
     };
     if outcome == OperationObjectiveOutcome::Failed {
         return Ok(PropertyProceedsPlan {
             proceeds: None,
             depleted_by_recent_take: false,
+            take_disrupted: None,
         });
     }
 
-    let (cents, depleted_by_recent_take) = resolve_take_proceeds_cents(
+    let (cents, depleted_by_recent_take, disrupted) = resolve_take_proceeds_cents(
         registry,
         state,
         operation,
-        *business,
+        TakeTarget {
+            business: *business,
+            historical_disrupted,
+        },
         TakeEconomics {
             full_basis_points: definition.business_gross_basis_points(),
             partial_basis_points: definition.partial_recovery_basis_points(),
@@ -144,6 +167,7 @@ pub(crate) fn resolve_property_proceeds(
         return Ok(PropertyProceedsPlan {
             proceeds: None,
             depleted_by_recent_take,
+            take_disrupted: Some(disrupted),
         });
     }
     Ok(PropertyProceedsPlan {
@@ -152,6 +176,7 @@ pub(crate) fn resolve_property_proceeds(
             crate::finance::Money::from_cents(cents),
         )),
         depleted_by_recent_take,
+        take_disrupted: Some(disrupted),
     })
 }
 
@@ -168,23 +193,23 @@ fn take_reference_time(
         .unwrap_or_else(|| state.now())
 }
 
-/// Take basis: the venue's degraded current gross while an active sabotage-disruption
-/// horizon applies, otherwise its normal gross potential. Businesses without operating
-/// books have no disruption horizon to honor, so they pay from potential directly. Both
-/// resolution planning and registry-aware invariant re-derivation consume this owner, so
-/// a persisted haul re-derives exactly.
+/// Normal and damaged gross come from the canonical business economy rule. Live operations
+/// observe the current disruption horizon; historical validation uses the recorded condition
+/// instead of letting later sabotage or repairs rewrite an earlier haul.
 fn resolve_take_gross(
     registry: &Registry,
     state: &AppState,
     business: crate::core::id::BusinessId,
-) -> Result<Money, OperationResolutionError> {
-    match resolve_business_current_gross(registry, state, business) {
-        Ok(gross) => Ok(gross),
-        Err(BusinessEconomyError::MissingBusinessEconomy(_)) => {
-            resolve_business_gross_potential(registry, state, business).map_err(Into::into)
-        }
-        Err(error) => Err(error.into()),
-    }
+    historical_disrupted: Option<bool>,
+) -> Result<(Money, bool), OperationResolutionError> {
+    let disrupted = historical_disrupted.unwrap_or_else(|| {
+        state
+            .economy
+            .get_business_economy(business)
+            .is_some_and(|economy| economy.is_disrupted(state.now()))
+    });
+    let gross = resolve_business_gross_at_disruption(registry, state, business, disrupted)?;
+    Ok((gross, disrupted))
 }
 
 pub(crate) fn recent_take_times(
@@ -268,6 +293,7 @@ fn resolve_take_cents(
 pub(crate) struct CashProceedsPlan {
     pub(crate) proceeds: Option<crate::operations::OperationCashProceedsRecord>,
     pub(crate) depleted_by_recent_take: bool,
+    pub(crate) take_disrupted: Option<bool>,
 }
 
 /// Derives the cash a successful take carries home. Mirrors the property-proceeds economics:
@@ -278,6 +304,7 @@ pub(crate) fn resolve_cash_proceeds(
     state: &AppState,
     operation: &crate::operations::OperationRecord,
     outcome: OperationObjectiveOutcome,
+    historical_disrupted: Option<bool>,
 ) -> Result<CashProceedsPlan, OperationResolutionError> {
     let Some(definition) = registry
         .get_operation(operation.kind())
@@ -287,6 +314,7 @@ pub(crate) fn resolve_cash_proceeds(
         return Ok(CashProceedsPlan {
             proceeds: None,
             depleted_by_recent_take: false,
+            take_disrupted: None,
         });
     };
     let OperationObjective::ObtainCash {
@@ -296,20 +324,25 @@ pub(crate) fn resolve_cash_proceeds(
         return Ok(CashProceedsPlan {
             proceeds: None,
             depleted_by_recent_take: false,
+            take_disrupted: None,
         });
     };
     if outcome == OperationObjectiveOutcome::Failed {
         return Ok(CashProceedsPlan {
             proceeds: None,
             depleted_by_recent_take: false,
+            take_disrupted: None,
         });
     }
 
-    let (cents, depleted_by_recent_take) = resolve_take_proceeds_cents(
+    let (cents, depleted_by_recent_take, disrupted) = resolve_take_proceeds_cents(
         registry,
         state,
         operation,
-        *business,
+        TakeTarget {
+            business: *business,
+            historical_disrupted,
+        },
         TakeEconomics {
             full_basis_points: definition.business_take_basis_points(),
             partial_basis_points: definition.partial_take_basis_points(),
@@ -323,6 +356,7 @@ pub(crate) fn resolve_cash_proceeds(
         return Ok(CashProceedsPlan {
             proceeds: None,
             depleted_by_recent_take,
+            take_disrupted: Some(disrupted),
         });
     }
     Ok(CashProceedsPlan {
@@ -331,6 +365,7 @@ pub(crate) fn resolve_cash_proceeds(
             crate::finance::Money::from_cents(cents),
         )),
         depleted_by_recent_take,
+        take_disrupted: Some(disrupted),
     })
 }
 
@@ -540,8 +575,9 @@ mod tests {
             .expect("take basis should resolve before books exist");
         // A venue that never operated has no disruption horizon to honor.
         assert_eq!(
-            resolve_take_gross(&registry, &state, business)
-                .expect("bookless take basis should fall back to potential"),
+            resolve_take_gross(&registry, &state, business, None)
+                .expect("bookless take basis should fall back to potential")
+                .0,
             potential
         );
 
@@ -574,8 +610,9 @@ mod tests {
         .commit(&mut state)
         .expect("take-gross books should commit");
         assert_eq!(
-            resolve_take_gross(&registry, &state, business)
-                .expect("undisrupted take basis should match potential"),
+            resolve_take_gross(&registry, &state, business, None)
+                .expect("undisrupted take basis should match potential")
+                .0,
             potential
         );
 
@@ -583,8 +620,9 @@ mod tests {
             .expect("sabotage disruption should validate")
             .commit(&mut state)
             .expect("sabotage disruption should commit");
-        let degraded = resolve_take_gross(&registry, &state, business)
+        let (degraded, disrupted) = resolve_take_gross(&registry, &state, business, None)
             .expect("disrupted take basis should resolve");
+        assert!(disrupted);
         assert!(
             degraded < potential,
             "wrecking the shop must leave emptier shelves: degraded {degraded:?} vs potential {potential:?}"

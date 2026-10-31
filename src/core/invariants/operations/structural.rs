@@ -519,6 +519,13 @@ fn validate_operation_proceeds(
     operation: &OperationRecord,
     resolution: &crate::operations::OperationResolutionRecord,
 ) -> Result<(), StateValidationError> {
+    let is_completed_take = operation.objective().taken_business().is_some()
+        && resolution.objective_outcome() != OperationObjectiveOutcome::Failed;
+    if resolution.take_disrupted().is_some() != is_completed_take {
+        return Err(StateValidationError::InvalidOperationDefinition {
+            operation: operation.id(),
+        });
+    }
     if let Some(proceeds) = resolution.property_proceeds() {
         let valid_target = matches!(
             operation.objective(),

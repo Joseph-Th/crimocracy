@@ -47,14 +47,14 @@ fn validate_proceeds_context(
     outcome: &OperationResolutionOutcomePlan,
 ) -> Result<(), OperationResolutionError> {
     let expected_property_proceeds =
-        resolve_property_proceeds(registry, state, record, outcome.objective_outcome)?;
+        resolve_property_proceeds(registry, state, record, outcome.objective_outcome, None)?;
     if outcome.property_proceeds_plan != expected_property_proceeds {
         return Err(OperationResolutionError::StalePropertyProceedsContext {
             operation: record.id(),
         });
     }
     let expected_cash_proceeds =
-        resolve_cash_proceeds(registry, state, record, outcome.objective_outcome)?;
+        resolve_cash_proceeds(registry, state, record, outcome.objective_outcome, None)?;
     if outcome.cash_proceeds_plan != expected_cash_proceeds {
         return Err(OperationResolutionError::StaleCashProceedsContext {
             operation: record.id(),

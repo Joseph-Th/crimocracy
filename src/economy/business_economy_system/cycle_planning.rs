@@ -544,12 +544,23 @@ pub(crate) fn resolve_business_current_gross(
     state: &AppState,
     business: BusinessId,
 ) -> Result<Money, BusinessEconomyError> {
-    let normal = resolve_business_gross_potential(registry, state, business)?;
     let disrupted = state
         .economy
         .get_business_economy(business)
         .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?
         .is_disrupted(state.now());
+    resolve_business_gross_at_disruption(registry, state, business, disrupted)
+}
+
+/// Re-derive business gross with an explicit historical disruption fact. A completed take
+/// must not change when repairs finish or another crew later damages the same storefront.
+pub(crate) fn resolve_business_gross_at_disruption(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+    disrupted: bool,
+) -> Result<Money, BusinessEconomyError> {
+    let normal = resolve_business_gross_potential(registry, state, business)?;
     if disrupted {
         return resolve_disrupted_gross(
             business,

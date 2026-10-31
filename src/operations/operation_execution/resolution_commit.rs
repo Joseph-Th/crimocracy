@@ -206,6 +206,12 @@ impl ValidatedOperationResolution {
                 exposure,
                 property_proceeds: self.plan.outcome.property_proceeds_plan.proceeds,
                 cash_proceeds: self.plan.outcome.cash_proceeds_plan.proceeds,
+                take_disrupted: self
+                    .plan
+                    .outcome
+                    .property_proceeds_plan
+                    .take_disrupted
+                    .or(self.plan.outcome.cash_proceeds_plan.take_disrupted),
                 extraction_arrest,
                 discovered_information,
                 participant_information,

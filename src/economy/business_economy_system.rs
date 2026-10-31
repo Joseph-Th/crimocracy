@@ -11,8 +11,8 @@ pub use cycle_planning::{
 };
 use cycle_planning::{active_enterprise_dependency, resolve_cycle_financials};
 pub(crate) use cycle_planning::{
-    find_due_businesses, resolve_business_current_gross, resolve_business_gross_potential,
-    resolve_historical_business_cycle_financials,
+    find_due_businesses, resolve_business_current_gross, resolve_business_gross_at_disruption,
+    resolve_business_gross_potential, resolve_historical_business_cycle_financials,
 };
 mod lifecycle;
 mod profit_sweep;

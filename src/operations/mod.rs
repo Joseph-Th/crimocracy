@@ -731,6 +731,9 @@ pub struct OperationResolutionRecord {
     exposure: OperationExposureRecord,
     property_proceeds: Option<OperationPropertyProceedsRecord>,
     cash_proceeds: Option<OperationCashProceedsRecord>,
+    /// Frozen sabotage condition used for a cash/property take, including empty hauls. Later
+    /// repairs or sabotage cannot alter historical proceeds or prevent a valid save from loading.
+    take_disrupted: Option<bool>,
     /// Custody relationship observed when an extraction resolved. This snapshot is persisted
     /// because custody may end in the same minute or later, so later validation cannot infer
     /// whether the target was actually detained when the crew reached the objective.
@@ -780,6 +783,10 @@ impl OperationResolutionRecord {
 
     pub fn cash_proceeds(&self) -> Option<OperationCashProceedsRecord> {
         self.cash_proceeds
+    }
+
+    pub fn take_disrupted(&self) -> Option<bool> {
+        self.take_disrupted
     }
 
     pub fn extraction_arrest(&self) -> Option<ArrestId> {

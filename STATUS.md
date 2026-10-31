@@ -72,6 +72,6 @@ mismatched saves are rejected. Keep them in sync with the owners.
 
 The current authored content revision is 63.
 
-The current in-memory state schema version is 112.
+The current in-memory state schema version is 113.
 
 Compiled character capabilities, traits, and drives are limited to values consumed by current gameplay systems; design-document examples without a live mechanic are not persisted as inert character attributes. The compiled operation vocabulary likewise contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes. Legal-support policy has only the two executable states: case-by-case/manual handling and automatic retention. Unsupported tactical, governance, or policy axes are not represented as inert plan fields.

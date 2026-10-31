@@ -49,6 +49,106 @@ fn insert_property_disposition_fixture(
 }
 
 #[test]
+fn later_establishment_and_disruption_do_not_reprice_completed_burglary() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_business_operation_fixture(false);
+    let business = state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized burglary should persist")
+        .objective()
+        .taken_business()
+        .expect("burglary must target a business");
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    state.advance_clock(SimDuration::from_minutes(45));
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("burglary should resolve");
+    assert_eq!(
+        plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Achieved
+    );
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("successful burglary should validate")
+        .commit(&mut state)
+        .expect("successful burglary should commit");
+    let original = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("burglary should persist its resolution");
+    assert_eq!(original.take_disrupted(), Some(false));
+    let original_value = original
+        .property_proceeds()
+        .expect("burglary should create property proceeds")
+        .estimated_value();
+
+    // The venue acquires formal operating books only after it was burgled. Later sabotage
+    // changes today's gross but cannot change the previous operation's stolen stock.
+    let operating_account = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("late operating account should validate");
+    let settlement_account = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("late settlement account should validate");
+    validate_establish_business_economy(
+        &registry,
+        &state,
+        BusinessEconomyDraft {
+            business,
+            operating_account,
+            settlement_account,
+        },
+    )
+    .expect("late business economy should validate")
+    .commit(&mut state)
+    .expect("late business economy should commit");
+    crate::economy::business_economy_system::validate_disrupt_business_economy(
+        &registry, &state, business,
+    )
+    .expect("later sabotage should validate")
+    .commit(&mut state)
+    .expect("later sabotage should commit");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state)
+            .expect("old burglary must survive later establishment and sabotage"),
+    )
+    .expect("old burglary must restore independently of today's damage");
+    let restored_resolution = restored
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("restored burglary should retain its history");
+    assert_eq!(restored_resolution.take_disrupted(), Some(false));
+    assert_eq!(
+        restored_resolution
+            .property_proceeds()
+            .expect("historical property proceeds should persist")
+            .estimated_value(),
+        original_value
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
 fn property_acquisition_persists_estimated_held_value_with_partial_recovery() {
     let (registry, mut achieved_state, _police, neighborhood, operation) =
         make_exposed_business_operation_fixture(false);

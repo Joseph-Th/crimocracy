@@ -1469,6 +1469,177 @@ fn cash_target_suspended_mid_execution_records_practical_failure_without_proceed
 }
 
 #[test]
+fn later_sabotage_cannot_reprice_completed_cash_take_or_invalidate_save() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, false, Vec::new());
+    let business = state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized take should exist")
+        .objective()
+        .taken_business()
+        .expect("cash take must target a business");
+    run_until_operation_resolved(&registry, &mut state, operation);
+    let completed = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("take should resolve");
+    let original_cash = completed
+        .cash_proceeds()
+        .expect("fixture must produce a cash take before sabotage");
+    assert_eq!(completed.take_disrupted(), Some(false));
+
+    let normal = crate::economy::business_economy_system::resolve_business_current_gross(
+        &registry, &state, business,
+    )
+    .expect("active business must have a gross basis");
+    crate::economy::business_economy_system::validate_disrupt_business_economy(
+        &registry, &state, business,
+    )
+    .expect("later sabotage should validate")
+    .commit(&mut state)
+    .expect("later sabotage should commit");
+    let damaged = crate::economy::business_economy_system::resolve_business_current_gross(
+        &registry, &state, business,
+    )
+    .expect("damaged business should still have a gross basis");
+    assert!(damaged < normal);
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operation)
+            .and_then(|record| record.resolution())
+            .and_then(|resolution| resolution.cash_proceeds()),
+        Some(original_cash),
+    );
+    let save = build_save(&registry, &state)
+        .expect("later sabotage must not retroactively invalidate historical cash proceeds");
+    let restored = restore_save(&registry, save)
+        .expect("historical cash proceeds must survive restore after later sabotage");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn completed_take_during_sabotage_keeps_its_degraded_value_after_repair() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, false, Vec::new());
+    let business = state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized take should persist")
+        .objective()
+        .taken_business()
+        .expect("cash take must target a business");
+    crate::economy::business_economy_system::validate_disrupt_business_economy(
+        &registry, &state, business,
+    )
+    .expect("initial disruption should validate")
+    .commit(&mut state)
+    .expect("initial disruption should commit");
+    let damaged_gross = crate::economy::business_economy_system::resolve_business_current_gross(
+        &registry, &state, business,
+    )
+    .expect("disrupted gross should resolve");
+    run_until_operation_resolved(&registry, &mut state, operation);
+    let resolution = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("damaged-target take should resolve");
+    assert_ne!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Failed
+    );
+    assert_eq!(resolution.take_disrupted(), Some(true));
+    let original_cash = resolution.cash_proceeds();
+
+    let disruption_through = state
+        .economy()
+        .get_business_economy(business)
+        .and_then(|economy| economy.disrupted_through())
+        .expect("disruption end must be persisted");
+    let repaired_at = disruption_through
+        .checked_add(SimDuration::from_minutes(1))
+        .expect("fixture repair moment should fit simulation clock");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(repaired_at.as_minutes() - state.now().as_minutes())
+            .expect("fixture repair interval should fit u32"),
+    ));
+    let repaired_gross = crate::economy::business_economy_system::resolve_business_current_gross(
+        &registry, &state, business,
+    )
+    .expect("repaired gross should resolve");
+    assert!(repaired_gross > damaged_gross);
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state)
+            .expect("repair must not retroactively increase the historical take"),
+    )
+    .expect("old damaged-target take should restore after repair");
+    let saved_resolution = restored
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("take resolution should persist");
+    assert_eq!(saved_resolution.take_disrupted(), Some(true));
+    assert_eq!(saved_resolution.cash_proceeds(), original_cash);
+    validate_invariants(&restored);
+}
+
+#[test]
+fn take_resolution_rejects_target_economy_change_after_validation() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, false, Vec::new());
+    let business = state
+        .operations()
+        .get_operation(operation)
+        .expect("authorized take should exist")
+        .objective()
+        .taken_business()
+        .expect("cash take must target a business");
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    let due = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution_due_at())
+        .expect("started take must have resolution due time");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due.as_minutes() - state.now().as_minutes())
+            .expect("fixture duration must fit the clock"),
+    ));
+    let plan = decide_operation_resolution(
+        &registry,
+        &state,
+        operation,
+        OperationResolutionRandomness::new(0, 0),
+    )
+    .expect("due take should resolve a plan");
+    let validated = validate_operation_resolution_plan(&registry, &state, plan)
+        .expect("unmodified target should permit the take");
+    crate::economy::business_economy_system::validate_disrupt_business_economy(
+        &registry, &state, business,
+    )
+    .expect("target should be disruptable")
+    .commit(&mut state)
+    .expect("new business disruption should commit");
+    let before = bincode::serialize(&state).expect("pre-rejection state should serialize");
+    assert_eq!(
+        validated.commit(&mut state),
+        Err(OperationResolutionError::StaleObjectiveContext { operation }),
+        "a validated take must not commit its old proceeds after damage changes the basis"
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected state should serialize"),
+        before
+    );
+    validate_invariants(&state);
+}
+
+#[test]
 fn operation_does_not_take_from_business_acquired_by_its_sponsor_mid_execution() {
     let (registry, mut state, _police, _neighborhood, operation) =
         make_exposed_operation_fixture(OperationKind::Burglary, false, Vec::new());

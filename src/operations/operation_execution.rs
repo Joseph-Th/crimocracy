@@ -233,8 +233,26 @@ struct OperationResolutionSnapshot {
     operation: OperationId,
     expected_operation_version: u32,
     resolved_at: SimTime,
+    /// Even a bookless target is pinned: establishing books after validation must not let
+    /// the operation commit a haul priced against the former business condition.
+    take_economy_version: Option<(crate::core::id::BusinessId, Option<u32>)>,
     police_snapshot: TargetPoliceSnapshot,
     police_response: Option<PoliceResponseResolutionSnapshot>,
+}
+
+fn take_economy_version(
+    state: &AppState,
+    operation: &OperationRecord,
+) -> Option<(crate::core::id::BusinessId, Option<u32>)> {
+    operation.objective().taken_business().map(|business| {
+        (
+            business,
+            state
+                .economy
+                .get_business_economy(business)
+                .map(|economy| economy.version()),
+        )
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -404,8 +422,9 @@ pub(crate) fn decide_operation_resolution(
         police_response_arrived,
     );
     let property_proceeds_plan =
-        resolve_property_proceeds(registry, state, record, objective_outcome)?;
-    let cash_proceeds_plan = resolve_cash_proceeds(registry, state, record, objective_outcome)?;
+        resolve_property_proceeds(registry, state, record, objective_outcome, None)?;
+    let cash_proceeds_plan =
+        resolve_cash_proceeds(registry, state, record, objective_outcome, None)?;
     let objective_outcome = downgrade_empty_take_outcome(
         registry.get_operation(record.kind()).execution(),
         objective_outcome,
@@ -447,6 +466,7 @@ pub(crate) fn decide_operation_resolution(
             operation,
             expected_operation_version: record.version(),
             resolved_at: state.now(),
+            take_economy_version: take_economy_version(state, record),
             police_snapshot,
             police_response,
         },
@@ -559,10 +579,22 @@ pub(crate) fn render_persisted_after_action_summary(
     let tactical_outcome = resolve_objective_outcome(execution, resolution.execution_margin());
     let pre_depletion_outcome =
         resolve_effective_objective_outcome(tactical_outcome, resolution.objective_blocker());
-    let property_proceeds_plan =
-        resolve_property_proceeds(registry, state, record, pre_depletion_outcome).ok()?;
-    let cash_proceeds_plan =
-        resolve_cash_proceeds(registry, state, record, pre_depletion_outcome).ok()?;
+    let property_proceeds_plan = resolve_property_proceeds(
+        registry,
+        state,
+        record,
+        pre_depletion_outcome,
+        resolution.take_disrupted(),
+    )
+    .ok()?;
+    let cash_proceeds_plan = resolve_cash_proceeds(
+        registry,
+        state,
+        record,
+        pre_depletion_outcome,
+        resolution.take_disrupted(),
+    )
+    .ok()?;
     let expected_outcome = downgrade_empty_take_outcome(
         execution,
         pre_depletion_outcome,
@@ -673,6 +705,11 @@ fn validate_plan_snapshot(
         return Err(OperationResolutionError::OperationNotInProgress(
             plan.snapshot.operation,
         ));
+    }
+    if take_economy_version(state, record) != plan.snapshot.take_economy_version {
+        return Err(OperationResolutionError::StaleObjectiveContext {
+            operation: plan.snapshot.operation,
+        });
     }
     let due_at = record
         .resolution_due_at()

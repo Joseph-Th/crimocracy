@@ -416,15 +416,24 @@ fn validate_authored_operation_resolution(
     ) = resolve_intelligence_factors(registry, state, operation.id());
     let expected_police_response_arrived =
         has_police_response_arrived_by(state, operation, resolution.resolved_at());
-    let expected_property_proceeds =
-        resolve_property_proceeds(registry, state, operation, expected_outcome)
-            .map_err(|_| invalid_operation_definition(operation))?;
-    let expected_cash_proceeds =
-        resolve_cash_proceeds(registry, state, operation, expected_outcome).map_err(|_| {
-            StateValidationError::InvalidOperationCashProceeds {
-                operation: operation.id(),
-            }
-        })?;
+    let expected_property_proceeds = resolve_property_proceeds(
+        registry,
+        state,
+        operation,
+        expected_outcome,
+        resolution.take_disrupted(),
+    )
+    .map_err(|_| invalid_operation_definition(operation))?;
+    let expected_cash_proceeds = resolve_cash_proceeds(
+        registry,
+        state,
+        operation,
+        expected_outcome,
+        resolution.take_disrupted(),
+    )
+    .map_err(|_| StateValidationError::InvalidOperationCashProceeds {
+        operation: operation.id(),
+    })?;
     // An empty-handed take persists `Partial` while its proceeds re-derive from the
     // pre-downgrade tactical outcome. Mirror the planning rule exactly: the downgrade
     // consumes the proceeds derived above, and the comparisons below keep checking those
@@ -455,6 +464,17 @@ fn validate_authored_operation_resolution(
         || factors.police_response_arrived() != expected_police_response_arrived
         || resolution.execution_margin() != expected_margin
         || resolution.objective_outcome() != expected_outcome
+        || expected_property_proceeds
+            .take_disrupted
+            .or(expected_cash_proceeds.take_disrupted)
+            != resolution.take_disrupted()
+        || resolution.take_disrupted().is_some_and(|disrupted| {
+            disrupted
+                && operation
+                    .objective()
+                    .business_target()
+                    .is_some_and(|business| state.economy.get_business_economy(business).is_none())
+        })
         || resolution.property_proceeds() != expected_property_proceeds.proceeds
     {
         return Err(invalid_operation_definition(operation));
