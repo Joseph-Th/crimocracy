@@ -569,23 +569,38 @@ fn repeat_custody_without_new_evidence(
     let released_at = prior
         .released_at()
         .expect("released arrest must retain its release instant");
-    // Renewed custody needs materially new material: at least one cited record that the prior
-    // detention never cited, carrying a fresh observation claim from the release minute or
-    // later. Identity alone would let a held-back pre-release exhibit chain detentions, and
-    // freshness alone would let the same cited set re-arm custody whenever its timestamps
-    // cluster on the release minute. Both properties are caller-visible and unforgable through
-    // this path: new records arrive only through canonical evidence creation. Renewal also
-    // waits until after the release minute so the release remains observable for one minute
-    // instead of the same tick releasing and immediately re-detaining through the later
-    // autonomous arrest phase.
-    let novel = evidence.iter().any(|evidence| {
+    (!has_fresh_independent_custody_evidence(state, prior, evidence, released_at)
+        || state.now() <= released_at)
+        .then_some((prior.id(), released_at))
+}
+
+/// The same source-based novelty requirement is used by runtime custody admission and
+/// persistence validation. An arrest citing only newly authored weak material or a newer
+/// analysis of previously cited evidence cannot reset the custody clock.
+pub(crate) fn has_fresh_independent_custody_evidence(
+    state: &AppState,
+    prior: &ArrestRecord,
+    evidence: &BTreeSet<EvidenceId>,
+    released_at: SimTime,
+) -> bool {
+    // Renewed custody needs a fresh qualifying *independent* source. Direct drafts may cite
+    // additional weak/questionable records alongside the old custody-grade set, but such
+    // records cannot re-arm detention. A new forensic derivative of previously cited evidence
+    // is likewise the same fact, even if its reliability improved after release.
+    let prior_sources: BTreeSet<_> = prior
+        .evidence()
+        .iter()
+        .filter_map(|id| state.legal.get_evidence(*id))
+        .filter_map(|record| CustodyEvidenceAssessment::corroboration_source(state, record))
+        .collect();
+    evidence.iter().any(|evidence| {
         !prior.evidence().contains(evidence)
-            && state
-                .legal
-                .get_evidence(*evidence)
-                .is_some_and(|record| record.discovered_at() >= released_at)
-    });
-    (state.now() <= released_at || !novel).then_some((prior.id(), released_at))
+            && state.legal.get_evidence(*evidence).is_some_and(|record| {
+                record.discovered_at() >= released_at
+                    && CustodyEvidenceAssessment::corroboration_source(state, record)
+                        .is_some_and(|source| !prior_sources.contains(&source))
+            })
+    })
 }
 
 /// Custody is a stronger consequence than adding a subject to a case graph. Weak material or a

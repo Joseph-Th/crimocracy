@@ -839,6 +839,67 @@ fn replace_serialized_evidence(
         .expect("same-layout evidence corruption must remain decodable")
 }
 
+#[derive(Clone, Serialize)]
+struct ArrestRecordWire {
+    id: ArrestId,
+    character: CharacterId,
+    authority: OrganizationId,
+    investigation: InvestigationId,
+    evidence: BTreeSet<EvidenceId>,
+    arrested_at: SimTime,
+    released_at: Option<SimTime>,
+    status: ArrestStatus,
+    version: u32,
+}
+
+fn arrest_wire(record: &ArrestRecord) -> ArrestRecordWire {
+    ArrestRecordWire {
+        id: record.id(),
+        character: record.character(),
+        authority: record.authority(),
+        investigation: record.investigation(),
+        evidence: record.evidence().clone(),
+        arrested_at: record.arrested_at(),
+        released_at: record.released_at(),
+        status: record.status(),
+        version: record.version(),
+    }
+}
+
+fn replace_serialized_arrest(
+    envelope: SaveEnvelope,
+    original: &ArrestRecord,
+    replacement: &ArrestRecordWire,
+) -> SaveEnvelope {
+    let original_bytes = bincode::serialize(original).expect("arrest record should serialize");
+    assert_eq!(
+        bincode::serialize(&arrest_wire(original)).expect("arrest mirror should serialize"),
+        original_bytes,
+        "wire mirror must exactly match persisted arrest layout"
+    );
+    let replacement_bytes =
+        bincode::serialize(replacement).expect("corrupted arrest mirror should serialize");
+    assert_eq!(
+        replacement_bytes.len(),
+        original_bytes.len(),
+        "replacement changes only the cited evidence ID"
+    );
+    let mut envelope_bytes = bincode::serialize(&envelope).expect("save should serialize");
+    let matches: Vec<_> = envelope_bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, bytes)| (bytes == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "arrest wire record must occur exactly once"
+    );
+    let start = matches[0];
+    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    bincode::deserialize(&envelope_bytes).expect("modified arrest envelope must decode")
+}
+
 #[test]
 fn restore_rejects_arrest_backed_by_nonqualifying_evidence() {
     let mut fixture = fixture();
@@ -2140,6 +2201,316 @@ fn repeat_custody_requires_new_post_release_evidence_for_direct_and_autonomous_p
     );
     validate_state(&fixture.state).expect("repeat custody state should remain structurally valid");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn repeat_custody_cannot_use_fresh_weak_evidence_to_recycle_old_corroboration() {
+    let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let original_evidence = BTreeSet::from([fixture.evidence, corroborating]);
+    let arrest = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: original_evidence.clone(),
+        },
+    )
+    .expect("initial corroborated custody should validate")
+    .commit(&mut fixture.state)
+    .expect("initial custody should commit");
+    validate_release_arrest(&fixture.state, arrest)
+        .expect("custody should be releasable")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let weak = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.suspect),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Weak,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("weak information is still valid investigative evidence")
+    .commit(&mut fixture.state)
+    .expect("weak case evidence should commit");
+    let mut recycled_evidence = original_evidence;
+    recycled_evidence.insert(weak);
+    let before = bincode::serialize(&fixture.state).expect("pre-arrest state must serialize");
+    assert!(matches!(
+        validate_arrest(
+            &fixture.registry,
+            &fixture.state,
+            ArrestDraft {
+                character: fixture.suspect,
+                investigation: fixture.investigation,
+                evidence: recycled_evidence,
+            },
+        ),
+        Err(ArrestError::RepeatCustodyWithoutNewEvidence {
+            prior_arrest,
+            ..
+        }) if prior_arrest == arrest
+    ));
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state must serialize"),
+        before
+    );
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .expect("autonomous custody should ignore nonqualifying novelty")
+            .is_empty()
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("weak evidence should not compromise the historical custody record");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn repeat_custody_forensic_reanalysis_of_old_source_is_not_new_independent_evidence() {
+    use crate::legal::investigation_system::validate_assign_investigator;
+    use crate::legal::investigation_work_execution::validate_schedule_investigation_work;
+    use crate::legal::{InvestigationWorkDraft, InvestigationWorkFocus, InvestigationWorkKind};
+    use crate::world::{CapabilityKind, Rating};
+
+    let mut fixture = fixture();
+    let fingerprint = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.suspect),
+            origin: None,
+            kind: EvidenceKind::Fingerprint,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("reviewable evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("fingerprint should persist");
+    let original_evidence = BTreeSet::from([fixture.evidence, fingerprint]);
+    let first = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: original_evidence.clone(),
+        },
+    )
+    .expect("initial custody should validate")
+    .commit(&mut fixture.state)
+    .expect("initial custody should commit");
+    validate_release_arrest(&fixture.state, first)
+        .expect("custody should be released")
+        .commit(&mut fixture.state)
+        .expect("custody release should commit");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let detective = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Post-release forensic analyst".to_owned(),
+            organization: Some(fixture.police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Investigation,
+                Rating::try_new(100).expect("maximal detective ability should validate"),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("detective should be added");
+    validate_assign_investigator(&fixture.state, fixture.investigation, detective)
+        .expect("detective should be assigned")
+        .commit(&mut fixture.state)
+        .expect("detective assignment should commit");
+    let review = validate_schedule_investigation_work(
+        &fixture.registry,
+        &fixture.state,
+        InvestigationWorkDraft {
+            investigation: fixture.investigation,
+            investigator: detective,
+            kind: InvestigationWorkKind::EvidenceReview,
+            focus: InvestigationWorkFocus::evidence(fingerprint),
+        },
+    )
+    .expect("forensic review should validate")
+    .commit(&mut fixture.state)
+    .expect("forensic review should schedule");
+    run_until_investigation_work_resolved(&mut fixture, review);
+    let derived = fixture
+        .state
+        .legal()
+        .get_investigation_work(review)
+        .and_then(|work| work.resolution())
+        .and_then(|resolution| resolution.derived_evidence())
+        .expect("high-skill review should develop forensic evidence");
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_evidence(derived)
+            .expect("derived forensic evidence must persist")
+            .discovered_at()
+            > fixture
+                .state
+                .legal()
+                .get_arrest(first)
+                .and_then(|arrest| arrest.released_at())
+                .expect("initial custody should remain released")
+    );
+    let recycled = BTreeSet::from([fixture.evidence, derived]);
+    assert!(matches!(
+        validate_arrest(
+            &fixture.registry,
+            &fixture.state,
+            ArrestDraft {
+                character: fixture.suspect,
+                investigation: fixture.investigation,
+                evidence: recycled,
+            },
+        ),
+        Err(ArrestError::RepeatCustodyWithoutNewEvidence { prior_arrest, .. })
+            if prior_arrest == first
+    ));
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .expect("reanalysis alone must not justify autonomous re-detention")
+            .is_empty()
+    );
+
+    // A different, independently obtained post-release exhibit does change the custody basis.
+    let fresh = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let second = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("independent fresh evidence should permit new custody");
+    assert_eq!(second.len(), 1);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_arrest(second[0])
+            .expect("renewed custody should persist")
+            .evidence()
+            .contains(&fresh)
+    );
+
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("historical custody, forensic review, and renewed custody must save"),
+    )
+    .expect("forensic custody history should restore");
+    validate_state_against_registry(&fixture.registry, &restored)
+        .expect("forensic custody history must remain causally valid after restore");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn restore_rejects_rearrest_that_swaps_fresh_qualifying_source_for_weak_evidence() {
+    let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let old = BTreeSet::from([fixture.evidence, corroborating]);
+    let first = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: old.clone(),
+        },
+    )
+    .expect("original arrest should validate")
+    .commit(&mut fixture.state)
+    .expect("original arrest should commit");
+    validate_release_arrest(&fixture.state, first)
+        .expect("original custody should be releasable")
+        .commit(&mut fixture.state)
+        .expect("original custody should release");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let weak = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.suspect),
+            origin: None,
+            kind: EvidenceKind::KnownAssociation,
+            strength: EvidenceStrength::Weak,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("weak evidence should be recordable")
+    .commit(&mut fixture.state)
+    .expect("weak evidence should persist");
+    let fresh_strong = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let mut valid_citations = old;
+    valid_citations.insert(fresh_strong);
+    let second = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: valid_citations,
+        },
+    )
+    .expect("fresh independent material should justify a new arrest")
+    .commit(&mut fixture.state)
+    .expect("new arrest should persist");
+    let record = fixture
+        .state
+        .legal()
+        .get_arrest(second)
+        .expect("second arrest record must exist");
+    let mut corrupt = arrest_wire(record);
+    assert!(corrupt.evidence.remove(&fresh_strong));
+    assert!(corrupt.evidence.insert(weak));
+    let save = build_save(&fixture.registry, &fixture.state)
+        .expect("valid custody chronology should save before corruption");
+    let corrupted_save = replace_serialized_arrest(save, record, &corrupt);
+    assert!(matches!(
+        restore_save(&fixture.registry, corrupted_save),
+        Err(crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidArrest { arrest: invalid }
+        )) if invalid == second
+    ));
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("the uncorrupted chronology must remain valid");
 }
 
 #[test]

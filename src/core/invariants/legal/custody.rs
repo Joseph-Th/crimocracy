@@ -5,7 +5,9 @@ use crate::core::id::EvidenceId;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
-use crate::legal::arrest_system::{arrest_evidence_meets_threshold, custody_release_at};
+use crate::legal::arrest_system::{
+    arrest_evidence_meets_threshold, custody_release_at, has_fresh_independent_custody_evidence,
+};
 use crate::legal::informant_system::{
     informant_reliability, informant_strength, information_is_relevant_to_investigation,
 };
@@ -17,15 +19,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationError> {
     // Arrest IDs are allocated monotonically, so this map reconstructs each case/person custody
-    // sequence in commit order. Renewed custody in the same case is valid only after the prior
-    // episode ended and the new arrest actually cites evidence discovered in that release minute
-    // or later. The new arrest itself must still occur on a later minute.
+    // sequence in commit order. Renewed custody requires evidence from a fresh independent
+    // qualifying source, using the exact runtime predicate. Weak/quasi-new exhibits and
+    // derivatives of sources already cited for the previous detention do not re-arm custody.
     let mut prior_custody = BTreeMap::<
         (
             crate::core::id::InvestigationId,
             crate::core::id::CharacterId,
         ),
-        Option<crate::core::time::SimTime>,
+        crate::core::id::ArrestId,
     >::new();
     for arrest in state.legal.arrests() {
         let _ = state.world.get_character(arrest.character()).ok_or(
@@ -45,19 +47,24 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
                 arrest: arrest.id(),
             })?;
         let custody_key = (arrest.investigation(), arrest.character());
-        if let Some(prior_release) = prior_custody.get(&custody_key) {
-            let Some(prior_release) = *prior_release else {
+        if let Some(prior_id) = prior_custody.get(&custody_key) {
+            let prior = state
+                .legal
+                .get_arrest(*prior_id)
+                .expect("prior custody ID in current arrest history must exist");
+            let Some(prior_release) = prior.released_at() else {
                 return Err(StateValidationError::InvalidArrest {
                     arrest: arrest.id(),
                 });
             };
-            let cites_release_or_later_evidence = arrest.evidence().iter().any(|evidence_id| {
-                state
-                    .legal
-                    .get_evidence(*evidence_id)
-                    .is_some_and(|evidence| evidence.discovered_at() >= prior_release)
-            });
-            if arrest.arrested_at() <= prior_release || !cites_release_or_later_evidence {
+            if arrest.arrested_at() <= prior_release
+                || !has_fresh_independent_custody_evidence(
+                    state,
+                    prior,
+                    arrest.evidence(),
+                    prior_release,
+                )
+            {
                 return Err(StateValidationError::InvalidArrest {
                     arrest: arrest.id(),
                 });
@@ -142,7 +149,7 @@ pub(super) fn validate_arrests(state: &AppState) -> Result<(), StateValidationEr
                 }
             }
         }
-        prior_custody.insert(custody_key, arrest.released_at());
+        prior_custody.insert(custody_key, arrest.id());
     }
 
     Ok(())
