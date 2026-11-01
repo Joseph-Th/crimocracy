@@ -426,6 +426,43 @@ impl WorldState {
                     .expect("business ownership-version index must reference a change record")
             })
     }
+    /// Find the first ownership revision at/after a time boundary (or strictly after it).
+    /// Ownership changes have nondecreasing timestamps and an exact version index, so a
+    /// historical query needs logarithmic lookups rather than replaying all earlier owners.
+    /// Wide bounds can also represent the sentinel after version `u32::MAX`.
+    fn first_ownership_version_matching(
+        &self,
+        business: BusinessId,
+        at: SimTime,
+        include_equal: bool,
+    ) -> u64 {
+        let last = self
+            .businesses
+            .records
+            .get(&business)
+            .map_or(0, BusinessRecord::version) as u64;
+        let (mut low, mut high) = (1_u64, last + 1);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let changed_at = self
+                .get_business_ownership_change_for_version(business, middle as u32)
+                .expect("business ownership version index must be complete")
+                .changed_at();
+            if changed_at > at || (include_equal && changed_at == at) {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        low
+    }
+
+    fn ownership_at_version(&self, business: BusinessId, version: u64) -> BusinessOwner {
+        self.get_business_ownership_change_for_version(business, version as u32)
+            .expect("business ownership version index must be complete")
+            .new_owner()
+    }
+
     /// Returns whether `owner` could have held, and definitely held, the business at one
     /// simulation timestamp. Ownership changes are ordered among themselves by business version,
     /// but cross-domain events sharing the same minute have no persisted sub-minute order. The
@@ -437,23 +474,22 @@ impl WorldState {
         owner: BusinessOwner,
         at: SimTime,
     ) -> (bool, bool) {
-        let mut owner_before = None;
-        let mut same_time_owners = Vec::new();
-        for change in self.business_ownership_history(business) {
-            if change.changed_at() < at {
-                owner_before = Some(change.new_owner());
-            } else if change.changed_at() == at {
-                same_time_owners.push(change.new_owner());
-            } else {
-                break;
-            }
+        let first_at = self.first_ownership_version_matching(business, at, true);
+        let first_after = self.first_ownership_version_matching(business, at, false);
+        let owner_before =
+            (first_at > 1).then(|| self.ownership_at_version(business, first_at - 1));
+        let mut observed_at = false;
+        let mut all_at_match = true;
+        for version in first_at..first_after {
+            let matches = self.ownership_at_version(business, version) == owner;
+            observed_at |= matches;
+            all_at_match &= matches;
         }
-        let could_be_owner = owner_before == Some(owner) || same_time_owners.contains(&owner);
+        let could_be_owner = owner_before == Some(owner) || observed_at;
         let definitely_owner = if let Some(owner_before) = owner_before {
-            owner_before == owner && same_time_owners.iter().all(|candidate| *candidate == owner)
+            owner_before == owner && all_at_match
         } else {
-            !same_time_owners.is_empty()
-                && same_time_owners.iter().all(|candidate| *candidate == owner)
+            first_at < first_after && all_at_match
         };
         (could_be_owner, definitely_owner)
     }
@@ -468,17 +504,18 @@ impl WorldState {
         if period_start > period_end {
             return false;
         }
-        let mut history = self.business_ownership_history(business).peekable();
-        while let Some(change) = history.next() {
-            let ownership_end = history.peek().map(|next| next.changed_at());
-            if change.new_owner() == owner
-                && change.changed_at() <= period_end
-                && ownership_end.is_none_or(|end| end > period_start)
-            {
-                return true;
-            }
+        // Intervals take the final same-minute revision as effective at their starting
+        // instant; earlier same-minute owners are handled as ambiguous point evidence above.
+        let first_after_start =
+            self.first_ownership_version_matching(business, period_start, false);
+        if first_after_start > 1
+            && self.ownership_at_version(business, first_after_start - 1) == owner
+        {
+            return true;
         }
-        false
+        let first_after_end = self.first_ownership_version_matching(business, period_end, false);
+        (first_after_start..first_after_end)
+            .any(|version| self.ownership_at_version(business, version) == owner)
     }
     pub(crate) fn organizations(&self) -> impl Iterator<Item = &OrganizationRecord> {
         self.organizations.values()

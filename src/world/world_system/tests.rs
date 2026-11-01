@@ -528,6 +528,148 @@ fn registry_validation_rejects_wrong_initial_three_state_organization_policy_set
 }
 
 #[test]
+fn ownership_history_queries_preserve_same_minute_evidence_and_interval_boundaries() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x0B51_00A7);
+    let owners: Vec<_> = (0..3)
+        .map(|index| {
+            insert_organization(
+                &registry,
+                &mut state,
+                OrganizationDraft {
+                    name: format!("Ownership Search Company {index}"),
+                    kind: OrganizationKind::Commercial,
+                },
+            )
+            .expect("owner fixture should validate")
+        })
+        .collect();
+    let owners: Vec<_> = owners
+        .into_iter()
+        .map(BusinessOwner::Organization)
+        .collect();
+    let business = make_test_business(&registry, &mut state, owners[0]);
+    let transfer = |state: &mut AppState, owner| {
+        validate_transfer_business_ownership(state, business, owner)
+            .expect("ownership change should validate")
+            .commit(state)
+            .expect("ownership change should persist");
+    };
+    state.advance_clock(SimDuration::from_minutes(5));
+    transfer(&mut state, owners[1]);
+    transfer(&mut state, owners[2]);
+    state.advance_clock(SimDuration::from_minutes(3));
+    transfer(&mut state, owners[0]);
+    transfer(&mut state, owners[1]);
+    state.advance_clock(SimDuration::from_minutes(4));
+    transfer(&mut state, owners[0]);
+
+    for at in 0..=14 {
+        for &owner in &owners {
+            let expected = {
+                let mut before = None;
+                let mut same_minute = Vec::new();
+                for change in state.world().business_ownership_history(business) {
+                    if change.changed_at().as_minutes() < at {
+                        before = Some(change.new_owner());
+                    } else if change.changed_at().as_minutes() == at {
+                        same_minute.push(change.new_owner());
+                    } else {
+                        break;
+                    }
+                }
+                (
+                    before == Some(owner) || same_minute.contains(&owner),
+                    if let Some(before) = before {
+                        before == owner && same_minute.iter().all(|candidate| *candidate == owner)
+                    } else {
+                        !same_minute.is_empty()
+                            && same_minute.iter().all(|candidate| *candidate == owner)
+                    },
+                )
+            };
+            assert_eq!(
+                state.world().business_owner_evidence_at(
+                    business,
+                    owner,
+                    SimTime::from_minutes(at),
+                ),
+                expected,
+                "point evidence changed for owner {owner:?} at minute {at}"
+            );
+            for start in 0..=14 {
+                for end in start..=14 {
+                    let mut history = state
+                        .world()
+                        .business_ownership_history(business)
+                        .peekable();
+                    let mut expected = false;
+                    while let Some(change) = history.next() {
+                        let ownership_end = history.peek().map(|next| next.changed_at());
+                        if change.new_owner() == owner
+                            && change.changed_at().as_minutes() <= end
+                            && ownership_end.is_none_or(|time| time.as_minutes() > start)
+                        {
+                            expected = true;
+                            break;
+                        }
+                    }
+                    assert_eq!(
+                        state.world().has_business_owner_during(
+                            business,
+                            owner,
+                            SimTime::from_minutes(start),
+                            SimTime::from_minutes(end),
+                        ),
+                        expected,
+                        "interval ownership changed for {owner:?} during {start}..={end}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        state
+            .world()
+            .business_owner_evidence_at(business, owners[2], SimTime::from_minutes(5)),
+        (true, false),
+        "a same-minute recipient is possible but not the only possible owner"
+    );
+    assert_eq!(
+        state
+            .world()
+            .business_owner_evidence_at(business, owners[2], SimTime::from_minutes(6)),
+        (true, true)
+    );
+    assert!(!state.world().has_business_owner_during(
+        business,
+        owners[1],
+        SimTime::from_minutes(5),
+        SimTime::from_minutes(5),
+    ));
+    validate_state_against_registry(&registry, &state)
+        .expect("indexed ownership queries should leave valid history");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("ownership history should save"),
+    )
+    .expect("ownership history should restore");
+    assert_eq!(
+        restored
+            .world()
+            .business_owner_evidence_at(business, owners[1], SimTime::from_minutes(8)),
+        (true, false),
+        "restore must rebuild the version index used by binary history searches"
+    );
+    assert!(restored.world().has_business_owner_during(
+        business,
+        owners[0],
+        SimTime::from_minutes(11),
+        SimTime::from_minutes(12),
+    ));
+}
+
+#[test]
 fn business_ownership_transfer_updates_indexes_and_preserves_versioned_history() {
     let registry = build_registry();
     let mut state = AppState::new(0x0B51_0001);

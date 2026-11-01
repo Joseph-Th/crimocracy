@@ -17,6 +17,7 @@ agent routing is in [`AGENTS.md`](AGENTS.md).
 - Save/load validates envelope, schema, authored content revision, registry references, cross-references, indexes, and ID high-water marks before accepting state. Compatibility is current-version only; no implicit migration or defaulting.
 - [`core::simulation::run_tick`](src/core/simulation.rs) is the canonical one-minute pipeline: it processes due work in stable order and returns `Result<TickOutcome, TickError>`, rejecting an exhausted simulation clock before any phase mutates state.
 - `validate_state` provides release-safe structural checks; debug boundaries additionally run the full invariant validator.
+- Historical business ownership is queried through the reconstructed business/version index with time-bounded searches rather than a full ownership replay for each operation, opportunity, or financial-report query. Same-minute ownership ambiguity and the established reporting-interval semantics are preserved, including after save restoration; the save schema is unchanged.
 
 ## Implemented domains
 
