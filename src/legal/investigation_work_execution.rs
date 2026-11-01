@@ -130,6 +130,10 @@ pub enum InvestigationWorkError {
     VarianceOutOfRange { variance: i8, limit: u8 },
     #[error("investigation work scheduling exceeds the representable simulation clock")]
     SimulationTimeOverflow,
+    #[error(
+        "investigation work schedule was validated at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleScheduleTime { expected: SimTime, found: SimTime },
     #[error("investigation work source evidence {0} no longer belongs to the case")]
     InvalidSourceEvidence(EvidenceId),
     #[error("witness interview for work {work} could not record a statement: {error}")]
@@ -151,6 +155,7 @@ pub struct ValidatedInvestigationWorkSchedule {
     source_evidence: BTreeSet<EvidenceId>,
     expected_investigation_version: u32,
     expected_investigator_version: u32,
+    validated_at: SimTime,
     duration_minutes: u32,
 }
 
@@ -159,6 +164,9 @@ impl ValidatedInvestigationWorkSchedule {
         self,
         state: &mut AppState,
     ) -> Result<InvestigationWorkId, InvestigationWorkError> {
+        crate::core::time::ensure_time_current(state.now(), self.validated_at).map_err(
+            |(expected, found)| InvestigationWorkError::StaleScheduleTime { expected, found },
+        )?;
         let investigation = state
             .legal
             .get_investigation(self.draft.investigation)
@@ -335,6 +343,7 @@ pub fn validate_schedule_investigation_work(
         source_evidence,
         expected_investigation_version: investigation.version(),
         expected_investigator_version: investigator.version(),
+        validated_at: state.now(),
         duration_minutes: duration.as_minutes(),
     })
 }

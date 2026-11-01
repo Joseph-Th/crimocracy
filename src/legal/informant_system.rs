@@ -88,6 +88,10 @@ pub enum InformantError {
         found: u32,
     },
     #[error(
+        "informant establishment was validated at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleEstablishmentTime { expected: SimTime, found: SimTime },
+    #[error(
         "investigation {investigation} changed after disclosure validation; expected version {expected}, found {found}"
     )]
     StaleInvestigation {
@@ -105,10 +109,14 @@ pub enum InformantError {
 pub struct ValidatedInformantEstablishment {
     draft: InformantDraft,
     expected_character_version: u32,
+    validated_at: SimTime,
 }
 
 impl ValidatedInformantEstablishment {
     pub fn commit(self, state: &mut AppState) -> Result<InformantId, InformantError> {
+        crate::core::time::ensure_time_current(state.now(), self.validated_at).map_err(
+            |(expected, found)| InformantError::StaleEstablishmentTime { expected, found },
+        )?;
         let character = state
             .world
             .get_character(self.draft.character)
@@ -126,7 +134,7 @@ impl ValidatedInformantEstablishment {
             id,
             character: self.draft.character,
             handler: self.draft.handler,
-            established_at: state.now(),
+            established_at: self.validated_at,
         });
         Ok(id)
     }
@@ -144,6 +152,7 @@ pub fn validate_establish_informant(
     Ok(ValidatedInformantEstablishment {
         draft,
         expected_character_version: character.version(),
+        validated_at: state.now(),
     })
 }
 

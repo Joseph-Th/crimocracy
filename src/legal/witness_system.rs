@@ -6,6 +6,7 @@ use crate::core::id::{
     InvestigationWorkId, ProsecutionCaseId, WitnessStatementId,
 };
 use crate::core::state::AppState;
+use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::legal::{
     Admissibility, CaseWitnessDraft, CaseWitnessRecord, EvidenceAssessment, EvidenceConnection,
@@ -83,6 +84,10 @@ pub enum WitnessError {
         found: u32,
     },
     #[error(
+        "case witness registration was validated at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleRegistrationTime { expected: SimTime, found: SimTime },
+    #[error(
         "character {witness} changed after witness validation; expected version {expected}, found {found}"
     )]
     StaleWitnessCharacter {
@@ -111,10 +116,13 @@ pub struct ValidatedCaseWitnessRegistration {
     draft: CaseWitnessDraft,
     expected_investigation_version: u32,
     expected_character_version: u32,
+    validated_at: SimTime,
 }
 
 impl ValidatedCaseWitnessRegistration {
     pub fn commit(self, state: &mut AppState) -> Result<CaseWitnessId, WitnessError> {
+        crate::core::time::ensure_time_current(state.now(), self.validated_at)
+            .map_err(|(expected, found)| WitnessError::StaleRegistrationTime { expected, found })?;
         validate_registration_snapshot(
             state,
             self.draft,
@@ -149,12 +157,12 @@ impl ValidatedCaseWitnessRegistration {
                 witness: self.draft.witness,
                 subject: self.draft.subject,
                 cooperation: self.draft.cooperation,
-                registered_at: state.now(),
+                registered_at: self.validated_at,
                 statements: Default::default(),
                 interview_attempts: 0,
                 version: 1,
             },
-            state.now(),
+            self.validated_at,
         );
         if let Some(knowledge) = knowledge {
             knowledge
@@ -188,6 +196,7 @@ pub fn validate_register_case_witness(
         draft,
         expected_investigation_version: investigation.version(),
         expected_character_version: witness.version(),
+        validated_at: state.now(),
     })
 }
 

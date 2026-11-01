@@ -118,6 +118,7 @@ fn investigation_work_is_terminally_blocked(error: &InvestigationWorkError) -> b
         | InvestigationWorkError::StaleWork { .. }
         | InvestigationWorkError::StaleResolutionContext { .. }
         | InvestigationWorkError::StaleResolutionTime { .. }
+        | InvestigationWorkError::StaleScheduleTime { .. }
         | InvestigationWorkError::VarianceOutOfRange { .. }
         | InvestigationWorkError::SimulationTimeOverflow
         | InvestigationWorkError::InvalidSourceEvidence(_)

@@ -2659,6 +2659,18 @@ fn stale_operation_preemption_rejects_arrest_before_custody_mutates() {
 
 #[test]
 fn derived_forensic_evidence_cannot_satisfy_the_custody_bar_alone() {
+    assert_forensic_corroboration_and_citation(EvidenceReliability::HighlyReliable, false);
+}
+
+#[test]
+fn autonomous_arrest_cites_improved_forensic_reliability_without_double_counting() {
+    assert_forensic_corroboration_and_citation(EvidenceReliability::Credible, true);
+}
+
+fn assert_forensic_corroboration_and_citation(
+    original_reliability: EvidenceReliability,
+    improved_citation_expected: bool,
+) {
     use crate::core::entity::EntityRef;
     use crate::legal::investigation_system::{
         validate_assign_investigator, validate_incident_intake,
@@ -2784,7 +2796,7 @@ fn derived_forensic_evidence_cannot_satisfy_the_custody_bar_alone() {
                 origin: Some(EntityRef::Operation(operation)),
                 kind: EvidenceKind::Fingerprint,
                 strength: EvidenceStrength::Strong,
-                reliability: EvidenceReliability::HighlyReliable,
+                reliability: original_reliability,
                 admissibility: Admissibility::Admissible,
                 discovered_at: fixture.state.now(),
             }],
@@ -2883,8 +2895,15 @@ fn derived_forensic_evidence_cannot_satisfy_the_custody_bar_alone() {
     assert_eq!(record.character(), fixture.suspect);
     assert_eq!(
         record.evidence(),
-        &BTreeSet::from([source, second]),
-        "autonomous custody cites the primary evidence sources"
+        &BTreeSet::from([
+            if improved_citation_expected {
+                derived
+            } else {
+                source
+            },
+            second,
+        ]),
+        "autonomous custody must cite the best qualifying record per independent source"
     );
     validate_state(&fixture.state).expect("custody state should remain valid");
     validate_invariants(&fixture.state);

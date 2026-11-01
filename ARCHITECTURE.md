@@ -211,6 +211,12 @@ Validated*::commit(self, &mut state) -> Result<Outcome, TypedError>
 Validation resolves references, permissions, lifecycle, ownership, capacity, ranges,
 and arithmetic before any consequential mutation. Commit consumes the validated
 value and rechecks authorization if staleness can invalidate it (`SimTime` freshness).
+Time-bearing legal admissions (detective-work scheduling, case-witness registration, and
+informant establishment) pin the minute at validation and reject stale commits rather
+than silently assigning a new due date or historical establishment timestamp.
+Autonomous arrests still count a primary fact and its forensic derivative as one
+corroboration source, but cite the qualifying record with the strongest
+strength/reliability assessment, retaining the primary on equal-quality ties.
 When a composite artifact must reference a record that the same commit will create, the owning
 system predicts that record's next ID without consuming it and exposes only an owner-derived
 planned-source token; the outer commit stales if allocator position changes, and the dependent

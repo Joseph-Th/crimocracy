@@ -37,6 +37,34 @@ struct Fixture {
     investigation: InvestigationId,
 }
 
+#[test]
+fn held_informant_establishment_rejects_clock_drift_without_redating_source() {
+    let mut fixture = fixture();
+    let prepared = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant establishment should validate");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let before = bincode::serialize(&fixture.state).expect("fixture should serialize");
+
+    assert_eq!(
+        prepared.commit(&mut fixture.state),
+        Err(InformantError::StaleEstablishmentTime {
+            expected: SimTime::ZERO,
+            found: SimTime::from_minutes(1),
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "stale informant establishment must not mutate relationship history or IDs"
+    );
+}
+
 fn fixture() -> Fixture {
     let registry = build_registry();
     let mut state = AppState::new(0x1F0A_1934);

@@ -32,6 +32,36 @@ struct WitnessFixture {
     subject: CharacterId,
 }
 
+#[test]
+fn held_witness_registration_rejects_clock_drift_without_redating_case_history() {
+    let mut fixture = make_fixture();
+    let prepared = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("witness registration should validate");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let before = bincode::serialize(&fixture.state).expect("fixture should serialize");
+
+    assert_eq!(
+        prepared.commit(&mut fixture.state),
+        Err(WitnessError::StaleRegistrationTime {
+            expected: SimTime::ZERO,
+            found: SimTime::from_minutes(1),
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "stale witness admission must preserve records, case indexes, and IDs"
+    );
+}
+
 #[derive(Clone, Serialize)]
 struct CaseWitnessRecordWire {
     id: CaseWitnessId,

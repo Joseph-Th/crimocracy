@@ -287,7 +287,7 @@ fn make_fixture(
 }
 
 #[test]
-fn held_work_schedule_rejects_clock_overflow_before_work_id_is_consumed() {
+fn held_work_schedule_rejects_time_drift_without_moving_its_deadline() {
     use crate::core::id::IdKind;
 
     let registry = build_registry();
@@ -303,23 +303,74 @@ fn held_work_schedule_rejects_clock_overflow_before_work_id_is_consumed() {
         review_draft(&fixture, fixture.first_evidence),
     )
     .expect("work should validate before the clock moves");
-    let duration = registry
-        .get_investigation_work(InvestigationWorkKind::EvidenceReview)
-        .duration();
-    fixture.state.set_now_for_test(SimTime::from_minutes(
-        u64::MAX - u64::from(duration.as_minutes()) + 1,
-    ));
+    fixture
+        .state
+        .advance_clock(crate::core::time::SimDuration::ONE_MINUTE);
+    let before = bincode::serialize(&fixture.state).expect("fixture should serialize");
     let next_work = fixture.state.ids.next_raw(IdKind::InvestigationWork);
 
     let error = validated
         .commit(&mut fixture.state)
-        .expect_err("held work token must reject an unrepresentable due time");
-    assert_eq!(error, InvestigationWorkError::SimulationTimeOverflow);
+        .expect_err("a held work order must not silently shift its due time");
+    assert_eq!(
+        error,
+        InvestigationWorkError::StaleScheduleTime {
+            expected: SimTime::ZERO,
+            found: SimTime::from_minutes(1)
+        }
+    );
     assert_eq!(
         fixture.state.ids.next_raw(IdKind::InvestigationWork),
         next_work
     );
     assert_eq!(fixture.state.legal().investigation_work().count(), 0);
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "the stale token must not mutate authoritative state or derived indexes"
+    );
+}
+
+#[test]
+fn held_work_schedule_rejects_terminal_clock_drift_without_consuming_ids() {
+    use crate::core::id::IdKind;
+
+    let registry = build_registry();
+    let mut fixture = make_fixture(
+        80,
+        EvidenceStrength::Strong,
+        EvidenceReliability::Credible,
+        Admissibility::Admissible,
+    );
+    let validated = validate_schedule_investigation_work(
+        &registry,
+        &fixture.state,
+        review_draft(&fixture, fixture.first_evidence),
+    )
+    .expect("work should validate before clock drift");
+    let duration = registry
+        .get_investigation_work(InvestigationWorkKind::EvidenceReview)
+        .duration();
+    let late = SimTime::from_minutes(u64::MAX - u64::from(duration.as_minutes()) + 1);
+    fixture.state.set_now_for_test(late);
+    let before = bincode::serialize(&fixture.state).expect("terminal fixture should serialize");
+    let next_work = fixture.state.ids.next_raw(IdKind::InvestigationWork);
+
+    assert_eq!(
+        validated.commit(&mut fixture.state),
+        Err(InvestigationWorkError::StaleScheduleTime {
+            expected: SimTime::ZERO,
+            found: late,
+        })
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::InvestigationWork),
+        next_work
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected terminal state should serialize"),
+        before
+    );
 }
 
 #[test]

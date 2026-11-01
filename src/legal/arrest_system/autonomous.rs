@@ -82,18 +82,20 @@ fn resolve_autonomous_arrest_candidates(
             continue;
         };
         assessment.observe(state, evidence);
-        // Cite one qualifying record per independent source. Prefer the primary source when it
-        // is itself custody-grade; otherwise a developed derivative must stand in for the weak
-        // or questionable original that it legitimately improved. Evidence review preserves
-        // source strength, so a custody-grade primary cannot discard a Strong/Direct property
-        // that exists only on its derivative.
+        // Cite one qualifying record per independent source. A forensic review can improve
+        // reliability without creating a second independent fact. Prefer the improved analysis
+        // when its quality is higher, but use the primary on a true quality tie: downstream
+        // prosecution must receive the best available evidence, not a stale weaker citation.
         let citation = match evidence.derived_from().iter().next().copied() {
             Some(source_id) => {
                 let source_evidence = state
                     .legal
                     .get_evidence(source_id)
                     .expect("custody evidence lineage was validated before citation selection");
-                if evidence_qualifies_for_custody(source_evidence) {
+                if evidence_qualifies_for_custody(source_evidence)
+                    && (source_evidence.strength(), source_evidence.reliability())
+                        >= (evidence.strength(), evidence.reliability())
+                {
                     source_evidence.id()
                 } else {
                     evidence.id()
@@ -101,13 +103,17 @@ fn resolve_autonomous_arrest_candidates(
             }
             None => evidence.id(),
         };
-        // Among several qualifying records from one source, cite the strongest account, not
-        // merely the oldest: a Corroborating record must not stand in for a Strong one from
-        // the same source. Evidence IDs break only exact strength/reliability ties.
+        // Rank the actual cited record, not the derivative inspected during this iteration.
+        // Otherwise a superior derivative's rank can be assigned to its weaker primary and
+        // mistakenly survive the selection. Stable ID breaks only equal-quality ties.
+        let cited = state
+            .legal
+            .get_evidence(citation)
+            .expect("selected autonomous citation must be persisted");
         let rank = (
-            evidence.strength(),
-            evidence.reliability(),
-            std::cmp::Reverse(evidence.id()),
+            cited.strength(),
+            cited.reliability(),
+            std::cmp::Reverse(citation),
         );
         citations
             .entry(source)
