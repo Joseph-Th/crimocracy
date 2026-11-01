@@ -224,6 +224,101 @@ fn payroll_account_selection_respects_terminal_version_capacity() {
 }
 
 #[test]
+fn funded_payroll_does_not_silently_garnish_a_members_negative_cash_pocket() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let wage = registry.upkeep().per_member_daily();
+    let indebted_pocket = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Character(fixture.member),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .expect("debt-bearing personal account should open through the finance owner");
+    // The generic balanced ledger can record a deficit as a liability. Payroll must not
+    // silently apply unrelated personal earnings to that liability without consent or an
+    // explicit repayment action in the simulation.
+    credit_account(&mut fixture.state, fixture.boss, indebted_pocket, -50_000);
+    credit_account(&mut fixture.state, fixture.boss, fixture.treasury, 100_000);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+
+    let outcome = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("payroll should use a new pocket for the indebted member");
+    assert_eq!(outcome.len(), 1);
+    assert_eq!(outcome[0].short(), Money::ZERO);
+    assert_eq!(outcome[0].paid(), wage.checked_mul(2).unwrap());
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(indebted_pocket)
+            .expect("existing liability must remain documented")
+            .balance(),
+        Money::from_cents(-50_000),
+        "wages must not silently reduce a member's pre-existing negative cash balance"
+    );
+    let fresh_pocket = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Character(fixture.member))
+        .find(|account| {
+            account.kind() == AccountKind::StreetCash && account.id() != indebted_pocket
+        })
+        .expect("a separate spendable wage pocket should be opened");
+    assert_eq!(fresh_pocket.balance(), wage);
+    assert_eq!(fresh_pocket.spendable_balance(), wage);
+    let fresh_pocket_id = fresh_pocket.id();
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+    let next_payday = apply_daily_payroll(&registry, &mut fixture.state)
+        .expect("later payroll should reuse the healthy pocket rather than opening more");
+    assert_eq!(next_payday.len(), 1);
+    assert_eq!(next_payday[0].short(), Money::ZERO);
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fresh_pocket_id)
+            .expect("wage pocket must persist across paydays")
+            .balance(),
+        wage.checked_mul(2).expect("two daily wages must fit money"),
+        "the same positive pocket should accumulate later wages"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .accounts_for(FinancialOwner::Character(fixture.member))
+            .filter(|account| account.kind() == AccountKind::StreetCash)
+            .count(),
+        2,
+        "the personal liability must not trigger a new cash account on every payday"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(indebted_pocket)
+            .unwrap()
+            .balance(),
+        Money::from_cents(-50_000)
+    );
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("split debt and wage accounts must save"),
+    )
+    .expect("split debt and wage accounts must restore");
+    validate_state(&restored).expect("payroll debt/wage separation must remain structurally valid");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn funded_payroll_moves_wages_into_member_pockets() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();

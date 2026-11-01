@@ -575,6 +575,11 @@ fn find_existing_wage_account(
         .accounts_for(FinancialOwner::Character(member))
         .find(|account| {
             account.kind() == AccountKind::StreetCash
+                // A debt-bearing pocket is not a wage destination: crediting it would quietly
+                // offset the employee's unrelated negative balance while reporting cash wages
+                // as paid. Open a fresh cash pocket instead; debt settlement requires an
+                // explicit ledger action rather than implicit payroll garnishment.
+                && account.balance() >= Money::ZERO
                 && payroll_account_has_posting_headroom(account.version())
                 && account.balance().checked_add(amount).is_some()
         })

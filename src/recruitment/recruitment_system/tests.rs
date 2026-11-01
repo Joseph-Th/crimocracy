@@ -1548,6 +1548,95 @@ fn organization_policy_change_reopens_pending_approval_route_for_autonomous_recr
 }
 
 #[test]
+fn pending_approval_excludes_only_its_live_recruitment_route() {
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, None);
+    let initially_available = find_recruitment_candidates(
+        &fixture.registry,
+        &fixture.state,
+        fixture.target,
+        fixture.recruiter,
+    )
+    .expect("fresh recruiter should discover the connected prospect");
+    assert_eq!(initially_available, vec![fixture.candidate]);
+
+    let request = validate_request_recruitment_approval(
+        &fixture.registry,
+        &fixture.state,
+        RecruitmentApprovalRequestDraft {
+            authority: personnel_authority(&fixture, mandate),
+            target_organization: fixture.target,
+            recruiter: fixture.recruiter,
+            candidate: fixture.candidate,
+            approach: RecruitmentApproach::Protection,
+            attention: AttentionClass::Exception,
+            summary: "Pending route eligibility contract".to_owned(),
+        },
+    )
+    .expect("approval should validate")
+    .commit(&mut fixture.state)
+    .expect("approval should commit");
+
+    assert!(
+        find_recruitment_candidates(
+            &fixture.registry,
+            &fixture.state,
+            fixture.target,
+            fixture.recruiter,
+        )
+        .expect("occupied route should not cause discovery to fail")
+        .is_empty(),
+        "candidate discovery must agree with the world's pending-reassignment guard"
+    );
+
+    let before_rejection = fixture.state.recruitment().attempts().count();
+    let resolved = validate_resolve_decision(
+        &fixture.registry,
+        &fixture.state,
+        request.decision,
+        fixture.target,
+        DecisionResponse::Reject,
+    )
+    .expect("leadership may reject the request")
+    .commit(&mut fixture.state)
+    .expect("rejection must resolve through the canonical decision owner");
+    assert!(resolved.recruitment_attempt.is_none());
+    assert_eq!(
+        fixture.state.recruitment().attempts().count(),
+        before_rejection
+    );
+    assert_eq!(
+        find_recruitment_candidates(
+            &fixture.registry,
+            &fixture.state,
+            fixture.target,
+            fixture.recruiter,
+        )
+        .expect("rejected approval should release the prospect for a later approach"),
+        vec![fixture.candidate],
+        "no fabricated recruitment cooldown should follow a rejected approval request"
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("approval dismissal must preserve case and candidate indexes");
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("approval route must save"),
+    )
+    .expect("approval route must survive restore");
+    assert_eq!(
+        find_recruitment_candidates(
+            &fixture.registry,
+            &restored,
+            fixture.target,
+            fixture.recruiter,
+        )
+        .expect("restored resolved approval must not reserve a candidate"),
+        vec![fixture.candidate]
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
 fn approval_required_recruitment_executes_only_after_approval() {
     let mut fixture = fixture();
     let mandate = assign_personnel_mandate(&mut fixture, None);

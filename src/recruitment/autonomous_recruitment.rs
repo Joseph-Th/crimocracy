@@ -122,7 +122,7 @@ fn plan_due_autonomous_recruitment(
 
     while !authorities.is_empty() {
         let Some((authority_index, candidate)) =
-            select_next_recruitment_action(state, &authorities, &claimed_this_pass)
+            select_next_recruitment_action(&authorities, &claimed_this_pass)
         else {
             break;
         };
@@ -274,13 +274,10 @@ fn prepare_recruitment_authorities(
         let PolicySetting::IndependentRecruitment(policy) = resolved_policy.setting else {
             unreachable!("independent-recruitment policy lookup returned another policy kind");
         };
-        let mut candidates = find_recruitment_candidates(registry, state, organization, manager)?;
-        candidates.retain(|candidate| {
-            state
-                .decisions()
-                .pending_for_recruitment_approval(organization, *candidate)
-                .is_none()
-        });
+        // The shared recruitment query already filters pending organization-candidate approvals
+        // through the world's canonical reassignment guard. Do not maintain a second, subtly
+        // different availability policy here.
+        let candidates = find_recruitment_candidates(registry, state, organization, manager)?;
         let candidates =
             rank_candidates_by_relationship(registry.recruitment(), state, manager, candidates);
         if candidates.is_empty() {
@@ -304,7 +301,6 @@ fn prepare_recruitment_authorities(
 /// Highest relationship support acts first; manager, organization, and mandate IDs break only
 /// exact ties, so cross-organization contention is deterministic without favoring any side.
 fn select_next_recruitment_action(
-    state: &AppState,
     authorities: &[PreparedRecruitmentAuthority],
     claimed_this_pass: &BTreeSet<CharacterId>,
 ) -> Option<(usize, CharacterId)> {
@@ -312,16 +308,13 @@ fn select_next_recruitment_action(
         .iter()
         .enumerate()
         .filter_map(|(index, authority)| {
-            let candidate = authority.candidates.iter().find(|candidate| {
-                !claimed_this_pass.contains(&candidate.character)
-                    && state
-                        .decisions()
-                        .pending_for_recruitment_approval(
-                            authority.organization,
-                            candidate.character,
-                        )
-                        .is_none()
-            })?;
+            // Candidate discovery already excluded every pending approval in this immutable
+            // planning snapshot. Only same-pass claims can change eligibility as one manager
+            // consumes a stronger manager's first-choice prospect.
+            let candidate = authority
+                .candidates
+                .iter()
+                .find(|candidate| !claimed_this_pass.contains(&candidate.character))?;
             Some((
                 (
                     candidate.relationship_support,
