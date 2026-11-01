@@ -148,25 +148,27 @@ pub(crate) fn apply_daily_payroll(
     let mut plans = Vec::with_capacity(organizations.len());
     for organization in organizations {
         if let Some(plan) = plan_organization_payroll(registry, state, organization)? {
-            plans.push(plan);
+            preflight_organization_payroll(registry, state, &plan)?;
+            // A payroll whose own minimum persistent artifacts can never be allocated is
+            // terminally blocked, not a reason to forgive every other organization's wages.
+            // This is only a read-only feasibility check: a viable pair that competes for
+            // the final global account or ledger ID is still rejected as a whole below.
+            if state.ids.reserve_many(&plan.id_budget(state)).is_ok() {
+                plans.push(plan);
+            }
         }
     }
-    // Prove every non-ID finite dependency before the first organization mutates.
-    // Account openings themselves are intentionally validated at commit because each organization
-    // must observe the allocator position left by the preceding payroll; the aggregate ID budget
-    // below guarantees those openings cannot exhaust.
-    for plan in &plans {
-        preflight_organization_payroll(registry, state, plan)?;
-    }
+    // Account openings themselves are validated at commit because each organization observes
+    // the allocator position left by preceding payrolls. Every surviving organization's
+    // dependencies were preflighted above, and the aggregate budget below proves capacity.
     let mut budget = Vec::new();
     for plan in &plans {
         budget.extend(plan.id_budget(state));
     }
     if state.ids.reserve_many(&budget).is_err() {
-        // The daily pass is one preflighted cohort. At the finite allocator rail there is no
-        // representable persisted payday, so mutate none of the organizations rather than
-        // paying an ID-ordered prefix or panicking the canonical tick after the day advanced.
-        // Direct organization payroll transactions retain their typed exhaustion errors.
+        // Shared allocator scarcity is distinct from an individually impossible payroll:
+        // when the complete viable cohort cannot fit, pay none rather than an ID-ordered
+        // prefix. Direct organization payroll transactions retain typed exhaustion errors.
         return Ok(Vec::new());
     }
 

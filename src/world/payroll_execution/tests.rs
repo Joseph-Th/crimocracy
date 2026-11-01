@@ -490,10 +490,10 @@ fn daily_payroll_reserves_all_wage_account_ids_before_first_payment() {
 }
 
 #[test]
-fn daily_payroll_reserves_later_player_shortfall_report_before_rival_payment() {
+fn daily_payroll_skips_terminal_player_report_without_freezing_rival_wages() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();
-    let (player, _player_boss, _player_treasury) =
+    let (player, player_boss, player_treasury) =
         add_single_member_payroll_organization(&registry, &mut fixture.state, "Later Player Crew");
     crate::world::world_system::designate_player_organization(&mut fixture.state, player)
         .expect("later criminal organization should be eligible as player organization");
@@ -506,27 +506,58 @@ fn daily_payroll_reserves_later_player_shortfall_report_before_rival_payment() {
         .state
         .ids
         .set_next_raw_for_test(IdKind::Report, u32::MAX);
-    let before =
-        bincode::serialize(&fixture.state).expect("pre-payroll report rail should serialize");
-
     let outcomes = apply_daily_payroll(&registry, &mut fixture.state)
-        .expect("shortfall-report ID exhaustion is a terminal autonomous no-op");
-    assert!(outcomes.is_empty());
-    assert_eq!(
-        bincode::serialize(&fixture.state).expect("rejected payroll state should serialize"),
-        before,
-        "later player report exhaustion must not let the earlier rival organization get paid"
-    );
+        .expect("a terminal player reporting rail must not freeze unrelated funded payroll");
+    let owed = registry
+        .upkeep()
+        .per_member_daily()
+        .checked_mul(2)
+        .expect("two-member wage obligation must fit Money");
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].organization(), fixture.organization);
+    assert_eq!(outcomes[0].owed(), owed);
+    assert_eq!(outcomes[0].paid(), owed);
+    assert_eq!(outcomes[0].short(), Money::ZERO);
+    assert!(outcomes[0].transaction().is_some());
     assert_eq!(
         fixture
             .state
             .finance()
             .get_account(fixture.treasury)
-            .expect("earlier treasury should persist")
+            .expect("funded treasury should persist")
             .balance(),
         Money::from_cents(100_000)
+            .checked_sub(owed)
+            .expect("payroll debit must be representable"),
+        "an independent organization's earned wages must still be paid"
     );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(player_treasury)
+            .expect("unfunded player treasury should persist")
+            .balance(),
+        Money::ZERO
+    );
+    assert!(
+        fixture
+            .state
+            .finance()
+            .accounts_for(FinancialOwner::Character(player_boss))
+            .all(|account| account.kind() != AccountKind::StreetCash),
+        "blocked player payroll must not open a wage pocket"
+    );
+    assert_eq!(fixture.state.reports().reports_for(player).count(), 0);
+    assert_eq!(fixture.state.ids.next_raw(IdKind::Report), u32::MAX);
+    validate_state(&fixture.state).expect("isolated payrolls must preserve valid state");
     validate_invariants(&fixture.state);
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("isolated payrolls should save"),
+    )
+    .expect("isolated payrolls must restore");
+    validate_state(&restored).expect("restored independent payment must remain valid");
 }
 
 #[test]

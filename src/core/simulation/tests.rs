@@ -593,8 +593,9 @@ fn domain_random_streams_do_not_cross_contaminate_unrelated_simulation_work() {
     }
 }
 
-#[test]
-fn due_business_cycle_cohort_treats_allocator_exhaustion_as_terminal_without_progress() {
+fn make_due_business_cycle_cohort(
+    second_independent: bool,
+) -> (Registry, AppState, Vec<crate::core::id::BusinessId>) {
     let registry = build_registry();
     let mut state = AppState::new(0xB051_BA7C);
     let organization = insert_organization(
@@ -625,7 +626,10 @@ fn due_business_cycle_cohort_treats_allocator_exhaustion_as_terminal_without_pro
     .expect("business neighborhood should validate");
 
     let mut businesses = Vec::new();
-    for name in ["First Batch Shop", "Second Batch Shop"] {
+    for (index, name) in ["First Batch Shop", "Second Batch Shop"]
+        .into_iter()
+        .enumerate()
+    {
         let business = insert_business(
             &registry,
             &mut state,
@@ -637,7 +641,11 @@ fn due_business_cycle_cohort_treats_allocator_exhaustion_as_terminal_without_pro
                     BusinessFunction::CustomerAccess,
                 ]),
                 neighborhood,
-                owner: BusinessOwner::Organization(organization),
+                owner: if second_independent && index == 1 {
+                    BusinessOwner::Independent
+                } else {
+                    BusinessOwner::Organization(organization)
+                },
             },
         )
         .expect("batch business should validate");
@@ -673,6 +681,12 @@ fn due_business_cycle_cohort_treats_allocator_exhaustion_as_terminal_without_pro
     }
 
     state.advance_clock(SimDuration::from_minutes(1_440));
+    (registry, state, businesses)
+}
+
+#[test]
+fn due_business_cycle_cohort_treats_allocator_exhaustion_as_terminal_without_progress() {
+    let (registry, mut state, businesses) = make_due_business_cycle_cohort(false);
     assert_eq!(find_due_businesses(&state), businesses);
     state
         .ids
@@ -691,6 +705,77 @@ fn due_business_cycle_cohort_treats_allocator_exhaustion_as_terminal_without_pro
     assert_eq!(find_due_businesses(&state), businesses);
     validate_state(&state).expect("rejected business-cycle cohort should remain valid");
     validate_invariants(&state);
+}
+
+#[test]
+fn terminal_business_artifact_capacity_does_not_freeze_independent_settlements() {
+    let (registry, mut state, businesses) = make_due_business_cycle_cohort(true);
+    // The first business must persist a notable accounting fact after sabotage; the second
+    // belongs to an independent owner and needs no organization accounting fact to settle.
+    crate::economy::business_economy_system::validate_disrupt_business_economy(
+        &registry,
+        &state,
+        businesses[0],
+    )
+    .expect("first business should be disruptable")
+    .commit(&mut state)
+    .expect("disruption should commit");
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Information, u32::MAX);
+    let blocked_economy_before = state
+        .economy()
+        .get_business_economy(businesses[0])
+        .expect("blocked economy must exist")
+        .version();
+    let mut expected_rng = state.business_rng_mut().clone();
+    let variance_limit = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .gross_variance_basis_points();
+    let expected_variance = draw_basis_point_variance(&mut expected_rng, variance_limit);
+
+    let cycles = run_business_cycle_phase(&registry, &mut state)
+        .expect("terminal accounting capacity must not freeze unrelated business income");
+    assert_eq!(cycles.len(), 1);
+    let settled = state
+        .economy()
+        .get_cycle(cycles[0])
+        .expect("independent business cycle should persist");
+    assert_eq!(settled.business(), businesses[1]);
+    assert_eq!(settled.variance_basis_points(), expected_variance);
+    assert_eq!(settled.information(), None);
+    assert_eq!(find_due_businesses(&state), vec![businesses[0]]);
+    assert_eq!(
+        state
+            .economy()
+            .get_business_economy(businesses[0])
+            .expect("blocked economy must remain active and due")
+            .version(),
+        blocked_economy_before,
+        "a blocked settlement must not mutate its economy"
+    );
+    assert_eq!(
+        draw_basis_point_variance(state.business_rng_mut(), variance_limit),
+        draw_basis_point_variance(&mut expected_rng, variance_limit),
+        "only committed business cycles may advance the persistent business RNG"
+    );
+    validate_state(&state).expect("mixed viable/blocked business cohort must remain valid");
+    validate_invariants(&state);
+    let restored = crate::core::persistence::restore_save(
+        &registry,
+        crate::core::persistence::build_save(&registry, &state)
+            .expect("mixed business cohort should save"),
+    )
+    .expect("mixed business cohort must restore");
+    assert_eq!(find_due_businesses(&restored), vec![businesses[0]]);
+    assert_eq!(
+        restored
+            .economy()
+            .get_cycle(cycles[0])
+            .map(|cycle| cycle.business()),
+        Some(businesses[1])
+    );
 }
 
 #[test]
@@ -1211,8 +1296,9 @@ fn due_operation_resolution_cohort_preflights_mandatory_reports() {
     validate_invariants(&state);
 }
 
-#[test]
-fn due_investigation_work_cohort_treats_late_artifact_exhaustion_as_terminal_noop() {
+fn make_due_investigation_work_cohort(
+    second_inconclusive: bool,
+) -> (Registry, AppState, Vec<InvestigationWorkId>) {
     let registry = build_registry();
     let mut state = AppState::new(0x1A7E_BA7C);
     let police = insert_organization(
@@ -1243,7 +1329,14 @@ fn due_investigation_work_cohort_treats_late_artifact_exhaustion_as_terminal_noo
                 organization: Some(police),
                 supervisor: None,
                 autonomy: AutonomyLevel::Delegated,
-                capabilities: BTreeMap::from([(CapabilityKind::Investigation, test_rating(100))]),
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Investigation,
+                    test_rating(if second_inconclusive && index == 1 {
+                        1
+                    } else {
+                        100
+                    }),
+                )]),
                 traits: BTreeSet::new(),
                 drives: BTreeMap::new(),
             },
@@ -1285,9 +1378,21 @@ fn due_investigation_work_cohort_treats_late_artifact_exhaustion_as_terminal_noo
                 subject: EntityRef::Character(subject),
                 origin: None,
                 kind: EvidenceKind::Fingerprint,
-                strength: EvidenceStrength::Direct,
-                reliability: EvidenceReliability::HighlyReliable,
-                admissibility: Admissibility::Admissible,
+                strength: if second_inconclusive && index == 1 {
+                    EvidenceStrength::Weak
+                } else {
+                    EvidenceStrength::Direct
+                },
+                reliability: if second_inconclusive && index == 1 {
+                    EvidenceReliability::Questionable
+                } else {
+                    EvidenceReliability::HighlyReliable
+                },
+                admissibility: if second_inconclusive && index == 1 {
+                    Admissibility::Inadmissible
+                } else {
+                    Admissibility::Admissible
+                },
                 discovered_at: state.now(),
             },
         )
@@ -1314,6 +1419,12 @@ fn due_investigation_work_cohort_treats_late_artifact_exhaustion_as_terminal_noo
         .get_investigation_work(InvestigationWorkKind::EvidenceReview)
         .duration();
     state.advance_clock(duration);
+    (registry, state, works)
+}
+
+#[test]
+fn due_investigation_work_cohort_treats_late_artifact_exhaustion_as_terminal_noop() {
+    let (registry, mut state, works) = make_due_investigation_work_cohort(false);
     assert_eq!(find_due_scheduled_investigation_work(&state), works);
 
     // Preview exactly the draws the production phase will freeze without publishing them.
@@ -1381,6 +1492,83 @@ fn due_investigation_work_cohort_treats_late_artifact_exhaustion_as_terminal_noo
     }
     validate_state(&state).expect("rejected investigation-work cohort should remain valid");
     validate_invariants(&state);
+}
+
+#[test]
+fn terminal_forensic_evidence_capacity_does_not_freeze_inconclusive_casework() {
+    let (registry, mut state, works) = make_due_investigation_work_cohort(true);
+    let variance_limit = registry
+        .get_investigation_work(InvestigationWorkKind::EvidenceReview)
+        .variance_limit();
+    let mut preview_rng = state.investigation_rng_mut().clone();
+    let mut outcomes = Vec::new();
+    for work in &works {
+        let variance = draw_signed_variance(&mut preview_rng, variance_limit);
+        let plan = decide_investigation_work_resolution(
+            &registry,
+            &state,
+            *work,
+            InvestigationWorkRandomness::new(variance),
+        )
+        .expect("due forensic work should decide");
+        outcomes.push(plan.outcome());
+    }
+    assert_eq!(
+        outcomes,
+        vec![
+            crate::legal::InvestigationWorkOutcome::Developed,
+            crate::legal::InvestigationWorkOutcome::Inconclusive,
+        ],
+        "the first case requires a new evidence ID, while the second can close without one"
+    );
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Evidence, u32::MAX);
+    let mut expected_rng = state.investigation_rng_mut().clone();
+    let _ = draw_signed_variance(&mut expected_rng, variance_limit);
+
+    let resolved = run_investigation_work_phase(&registry, &mut state)
+        .expect("unallocatable evidence for one case must not prevent an unrelated resolution");
+    assert_eq!(resolved, vec![works[1]]);
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation_work(works[0])
+            .expect("blocked forensic work must persist")
+            .status(),
+        crate::legal::InvestigationWorkStatus::Scheduled
+    );
+    let completed = state
+        .legal()
+        .get_investigation_work(works[1])
+        .expect("inconclusive forensic work must persist");
+    assert_eq!(
+        completed.status(),
+        crate::legal::InvestigationWorkStatus::Completed
+    );
+    assert_eq!(
+        completed
+            .resolution()
+            .map(|resolution| resolution.outcome()),
+        Some(crate::legal::InvestigationWorkOutcome::Inconclusive)
+    );
+    assert_eq!(
+        draw_signed_variance(state.investigation_rng_mut(), variance_limit),
+        draw_signed_variance(&mut expected_rng, variance_limit),
+        "a blocked case must not advance the investigation random stream"
+    );
+    validate_state(&state).expect("mixed resolved/blocked casework must remain valid");
+    validate_invariants(&state);
+    let restored = crate::core::persistence::restore_save(
+        &registry,
+        crate::core::persistence::build_save(&registry, &state)
+            .expect("mixed casework should save"),
+    )
+    .expect("mixed casework must restore");
+    assert_eq!(
+        find_due_scheduled_investigation_work(&restored),
+        vec![works[0]]
+    );
 }
 
 #[test]

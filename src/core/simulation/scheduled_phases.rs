@@ -34,7 +34,8 @@ pub(super) fn run_investigation_work_phase(
             .expect("due investigation work must still exist")
             .kind();
         let variance_limit = registry.get_investigation_work(kind).variance_limit();
-        let variance = draw_signed_variance(&mut advanced_rng, variance_limit);
+        let mut candidate_rng = advanced_rng.clone();
+        let variance = draw_signed_variance(&mut candidate_rng, variance_limit);
         let plan = match decide_investigation_work_resolution(
             registry,
             state,
@@ -43,23 +44,31 @@ pub(super) fn run_investigation_work_phase(
         ) {
             Ok(plan) => plan,
             Err(error) if investigation_work_is_terminally_blocked(&error) => {
-                return Ok(Vec::new());
+                continue;
             }
             Err(error) => return Err(error),
         };
         let validated = match validate_investigation_work_resolution_plan(registry, state, plan) {
             Ok(validated) => validated,
             Err(error) if investigation_work_is_terminally_blocked(&error) => {
-                return Ok(Vec::new());
+                continue;
             }
             Err(error) => return Err(error),
         };
-        id_budget.extend(validated.id_budget());
+        let work_budget = validated.id_budget();
+        // An individually impossible forensic or interview artifact must not hold unrelated
+        // cases hostage. Keep its work Scheduled and discard its speculative RNG draw; the
+        // full viable cohort's global budget still has to fit before anything can commit.
+        if state.ids.reserve_many(&work_budget).is_err() {
+            continue;
+        }
+        advanced_rng = candidate_rng;
+        id_budget.extend(work_budget);
         planned.push(validated);
     }
 
-    // Due work belongs to distinct active case/lead pairs. Freeze every draw and validate every
-    // resolution against the same pre-pass snapshot, then reserve the complete artifact budget
+    // Due work belongs to distinct active case/lead pairs. Freeze each viable draw and validate
+    // every viable resolution against the same pre-pass snapshot, then reserve the complete budget
     // before publishing either RNG progress or the first case mutation. This prevents a later
     // successful review/interview from leaving an earlier prefix resolved when global evidence or
     // statement IDs are nearly exhausted.
@@ -145,26 +154,40 @@ pub(super) fn run_business_cycle_phase(
             .get_business(kind)
             .economics()
             .gross_variance_basis_points();
-        let variance = draw_basis_point_variance(&mut advanced_rng, variance_limit);
+        // A permanently blocked business must not consume variance or freeze independent
+        // businesses that can still settle. Draw speculatively, publishing this business's
+        // stream progress only once its complete settlement has passed validation.
+        let mut candidate_rng = advanced_rng.clone();
+        let variance = draw_basis_point_variance(&mut candidate_rng, variance_limit);
         let plan = match decide_business_cycle(registry, state, business, variance) {
             Ok(plan) => plan,
-            Err(error) if business_cycle_is_terminally_blocked(&error) => return Ok(Vec::new()),
+            Err(error) if business_cycle_is_terminally_blocked(&error) => continue,
             Err(error) => return Err(error),
         };
         let validated = match validate_business_cycle_plan(state, plan) {
             Ok(validated) => validated,
-            Err(error) if business_cycle_is_terminally_blocked(&error) => return Ok(Vec::new()),
+            Err(error) if business_cycle_is_terminally_blocked(&error) => continue,
             Err(error) => return Err(error),
         };
-        id_budget.extend(validated.id_budget());
+        let cycle_budget = validated.id_budget();
+        // A business that can never allocate its own minimum artifact footprint is inert at
+        // this persistence rail. Skip it instead of using its impossible allocation to hold
+        // every independent storefront hostage. This read-only check does not consume IDs:
+        // the aggregate check below still rejects a viable cohort that cannot *all* fit.
+        if state.ids.reserve_many(&cycle_budget).is_err() {
+            continue;
+        }
+        advanced_rng = candidate_rng;
+        id_budget.extend(cycle_budget);
         planned.push(validated);
     }
 
     // Business economies have business-owned operating/settlement accounts, with settlement
-    // accounts unique by owner index. Due cycles therefore cannot stale one another's financial
-    // snapshots. Freeze every draw and reserve the complete persistent-ID budget before
-    // publishing RNG progress or the first settlement so allocator pressure cannot settle only
-    // the lowest business IDs in a same-minute cohort.
+    // accounts unique by owner index. Independently blocked businesses are omitted before this
+    // point; the viable cohort cannot stale one another's financial snapshots. Freeze each
+    // successful draw and reserve the complete shared persistent-ID budget before publishing
+    // RNG progress or the first settlement. Global allocator exhaustion still cannot settle
+    // an arbitrary prefix merely because its businesses have lower stable IDs.
     if state.ids.reserve_many(&id_budget).is_err() {
         return Ok(Vec::new());
     }
