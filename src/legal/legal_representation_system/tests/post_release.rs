@@ -136,6 +136,231 @@ fn post_release_prosecution_supports_direct_counsel_without_false_detention_know
     validate_invariants(&restored);
 }
 
+fn enable_automatic_defense(fixture: &mut Fixture) {
+    validate_set_policy(
+        &fixture.registry,
+        &fixture.state,
+        fixture.sponsor,
+        PolicySetting::AssociateLegalSupport(crate::world::LegalSupportPolicy::Automatic),
+    )
+    .expect("automatic support policy should validate")
+    .commit(&fixture.registry, &mut fixture.state)
+    .expect("automatic support policy should commit");
+}
+
+#[test]
+fn automatic_policy_retains_counsel_for_released_defendant_with_prosecution_only() {
+    let mut fixture = fixture();
+    enable_automatic_defense(&mut fixture);
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("custody should be releasable")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+    let first_case = open_prosecution(&mut fixture);
+    let second_case = open_prosecution(&mut fixture);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .arrests_with_open_prosecutions()
+            .collect::<Vec<_>>(),
+        vec![fixture.arrest],
+        "two prosecutor offices must not produce two retention candidates"
+    );
+    assert!(!fixture.state.legal().has_detained_arrests());
+
+    let payer_before = fixture
+        .state
+        .finance()
+        .get_account(fixture.payer)
+        .expect("sponsor reserves must persist")
+        .balance();
+    let outcome = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(outcome.automatic_legal_support.len(), 1);
+    let representation = outcome.automatic_legal_support[0];
+    let retained = fixture
+        .state
+        .legal()
+        .get_legal_representation(representation)
+        .expect("automatic defense must persist");
+    assert_eq!(retained.arrest(), fixture.arrest);
+    assert_eq!(
+        retained.origin(),
+        crate::legal::LegalRepresentationOrigin::AutomaticPolicy
+    );
+    assert_eq!(
+        fixture
+            .state
+            .intelligence()
+            .get_information(retained.information())
+            .expect("retention knowledge must persist")
+            .signal(),
+        None,
+        "representation begun after release is not evidence of current detention"
+    );
+    let fee = fixture.registry.legal().automatic_support_retainer();
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.payer)
+            .expect("sponsor reserves must persist")
+            .balance(),
+        payer_before
+            .checked_sub(fee)
+            .expect("fixture reserves exceed retainer")
+    );
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("post-release automatic representation should save"),
+    )
+    .expect("post-release automatic representation should restore");
+    fixture.state = restored;
+
+    validate_decline_prosecution_case(&fixture.state, first_case)
+        .expect("first reviewing case should be declinable")
+        .commit(&mut fixture.state)
+        .expect("first case should close");
+    let reviewing = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(reviewing.concluded_automatic_legal_support, 0);
+    assert!(reviewing.automatic_legal_support.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .active_representation_for_arrest(fixture.arrest)
+            .map(|record| record.id()),
+        Some(representation)
+    );
+
+    validate_decline_prosecution_case(&fixture.state, second_case)
+        .expect("remaining reviewing case should be declinable")
+        .commit(&mut fixture.state)
+        .expect("final case should close");
+    let finished = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(finished.concluded_automatic_legal_support, 1);
+    assert!(finished.automatic_legal_support.is_empty());
+    validate_terminate_contact(&fixture.state, fixture.contact)
+        .expect("finished automatic defense should release its legal contact");
+    validate_state(&fixture.state).expect("completed automatic defense must validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn automatic_policy_does_not_spend_on_released_defendant_without_open_prosecution() {
+    let mut fixture = fixture();
+    enable_automatic_defense(&mut fixture);
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("custody should be releasable")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+    let before = bincode::serialize(&fixture.state).expect("stable legal state must serialize");
+    let outcome = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
+        .expect("quiet automatic policy should be an ordinary no-op");
+    assert!(outcome.retained.is_empty());
+    assert_eq!(outcome.concluded, 0);
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("quiet legal state must serialize"),
+        before
+    );
+}
+
+#[test]
+fn automatic_policy_prioritizes_pending_detainee_over_older_released_case() {
+    let mut fixture = fixture();
+    enable_automatic_defense(&mut fixture);
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("first custody should be releasable")
+        .commit(&mut fixture.state)
+        .expect("first release should commit");
+    open_prosecution(&mut fixture);
+    let second_defendant = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Newly Detained Associate".to_owned(),
+            organization: Some(fixture.sponsor),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second member should validate");
+    let second_arrest_draft =
+        arrest_draft_for_character(&mut fixture, second_defendant, "Newer inquiry");
+    let second_arrest = validate_arrest(&fixture.registry, &fixture.state, second_arrest_draft)
+        .expect("second arrest should validate")
+        .commit(&mut fixture.state)
+        .expect("second arrest should commit");
+
+    // Leave exactly one flat retainer in sponsor liquidity. Observing selection order is not
+    // enough: a released case must not consume the money needed by a pending custody decision.
+    let settlement = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(fixture.sponsor))
+        .find(|account| account.kind() == AccountKind::Settlement)
+        .expect("fixture includes an organization settlement counterparty")
+        .id();
+    let fee = fixture.registry.legal().automatic_support_retainer();
+    let balance = fixture
+        .state
+        .finance()
+        .get_account(fixture.payer)
+        .expect("payer account must persist")
+        .balance();
+    let excess = balance
+        .checked_sub(fee)
+        .expect("fixture initially has more than one retainer");
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Reserve only one automatic legal retainer".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.payer,
+                    amount: excess.checked_neg().expect("positive reserve must negate"),
+                },
+                LedgerPosting {
+                    account: settlement,
+                    amount: excess,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("reserve reduction should be valid")
+    .commit(&mut fixture.state)
+    .expect("reserve reduction should commit");
+
+    let outcome = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
+        .expect("available funding must go to the higher-priority matter");
+    assert_eq!(outcome.retained.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_legal_representation(outcome.retained[0])
+            .expect("first candidate should persist")
+            .arrest(),
+        second_arrest,
+        "the detainee with an upcoming informant decision must take funding priority"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_representation_for_arrest(fixture.arrest)
+            .is_none(),
+        "the released case must remain unrepresented until a later funding opportunity"
+    );
+    validate_state(&fixture.state).expect("concurrent legal matters must validate");
+    validate_invariants(&fixture.state);
+}
+
 #[test]
 fn prosecution_closure_stales_uncommitted_post_release_retainer_atomically() {
     let mut fixture = fixture();

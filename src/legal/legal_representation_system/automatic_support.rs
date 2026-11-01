@@ -69,9 +69,9 @@ pub(crate) struct AutomaticLegalSupportOutcome {
     pub(crate) concluded: usize,
 }
 
-/// Executes `AssociateLegalSupport(Automatic)` governance: every detained member of an
-/// organization that runs the Automatic policy gets counsel retained through the canonical
-/// representation path. Organization policy may aggregate sponsor liquidity; a mandate-sourced
+/// Executes `AssociateLegalSupport(Automatic)` governance: unrepresented members in custody
+/// or with an open prosecution receive counsel through the canonical representation path.
+/// Organization policy may aggregate sponsor liquidity; a mandate-sourced
 /// override must spend through its Legal-scope budget account and current budget window. Counsel
 /// is selected from the strongest currently usable LegalServices channel by LegalKnowledge,
 /// with stable contact/account IDs only as exact-skill tie-breakers.
@@ -89,12 +89,12 @@ pub(crate) fn apply_automatic_legal_support(
     // Explicitly commanded retentions are never swept here — their matter is leadership's
     // to end, not governance's.
     //
-    // Both halves of this stage need custody work to observe: the sweep ends automatic
-    // representations whose detainee left, and retention needs a detained member. With no
-    // representation and nobody in custody there is nothing this pass could do, so quiet
-    // ticks skip both scans.
+    // An open prosecution may remain after every detainee has been released. Keep its
+    // unrepresented defendants eligible to receive promised automatic defense when resources
+    // recover, but skip the governance scan when no active legal matters or retainers exist.
     if !state.legal.has_active_automatic_policy_representations()
         && !state.legal.has_detained_arrests()
+        && !state.legal.has_open_prosecutions()
     {
         return Ok(AutomaticLegalSupportOutcome::default());
     }
@@ -226,7 +226,17 @@ fn resolve_automatic_legal_support_candidates(
     state: &AppState,
 ) -> Result<Vec<AutomaticLegalSupportCandidate>, LegalRepresentationError> {
     let mut candidates = Vec::new();
-    for arrest in state.legal.detained_arrests() {
+    let mut eligible_arrests: BTreeSet<_> = state
+        .legal
+        .detained_arrests()
+        .map(|arrest| arrest.id())
+        .collect();
+    eligible_arrests.extend(state.legal.arrests_with_open_prosecutions());
+    for arrest_id in eligible_arrests {
+        let arrest = state
+            .legal
+            .get_arrest(arrest_id)
+            .expect("eligible custody or prosecution index must reference an arrest");
         if state
             .legal
             .active_representation_for_arrest(arrest.id())
@@ -262,22 +272,21 @@ fn resolve_automatic_legal_support_candidates(
     }
     let now = state.now().as_minutes();
     let decision_delay = u64::from(registry.legal().informant_decision_delay().as_minutes());
-    // Scarce support must follow modeled need, not merely arrest-record creation order. Counsel
-    // can still change the detainee's one-time cooperation outcome through the decision minute,
-    // so protect candidates whose decision is still pending before spending on matters whose
-    // modeled decision has already passed. Among pending decisions, the closest deadline goes
-    // first. Arrest ID breaks only equal decision times; latent personal drives are deliberately
-    // not consulted by this institutional policy.
+    // Pending detainee decisions receive first claim, then ongoing custody, then released
+    // defendants with reviewing prosecution cases. Within pending decisions the closest
+    // deadline wins. Stable arrest IDs break remaining ties; latent drives are not consulted.
     candidates.sort_unstable_by_key(|candidate| {
         let arrest = state
             .legal
             .get_arrest(candidate.arrest)
             .expect("automatic-support candidate must retain its arrest");
         let elapsed = now.saturating_sub(arrest.arrested_at().as_minutes());
-        let decision_has_passed = elapsed > decision_delay;
+        let released = arrest.status() != ArrestStatus::Detained;
+        let decision_has_passed = released || elapsed > decision_delay;
         let minutes_until_decision = decision_delay.saturating_sub(elapsed);
         (
             decision_has_passed,
+            released,
             minutes_until_decision,
             candidate.arrest,
         )

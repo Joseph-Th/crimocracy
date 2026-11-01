@@ -144,8 +144,9 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
             .expect("valid state should staff available prosecutors onto open reviews");
     // Legal-support governance runs before the detainee's one-time informant decision. This lets
     // promised counsel materially affect custodial cooperation risk instead of retaining counsel
-    // only after the irreversible decision. It also sees every new arrest created above and
-    // concludes automatic retainers for matters already ended.
+    // only after the irreversible decision. It sees every new arrest above and any open
+    // prosecution that outlived a release, so promised defense can start after custody too;
+    // automatic retainers are concluded only after their final matter ends.
     let automatic_legal_support_outcome =
         crate::legal::legal_representation_system::apply_automatic_legal_support(registry, state)
             .expect("valid state should resolve automatic legal-support retention");

@@ -252,6 +252,26 @@ impl LegalState {
             .next()
             .is_some()
     }
+    /// Arrests with at least one reviewing prosecution, without duplicate candidates when
+    /// several prosecutor offices hold separate cases against the same defendant.
+    pub(crate) fn arrests_with_open_prosecutions(&self) -> impl Iterator<Item = ArrestId> + '_ {
+        let mut last = None;
+        self.indexes
+            .prosecutions
+            .open_by_arrest_office
+            .keys()
+            .filter_map(move |(arrest, _)| {
+                if last == Some(*arrest) {
+                    None
+                } else {
+                    last = Some(*arrest);
+                    Some(*arrest)
+                }
+            })
+    }
+    pub(crate) fn has_open_prosecutions(&self) -> bool {
+        !self.indexes.prosecutions.open_by_arrest_office.is_empty()
+    }
     pub fn reviewing_prosecution_cases_for_prosecutor(
         &self,
         prosecutor: CharacterId,
