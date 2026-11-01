@@ -15,6 +15,12 @@ impl LegalState {
         debug_assert_eq!(case.initial_referral(), referral_id);
         debug_assert_eq!(case.referrals(), &BTreeSet::from([referral_id]));
         debug_assert_eq!(case.evidence(), referral.evidence());
+        self.indexes
+            .prosecutions
+            .by_arrest
+            .entry(case.arrest())
+            .or_default()
+            .insert(case_id);
         if let Some(prosecutor) = case.assigned_prosecutor() {
             self.indexes
                 .prosecutions

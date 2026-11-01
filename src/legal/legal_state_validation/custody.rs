@@ -9,6 +9,15 @@ impl LegalState {
     pub(super) fn has_consistent_prosecution_indexes(&self) -> bool {
         for case in self.prosecution_cases.values() {
             let id = case.id();
+            if !self
+                .indexes
+                .prosecutions
+                .by_arrest
+                .get(&case.arrest())
+                .is_some_and(|ids| ids.contains(&id))
+            {
+                return false;
+            }
             let assignment_indexed = match (case.status(), case.assigned_prosecutor()) {
                 (ProsecutionCaseStatus::Reviewing, Some(prosecutor)) => self
                     .indexes
@@ -51,6 +60,18 @@ impl LegalState {
                 ProsecutionCaseStatus::Reviewing
                 | ProsecutionCaseStatus::Declined
                 | ProsecutionCaseStatus::Closed => {}
+            }
+        }
+        for (arrest, ids) in &self.indexes.prosecutions.by_arrest {
+            if ids.is_empty()
+                || ids.iter().any(|id| {
+                    !self
+                        .prosecution_cases
+                        .get(id)
+                        .is_some_and(|case| case.arrest() == *arrest)
+                })
+            {
+                return false;
             }
         }
         for referral in self.prosecution_referrals.values() {

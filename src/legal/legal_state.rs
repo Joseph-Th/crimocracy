@@ -394,6 +394,12 @@ impl LegalState {
 
     fn rebuild_prosecution_indexes(&mut self) {
         for case in self.prosecution_cases.values() {
+            self.indexes
+                .prosecutions
+                .by_arrest
+                .entry(case.arrest())
+                .or_default()
+                .insert(case.id());
             if case.status() == ProsecutionCaseStatus::Reviewing {
                 self.indexes
                     .prosecutions

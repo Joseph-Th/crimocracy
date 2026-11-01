@@ -189,6 +189,23 @@ impl LegalState {
     pub fn get_prosecution_case(&self, id: ProsecutionCaseId) -> Option<&ProsecutionCaseRecord> {
         self.prosecution_cases.get(&id)
     }
+    /// Active and historical prosecution episodes for one arrest, in stable case-ID order.
+    pub(crate) fn prosecution_cases_for_arrest(
+        &self,
+        arrest: ArrestId,
+    ) -> impl Iterator<Item = &ProsecutionCaseRecord> {
+        self.indexes
+            .prosecutions
+            .by_arrest
+            .get(&arrest)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.prosecution_cases
+                    .get(id)
+                    .expect("prosecution arrest index must reference its case")
+            })
+    }
     pub fn get_prosecution_referral(
         &self,
         id: ProsecutionReferralId,

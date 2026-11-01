@@ -35,6 +35,8 @@ use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, Rating};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod post_release;
+
 struct Fixture {
     registry: Registry,
     state: AppState,

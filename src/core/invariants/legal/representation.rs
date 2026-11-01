@@ -123,7 +123,7 @@ fn validate_retained_contract(
 ) -> Result<(), StateValidationError> {
     if !base_relationships_are_valid(state, representation, refs)
         || !retainer_payment_is_valid(state, representation, refs)
-        || !retained_artifacts_are_valid(representation, refs)
+        || !retained_artifacts_are_valid(state, representation, refs)
         || !seen.payments.insert(representation.payment())
         || !seen.information.insert(representation.information())
         || !seen.reports.insert(representation.report())
@@ -229,6 +229,7 @@ fn budget_authority_is_valid(
 }
 
 fn retained_artifacts_are_valid(
+    state: &AppState,
     representation: &LegalRepresentationRecord,
     refs: &RepresentationRefs<'_>,
 ) -> bool {
@@ -244,7 +245,37 @@ fn retained_artifacts_are_valid(
     let Some(entry) = report.entries().first() else {
         return false;
     };
-    information.holder() == KnowledgeHolder::Organization(representation.sponsor())
+    // A represented person may already have left custody when prosecutors refer a case.
+    // The retainer is still a durable legal activity event, but must not manufacture a current
+    // detention signal. Prove the unsignalled variant against a prosecution that was actually
+    // open at the historical retainer minute, even if that case has since closed.
+    let detention_signal = Some(InformationSignal::LegalPersonStatus(
+        LegalPersonStatusSignal::Detained {
+            arrest: representation.arrest(),
+        },
+    ));
+    let valid_legal_matter = if information.signal() == detention_signal.as_ref() {
+        refs.arrest
+            .released_at()
+            .is_none_or(|released_at| representation.retained_at() <= released_at)
+    } else if information.signal().is_none() {
+        refs.arrest
+            .released_at()
+            .is_some_and(|released_at| released_at <= representation.retained_at())
+            && state
+                .legal
+                .prosecution_cases_for_arrest(representation.arrest())
+                .any(|case| {
+                    case.opened_at() <= representation.retained_at()
+                        && case
+                            .resolved_at()
+                            .is_none_or(|resolved_at| resolved_at >= representation.retained_at())
+                })
+    } else {
+        false
+    };
+    valid_legal_matter
+        && information.holder() == KnowledgeHolder::Organization(representation.sponsor())
         && information.source_kind() == InformationSourceKind::AfterAction
         && information.topic() == InformationTopic::LegalActivity
         && information.source_entity() == Some(EntityRef::Character(representation.counsel()))
@@ -253,12 +284,6 @@ fn retained_artifacts_are_valid(
         && information.recorded_at() == representation.retained_at()
         && information.reliability() == Reliability::DirectAccess
         && information.specificity() == Specificity::Precise
-        && information.signal()
-            == Some(&InformationSignal::LegalPersonStatus(
-                LegalPersonStatusSignal::Detained {
-                    arrest: representation.arrest(),
-                },
-            ))
         && information.derived_from().is_empty()
         && information.summary() == expected_summary
         && report.recipient() == representation.sponsor()

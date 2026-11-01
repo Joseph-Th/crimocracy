@@ -86,8 +86,8 @@ pub enum LegalRepresentationError {
         arrest: ArrestId,
         representation: LegalRepresentationId,
     },
-    #[error("arrest {arrest} is not an active detention")]
-    ArrestNotActive { arrest: ArrestId },
+    #[error("arrest {arrest} has neither active custody nor an open prosecution matter")]
+    NoActiveLegalMatter { arrest: ArrestId },
     #[error("legal retainer fee must be greater than zero")]
     InvalidFee,
     #[error("financial account {0} does not exist")]
@@ -337,23 +337,35 @@ pub fn validate_retain_legal_representation(
         defendant.name(),
         draft.fee,
     );
-    let information = validate_record_system_information_with_signal(
-        state,
-        InformationDraft {
-            holder: KnowledgeHolder::Organization(draft.sponsor),
-            source_kind: InformationSourceKind::AfterAction,
-            topic: InformationTopic::LegalActivity,
-            source_entity: Some(EntityRef::Character(dependencies.counsel)),
-            subject: EntityRef::Character(dependencies.defendant),
-            observed_at: retained_at,
-            reliability: Reliability::DirectAccess,
-            specificity: Specificity::Precise,
-            summary: summary.clone(),
-        },
-        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::Detained {
-            arrest: draft.arrest,
-        }),
-    )?;
+    let information_draft = InformationDraft {
+        holder: KnowledgeHolder::Organization(draft.sponsor),
+        source_kind: InformationSourceKind::AfterAction,
+        topic: InformationTopic::LegalActivity,
+        source_entity: Some(EntityRef::Character(dependencies.counsel)),
+        subject: EntityRef::Character(dependencies.defendant),
+        observed_at: retained_at,
+        reliability: Reliability::DirectAccess,
+        specificity: Specificity::Precise,
+        summary: summary.clone(),
+    };
+    // Retaining a lawyer for an active detainee is personal custody knowledge; retaining one
+    // for a filed case after release is not. Never mint a fresh "detained" signal for a person
+    // already at liberty, even though the earlier arrest is still the prosecution's case anchor.
+    let information = if state
+        .legal
+        .get_arrest(draft.arrest)
+        .is_some_and(|arrest| arrest.status() == ArrestStatus::Detained)
+    {
+        validate_record_system_information_with_signal(
+            state,
+            information_draft,
+            InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::Detained {
+                arrest: draft.arrest,
+            }),
+        )?
+    } else {
+        validate_record_system_information(state, information_draft)?
+    };
     let report = validate_record_report(
         state,
         ReportDraft {
@@ -391,8 +403,12 @@ fn validate_representation_dependencies(
         .legal
         .get_arrest(draft.arrest)
         .ok_or(LegalRepresentationError::MissingArrest(draft.arrest))?;
-    if arrest.status() != ArrestStatus::Detained {
-        return Err(LegalRepresentationError::ArrestNotActive {
+    if arrest.status() != ArrestStatus::Detained
+        && !state
+            .legal
+            .has_open_prosecution_case_for_arrest(draft.arrest)
+    {
+        return Err(LegalRepresentationError::NoActiveLegalMatter {
             arrest: draft.arrest,
         });
     }

@@ -190,6 +190,9 @@ pub struct ProsecutionReferralDraft {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(in crate::legal) struct ProsecutionIndexes {
+    /// All cases keyed by their originating arrest, including resolved history.
+    /// Representation validation must prove past matters without scanning unrelated cases.
+    pub(in crate::legal) by_arrest: BTreeMap<ArrestId, BTreeSet<ProsecutionCaseId>>,
     /// Reviewing cases currently assigned to each prosecutor. Terminal case history is not
     /// retained here because actor attribution is stored on referral/resolution records.
     pub(in crate::legal) reviewing_cases_by_prosecutor:
