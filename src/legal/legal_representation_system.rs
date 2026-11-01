@@ -177,6 +177,13 @@ pub enum LegalRepresentationError {
     #[error("legal representation {0} is not active")]
     RepresentationNotActive(LegalRepresentationId),
     #[error(
+        "representation {representation} cannot conclude while arrest {arrest} still has custody or an open prosecution"
+    )]
+    MatterStillActive {
+        representation: LegalRepresentationId,
+        arrest: ArrestId,
+    },
+    #[error(
         "legal representation {representation} changed after end validation; expected version {expected}, found {found}"
     )]
     StaleRepresentation {
@@ -755,6 +762,7 @@ impl ValidatedLegalRepresentationEnd {
                 self.representation,
             ));
         }
+        ensure_representation_matter_concluded(state, record, self.reason)?;
         ensure_version_can_advance(record.version(), "legal representation")?;
         Ok(())
     }
@@ -886,6 +894,7 @@ pub fn validate_end_legal_representation(
             representation,
         ));
     }
+    ensure_representation_matter_concluded(state, record, reason)?;
     ensure_version_can_advance(record.version(), "legal representation")?;
     let ended_at = state.now();
     let defendant = state.world.get_character(record.defendant()).ok_or(
@@ -937,6 +946,34 @@ pub fn validate_end_legal_representation(
         information,
         report,
     })
+}
+
+/// A concluded legal matter is not the same as a sponsor withdrawing or replacing its lawyer.
+/// Custody and every still-reviewing prosecution must have ended before the historical report
+/// can truthfully call the matter concluded. This is rechecked on held end tokens because filing
+/// a case does not change the representation's own version.
+fn ensure_representation_matter_concluded(
+    state: &AppState,
+    representation: &LegalRepresentationRecord,
+    reason: LegalRepresentationEndReason,
+) -> Result<(), LegalRepresentationError> {
+    if reason != LegalRepresentationEndReason::MatterConcluded {
+        return Ok(());
+    }
+    let arrest = state.legal.get_arrest(representation.arrest()).ok_or(
+        LegalRepresentationError::MissingArrest(representation.arrest()),
+    )?;
+    if arrest.status() == ArrestStatus::Detained
+        || state
+            .legal
+            .has_open_prosecution_case_for_arrest(representation.arrest())
+    {
+        return Err(LegalRepresentationError::MatterStillActive {
+            representation: representation.id(),
+            arrest: representation.arrest(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn retained_representation_summary(

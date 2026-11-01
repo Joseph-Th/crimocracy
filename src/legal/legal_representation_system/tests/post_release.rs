@@ -168,3 +168,140 @@ fn prosecution_closure_stales_uncommitted_post_release_retainer_atomically() {
     validate_state(&fixture.state).expect("rejected retainer state must validate");
     validate_invariants(&fixture.state);
 }
+
+#[test]
+fn matter_concluded_cannot_be_claimed_while_custody_or_prosecution_remains_active() {
+    let mut fixture = fixture();
+    let representation = retain(&mut fixture, 7_500, None);
+    let still_detained = validate_end_legal_representation(
+        &fixture.state,
+        representation,
+        LegalRepresentationEndReason::MatterConcluded,
+    )
+    .err()
+    .expect("a retained defendant still in custody has an active legal matter");
+    let expected = LegalRepresentationError::MatterStillActive {
+        representation,
+        arrest: fixture.arrest,
+    };
+    assert_eq!(still_detained, expected);
+
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("custody should be releasable")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+    let case = open_prosecution(&mut fixture);
+    let before = bincode::serialize(&fixture.state).expect("open matter must serialize");
+    assert_eq!(
+        validate_end_legal_representation(
+            &fixture.state,
+            representation,
+            LegalRepresentationEndReason::MatterConcluded,
+        )
+        .err()
+        .expect("an open prosecution still needs defense"),
+        expected
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected end must serialize"),
+        before
+    );
+    // Withdrawal is a discretionary decision, not a claim that the legal matter is closed.
+    validate_end_legal_representation(
+        &fixture.state,
+        representation,
+        LegalRepresentationEndReason::SponsorWithdrawn,
+    )
+    .expect("sponsor can withdraw defense before prosecution ends")
+    .commit(&mut fixture.state)
+    .expect("sponsor withdrawal should commit");
+    assert!(
+        fixture
+            .state
+            .legal()
+            .has_open_prosecution_case_for_arrest(fixture.arrest)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(case)
+            .expect("open prosecution remains separate")
+            .status(),
+        crate::legal::ProsecutionCaseStatus::Reviewing
+    );
+    validate_state(&fixture.state).expect("withdrawal must keep legal history valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn new_prosecution_stales_prevalidated_matter_conclusion_without_partial_end() {
+    let mut fixture = fixture();
+    let representation = retain(&mut fixture, 7_500, None);
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("custody should be releasable")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+    let held = validate_end_legal_representation(
+        &fixture.state,
+        representation,
+        LegalRepresentationEndReason::MatterConcluded,
+    )
+    .expect("released custody without a filed prosecution is a concluded matter");
+    open_prosecution(&mut fixture);
+    let before = bincode::serialize(&fixture.state).expect("newly filed case must serialize");
+    assert_eq!(
+        held.commit(&mut fixture.state)
+            .expect_err("filing a prosecution must stale an earlier conclusion token"),
+        LegalRepresentationError::MatterStillActive {
+            representation,
+            arrest: fixture.arrest,
+        }
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected conclusion must not mutate"),
+        before
+    );
+    validate_state(&fixture.state).expect("stale conclusion must preserve validity");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn matter_conclusion_after_case_disposition_survives_restore() {
+    let mut fixture = fixture();
+    let representation = retain(&mut fixture, 7_500, None);
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("custody should be releasable")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let case = open_prosecution(&mut fixture);
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    validate_decline_prosecution_case(&fixture.state, case)
+        .expect("open prosecution should be declinable")
+        .commit(&mut fixture.state)
+        .expect("case closure should commit");
+    validate_end_legal_representation(
+        &fixture.state,
+        representation,
+        LegalRepresentationEndReason::MatterConcluded,
+    )
+    .expect("completed detention and prosecution justify final defense closure")
+    .commit(&mut fixture.state)
+    .expect("final defense closure should commit");
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("completed legal matter should save"),
+    )
+    .expect("completed legal matter should restore");
+    assert_eq!(
+        restored
+            .legal()
+            .get_legal_representation(representation)
+            .expect("historical representation must persist")
+            .end_reason(),
+        Some(LegalRepresentationEndReason::MatterConcluded)
+    );
+    validate_state(&restored).expect("restored concluded matter must remain valid");
+    validate_invariants(&restored);
+}

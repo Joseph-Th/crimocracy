@@ -16,7 +16,10 @@ use crate::intelligence::{
 use crate::legal::legal_representation_system::{
     ended_representation_summary, retained_representation_summary,
 };
-use crate::legal::{ArrestRecord, LegalRepresentationRecord, LegalRepresentationStatus};
+use crate::legal::{
+    ArrestRecord, LegalRepresentationEndReason, LegalRepresentationRecord,
+    LegalRepresentationStatus,
+};
 use crate::reports::{ReportKind, ReportRecord};
 use crate::world::{CapabilityKind, CharacterRecord, OrganizationKind, OrganizationRecord};
 use std::collections::BTreeSet;
@@ -357,7 +360,25 @@ fn validate_ended_lifecycle(
     };
     let expected_summary =
         ended_representation_summary(refs.counsel.name(), refs.defendant.name(), reason);
+    // A concluded-matter report is a factual disposition, unlike the sponsor's discretionary
+    // withdrawal/replacement. Historical records must support that assertion even after a
+    // new prosecution case is filed against the same arrest in a later campaign minute.
+    let matter_was_concluded = reason != LegalRepresentationEndReason::MatterConcluded
+        || (refs
+            .arrest
+            .released_at()
+            .is_some_and(|released_at| released_at <= ended_at)
+            && !state
+                .legal
+                .prosecution_cases_for_arrest(representation.arrest())
+                .any(|case| {
+                    case.opened_at() < ended_at
+                        && case
+                            .resolved_at()
+                            .is_none_or(|resolved_at| resolved_at > ended_at)
+                }));
     if representation.version() != 2
+        || !matter_was_concluded
         || ended_at < representation.retained_at()
         || ended_at > state.now()
         || state

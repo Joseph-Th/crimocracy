@@ -2091,7 +2091,7 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
     validate_end_legal_representation(
         &restored,
         representation,
-        LegalRepresentationEndReason::MatterConcluded,
+        LegalRepresentationEndReason::Replaced,
     )
     .expect("restored representation should be endable")
     .commit(&mut restored)
@@ -2103,7 +2103,7 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
     assert_eq!(ended.status(), LegalRepresentationStatus::Ended);
     assert_eq!(
         ended.end_reason(),
-        Some(LegalRepresentationEndReason::MatterConcluded)
+        Some(LegalRepresentationEndReason::Replaced)
     );
     assert!(ended.ended_information().is_some());
     assert!(ended.ended_report().is_some());
