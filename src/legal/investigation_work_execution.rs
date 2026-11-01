@@ -647,10 +647,6 @@ mod autonomous_scheduling;
 pub(crate) use autonomous_scheduling::{
     InvestigationWorkSchedulingOutcome, apply_investigation_work_scheduling,
 };
-#[cfg(test)]
-pub(crate) use autonomous_scheduling::{
-    apply_evidence_review_scheduling, apply_witness_interview_scheduling,
-};
 
 #[cfg(test)]
 mod tests;

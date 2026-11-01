@@ -7,7 +7,7 @@
 use super::{
     InvestigationWorkError, scheduled_work_for_investigator, validate_schedule_investigation_work,
 };
-use crate::core::id::{CharacterId, EvidenceId, IdKind, InvestigationId, InvestigationWorkId};
+use crate::core::id::{CharacterId, IdKind, InvestigationId, InvestigationWorkId};
 use crate::core::state::AppState;
 use crate::legal::{
     InvestigationRecord, InvestigationWorkDraft, InvestigationWorkFocus, InvestigationWorkKind,
@@ -23,26 +23,19 @@ pub(crate) struct InvestigationWorkSchedulingOutcome {
 
 /// Runs the authoritative autonomous scheduling policy over the active-case index once.
 ///
-/// Evidence review has first claim on a free detective, matching the historical two-phase
-/// ordering. Because one investigator may lead only one active case, this single pass is
-/// equivalent to scanning every active case once for reviews and then scanning them all again
-/// for interviews, while avoiding the duplicate per-minute traversal and allocation.
+/// Evidence review has first claim on a free detective. Because one investigator may lead
+/// only one active case, planning both work kinds in a single read-only pass preserves that
+/// priority without traversing the active-case index twice.
 pub(crate) fn apply_investigation_work_scheduling(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<InvestigationWorkSchedulingOutcome, InvestigationWorkError> {
-    let investigations: Vec<InvestigationId> = state
-        .legal
-        .active_investigations()
-        .map(|investigation| investigation.id())
-        .collect();
     let mut planned = Vec::new();
 
-    for investigation_id in investigations {
-        let investigation = state
-            .legal
-            .get_investigation(investigation_id)
-            .expect("indexed active investigation must exist");
+    // All scheduling is planned before any mutation, so read the indexed case records directly.
+    // Collecting IDs and looking each one up again allocated every simulation minute for no gain.
+    for investigation in state.legal.active_investigations() {
+        let investigation_id = investigation.id();
         let Some(investigator) = available_case_investigator(state, investigation) else {
             continue;
         };
@@ -92,97 +85,6 @@ pub(crate) fn apply_investigation_work_scheduling(
     Ok(outcome)
 }
 
-/// Focused witness-only policy surface for tests that isolate interview ordering/headroom from
-/// evidence-review priority. It uses the same cohort preflight/commit discipline as the canonical
-/// combined scheduler rather than a sequential test-only mutation path.
-#[cfg(test)]
-pub(crate) fn apply_witness_interview_scheduling(
-    registry: &Registry,
-    state: &mut AppState,
-) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
-    let candidates: Vec<InvestigationId> = state
-        .legal
-        .active_investigations()
-        .map(|investigation| investigation.id())
-        .collect();
-    let mut planned = Vec::new();
-    for investigation_id in candidates {
-        let investigation = state
-            .legal
-            .get_investigation(investigation_id)
-            .expect("indexed active investigation must exist");
-        if investigation.version() > u32::MAX - 4 {
-            continue;
-        }
-        let Some(investigator) = available_case_investigator(state, investigation) else {
-            continue;
-        };
-        if scheduled_work_for_investigator(state, investigator).is_some() {
-            continue;
-        }
-        if let Some(work) =
-            plan_next_witness_interview(registry, state, investigation_id, investigator)?
-        {
-            planned.push(work);
-        }
-    }
-    commit_planned_work_cohort(state, planned)
-}
-
-/// Focused review-only policy surface for tests that isolate evidence ordering/retry behavior.
-/// The canonical combined scheduler remains the production tick path.
-#[cfg(test)]
-pub(crate) fn apply_evidence_review_scheduling(
-    registry: &Registry,
-    state: &mut AppState,
-) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
-    let investigations: Vec<InvestigationId> = state
-        .legal
-        .active_investigations()
-        .map(|investigation| investigation.id())
-        .collect();
-    let mut planned = Vec::new();
-    for investigation_id in investigations {
-        let investigation = state
-            .legal
-            .get_investigation(investigation_id)
-            .expect("indexed active investigation must exist");
-        if investigation.version() > u32::MAX - 3 {
-            continue;
-        }
-        let Some(investigator) = available_case_investigator(state, investigation) else {
-            continue;
-        };
-        if scheduled_work_for_investigator(state, investigator).is_some() {
-            continue;
-        }
-        if let Some(work) =
-            plan_next_evidence_review(registry, state, investigation_id, investigator)?
-        {
-            planned.push(work);
-        }
-    }
-    commit_planned_work_cohort(state, planned)
-}
-
-#[cfg(test)]
-fn commit_planned_work_cohort(
-    state: &mut AppState,
-    planned: Vec<super::ValidatedInvestigationWorkSchedule>,
-) -> Result<Vec<InvestigationWorkId>, InvestigationWorkError> {
-    state.ids.reserve(
-        IdKind::InvestigationWork,
-        u32::try_from(planned.len()).expect("persisted investigation count must fit the ID space"),
-    )?;
-    Ok(planned
-        .into_iter()
-        .map(|work| {
-            work.commit(state)
-                .expect("prevalidated focused scheduling cohort must remain current")
-        })
-        .collect())
-}
-
 /// The investigator an autonomous casework scheduler may currently use. The lead is the single
 /// modeled case seat. Detention pauses work rather than silently assigning a different
 /// institution or character.
@@ -201,11 +103,10 @@ fn plan_next_evidence_review(
     investigation: InvestigationId,
     investigator: CharacterId,
 ) -> Result<Option<super::ValidatedInvestigationWorkSchedule>, InvestigationWorkError> {
-    let record = state
+    let Some(source) = state
         .legal
-        .get_investigation(investigation)
-        .expect("indexed active investigation must exist");
-    let Some(source) = next_unattempted_review_source(state, record)? else {
+        .next_unattempted_reviewable_evidence(investigation)
+    else {
         return Ok(None);
     };
     match validate_schedule_investigation_work(
@@ -290,16 +191,4 @@ const fn witness_cooperation_priority(cooperation: WitnessCooperation) -> u8 {
         WitnessCooperation::Reluctant => 1,
         WitnessCooperation::Hostile => 2,
     }
-}
-
-/// Returns the oldest case-owned reviewable evidence that has not received a real autonomous
-/// review attempt. Scheduled and completed work consume the source; cancelled work does not.
-/// Discovery time is substantive age; ID breaks exact-time ties.
-fn next_unattempted_review_source(
-    state: &AppState,
-    investigation: &InvestigationRecord,
-) -> Result<Option<EvidenceId>, InvestigationWorkError> {
-    Ok(state
-        .legal
-        .next_unattempted_reviewable_evidence(investigation.id()))
 }
