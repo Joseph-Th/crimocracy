@@ -74,18 +74,26 @@ pub(super) fn plan_due_autonomous_expansions(
     state: &AppState,
     excluded_mandates: &BTreeSet<MandateId>,
 ) -> Result<AutonomousExpansionCohort, AutonomousEnterpriseError> {
-    let observed_district_pressure = resolve_observed_district_pressure(registry, state)?;
-    // Working capital is a capacity constraint, not a balance-presence check. Existing active
-    // rackets already rely on their cash accounts for one current operating cycle, and each new
-    // establishment in this pass makes another claim on that same pool.
-    let mut working_capital_reservations =
-        resolve_committed_working_capital(registry, state, &observed_district_pressure)?;
     let mut mandates = resolve_eligible_expansion_mandates(
         registry,
         state,
         state.player_organization(),
         excluded_mandates,
     )?;
+    // On a campaign with no eligible delegated rival managers, reconstructing recent racket
+    // histories and reserving every active racket's operating runway cannot affect the outcome.
+    if mandates.is_empty() {
+        return Ok(AutonomousExpansionCohort {
+            actions: Vec::new(),
+            fresh_settlement_accounts: 0,
+        });
+    }
+    let observed_district_pressure = resolve_observed_district_pressure(registry, state)?;
+    // Working capital is a capacity constraint, not a balance-presence check. Existing active
+    // rackets already rely on their cash accounts for one current operating cycle, and each new
+    // establishment in this pass makes another claim on that same pool.
+    let mut working_capital_reservations =
+        resolve_committed_working_capital(registry, state, &observed_district_pressure)?;
     let mut territory = ProjectedTerritoryInfluence::from_state(state);
     let mut occupied_locations = resolve_occupied_enterprise_locations(state);
     let mut free_settlement_accounts = resolve_free_settlement_accounts(state, &mandates);

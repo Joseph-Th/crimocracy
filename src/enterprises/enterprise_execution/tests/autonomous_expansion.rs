@@ -67,6 +67,55 @@ fn add_second_expansion_mandate(fixture: &mut EnterpriseFixture) {
 }
 
 #[test]
+fn idle_enterprise_governance_does_not_change_a_player_controlled_racket() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let enterprise = establish_protection(&registry, &mut fixture);
+    crate::world::world_system::designate_player_organization(
+        &mut fixture.state,
+        fixture.organization,
+    )
+    .expect("existing criminal organization should be designated as player");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let before = serde_json::to_value(
+        build_save(&registry, &fixture.state).expect("active enterprise should save"),
+    )
+    .expect("saved envelope should serialize for exact state comparison");
+
+    let lifecycle = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state)
+        .expect("player-controlled active enterprise has no autonomous maintenance");
+    assert!(lifecycle.resumed.is_empty());
+    assert!(lifecycle.retired.is_empty());
+    assert!(lifecycle.resumed_mandates.is_empty());
+    let expansion = apply_due_autonomous_enterprises(&registry, &mut fixture.state)
+        .expect("no eligible rival mandates should produce no expansion");
+    assert!(expansion.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("player's active racket should remain live")
+            .status(),
+        EnterpriseStatus::Active
+    );
+    assert_eq!(
+        serde_json::to_value(
+            build_save(&registry, &fixture.state).expect("idle governance state should save")
+        )
+        .expect("saved envelope should serialize after idle governance"),
+        before,
+        "empty autonomous governance must leave ledger, records, IDs and RNG streams untouched"
+    );
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("idle governance must preserve registry-derived validity");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn autonomous_expansion_shared_slot_prefers_district_leader_over_organization_id() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();

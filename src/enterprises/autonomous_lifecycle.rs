@@ -64,15 +64,25 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
     }
 
     let player_organization = state.player_organization();
-    let observed_district_pressure = resolve_observed_district_pressure(registry, state)?;
-    let mut reservations =
-        resolve_committed_working_capital(registry, state, &observed_district_pressure)?;
     let suspended: Vec<_> = state
         .enterprises()
         .suspended_enterprises()
         .filter(|enterprise| Some(enterprise.organization()) != player_organization)
+        // A loss-threshold suspension on this exact daily boundary must remain suspended
+        // for at least one full governance interval. Remove it before constructing economic
+        // projections; those facts cannot make it eligible for action today.
+        .filter(|enterprise| enterprise.last_cycle_at() != Some(state.now()))
         .map(|enterprise| enterprise.id())
         .collect();
+    // Reconstructing observed district pressure walks recent settled cycles. On most days
+    // there is no suspended rival racket to maintain, so do not build pressure or working-
+    // capital projections that no candidate can consume.
+    if suspended.is_empty() {
+        return Ok(AutonomousEnterpriseLifecycleOutcome::default());
+    }
+    let observed_district_pressure = resolve_observed_district_pressure(registry, state)?;
+    let mut reservations =
+        resolve_committed_working_capital(registry, state, &observed_district_pressure)?;
 
     let mut retirements = Vec::new();
     let mut candidates = Vec::new();
@@ -81,12 +91,6 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             .enterprises()
             .get_enterprise(enterprise_id)
             .expect("suspended enterprise collected from authoritative state must persist");
-        // A losing cycle may suspend exactly on this day boundary. Give that suspension at least
-        // one governance interval of consequence instead of resetting its streak immediately.
-        if enterprise.last_cycle_at() == Some(state.now()) {
-            continue;
-        }
-
         let organization = enterprise.organization();
         let resume = match validate_resume_enterprise(registry, state, enterprise_id) {
             Ok(resume) => resume,
