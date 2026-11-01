@@ -157,6 +157,47 @@ struct InvestigationStaffingPriority {
     investigation: InvestigationId,
 }
 
+/// Assigns a case to a detective, displacing an earlier assignment only when that earlier
+/// case can be moved to another eligible detective. Cases arrive in evidentiary priority order.
+/// Free detectives are preferred before trying any displacement, preserving stronger assignments
+/// whenever coverage does not require a tradeoff.
+fn match_investigator(
+    case: InvestigationId,
+    candidates: &BTreeMap<InvestigationId, Vec<CharacterId>>,
+    by_case: &mut BTreeMap<InvestigationId, CharacterId>,
+    by_investigator: &mut BTreeMap<CharacterId, InvestigationId>,
+    visited: &mut BTreeSet<CharacterId>,
+) -> bool {
+    let eligible = candidates
+        .get(&case)
+        .expect("staffing match must reference a prepared case");
+    for investigator in eligible {
+        if !visited.contains(investigator) && !by_investigator.contains_key(investigator) {
+            if let Some(previous) = by_case.insert(case, *investigator) {
+                by_investigator.remove(&previous);
+            }
+            by_investigator.insert(*investigator, case);
+            return true;
+        }
+    }
+    for investigator in eligible {
+        if !visited.insert(*investigator) {
+            continue;
+        }
+        let Some(other_case) = by_investigator.get(investigator).copied() else {
+            continue;
+        };
+        if match_investigator(other_case, candidates, by_case, by_investigator, visited) {
+            if let Some(previous) = by_case.insert(case, *investigator) {
+                by_investigator.remove(&previous);
+            }
+            by_investigator.insert(*investigator, case);
+            return true;
+        }
+    }
+    false
+}
+
 fn investigation_staffing_priority(
     state: &AppState,
     investigation_id: InvestigationId,
@@ -192,8 +233,7 @@ pub(crate) fn apply_autonomous_investigator_staffing(
 
     // Availability and Investigation capability are authority-wide facts for this staffing pass.
     // Build each authority's ranked pool once instead of rescanning every member for every
-    // unstaffed case. Case-specific subject/witness conflicts remain checked below, and the
-    // per-pass assignment set preserves one-active-case capacity as assignments commit.
+    // unstaffed case. Case-specific subject/witness conflicts are checked before matching.
     let owners: BTreeSet<_> = investigations
         .iter()
         .map(|investigation| {
@@ -237,46 +277,61 @@ pub(crate) fn apply_autonomous_investigator_staffing(
         );
     }
 
-    let mut planned = Vec::new();
-    let mut assigned_this_pass = BTreeSet::new();
+    // Collect all conflict-free candidates before making a staffing choice. A flexible case
+    // should not monopolize the only qualified detective for a more constrained case.
+    let mut eligible_by_case = BTreeMap::new();
+    let mut prioritized_cases = Vec::new();
     for investigation_id in investigations {
         let investigation = state
             .legal
             .get_investigation(investigation_id)
             .ok_or(InvestigationError::MissingInvestigation(investigation_id))?;
-        // A max-version active case is a valid finite terminal rail: direct assignment must
-        // still report VersionCapacity, but autonomous maintenance cannot ever make this case
-        // representably staffable. Leave it unstaffed and continue allocating detectives to
-        // cases that can still advance instead of failing every future simulation minute.
+        // An unstaffable finite-version case must not block other cases.
         if investigation.version() > u32::MAX - 2 {
             continue;
         }
-        let owner = investigation.owner();
-        let investigator = candidates_by_owner
-            .get(&owner)
+        let eligible: Vec<_> = candidates_by_owner
+            .get(&investigation.owner())
             .into_iter()
             .flatten()
             .copied()
-            .find(|investigator| {
-                !assigned_this_pass.contains(investigator)
-                    && !investigation
-                        .subjects()
-                        .contains(&EntityRef::Character(*investigator))
+            .filter(|investigator| {
+                !investigation
+                    .subjects()
+                    .contains(&EntityRef::Character(*investigator))
                     && state
                         .legal
                         .case_witness_for(investigation_id, *investigator)
                         .is_none()
-            });
-        let Some(investigator) = investigator else {
+            })
+            .collect();
+        if !eligible.is_empty() {
+            eligible_by_case.insert(investigation_id, eligible);
+            prioritized_cases.push(investigation_id);
+        }
+    }
+
+    let mut by_case = BTreeMap::new();
+    let mut by_investigator = BTreeMap::new();
+    for investigation_id in &prioritized_cases {
+        match_investigator(
+            *investigation_id,
+            &eligible_by_case,
+            &mut by_case,
+            &mut by_investigator,
+            &mut BTreeSet::new(),
+        );
+    }
+
+    let mut planned = Vec::new();
+    for investigation_id in prioritized_cases {
+        let Some(investigator) = by_case.get(&investigation_id).copied() else {
             continue;
         };
-
-        // Selection used the same current authoritative indexes and predicates as the canonical
-        // validator. A rejection now is not a modeled "no investigator available" outcome; it
-        // means state or allocator capacity is broken and must surface instead of disappearing.
+        // Every match uses the exact eligibility predicates of the canonical validator.
+        // Revalidation and case-knowledge preparation happen before the first mutation.
         let prepared = validate_assign_investigator(state, investigation_id, investigator)?
             .prepare_current(state)?;
-        assigned_this_pass.insert(investigator);
         planned.push((investigation_id, investigator, prepared));
     }
 

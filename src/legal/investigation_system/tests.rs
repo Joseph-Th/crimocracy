@@ -1948,6 +1948,90 @@ fn autonomous_staffing_assigns_best_available_detective_and_respects_active_case
 }
 
 #[test]
+fn autonomous_staffing_reassigns_flexible_case_instead_of_stranding_a_conflicted_case() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x57AF_A110);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Conflict-Aware Staffing Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Conflict-Aware Staffing Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let junior = insert_test_investigator(&mut state, police, "Flexible Junior", 65);
+    let senior = insert_test_investigator(&mut state, police, "Only Eligible Senior", 95);
+    let flexible = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "General case with either detective".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+        },
+    )
+    .expect("general case should validate")
+    .commit(&mut state)
+    .expect("general case should commit");
+    let constrained = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Internal case concerning the junior detective".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(junior)]),
+        },
+    )
+    .expect("conflicted case should validate")
+    .commit(&mut state)
+    .expect("conflicted case should commit");
+
+    // Greedy capability-first assignment would give the senior to the flexible earlier
+    // case, leaving the internal case without a non-subject detective.
+    let staffed = apply_autonomous_investigator_staffing(&mut state)
+        .expect("both cases have a feasible non-conflicted assignment");
+    assert_eq!(staffed, vec![(flexible, junior), (constrained, senior)]);
+    for (case, detective) in staffed {
+        assert_eq!(
+            state
+                .legal()
+                .get_investigation(case)
+                .expect("staffed investigation must persist")
+                .lead_investigator(),
+            Some(detective)
+        );
+        assert_eq!(
+            state
+                .legal()
+                .active_investigation_for_investigator(detective)
+                .map(|case| case.id()),
+            Some(case)
+        );
+    }
+    let mut restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("matched staffing should save"),
+    )
+    .expect("matched staffing and lead indexes must restore");
+    assert!(
+        apply_autonomous_investigator_staffing(&mut restored)
+            .expect("repeating staffing on occupied seats should be a no-op")
+            .is_empty()
+    );
+    validate_state_against_registry(&registry, &restored)
+        .expect("restored conflict-aware staffing should remain registry-consistent");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn autonomous_staffing_prioritizes_developed_case_over_creation_order() {
     let registry = build_registry();
     let mut state = AppState::new(0x57AF_C453);
