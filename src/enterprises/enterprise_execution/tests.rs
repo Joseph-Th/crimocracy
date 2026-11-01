@@ -914,6 +914,51 @@ fn notable_settlement_reaches_executive_brief_without_pending_decisions() {
         .unwrap()
         .commit(&mut fixture.state)
         .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .cycles_for_organization_from_through(
+                fixture.organization,
+                SimTime::ZERO,
+                fixture.state.now(),
+            )
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        vec![cycle],
+        "an enterprise settlement must enter the organization's chronological index"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .cycles_for_organization_from_through(
+                fixture.organization,
+                SimTime::ZERO,
+                SimTime::from_minutes(fixture.state.now().as_minutes() - 1),
+            )
+            .count(),
+        0,
+        "the reporting window cannot admit a later settlement"
+    );
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("settled enterprise should save"),
+    )
+    .expect("settled enterprise should restore");
+    assert_eq!(
+        restored
+            .enterprises()
+            .cycles_for_organization_from_through(
+                fixture.organization,
+                SimTime::ZERO,
+                restored.now()
+            )
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        vec![cycle],
+        "load must rebuild the nonserialized organization/time index"
+    );
     let information = fixture
         .state
         .enterprises()

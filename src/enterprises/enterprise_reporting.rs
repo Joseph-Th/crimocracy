@@ -51,6 +51,7 @@ pub fn resolve_organization_enterprise_financial_summary(
     }
     resolve_summary(
         state,
+        organization,
         state
             .enterprises()
             .enterprises_for_organization(organization),
@@ -75,6 +76,7 @@ fn validate_window(
 
 fn resolve_summary<'a>(
     state: &AppState,
+    organization: OrganizationId,
     enterprises: impl IntoIterator<Item = &'a EnterpriseRecord>,
     period_start: SimTime,
     period_end: SimTime,
@@ -95,10 +97,13 @@ fn resolve_summary<'a>(
         let kind_totals = by_kind.entry(enterprise.kind()).or_default();
         increment_enterprise_count(kind_totals)?;
     }
-    for cycle in state
-        .enterprises()
-        .cycles_from_through(period_start, period_end)
-    {
+    // The organization/time index visits only this organization's reporting window, in
+    // chronological order so checked accumulation remains deterministic.
+    for cycle in state.enterprises().cycles_for_organization_from_through(
+        organization,
+        period_start,
+        period_end,
+    ) {
         let Some(kind) = candidate_kinds.get(&cycle.enterprise()).copied() else {
             continue;
         };

@@ -106,18 +106,20 @@ fn resolve_summary<'a>(
             counted_businesses.insert(business.id());
         }
     }
+    // The owner/time index visits only this organization's settlements in the requested
+    // period, preserving global chronological order for checked financial accumulation.
     for cycle in state
         .economy()
-        .cycles_from_through(period_start, period_end)
-        .filter(|cycle| cycle.owner() == owner)
+        .cycles_for_owner_from_through(owner, period_start, period_end)
     {
-        let Some(kind) = candidate_kinds.get(&cycle.business()).copied() else {
+        let business = cycle.business();
+        let Some(kind) = candidate_kinds.get(&business).copied() else {
             continue;
         };
-        // Ownership changes have minute precision, while cycle records persist the exact owner
-        // at commit. A same-minute outgoing-owner cycle therefore remains stronger historical
-        // evidence than the interval ownership projection and lazily counts that business.
-        if counted_businesses.insert(cycle.business()) {
+        // Ownership changes have minute precision, while cycle records persist the exact
+        // owner at commit. A same-minute outgoing-owner cycle therefore remains stronger
+        // evidence than the interval projection and lazily counts the business.
+        if counted_businesses.insert(business) {
             increment_business_count(&mut totals)?;
             increment_business_count(by_kind.entry(kind).or_default())?;
         }

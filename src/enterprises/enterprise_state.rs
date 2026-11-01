@@ -34,6 +34,9 @@ pub struct EnterpriseState {
     by_settlement_account: BTreeMap<FinancialAccountId, EnterpriseId>,
     #[serde(skip)]
     cycles_by_enterprise: BTreeMap<EnterpriseId, BTreeSet<EnterpriseCycleId>>,
+    /// Immutable enterprise organization and settlement minute, rebuilt from authoritative cycles.
+    #[serde(skip)]
+    cycles_by_organization_time: BTreeMap<(OrganizationId, SimTime), BTreeSet<EnterpriseCycleId>>,
     /// Settled cycle ids keyed by authoritative occurrence time. This is a derived scan index,
     /// omitted from save bytes and rebuilt from `cycles`, for consumers that need only a recent
     /// time window rather than lifetime enterprise history.
@@ -56,6 +59,7 @@ impl EnterpriseState {
         self.suspended.clear();
         self.by_settlement_account.clear();
         self.cycles_by_enterprise.clear();
+        self.cycles_by_organization_time.clear();
         self.cycles_by_time.clear();
         for record in self.records.values() {
             let id = record.id();
@@ -99,6 +103,14 @@ impl EnterpriseState {
                 .entry(cycle.enterprise())
                 .or_default()
                 .insert(cycle.id());
+            // Rebuild must tolerate a malformed save long enough for the explicit invariant
+            // validation to reject it. Do not panic on an orphaned persisted cycle.
+            if let Some(enterprise) = self.records.get(&cycle.enterprise()) {
+                self.cycles_by_organization_time
+                    .entry((enterprise.organization(), cycle.occurred_at()))
+                    .or_default()
+                    .insert(cycle.id());
+            }
             self.cycles_by_time
                 .entry(cycle.occurred_at())
                 .or_default()
@@ -127,20 +139,21 @@ impl EnterpriseState {
             })
     }
 
-    /// Settled cycles in the inclusive reporting window `[start, end]`, ordered by occurrence
-    /// time then cycle id. This complements the exclusive-lower-bound observation query above.
-    pub(crate) fn cycles_from_through(
+    /// Organization-specific settlements within the inclusive window, in time and ID order.
+    /// Reports avoid unrelated organizations and old cycles even late in a long campaign.
+    pub(crate) fn cycles_for_organization_from_through(
         &self,
+        organization: OrganizationId,
         start: SimTime,
         end: SimTime,
     ) -> impl Iterator<Item = &EnterpriseCycleRecord> {
-        self.cycles_by_time
-            .range(start..=end)
+        self.cycles_by_organization_time
+            .range((organization, start)..=(organization, end))
             .flat_map(|(_, ids)| ids.iter())
             .map(|id| {
                 self.cycles
                     .get(id)
-                    .expect("enterprise cycle time index must reference a cycle")
+                    .expect("indexed enterprise cycle must exist")
             })
     }
 
@@ -439,6 +452,10 @@ impl EnterpriseState {
             .entry(enterprise_id)
             .or_default()
             .insert(cycle.id());
+        self.cycles_by_organization_time
+            .entry((enterprise.organization(), cycle.occurred_at()))
+            .or_default()
+            .insert(cycle.id());
         self.cycles_by_time
             .entry(cycle.occurred_at())
             .or_default()
@@ -698,6 +715,22 @@ impl EnterpriseState {
                 }
             }
         }
+        for ((organization, time), ids) in &self.cycles_by_organization_time {
+            if ids.is_empty() {
+                return false;
+            }
+            for id in ids {
+                if !self.cycles.get(id).is_some_and(|cycle| {
+                    cycle.occurred_at() == *time
+                        && self
+                            .records
+                            .get(&cycle.enterprise())
+                            .is_some_and(|record| record.organization() == *organization)
+                }) {
+                    return false;
+                }
+            }
+        }
         for (time, ids) in &self.cycles_by_time {
             if ids.is_empty() {
                 return false;
@@ -717,11 +750,20 @@ impl EnterpriseState {
                 .cycles_by_time
                 .get(&cycle.occurred_at())
                 .is_some_and(|ids| ids.contains(&cycle.id()))
+                || !self.records.get(&cycle.enterprise()).is_some_and(|record| {
+                    self.cycles_by_organization_time
+                        .get(&(record.organization(), cycle.occurred_at()))
+                        .is_some_and(|ids| ids.contains(&cycle.id()))
+                })
             {
                 return false;
             }
         }
-        true
+        self.cycles_by_organization_time
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            == self.cycles.len()
     }
 
     /// Only active enterprises may occupy an organization's current operating index.

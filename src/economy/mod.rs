@@ -202,11 +202,10 @@ pub struct EconomyState {
     by_settlement_account: BTreeMap<FinancialAccountId, BusinessId>,
     #[serde(skip)]
     cycles_by_business: BTreeMap<BusinessId, BTreeSet<BusinessCycleId>>,
-    /// Settled cycle ids keyed by authoritative occurrence time. Derived from `cycles` and
-    /// rebuilt after restore so bounded reports never need to walk each business's lifetime
-    /// settlement history.
+    /// Frozen cycle owner and settlement minute. Organization reports scan only their
+    /// requested time window; the projection is rebuilt from durable cycle records.
     #[serde(skip)]
-    cycles_by_time: BTreeMap<SimTime, BTreeSet<BusinessCycleId>>,
+    cycles_by_owner_time: BTreeMap<(BusinessOwner, SimTime), BTreeSet<BusinessCycleId>>,
 }
 
 impl EconomyState {
@@ -219,7 +218,7 @@ impl EconomyState {
         self.suspended.clear();
         self.by_settlement_account.clear();
         self.cycles_by_business.clear();
-        self.cycles_by_time.clear();
+        self.cycles_by_owner_time.clear();
         for record in self.businesses.values() {
             self.by_settlement_account
                 .insert(record.settlement_account(), record.business());
@@ -239,8 +238,8 @@ impl EconomyState {
                 .entry(cycle.business())
                 .or_default()
                 .insert(cycle.id());
-            self.cycles_by_time
-                .entry(cycle.occurred_at())
+            self.cycles_by_owner_time
+                .entry((cycle.owner(), cycle.occurred_at()))
                 .or_default()
                 .insert(cycle.id());
         }
@@ -267,20 +266,21 @@ impl EconomyState {
             .map(|id| self.cycles.get(id).expect("indexed cycle must exist"))
     }
 
-    /// Settled business cycles in the inclusive reporting window `[start, end]`, ordered by
-    /// occurrence time then cycle id.
-    pub(crate) fn cycles_from_through(
+    /// Settlements attributed to the owner at commit, in chronological order within
+    /// the inclusive window. Title changes never reattribute historical earnings.
+    pub(crate) fn cycles_for_owner_from_through(
         &self,
+        owner: BusinessOwner,
         start: SimTime,
         end: SimTime,
     ) -> impl Iterator<Item = &BusinessCycleRecord> {
-        self.cycles_by_time
-            .range(start..=end)
+        self.cycles_by_owner_time
+            .range((owner, start)..=(owner, end))
             .flat_map(|(_, ids)| ids.iter())
             .map(|id| {
                 self.cycles
                     .get(id)
-                    .expect("business cycle time index must reference a cycle")
+                    .expect("indexed business cycle must exist")
             })
     }
 
@@ -405,8 +405,8 @@ impl EconomyState {
             .entry(business)
             .or_default()
             .insert(cycle.id());
-        self.cycles_by_time
-            .entry(cycle.occurred_at())
+        self.cycles_by_owner_time
+            .entry((cycle.owner(), cycle.occurred_at()))
             .or_default()
             .insert(cycle.id());
         let previous = self.cycles.insert(cycle.id(), cycle);
@@ -641,8 +641,8 @@ impl EconomyState {
                 .get(&cycle.business())
                 .is_some_and(|ids| ids.contains(&cycle.id()))
                 || !self
-                    .cycles_by_time
-                    .get(&cycle.occurred_at())
+                    .cycles_by_owner_time
+                    .get(&(cycle.owner(), cycle.occurred_at()))
                     .is_some_and(|ids| ids.contains(&cycle.id()))
             {
                 return false;
@@ -662,7 +662,7 @@ impl EconomyState {
                 }
             }
         }
-        for (time, ids) in &self.cycles_by_time {
+        for ((owner, time), ids) in &self.cycles_by_owner_time {
             if ids.is_empty() {
                 return false;
             }
@@ -670,7 +670,7 @@ impl EconomyState {
                 if !self
                     .cycles
                     .get(id)
-                    .is_some_and(|cycle| cycle.occurred_at() == *time)
+                    .is_some_and(|cycle| cycle.owner() == *owner && cycle.occurred_at() == *time)
                 {
                     return false;
                 }
@@ -682,7 +682,7 @@ impl EconomyState {
             .sum::<usize>()
             == self.cycles.len()
             && self
-                .cycles_by_time
+                .cycles_by_owner_time
                 .values()
                 .map(BTreeSet::len)
                 .sum::<usize>()

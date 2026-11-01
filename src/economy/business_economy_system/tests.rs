@@ -1693,6 +1693,47 @@ fn transferred_business_cycles_remain_attributed_to_the_owner_at_commit() {
     );
     assert_eq!(second_cycle_record.business_version(), 2);
 
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .cycles_for_owner_from_through(
+                BusinessOwner::Organization(fixture.organization),
+                SimTime::ZERO,
+                fixture.state.now(),
+            )
+            .map(|cycle| cycle.id())
+            .collect::<Vec<_>>(),
+        vec![first_cycle],
+        "the owner/time index must retain the outgoing owner's settlement"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .cycles_for_owner_from_through(
+                BusinessOwner::Organization(successor),
+                SimTime::ZERO,
+                transfer_minute,
+            )
+            .count(),
+        0,
+        "the incoming owner cannot receive a pre-transfer settlement"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .cycles_for_owner_from_through(
+                BusinessOwner::Organization(successor),
+                transfer_minute,
+                fixture.state.now(),
+            )
+            .map(|cycle| cycle.id())
+            .collect::<Vec<_>>(),
+        vec![second_cycle]
+    );
+
     let original_summary = resolve_organization_business_financial_summary(
         &fixture.state,
         fixture.organization,

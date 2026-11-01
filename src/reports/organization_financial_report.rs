@@ -434,14 +434,14 @@ fn collect_notable_business_cycles(
     period_end: SimTime,
 ) -> Result<Vec<(SimTime, NotableFinancialItem)>, OrganizationFinancialReportError> {
     let mut items = Vec::new();
-    for cycle in state
-        .economy()
-        .cycles_from_through(period_start, period_end)
-        .filter(|cycle| {
-            cycle.owner() == BusinessOwner::Organization(recipient)
-                && cycle.attention() == AttentionClass::Notable
-        })
-    {
+    for cycle in state.economy().cycles_for_owner_from_through(
+        BusinessOwner::Organization(recipient),
+        period_start,
+        period_end,
+    ) {
+        if cycle.attention() != AttentionClass::Notable {
+            continue;
+        }
         let information = cycle
             .information()
             .ok_or(OrganizationFinancialReportError::MissingNotableInformation)?;
@@ -464,16 +464,12 @@ fn collect_notable_enterprise_cycles(
     period_end: SimTime,
 ) -> Result<Vec<(SimTime, NotableFinancialItem)>, OrganizationFinancialReportError> {
     let mut items = Vec::new();
-    for cycle in state
-        .enterprises()
-        .cycles_from_through(period_start, period_end)
-        .filter(|cycle| cycle.attention() == AttentionClass::Notable)
-    {
-        let enterprise = state
-            .enterprises()
-            .get_enterprise(cycle.enterprise())
-            .expect("enterprise cycle must reference its persisted enterprise");
-        if enterprise.organization() != recipient {
+    for cycle in state.enterprises().cycles_for_organization_from_through(
+        recipient,
+        period_start,
+        period_end,
+    ) {
+        if cycle.attention() != AttentionClass::Notable {
             continue;
         }
         let information = cycle
