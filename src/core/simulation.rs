@@ -325,18 +325,24 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
     );
 
     let due_authorized = find_due_authorized_operations(state);
-    let prestart_aborts = prepare_authorized_prestart_aborts(registry, state, &due_authorized)
-        .expect("valid due authorized abort cohort must preflight atomically");
+    let prestart_actions = plan_authorized_prestarts(registry, state, &due_authorized)
+        .expect("valid due authorized prestarts must plan without mutation");
     let mut started_operations = Vec::with_capacity(due_authorized.len());
-    for (operation, prestart_abort) in due_authorized
-        .into_iter()
-        .zip(prestart_aborts.unwrap_or_default())
-    {
-        if let Some(abort) = prestart_abort {
-            (*abort).commit_preflighted(state);
-            aborted_operations.push(operation);
-        } else {
-            match apply_transition(registry, state, operation, OperationTransition::Begin) {
+    for (operation, action) in due_authorized.into_iter().zip(prestart_actions) {
+        match action {
+            AuthorizedPrestartAction::Abort(abort) => {
+                (*abort).commit_preflighted(state);
+                aborted_operations.push(operation);
+            }
+            // One impossible abort must not suppress an unrelated due start. Keep the blocked
+            // operation Authorized, rather than attempting to begin an expired objective.
+            AuthorizedPrestartAction::Blocked => {}
+            AuthorizedPrestartAction::Begin => match apply_transition(
+                registry,
+                state,
+                operation,
+                OperationTransition::Begin,
+            ) {
                 Ok(()) => started_operations.push(operation),
                 // A future assignment can become temporarily unavailable when an earlier
                 // operation remains paused longer than projected at authorization time. The due
@@ -355,7 +361,7 @@ fn run_operations_phase(registry: &Registry, state: &mut AppState) -> Operations
                         "due authorized operation could not begin through its canonical path: {error}"
                     )
                 }
-            }
+            },
         }
     }
     OperationsPhaseOutcome {
@@ -431,23 +437,17 @@ fn operation_phase_batch_is_terminally_blocked(error: &OperationPhaseBatchError)
     }
 }
 
-fn prepare_authorized_prestart_aborts(
-    registry: &Registry,
-    state: &AppState,
-    due_authorized: &[OperationId],
-) -> Result<Option<Vec<Option<Box<ValidatedOperationAbort>>>>, OperationPhaseBatchError> {
-    match prepare_authorized_prestart_aborts_strict(registry, state, due_authorized) {
-        Ok(planned) => Ok(Some(planned)),
-        Err(error) if operation_phase_batch_is_terminally_blocked(&error) => Ok(None),
-        Err(error) => Err(error),
-    }
+enum AuthorizedPrestartAction {
+    Begin,
+    Abort(Box<ValidatedOperationAbort>),
+    Blocked,
 }
 
-fn prepare_authorized_prestart_aborts_strict(
+fn plan_authorized_prestarts(
     registry: &Registry,
     state: &AppState,
     due_authorized: &[OperationId],
-) -> Result<Vec<Option<Box<ValidatedOperationAbort>>>, OperationPhaseBatchError> {
+) -> Result<Vec<AuthorizedPrestartAction>, OperationPhaseBatchError> {
     let mut planned = Vec::with_capacity(due_authorized.len());
     let mut budget = Vec::new();
     for operation in due_authorized {
@@ -455,38 +455,54 @@ fn prepare_authorized_prestart_aborts_strict(
             .operations()
             .get_operation(*operation)
             .expect("due authorized operation must still exist");
-        let abort = if has_missed_operation_deadline(registry, state, *operation) {
-            Some(validate_deadline_missed_operation(
-                registry, state, *operation,
-            )?)
-        } else if let Some((opportunity, _)) = state
-            .opportunities()
-            .expired_window_for_operation(*operation, state.now())
-        {
-            Some(validate_expired_opportunity_operation(
-                state,
-                *operation,
-                opportunity.id(),
-            )?)
-        } else if let Some(blocker) =
-            crate::operations::operation_objective::resolve_objective_blocker(state, record)
-        {
-            Some(validate_objective_unavailable_operation(
-                state, *operation, blocker,
-            )?)
-        } else {
-            None
+        let abort: Result<_, OperationPhaseBatchError> = (|| {
+            if has_missed_operation_deadline(registry, state, *operation) {
+                Ok(Some(validate_deadline_missed_operation(
+                    registry, state, *operation,
+                )?))
+            } else if let Some((opportunity, _)) = state
+                .opportunities()
+                .expired_window_for_operation(*operation, state.now())
+            {
+                Ok(Some(validate_expired_opportunity_operation(
+                    state,
+                    *operation,
+                    opportunity.id(),
+                )?))
+            } else if let Some(blocker) =
+                crate::operations::operation_objective::resolve_objective_blocker(state, record)
+            {
+                Ok(Some(validate_objective_unavailable_operation(
+                    state, *operation, blocker,
+                )?))
+            } else {
+                Ok(None)
+            }
+        })();
+        let action = match abort {
+            Ok(Some(abort)) => {
+                budget.extend(abort.id_budget());
+                AuthorizedPrestartAction::Abort(Box::new(abort))
+            }
+            Ok(None) => AuthorizedPrestartAction::Begin,
+            Err(error) if operation_phase_batch_is_terminally_blocked(&error) => {
+                AuthorizedPrestartAction::Blocked
+            }
+            Err(error) => return Err(error),
         };
-        if let Some(abort) = &abort {
-            budget.extend(abort.id_budget());
-        }
-        planned.push(abort.map(Box::new));
+        planned.push(action);
     }
-    // Preserve the existing per-operation begin/abort ordering, but prove the complete artifact
-    // budget for every deterministic pre-start abort first. Operation begin may allocate only a
-    // PoliceResponseId, so intervening successful starts cannot consume these reserved artifact
-    // kinds before a later prepared abort commits.
-    state.ids.reserve_many(&budget)?;
+    // No ID-ordered prefix of aborts may consume the last artifact IDs. If their combined
+    // budget cannot fit, retain *all* those abort candidates without mutation; independent
+    // starts remain actionable. Begin only allocates PoliceResponseId, so successful starts
+    // cannot consume the preflighted abort artifact kinds.
+    if state.ids.reserve_many(&budget).is_err() {
+        for action in &mut planned {
+            if matches!(action, AuthorizedPrestartAction::Abort(_)) {
+                *action = AuthorizedPrestartAction::Blocked;
+            }
+        }
+    }
     Ok(planned)
 }
 

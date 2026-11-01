@@ -684,24 +684,88 @@ fn authorized_prestart_abort_cohort_exhaustion_is_terminal_noop_before_first_abo
     let before =
         bincode::serialize(&state).expect("pre-exhaustion authorized state should serialize");
 
-    let planned = prepare_authorized_prestart_aborts(&registry, &state, &operations)
-        .expect("prestart artifact exhaustion is a terminal autonomous no-op");
-    assert!(planned.is_none());
+    let planned = plan_authorized_prestarts(&registry, &state, &operations)
+        .expect("prestart artifact exhaustion must leave the abort cohort blocked");
+    assert_eq!(planned.len(), operations.len());
+    assert!(
+        planned
+            .iter()
+            .all(|action| matches!(action, AuthorizedPrestartAction::Blocked))
+    );
     assert_eq!(
         bincode::serialize(&state).expect("rejected authorized state should serialize"),
         before,
         "artifact exhaustion must not abort only the earliest authorized operation"
     );
-    for operation in operations {
+    for operation in &operations {
         assert_eq!(
             state
                 .operations()
-                .get_operation(operation)
+                .get_operation(*operation)
                 .expect("rejected authorized operation should persist")
                 .status(),
             OperationStatus::Authorized
         );
     }
+
+    // A blocked abort cannot consume the last information IDs, but a separate operation with
+    // an executable window must still start. The previous implementation zipped due work with
+    // an empty abort plan and silently skipped every authorized operation on this minute.
+    let ready_leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Available Independent Scout".to_owned(),
+            organization: Some(crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(CapabilityKind::Surveillance, test_rating(60))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("independent scout should validate");
+    let ready = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Independent feasible surveillance".to_owned(),
+            kind: OperationKind::Surveillance,
+            responsible_organization: crew,
+            leader: ready_leader,
+            objective: OperationObjective::GatherInformation {
+                target: EntityRef::Organization(crew),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Surveillance, ready_leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now(),
+        },
+    )
+    .expect("unconstrained independent job should authorize")
+    .commit(&mut state)
+    .expect("independent job should persist");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    assert_eq!(
+        find_due_authorized_operations(&state),
+        [operations.as_slice(), &[ready]].concat()
+    );
+    let phase = run_operations_phase(&registry, &mut state);
+    assert_eq!(phase.started, vec![ready]);
+    assert!(phase.aborted.is_empty());
+    for blocked in operations {
+        assert_eq!(
+            state.operations().get_operation(blocked).unwrap().status(),
+            OperationStatus::Authorized,
+            "unrepresentable aborts must remain untouched"
+        );
+    }
+    assert_eq!(
+        state.operations().get_operation(ready).unwrap().status(),
+        OperationStatus::InProgress,
+        "an unrelated feasible start must not be lost to abort-artifact exhaustion"
+    );
     validate_state(&state).expect("rejected prestart abort cohort should remain valid");
     validate_invariants(&state);
 }

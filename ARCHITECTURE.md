@@ -114,7 +114,8 @@ determinism and harness contracts.
  4    ├─ apply_due_police_response_arrivals (exposure → decisions; must precede completion/new starts)
  5    ├─ find_due_with_missed_deadlines → abort via decision when present
  6    ├─ find_due_in_progress → decide+validate+commit per operation (RNG: operation stream)
- 7    └─ find_due_authorized → Begin or deadline-missed
+ 7    └─ find_due_authorized → Begin or validated deadline/opportunity/objective abort;
+        finite abort-artifact capacity blocks only abort candidates, never independent starts
  8  apply_autonomous_investigator_staffing single-seat staffing, lead-investigator knowledge
  9  apply_investigation_work_scheduling    one active-case scan; evidence review first, otherwise witness interview
 10  run_investigation_work_phase           resolve due work (RNG: investigation stream)
@@ -139,6 +140,13 @@ determinism and harness contracts.
 ```
 
 New autonomous work must slot explicitly here with a rationale comment.
+
+Due authorized work is planned as a complete ordered cohort. Every needed pre-start abort
+must pass its owner's validation and the combined artifact-ID budget before any abort commits;
+no ID-ordered prefix may consume the remaining IDs. An abort whose record has reached a
+finite version rail remains authorized without an invalid transition. Other due operations
+that can still begin are admitted independently, even when one or more aborts cannot persist
+their required artifacts. A blocked operation never bypasses its abort by beginning instead.
 
 ## Source map — one owner per field
 
