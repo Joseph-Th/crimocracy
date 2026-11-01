@@ -1016,8 +1016,15 @@ fn make_exposed_operation_fixture_with_constraints(
                     illicit_demand: Rating::try_new(50).expect("fixture demand should validate"),
                 },
                 institutions: NeighborhoodInstitutionProfile {
-                    police_presence: Rating::try_new(90)
-                        .expect("fixture police presence should validate"),
+                    // The ransom blocker test needs a tactically viable kidnapping before
+                    // the shuttered business makes its *practical* outcome fail. The other
+                    // exposure fixtures deliberately retain a heavily policed ward.
+                    police_presence: Rating::try_new(if kind == OperationKind::Kidnapping {
+                        5
+                    } else {
+                        90
+                    })
+                    .expect("fixture police presence should validate"),
                 },
             },
         },
@@ -1052,10 +1059,13 @@ fn make_exposed_operation_fixture_with_constraints(
         },
     )
     .expect("exposure business should validate");
-    if matches!(kind, OperationKind::Sabotage | OperationKind::Intimidation) {
+    if matches!(
+        kind,
+        OperationKind::Sabotage | OperationKind::Intimidation | OperationKind::Kidnapping
+    ) {
         // These fixtures exercise target-economy liveness after authorization. Sabotage requires
-        // operating books up front; Intimidation may target an ambient business without books,
-        // but giving it explicit books lets the test distinguish Active from shuttered.
+        // operating books up front; cash-taking operations can target ambient businesses, but
+        // explicit books let the tests distinguish Active from shuttered targets.
         let operating = insert_account(
             &mut state,
             FinancialAccountDraft {
@@ -1120,6 +1130,10 @@ fn make_exposed_operation_fixture_with_constraints(
                     Rating::try_new(80).expect("fixture burglary should validate"),
                 ),
                 (
+                    CapabilityKind::Driving,
+                    Rating::try_new(90).expect("fixture getaway driving should validate"),
+                ),
+                (
                     CapabilityKind::Stealth,
                     Rating::try_new(0).expect("fixture stealth should validate"),
                 ),
@@ -1160,6 +1174,17 @@ fn make_exposed_operation_fixture_with_constraints(
             OperationApproach::Intimidating,
             BTreeMap::from([(RoleKind::Coordinator, leader)]),
         ),
+        OperationKind::Kidnapping => (
+            "Observed ransom".to_owned(),
+            OperationObjective::ObtainCash {
+                target: EntityRef::Business(business),
+            },
+            OperationApproach::Covert,
+            BTreeMap::from([
+                (RoleKind::Coordinator, leader),
+                (RoleKind::Driver, specialist),
+            ]),
+        ),
         OperationKind::Robbery
         | OperationKind::Hijacking
         | OperationKind::Smuggling
@@ -1168,7 +1193,6 @@ fn make_exposed_operation_fixture_with_constraints(
         | OperationKind::DocumentTheft
         | OperationKind::GamblingEvent
         | OperationKind::Extraction
-        | OperationKind::Kidnapping
         | OperationKind::Infiltration
         | OperationKind::Arson => panic!("exposure fixture does not support {kind:?}"),
     };
@@ -1396,6 +1420,64 @@ fn cash_operation_of_suspended_target_aborts_before_start() {
     validate_state_against_registry(&registry, &state)
         .expect("pre-start cash-target closure should remain registry-valid");
     validate_invariants(&state);
+}
+
+#[test]
+fn kidnapping_ransom_target_shuttered_mid_execution_reports_cash_failure_not_sabotage() {
+    let (registry, mut state, _police, _neighborhood, operation) =
+        make_exposed_operation_fixture(OperationKind::Kidnapping, false, Vec::new());
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let business = state
+        .operations()
+        .get_operation(operation)
+        .expect("ransom operation must persist")
+        .objective()
+        .taken_business()
+        .expect("kidnapping ransom is priced against a business");
+
+    crate::economy::business_economy_system::validate_suspend_business_economy(&state, business)
+        .expect("active ransom-funding business should suspend")
+        .commit(&mut state)
+        .expect("ransom-funding business suspension should commit");
+    run_until_operation_resolved(&registry, &mut state, operation);
+
+    let resolution = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.resolution())
+        .expect("kidnapping should resolve with a practical outcome");
+    assert_eq!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Failed
+    );
+    assert_eq!(
+        resolution.objective_blocker(),
+        Some(OperationObjectiveBlocker::TargetEconomyInactive)
+    );
+    assert!(resolution.cash_proceeds().is_none());
+    let summary = &state
+        .reports()
+        .get_report(resolution.after_action_report())
+        .expect("ransom operation should have a debrief")
+        .entries()[0]
+        .summary;
+    assert!(
+        summary.contains("no active cash-generating business to collect from"),
+        "a ransom operation should explain why its cash objective failed: {summary}"
+    );
+    assert!(
+        !summary.contains("business to disrupt"),
+        "kidnapping must never be narrated as property sabotage: {summary}"
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("practical ransom failure must remain valid across persistence boundaries");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("ransom failure should save"),
+    )
+    .expect("ransom failure should restore");
+    validate_invariants(&restored);
 }
 
 #[test]
@@ -3112,6 +3194,66 @@ fn after_action_summary_omits_neutral_lines_and_keeps_deviations() {
         &[],
     );
     assert!(witnessed.contains("witnessed or otherwise clearly observed"));
+}
+
+#[test]
+fn successful_surveillance_and_infiltration_lead_with_findings_not_planning_boilerplate() {
+    let factors = OperationResolutionFactors {
+        role_capability_average: Rating::try_new(85).expect("fixture rating should be valid"),
+        leader_capability: Some(Rating::try_new(85).expect("fixture rating should be valid")),
+        intelligence_quality: Rating::try_new(30).expect("fixture rating should be valid"),
+        intelligence_adjustment: 0,
+        intelligence_topics_covered: 1,
+        intelligence_topics_relevant: 3,
+        target_police_presence: None,
+        police_response_arrived: false,
+        approach_adjustment: 0,
+        business_fear_adjustment: 0,
+        time_pressure: 0,
+        variance: 0,
+    };
+    for kind in [OperationKind::Surveillance, OperationKind::Infiltration] {
+        let achieved = build_operation_after_action_summary(
+            kind,
+            OperationObjectiveOutcome::Achieved,
+            OperationObjectiveOutcome::Achieved,
+            factors,
+            OperationExposureLevel::None,
+            65,
+            &[],
+        );
+        assert!(
+            !achieved.contains("Before departure:"),
+            "successful {kind:?} should foreground its acquired information, not its planning gaps"
+        );
+        let partial = build_operation_after_action_summary(
+            kind,
+            OperationObjectiveOutcome::Partial,
+            OperationObjectiveOutcome::Partial,
+            factors,
+            OperationExposureLevel::None,
+            65,
+            &[],
+        );
+        assert!(
+            partial.contains("Before departure:"),
+            "incomplete {kind:?} should still explain the thin planning intelligence"
+        );
+    }
+
+    let records_theft = build_operation_after_action_summary(
+        OperationKind::DocumentTheft,
+        OperationObjectiveOutcome::Achieved,
+        OperationObjectiveOutcome::Achieved,
+        factors,
+        OperationExposureLevel::None,
+        65,
+        &[],
+    );
+    assert!(
+        records_theft.contains("Before departure:"),
+        "execution-heavy document theft must retain its meaningful planning context"
+    );
 }
 
 #[test]

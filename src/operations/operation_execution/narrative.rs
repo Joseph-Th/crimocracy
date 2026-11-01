@@ -33,9 +33,10 @@ pub(super) fn build_after_action_summary(
     )
 }
 
-/// Successful surveillance should lead with what the scout learned, not generic boilerplate
-/// listing the information the scout was sent out to obtain. Thin planning intelligence still
-/// matters when surveillance itself underperforms, where it can explain a partial or failed job.
+/// Successful information-gathering work should lead with what the crew learned, not generic
+/// boilerplate about the information it was sent out to obtain. Both surveillance and
+/// infiltration use the same observation pipeline, so they follow the same presentation rule.
+/// Thin planning intelligence still matters when the observation itself underperforms.
 pub(super) fn build_operation_after_action_summary(
     kind: OperationKind,
     outcome: OperationObjectiveOutcome,
@@ -45,8 +46,10 @@ pub(super) fn build_operation_after_action_summary(
     high_police_presence_threshold: u8,
     missing_intelligence_topics: &[InformationTopic],
 ) -> String {
-    let include_intelligence_context = kind != OperationKind::Surveillance
-        || tactical_outcome != OperationObjectiveOutcome::Achieved;
+    let include_intelligence_context = !matches!(
+        kind,
+        OperationKind::Surveillance | OperationKind::Infiltration
+    ) || tactical_outcome != OperationObjectiveOutcome::Achieved;
     build_after_action_summary_with_intelligence_context(
         outcome,
         tactical_outcome,

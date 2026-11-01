@@ -144,7 +144,7 @@ pub(crate) fn blocker_clause(
         OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
             "The target came under the sponsoring organization's ownership before the crew reached the objective, so taking or damaging it would have meant hitting its own assets."
         }
-        OperationObjectiveBlocker::TargetEconomyInactive if is_operation_cash_kind(kind) => {
+        OperationObjectiveBlocker::TargetEconomyInactive if kind.can_take_cash() => {
             "The target was no longer operating when the crew reached the objective, so there was no active cash-generating business to collect from."
         }
         OperationObjectiveBlocker::TargetEconomyInactive => {
@@ -260,12 +260,29 @@ pub(crate) fn blocker_matches_objective(
     }
 }
 
-const fn is_operation_cash_kind(kind: OperationKind) -> bool {
-    matches!(
-        kind,
-        OperationKind::Robbery
-            | OperationKind::Smuggling
-            | OperationKind::Intimidation
-            | OperationKind::GamblingEvent
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operations::ALL_OPERATION_KINDS;
+
+    #[test]
+    fn inactive_business_blocker_describes_each_operation_objective_correctly() {
+        for kind in ALL_OPERATION_KINDS {
+            if kind.can_take_cash() {
+                let explanation =
+                    blocker_clause(kind, OperationObjectiveBlocker::TargetEconomyInactive);
+                assert!(
+                    explanation.contains("cash-generating business to collect from"),
+                    "{kind:?} must describe the cash objective it actually attempts"
+                );
+                assert!(!explanation.contains("disrupt"));
+            }
+        }
+        for kind in [OperationKind::Sabotage, OperationKind::Arson] {
+            assert!(
+                blocker_clause(kind, OperationObjectiveBlocker::TargetEconomyInactive)
+                    .contains("business to disrupt")
+            );
+        }
+    }
 }
