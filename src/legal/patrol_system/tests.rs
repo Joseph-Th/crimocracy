@@ -650,3 +650,133 @@ fn patrol_revision_rejects_normalized_unchanged_schedule_without_freshness_churn
     );
     validate_invariants(&state);
 }
+
+#[test]
+fn historical_patrol_queries_match_linear_replay_including_same_minute_transitions() {
+    let (registry, mut state, police, neighborhood) = make_fixture();
+    let deployment = validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![window(0, 1440, 65)],
+        },
+    )
+    .expect("patrol establishment should validate")
+    .commit(&mut state)
+    .expect("patrol establishment should commit");
+    validate_revise_patrol_deployment(&state, deployment, vec![window(0, 1440, 70)])
+        .expect("same-minute revision should validate")
+        .commit(&mut state)
+        .expect("same-minute revision should commit");
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(4));
+    validate_patrol_transition(&state, deployment, PatrolDeploymentTransition::Suspend)
+        .expect("suspension should validate")
+        .commit(&mut state)
+        .expect("suspension should commit");
+    validate_patrol_transition(&state, deployment, PatrolDeploymentTransition::Resume)
+        .expect("same-minute resumption should validate")
+        .commit(&mut state)
+        .expect("same-minute resumption should commit");
+    validate_revise_patrol_deployment(&state, deployment, vec![window(0, 1440, 85)])
+        .expect("second same-minute revision should validate")
+        .commit(&mut state)
+        .expect("second same-minute revision should commit");
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(3));
+    validate_patrol_transition(&state, deployment, PatrolDeploymentTransition::Suspend)
+        .expect("later suspension should validate")
+        .commit(&mut state)
+        .expect("later suspension should commit");
+
+    let check = |state: &AppState| {
+        let record = state.legal().get_patrol_deployment(deployment).unwrap();
+        let revisions = record.revisions();
+        for minute in 0..=10 {
+            let at = SimTime::from_minutes(minute);
+            let old = revisions
+                .iter()
+                .rev()
+                .find(|revision| revision.changed_at() <= at);
+            assert_eq!(
+                record
+                    .revision_at(at)
+                    .map(PatrolDeploymentRevision::version),
+                old.map(PatrolDeploymentRevision::version),
+                "patrol minute {minute}"
+            );
+            for revision in revisions {
+                let expected = revision.changed_at() == at
+                    || revision.changed_at() < at
+                        && revisions
+                            .iter()
+                            .filter(|later| later.version() > revision.version())
+                            .all(|later| later.changed_at() >= at);
+                assert_eq!(
+                    patrol_revision_is_candidate_at(record, revision, at),
+                    expected,
+                    "patrol revision {} at minute {minute}",
+                    revision.version()
+                );
+                assert_eq!(
+                    record
+                        .revision_by_version(revision.version())
+                        .map(PatrolDeploymentRevision::version),
+                    Some(revision.version())
+                );
+            }
+        }
+        assert!(record.revision_by_version(0).is_none());
+        assert!(record.revision_by_version(record.version() + 1).is_none());
+
+        // A point query per minute is deliberately independent of the interval segment
+        // builder: compare every short history window, including suspension boundaries.
+        let ambient = state
+            .world()
+            .get_neighborhood(neighborhood)
+            .expect("fixture neighborhood must persist")
+            .profile()
+            .institutions
+            .police_presence
+            .value();
+        for start in 0..=9_u64 {
+            for end in (start + 1)..=10_u64 {
+                let mut sampled_total = 0_u64;
+                let mut modeled = false;
+                for minute in start..end {
+                    let presence = resolve_patrol_presence_snapshot(
+                        &registry,
+                        state,
+                        neighborhood,
+                        SimTime::from_minutes(minute),
+                    )
+                    .presence();
+                    modeled |= presence.is_some();
+                    sampled_total += u64::from(presence.map_or(ambient, Rating::value));
+                }
+                let observed = resolve_patrol_presence_interval_snapshot(
+                    &registry,
+                    state,
+                    neighborhood,
+                    SimTime::from_minutes(start),
+                    SimTime::from_minutes(end),
+                )
+                .presence()
+                .map(Rating::value);
+                let expected = modeled.then(|| {
+                    u8::try_from((sampled_total + (end - start) / 2) / (end - start))
+                        .expect("bounded average fits rating")
+                });
+                assert_eq!(observed, expected, "patrol interval [{start},{end})");
+            }
+        }
+    };
+    check(&state);
+    validate_state(&state).expect("historical patrol state should remain valid");
+    validate_invariants(&state);
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("historical patrols should save"),
+    )
+    .expect("historical patrols should restore");
+    check(&restored);
+}

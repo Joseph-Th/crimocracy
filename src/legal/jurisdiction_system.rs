@@ -270,36 +270,32 @@ fn jurisdiction_revision_is_possible_at(
     revision: &JurisdictionRevision,
     at: crate::core::time::SimTime,
 ) -> bool {
+    // Jurisdiction revisions are consecutive versions in nondecreasing timestamp order.
+    // Only the immediately following revision can exclude this one from a historical minute;
+    // scanning the entire suffix for every police response adds work without new evidence.
     revision.changed_at() <= at
-        && record
-            .revisions()
-            .iter()
-            .filter(|later| later.version() > revision.version())
-            .all(|later| later.changed_at() >= at)
+        && usize::try_from(revision.version())
+            .ok()
+            .and_then(|next_index| record.revisions().get(next_index))
+            .is_none_or(|next| next.changed_at() >= at)
 }
 
 fn reachable_jurisdiction_revisions_at(
     record: &JurisdictionRecord,
     at: crate::core::time::SimTime,
 ) -> impl Iterator<Item = Option<&JurisdictionRevision>> {
-    let absent = record
-        .revisions()
-        .first()
-        .is_some_and(|first| first.changed_at() >= at)
-        .then_some(None);
-    let before = record
-        .revisions()
-        .iter()
-        .rev()
-        .find(|revision| revision.changed_at() < at)
-        .map(Some);
-    absent.into_iter().chain(before).chain(
-        record
-            .revisions()
-            .iter()
-            .filter(move |revision| revision.changed_at() == at)
-            .map(Some),
-    )
+    let revisions = record.revisions();
+    // Stable partition boundaries retain every same-minute revision as a possible routing
+    // snapshot. A revision strictly before the minute is the only prior candidate, and an
+    // absent jurisdiction is possible only up to its first establishment minute.
+    let first_at = revisions.partition_point(|revision| revision.changed_at() < at);
+    let first_after = revisions.partition_point(|revision| revision.changed_at() <= at);
+    let absent = (first_at == 0 && !revisions.is_empty()).then_some(None);
+    let before = first_at.checked_sub(1).map(|index| Some(&revisions[index]));
+    absent
+        .into_iter()
+        .chain(before)
+        .chain(revisions[first_at..first_after].iter().map(Some))
 }
 
 fn validate_jurisdiction_dependencies(

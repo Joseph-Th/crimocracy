@@ -260,11 +260,22 @@ impl PatrolDeploymentRecord {
         &self.revisions
     }
 
+    pub(crate) fn revision_by_version(&self, version: u32) -> Option<&PatrolDeploymentRevision> {
+        version
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| self.revisions.get(index))
+            .filter(|revision| revision.version() == version)
+    }
+
     pub(crate) fn revision_at(&self, at: SimTime) -> Option<&PatrolDeploymentRevision> {
-        self.revisions
-            .iter()
-            .rev()
-            .find(|revision| revision.changed_at() <= at)
+        // The last same-minute revision wins for current/past presence. Police-response
+        // history uses a separate reachability rule to preserve ambiguous cross-domain order.
+        self.revisions.get(
+            self.revisions
+                .partition_point(|revision| revision.changed_at() <= at)
+                .checked_sub(1)?,
+        )
     }
 }
 

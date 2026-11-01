@@ -457,12 +457,16 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot_with_percent(
         .collect();
     let mut boundaries = vec![start, end];
     for deployment in &deployments {
+        let revisions = deployment.revisions();
+        let first = revisions.partition_point(|revision| revision.changed_at() <= start);
+        let after = revisions.partition_point(|revision| revision.changed_at() < end);
+        // Only revisions strictly inside the window can introduce a new segment. Binary
+        // boundaries avoid walking years of earlier or later deployment history for a
+        // single operation's exposure interval.
         boundaries.extend(
-            deployment
-                .revisions()
+            revisions[first..after]
                 .iter()
-                .map(PatrolDeploymentRevision::changed_at)
-                .filter(|changed_at| *changed_at > start && *changed_at < end),
+                .map(PatrolDeploymentRevision::changed_at),
         );
     }
     boundaries.sort_unstable();
@@ -659,11 +663,12 @@ pub(crate) fn police_response_patrol_snapshot_is_possible(
             if deployment.id() != snapshot.deployment() {
                 return false;
             }
-            let candidate = deployment.revisions().iter().find(|revision| {
-                revision.version() == snapshot.version()
-                    && revision.status() == PatrolDeploymentStatus::Active
-                    && patrol_revision_is_candidate_at(deployment, revision, at)
-            });
+            let candidate = deployment
+                .revision_by_version(snapshot.version())
+                .filter(|revision| {
+                    revision.status() == PatrolDeploymentStatus::Active
+                        && patrol_revision_is_candidate_at(deployment, revision, at)
+                });
             candidate.is_some_and(|revision| {
                 patrol_revision_presence(revision, at, off_window_presence) == presence
             })
@@ -689,34 +694,40 @@ pub(crate) fn police_response_patrol_snapshot_reference_is_possible(
     if let Some(snapshot) = snapshot {
         return deployments.iter().any(|deployment| {
             deployment.id() == snapshot.deployment()
-                && deployment.revisions().iter().any(|revision| {
-                    revision.version() == snapshot.version()
-                        && revision.status() == PatrolDeploymentStatus::Active
-                        && patrol_revision_is_candidate_at(deployment, revision, at)
-                })
+                && deployment
+                    .revision_by_version(snapshot.version())
+                    .is_some_and(|revision| {
+                        revision.status() == PatrolDeploymentStatus::Active
+                            && patrol_revision_is_candidate_at(deployment, revision, at)
+                    })
         });
     }
 
     let active_before = deployments.iter().find_map(|deployment| {
         deployment
             .revisions()
-            .iter()
-            .rev()
-            .find(|revision| revision.changed_at() < at)
+            .get(
+                deployment
+                    .revisions()
+                    .partition_point(|revision| revision.changed_at() < at)
+                    .checked_sub(1)?,
+            )
             .filter(|revision| revision.status() == PatrolDeploymentStatus::Active)
             .map(|revision| (deployment, revision))
     });
     let Some((deployment, active_before)) = active_before else {
         return true;
     };
-    deployment.revisions().iter().any(|revision| {
-        revision.version() > active_before.version()
-            && revision.changed_at() == at
-            && matches!(
+    deployment.revisions()[usize::try_from(active_before.version())
+        .expect("patrol revision ordinal must fit usize")..]
+        .iter()
+        .take_while(|revision| revision.changed_at() == at)
+        .any(|revision| {
+            matches!(
                 revision.status(),
                 PatrolDeploymentStatus::Suspended | PatrolDeploymentStatus::Retired
             )
-    })
+        })
 }
 
 fn patrol_revision_presence(
@@ -743,11 +754,10 @@ fn patrol_revision_is_candidate_at(
 ) -> bool {
     revision.changed_at() == at
         || revision.changed_at() < at
-            && deployment
-                .revisions()
-                .iter()
-                .filter(|later| later.version() > revision.version())
-                .all(|later| later.changed_at() >= at)
+            && usize::try_from(revision.version())
+                .ok()
+                .and_then(|next| deployment.revisions().get(next))
+                .is_none_or(|later| later.changed_at() >= at)
 }
 
 fn reduced_off_window_presence(ambient: Rating, off_window_patrol_presence_percent: u8) -> Rating {
