@@ -1,8 +1,24 @@
-//! Shared financial arithmetic used by enterprise and business economy cycles.
+//! Finance-owned arithmetic, payment ordering, and reporting helpers.
 
 use crate::core::id::FinancialAccountId;
 use crate::core::time::SimTime;
-use crate::finance::{LedgerPosting, Money};
+use crate::finance::{AccountKind, LedgerPosting, Money};
+
+/// Canonical deterministic spending order for unrestricted organizational expenses. Consume
+/// dirty street cash, then concealed reserves, then clean money; among equivalent money
+/// states, draw the largest available pool first to reduce ledger postings. Persistent account
+/// ID breaks only exact ties. Payroll and counsel-retainer planning must share this ordering.
+pub(crate) fn sort_unrestricted_payment_sources(
+    sources: &mut [(AccountKind, Money, FinancialAccountId)],
+) {
+    sources.sort_unstable_by(|left, right| {
+        left.0
+            .unrestricted_spending_priority()
+            .cmp(&right.0.unrestricted_spending_priority())
+            .then(right.1.cmp(&left.1))
+            .then(left.2.cmp(&right.2))
+    });
+}
 
 /// Weighted contribution of a rating point value without overflow.
 pub(crate) fn weighted_rating(per_point: Money, rating: u8) -> Option<Money> {
@@ -126,8 +142,31 @@ pub(crate) fn count_trailing_losing_cycles<T: Copy>(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_basis_point_multiplier, describe_gross_variance, format_money_cents};
-    use crate::finance::Money;
+    use super::{
+        apply_basis_point_multiplier, describe_gross_variance, format_money_cents,
+        sort_unrestricted_payment_sources,
+    };
+    use crate::core::id::FinancialAccountId;
+    use crate::finance::{AccountKind, Money};
+
+    #[test]
+    fn unrestricted_funding_order_prefers_money_state_then_liquidity_then_account_id() {
+        let money = Money::from_cents;
+        let id = FinancialAccountId::from_raw;
+        let mut sources = [
+            (AccountKind::AccountedFunds, money(9_000), id(2)),
+            (AccountKind::ConcealedCash, money(1_000), id(3)),
+            (AccountKind::StreetCash, money(1_000), id(4)),
+            (AccountKind::StreetCash, money(2_000), id(5)),
+            (AccountKind::StreetCash, money(1_000), id(1)),
+            (AccountKind::LegitimateOperating, money(9_000), id(6)),
+        ];
+        sort_unrestricted_payment_sources(&mut sources);
+        assert_eq!(
+            sources.map(|(_, _, account)| account),
+            [id(5), id(1), id(4), id(3), id(2), id(6)]
+        );
+    }
 
     #[test]
     fn basis_point_multiplier_uses_one_symmetric_money_rounding_rule() {

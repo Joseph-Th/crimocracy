@@ -545,23 +545,14 @@ fn find_funding_accounts(
         .filter_map(|account| {
             let spendable = account.spendable_balance();
             (spendable > Money::ZERO && payroll_account_has_posting_headroom(account.version()))
-                .then_some((
-                    account.kind().unrestricted_spending_priority(),
-                    spendable,
-                    account.id(),
-                ))
+                .then_some((account.kind(), spendable, account.id()))
         })
         .collect();
     // Wages are an informal carrying cost. Spend exposed street cash first, then hidden dirty
     // reserves, before consuming clean liquidity that can finance legitimate purchases and
     // delegated budgets. Within an equal semantic class, use the largest balance first to keep
     // ordinary payroll transactions compact; account ID is only the deterministic final tie.
-    accounts.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then(right.1.cmp(&left.1))
-            .then(left.2.cmp(&right.2))
-    });
+    crate::finance::helpers::sort_unrestricted_payment_sources(&mut accounts);
     accounts.into_iter().map(|(_, _, id)| id).collect()
 }
 

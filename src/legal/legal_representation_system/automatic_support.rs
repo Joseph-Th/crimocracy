@@ -81,11 +81,11 @@ pub(crate) fn apply_automatic_legal_support(
     registry: &crate::registry::Registry,
     state: &mut AppState,
 ) -> Result<AutomaticLegalSupportOutcome, LegalRepresentationError> {
-    // Automatic support concludes when the matter it covers does: a representation this pass
-    // retained for a detainee who has left custody ends with `MatterConcluded`, so concluded
-    // matters stop blocking contact termination. A contact may carry several concurrent
-    // matters — counsel serves multiple clients — but it cannot be terminated while any of
-    // them is still active.
+    // Automatic support concludes only when neither custody nor prosecution remains active.
+    // A custody release does not dispose of the originating criminal matter: the same arrest
+    // may still have a reviewing prosecution case, and automatically dismissing its defense
+    // counsel at that moment would abandon an ongoing case. Once the last such review closes,
+    // `MatterConcluded` frees the contact. A contact may carry several concurrent matters.
     // Explicitly commanded retentions are never swept here — their matter is leadership's
     // to end, not governance's.
     //
@@ -153,7 +153,11 @@ fn validate_inactive_automatic_representation_endings(
             .legal
             .get_arrest(record.arrest())
             .ok_or(LegalRepresentationError::MissingArrest(record.arrest()))?;
-        if arrest.status() != ArrestStatus::Detained {
+        if arrest.status() != ArrestStatus::Detained
+            && !state
+                .legal
+                .has_open_prosecution_case_for_arrest(record.arrest())
+        {
             concluded.push(record.id());
         }
     }
@@ -459,19 +463,10 @@ impl AutomaticSupportFinanceProjection {
                 .ok_or(LegalRepresentationError::MissingAccount(*account_id))?;
             let spendable = self.spendable_balance(account);
             if spendable > Money::ZERO {
-                payers.push((
-                    account.kind().unrestricted_spending_priority(),
-                    spendable,
-                    account.id(),
-                ));
+                payers.push((account.kind(), spendable, account.id()));
             }
         }
-        payers.sort_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then(right.1.cmp(&left.1))
-                .then(left.2.cmp(&right.2))
-        });
+        crate::finance::helpers::sort_unrestricted_payment_sources(&mut payers);
 
         let mut remaining = fee;
         for (_, spendable, account) in payers {

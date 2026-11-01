@@ -184,7 +184,7 @@ pub struct LegalRepresentationDraft {
 pub(in crate::legal) struct LegalRepresentationIndexes {
     pub(in crate::legal) active_by_arrest: BTreeMap<ArrestId, LegalRepresentationId>,
     pub(in crate::legal) active_by_contact: BTreeMap<ContactId, BTreeSet<LegalRepresentationId>>,
-    /// Active automatic-policy retentions, so the per-tick custody sweep concludes only its
-    /// own matters without scanning the full representation history, which grows forever.
+    /// Active automatic-policy retentions, so the per-tick legal-matter sweep concludes only
+    /// its own custody/prosecution matters without scanning the full representation history.
     pub(in crate::legal) active_automatic_policy: BTreeSet<LegalRepresentationId>,
 }

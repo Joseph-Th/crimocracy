@@ -16,9 +16,12 @@ use crate::finance::{FinancialAccountDraft, LedgerPosting};
 use crate::intelligence::{InformationSignal, LegalPersonStatusSignal};
 use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+use crate::legal::prosecution_system::{
+    validate_decline_prosecution_case, validate_open_prosecution_case,
+};
 use crate::legal::{
     Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
-    InvestigationDraft,
+    InvestigationDraft, ProsecutionCaseDraft,
 };
 use crate::registry::Registry;
 use crate::social::relationship_system::validate_set_relationship;
@@ -2414,6 +2417,119 @@ fn automatic_policy_concludes_representation_after_release_and_frees_the_contact
         .commit(&mut fixture.state)
         .expect("contact termination should commit");
     validate_state(&fixture.state).expect("concluded representation state should validate");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn automatic_counsel_survives_release_while_prosecution_review_remains_open() {
+    let mut fixture = fixture();
+    let prosecutor_office = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "North Ward Prosecutor".to_owned(),
+            kind: OrganizationKind::Prosecutor,
+        },
+    )
+    .expect("prosecutor office should validate");
+    let prosecutor = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Reviewing Prosecutor".to_owned(),
+            organization: Some(prosecutor_office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::LegalKnowledge, rating(80))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("prosecutor should validate");
+    let evidence = fixture
+        .state
+        .legal()
+        .get_arrest(fixture.arrest)
+        .expect("fixture arrest must persist")
+        .evidence()
+        .clone();
+    let case = validate_open_prosecution_case(
+        &fixture.state,
+        ProsecutionCaseDraft {
+            arrest: fixture.arrest,
+            prosecutor_office,
+            prosecutor,
+            evidence,
+        },
+    )
+    .expect("custody case should be referrable")
+    .commit(&mut fixture.state)
+    .expect("prosecution case should open");
+
+    let mut draft = representation_draft(&fixture, 7_500, None);
+    draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
+    let representation = validate_retain_legal_representation(&fixture.state, draft)
+        .expect("automatic defense should validate")
+        .commit(&mut fixture.state)
+        .expect("automatic defense should persist");
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("defendant should be releasable before prosecution disposition")
+        .commit(&mut fixture.state)
+        .expect("custody release should commit");
+
+    let envelope =
+        build_save(&fixture.registry, &fixture.state).expect("open legal matter should save");
+    fixture.state =
+        restore_save(&fixture.registry, envelope).expect("open legal matter should restore");
+    assert!(
+        fixture
+            .state
+            .legal()
+            .has_open_prosecution_case_for_arrest(fixture.arrest)
+    );
+    let still_reviewing = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(still_reviewing.concluded_automatic_legal_support, 0);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .active_representation_for_arrest(fixture.arrest)
+            .map(|record| record.id()),
+        Some(representation),
+        "releasing the defendant must not dismiss counsel from an open prosecution"
+    );
+    assert_eq!(
+        validate_terminate_contact(&fixture.state, fixture.contact)
+            .expect_err("active defense must continue to reserve its counsel"),
+        ContactError::ActiveLegalRepresentation {
+            contact: fixture.contact,
+            representation,
+        }
+    );
+
+    validate_decline_prosecution_case(&fixture.state, case)
+        .expect("prosecutor should be able to dispose of the open matter")
+        .commit(&mut fixture.state)
+        .expect("prosecution disposition should commit");
+    assert!(
+        !fixture
+            .state
+            .legal()
+            .has_open_prosecution_case_for_arrest(fixture.arrest)
+    );
+    let concluded = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(concluded.concluded_automatic_legal_support, 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_legal_representation(representation)
+            .expect("concluded defense must remain historical")
+            .end_reason(),
+        Some(LegalRepresentationEndReason::MatterConcluded)
+    );
+    validate_terminate_contact(&fixture.state, fixture.contact)
+        .expect("completed custody and prosecution must release the counsel contact");
+    validate_state(&fixture.state).expect("completed prosecution and defense must validate");
     validate_invariants(&fixture.state);
 }
 

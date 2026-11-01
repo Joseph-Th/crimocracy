@@ -121,7 +121,8 @@ determinism and harness contracts.
 10  run_investigation_work_phase           resolve due work (RNG: investigation stream)
 11  apply_autonomous_evidence_arrests      active LawEnforcement cases: authored independent-evidence threshold → custody + responsibility preemption
 12  apply_autonomous_prosecution_staffing  refill prosecution seats released by custody
-13  apply_automatic_legal_support          conclude boundary releases; retain before a due detainee decision
+13  apply_automatic_legal_support          conclude only after custody and every open prosecution review end;
+                                                retain before a due detainee decision
 14  apply_detainee_informant_recruitment   one decision after a delay; active counsel lowers authored flip chance
 15  apply_informant_disclosures            holder-knowledge → handler cases
 16  apply_cold_case_decay                  originated cases only, authored inactivity window, no RNG

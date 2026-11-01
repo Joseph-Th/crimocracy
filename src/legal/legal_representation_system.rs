@@ -571,11 +571,7 @@ fn validate_retainer_payment(
         available_cents =
             (available_cents + i128::from(spendable.cents())).min(i128::from(draft.fee.cents()));
         if spendable > Money::ZERO {
-            payers.push((
-                payer.kind().unrestricted_spending_priority(),
-                spendable,
-                payer.id(),
-            ));
+            payers.push((payer.kind(), spendable, payer.id()));
         }
     }
     if available_cents < i128::from(draft.fee.cents()) {
@@ -600,12 +596,7 @@ fn validate_retainer_payment(
     // Any-liquid retainer funding follows the finance owner's shared money-state semantics
     // instead of account creation order. Within one money-state class, consume the largest pool
     // first to keep the balanced transaction compact; account ID is only the final stable tie.
-    payers.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then(right.1.cmp(&left.1))
-            .then(left.2.cmp(&right.2))
-    });
+    crate::finance::helpers::sort_unrestricted_payment_sources(&mut payers);
     let mut postings = Vec::with_capacity(draft.payer_accounts.len() + 1);
     let mut remaining = draft.fee;
     for (_, spendable, account_id) in payers {
