@@ -5,7 +5,6 @@ use super::{
     evidence_qualifies_for_custody, repeat_custody_without_new_evidence, validate_arrest,
     validate_custody_evidence_references,
 };
-use crate::core::entity::EntityRef;
 use crate::core::id::{ArrestId, CharacterId, EvidenceId, InvestigationId, OperationId};
 use crate::core::state::AppState;
 use crate::legal::{ArrestDraft, InvestigationStatus};
@@ -22,15 +21,14 @@ struct AutonomousArrestCandidate {
     strong_sources: usize,
 }
 
-fn resolve_autonomous_arrest_candidate(
+/// A single case-level evidence pass supplies all character subjects. A multi-subject case
+/// must not rescan its complete evidence history for every suspect on every canonical minute.
+/// Corroboration and citation ranking are still tracked separately for each character.
+fn resolve_autonomous_arrest_candidates(
     registry: &Registry,
     state: &AppState,
     investigation_id: InvestigationId,
-    character: CharacterId,
-) -> Result<Option<AutonomousArrestCandidate>, ArrestError> {
-    if state.legal.active_arrest_for_character(character).is_some() {
-        return Ok(None);
-    }
+) -> Result<Vec<AutonomousArrestCandidate>, ArrestError> {
     let investigation = state
         .legal
         .get_investigation(investigation_id)
@@ -39,15 +37,45 @@ fn resolve_autonomous_arrest_candidate(
         return Err(ArrestError::InactiveInvestigation(investigation_id));
     }
     let owner = investigation.owner();
-    let mut assessment = CustodyEvidenceAssessment::default();
-    let mut citations: BTreeMap<CustodyCorroborationSource, EvidenceId> = BTreeMap::new();
+    let mut by_character: BTreeMap<
+        CharacterId,
+        (
+            CustodyEvidenceAssessment,
+            BTreeMap<CustodyCorroborationSource, EvidenceId>,
+        ),
+    > = investigation
+        .subjects()
+        .iter()
+        .filter_map(|subject| subject.as_character())
+        .filter(|character| {
+            state
+                .legal
+                .active_arrest_for_character(*character)
+                .is_none()
+        })
+        .map(|character| {
+            (
+                character,
+                (CustodyEvidenceAssessment::default(), BTreeMap::new()),
+            )
+        })
+        .collect();
+    if by_character.is_empty() {
+        return Ok(Vec::new());
+    }
     for evidence_id in investigation.evidence() {
         let evidence = state
             .legal
             .get_evidence(*evidence_id)
             .ok_or(ArrestError::MissingEvidence(*evidence_id))?;
         validate_custody_evidence_references(state, evidence)?;
-        if evidence.subject() != EntityRef::Character(character) || evidence.custodian() != owner {
+        let Some(character) = evidence.subject().as_character() else {
+            continue;
+        };
+        let Some((assessment, citations)) = by_character.get_mut(&character) else {
+            continue;
+        };
+        if evidence.custodian() != owner {
             continue;
         }
         let Some(source) = CustodyEvidenceAssessment::corroboration_source(state, evidence) else {
@@ -99,21 +127,27 @@ fn resolve_autonomous_arrest_candidate(
             })
             .or_insert(citation);
     }
-    if !assessment.meets(registry.legal().minimum_arrest_qualifying_evidence()) {
-        return Ok(None);
-    }
-    let evidence: BTreeSet<_> = citations.into_values().collect();
-    if repeat_custody_without_new_evidence(state, investigation_id, character, &evidence).is_some()
-    {
-        return Ok(None);
-    }
-    Ok(Some(AutonomousArrestCandidate {
-        investigation: investigation_id,
-        character,
-        evidence,
-        independent_sources: assessment.independent_qualifying(),
-        strong_sources: assessment.strong_independent(),
-    }))
+    Ok(by_character
+        .into_iter()
+        .filter_map(|(character, (assessment, citations))| {
+            if !assessment.meets(registry.legal().minimum_arrest_qualifying_evidence()) {
+                return None;
+            }
+            let evidence: BTreeSet<_> = citations.into_values().collect();
+            if repeat_custody_without_new_evidence(state, investigation_id, character, &evidence)
+                .is_some()
+            {
+                return None;
+            }
+            Some(AutonomousArrestCandidate {
+                investigation: investigation_id,
+                character,
+                evidence,
+                independent_sources: assessment.independent_qualifying(),
+                strong_sources: assessment.strong_independent(),
+            })
+        })
+        .collect())
 }
 
 /// Evidence bar for the autonomous conversion step: the authored number of independent
@@ -131,10 +165,9 @@ pub fn apply_autonomous_evidence_arrests(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<Vec<ArrestId>, ArrestError> {
-    // Single scan over active cases. Case provenance controls lifecycle and information flow,
-    // not whether equally strong evidence can produce custody; subject pairs append directly so
-    // a tick with no candidates allocates nothing beyond the one candidate buffer.
-    let mut case_subjects: Vec<(InvestigationId, CharacterId)> = Vec::new();
+    // Single scan over active cases. Each case's evidence is assessed just once for every
+    // currently undetained subject, instead of once per subject on every tick.
+    let mut candidates = Vec::new();
     for investigation in state.legal().active_investigations() {
         // Legal authorities can own investigative files, but only law-enforcement institutions
         // have custody authority. Skip non-police case owners here instead of turning a valid
@@ -146,24 +179,11 @@ pub fn apply_autonomous_evidence_arrests(
         if owner.kind() != OrganizationKind::LawEnforcement {
             continue;
         }
-        let investigation_id = investigation.id();
-        case_subjects.extend(investigation.subjects().iter().filter_map(|subject| {
-            subject
-                .as_character()
-                .map(|character| (investigation_id, character))
-        }));
-    }
-    if case_subjects.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut candidates = Vec::new();
-    for (investigation, character) in case_subjects {
-        if let Some(candidate) =
-            resolve_autonomous_arrest_candidate(registry, state, investigation, character)?
-        {
-            candidates.push(candidate);
-        }
+        candidates.extend(resolve_autonomous_arrest_candidates(
+            registry,
+            state,
+            investigation.id(),
+        )?);
     }
     // One character can be arrestable in several police files at once, but only one active
     // detention can own them. Prefer the case with more independent qualifying sources, then

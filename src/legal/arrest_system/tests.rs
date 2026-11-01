@@ -77,6 +77,85 @@ fn run_until_investigation_work_resolved(fixture: &mut Fixture, work: Investigat
 }
 
 #[test]
+fn autonomous_arrest_assesses_multiple_suspects_in_one_case_independently() {
+    let mut fixture = fixture();
+    let crew = fixture
+        .state
+        .world()
+        .get_character(fixture.suspect)
+        .expect("fixture suspect must persist")
+        .organization();
+    let other = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second independent custody subject".to_owned(),
+            organization: crew,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second subject should validate");
+    let joint_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Joint multi-subject case".to_owned(),
+            subjects: BTreeSet::from([
+                EntityRef::Character(fixture.suspect),
+                EntityRef::Character(other),
+            ]),
+        },
+    )
+    .expect("two-subject investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("two-subject investigation should commit");
+    for character in [fixture.suspect, other] {
+        for _ in 0..2 {
+            add_character_evidence(&mut fixture.state, fixture.police, joint_case, character);
+        }
+    }
+
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("both independently corroborated subjects must be arrestable");
+    assert_eq!(arrests.len(), 2);
+    let detained: BTreeSet<_> = arrests
+        .iter()
+        .map(|id| {
+            let record = fixture.state.legal().get_arrest(*id).unwrap();
+            assert_eq!(record.investigation(), joint_case);
+            assert_eq!(record.evidence().len(), 2);
+            for evidence in record.evidence() {
+                assert_eq!(
+                    fixture
+                        .state
+                        .legal()
+                        .get_evidence(*evidence)
+                        .unwrap()
+                        .subject(),
+                    EntityRef::Character(record.character()),
+                    "one suspect cannot borrow the other's corroboration"
+                );
+            }
+            record.character()
+        })
+        .collect();
+    assert_eq!(detained, BTreeSet::from([fixture.suspect, other]));
+
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("joint-custody simulation should save"),
+    )
+    .expect("joint custody must survive restore");
+    validate_state_against_registry(&fixture.registry, &restored)
+        .expect("joint-custody records must remain registry-consistent");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn autonomous_arrest_prefers_stronger_case_over_earlier_investigation_id() {
     let mut fixture = fixture();
     add_character_evidence(
