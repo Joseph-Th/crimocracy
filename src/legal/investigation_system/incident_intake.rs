@@ -8,6 +8,7 @@ use super::{
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{EvidenceId, IdKind, InvestigationId, OrganizationId};
 use crate::core::state::AppState;
+use crate::core::time::{SimTime, ensure_time_current};
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance_by};
 use crate::legal::{
     CaseWitnessRecord, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceRecord,
@@ -27,6 +28,7 @@ pub struct IncidentIntakeOutcome {
 
 pub struct ValidatedIncidentIntake {
     draft: IncidentIntakeDraft,
+    validated_at: SimTime,
     /// The suspended originated shelf (and its pinned version) this intake continues, found
     /// at validation time and re-checked at commit so a stale token cannot resurrect a shelf
     /// whose state moved on.
@@ -53,6 +55,9 @@ impl ValidatedIncidentIntake {
     /// callers use this before committing unrelated state, so a shelf that appeared, resumed,
     /// or changed after validation cannot make incident intake fail after another domain moved.
     pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), InvestigationError> {
+        ensure_time_current(state.now(), self.validated_at).map_err(|(expected, found)| {
+            InvestigationError::StaleIncidentTime { expected, found }
+        })?;
         validate_incident_intake_dependencies(state, &self.draft)?;
         let found = find_resumable_shelf(state, &self.draft);
         if found != self.resuming {
@@ -184,9 +189,9 @@ impl ValidatedIncidentIntake {
                     declared_subjects: subjects.clone(),
                     subjects,
                     evidence: Default::default(),
-                    opened_at: state.now(),
+                    opened_at: self.validated_at,
                     origin: self.draft.origin,
-                    last_activity_at: state.now(),
+                    last_activity_at: self.validated_at,
                     version: 1,
                 });
                 investigation
@@ -204,12 +209,12 @@ impl ValidatedIncidentIntake {
                     witness: witness.character,
                     subject: witness.subject,
                     cooperation: witness.cooperation,
-                    registered_at: state.now(),
+                    registered_at: self.validated_at,
                     statements: Default::default(),
                     interview_attempts: 0,
                     version: 1,
                 },
-                state.now(),
+                self.validated_at,
             );
             Some(id)
         } else {
@@ -242,7 +247,7 @@ impl ValidatedIncidentIntake {
                     },
                     discovered_at: evidence.discovered_at,
                 },
-                state.now(),
+                self.validated_at,
             );
             evidence_ids.push(id);
         }
@@ -261,7 +266,11 @@ pub fn validate_incident_intake(
 ) -> Result<ValidatedIncidentIntake, InvestigationError> {
     validate_incident_intake_dependencies(state, &draft)?;
     let resuming = find_resumable_shelf(state, &draft);
-    let validated = ValidatedIncidentIntake { draft, resuming };
+    let validated = ValidatedIncidentIntake {
+        draft,
+        resuming,
+        validated_at: state.now(),
+    };
     validated.ensure_current(state)?;
     Ok(validated)
 }

@@ -121,6 +121,8 @@ pub enum InvestigationError {
         expected: Option<(InvestigationId, u32)>,
         found: Option<(InvestigationId, u32)>,
     },
+    #[error("incident intake was validated at {expected:?}, but simulation time is now {found:?}")]
+    StaleIncidentTime { expected: SimTime, found: SimTime },
     #[error("entity {0:?} cannot originate a case")]
     InvalidCaseOrigin(EntityRef),
     #[error("forensic-analysis evidence must be produced by canonical investigation work")]

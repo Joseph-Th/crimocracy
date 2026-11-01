@@ -2287,6 +2287,12 @@ fn repeat_custody_forensic_reanalysis_of_old_source_is_not_new_independent_evide
     use crate::world::{CapabilityKind, Rating};
 
     let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
     let fingerprint = validate_add_evidence(
         &fixture.state,
         EvidenceDraft {
@@ -2296,7 +2302,7 @@ fn repeat_custody_forensic_reanalysis_of_old_source_is_not_new_independent_evide
             origin: None,
             kind: EvidenceKind::Fingerprint,
             strength: EvidenceStrength::Strong,
-            reliability: EvidenceReliability::Credible,
+            reliability: EvidenceReliability::Questionable,
             admissibility: Admissibility::Admissible,
             discovered_at: fixture.state.now(),
         },
@@ -2304,7 +2310,9 @@ fn repeat_custody_forensic_reanalysis_of_old_source_is_not_new_independent_evide
     .expect("reviewable evidence should validate")
     .commit(&mut fixture.state)
     .expect("fingerprint should persist");
-    let original_evidence = BTreeSet::from([fixture.evidence, fingerprint]);
+    // This questionable source is cited in the first arrest but does not contribute to
+    // custody corroboration until the later forensic review improves its reliability.
+    let original_evidence = BTreeSet::from([fixture.evidence, corroborating, fingerprint]);
     let first = validate_arrest(
         &fixture.registry,
         &fixture.state,
@@ -2356,6 +2364,14 @@ fn repeat_custody_forensic_reanalysis_of_old_source_is_not_new_independent_evide
     .commit(&mut fixture.state)
     .expect("forensic review should schedule");
     run_until_investigation_work_resolved(&mut fixture, review);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_arrest_for_character(fixture.suspect)
+            .is_none(),
+        "upgrading a previously cited questionable exhibit is not an independent new source"
+    );
     let derived = fixture
         .state
         .legal()
@@ -2377,7 +2393,7 @@ fn repeat_custody_forensic_reanalysis_of_old_source_is_not_new_independent_evide
                 .and_then(|arrest| arrest.released_at())
                 .expect("initial custody should remain released")
     );
-    let recycled = BTreeSet::from([fixture.evidence, derived]);
+    let recycled = BTreeSet::from([fixture.evidence, corroborating, derived]);
     assert!(matches!(
         validate_arrest(
             &fixture.registry,

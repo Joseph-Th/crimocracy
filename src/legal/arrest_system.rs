@@ -583,15 +583,14 @@ pub(crate) fn has_fresh_independent_custody_evidence(
     evidence: &BTreeSet<EvidenceId>,
     released_at: SimTime,
 ) -> bool {
-    // Renewed custody needs a fresh qualifying *independent* source. Direct drafts may cite
-    // additional weak/questionable records alongside the old custody-grade set, but such
-    // records cannot re-arm detention. A new forensic derivative of previously cited evidence
-    // is likewise the same fact, even if its reliability improved after release.
+    // Renewed custody needs a fresh qualifying *independent* source. A source that the first
+    // arrest explicitly cited remains previously known even if the original exhibit was weak
+    // or questionable and only its new forensic derivative now satisfies custody quality.
     let prior_sources: BTreeSet<_> = prior
         .evidence()
         .iter()
         .filter_map(|id| state.legal.get_evidence(*id))
-        .filter_map(|record| CustodyEvidenceAssessment::corroboration_source(state, record))
+        .filter_map(|record| CustodyEvidenceAssessment::evidence_source(state, record))
         .collect();
     evidence.iter().any(|evidence| {
         !prior.evidence().contains(evidence)
@@ -639,6 +638,16 @@ impl CustodyEvidenceAssessment {
         if !evidence_qualifies_for_custody(evidence) {
             return None;
         }
+        Self::evidence_source(state, evidence)
+    }
+
+    /// Provenance is meaningful even when the original exhibit is too weak to count for
+    /// custody. Keep provenance resolution separate from the custody-quality filter so a
+    /// later stronger derivative cannot present that previously cited fact as independent.
+    fn evidence_source(
+        state: &AppState,
+        evidence: &crate::legal::EvidenceRecord,
+    ) -> Option<CustodyCorroborationSource> {
         let source_evidence = match evidence.derived_from().len() {
             0 => evidence,
             1 => {

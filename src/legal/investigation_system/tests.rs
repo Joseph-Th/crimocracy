@@ -97,6 +97,84 @@ fn rating(value: u8) -> Rating {
 }
 
 #[test]
+fn held_incident_intake_cannot_move_case_opening_after_its_validation_minute() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x1C1D_E071);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Late Case Intake Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let criminal = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Late Incident Target".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("criminal fixture should validate");
+    let draft = IncidentIntakeDraft {
+        owner: police,
+        title: "Minute-pinned incident".to_owned(),
+        subjects: BTreeSet::from([EntityRef::Organization(criminal)]),
+        evidence: vec![crate::legal::IncidentEvidenceDraft {
+            subject: EntityRef::Organization(criminal),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Unknown,
+            discovered_at: state.now(),
+        }],
+        origin: None,
+        witness: None,
+    };
+    let held = validate_incident_intake(&state, draft.clone())
+        .expect("initial incident should validate in its observation minute");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let before = bincode::serialize(&state).expect("state should serialize");
+    assert_eq!(
+        held.commit(&mut state)
+            .expect_err("held intake must reject a later-minute commit"),
+        InvestigationError::StaleIncidentTime {
+            expected: SimTime::ZERO,
+            found: SimTime::from_minutes(1),
+        }
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("state should serialize after rejection"),
+        before,
+        "stale intake must preserve the IDs, case index, and all authoritative records"
+    );
+    let current = validate_incident_intake(&state, draft.clone())
+        .expect("freshly validated intake can explicitly record older incident evidence")
+        .commit(&mut state)
+        .expect("fresh current-minute intake should commit");
+    assert!(!current.resumed_shelf);
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(current.investigation)
+            .expect("new intake should persist")
+            .opened_at(),
+        state.now()
+    );
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("current-minute intake should save"),
+    )
+    .expect("current-minute intake should restore");
+    validate_state_against_registry(&registry, &restored)
+        .expect("incident chronologies should remain valid after restore");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn resumed_incident_preserves_declared_subjects_across_origins() {
     let registry = build_registry();
     let mut state = AppState::new(0xA11C_E5E1);
@@ -1685,6 +1763,29 @@ fn incident_intake_resumes_a_matching_suspended_shelf_instead_of_opening_a_paral
             .len(),
         1,
         "stale intake cannot append evidence before rejecting"
+    );
+
+    // A separate held plan against an otherwise unchanged shelf must not move incident
+    // evidence into the next minute merely because its intake was committed later.
+    let held_resume =
+        validate_incident_intake(&state, make_draft("Held shelf exposure", state.now()))
+            .expect("unmodified originated shelf should permit new intake");
+    let validated_at = state.now();
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let before_held_resume = bincode::serialize(&state).expect("shelf state should serialize");
+    assert_eq!(
+        held_resume
+            .commit(&mut state)
+            .expect_err("cross-minute shelf continuation must be rejected"),
+        InvestigationError::StaleIncidentTime {
+            expected: validated_at,
+            found: state.now(),
+        }
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected shelf state should serialize"),
+        before_held_resume,
+        "held continuation must preserve evidence, case versions, derived indexes, and ID counters"
     );
 
     // The second exposure shares the shelf's subject matter, so it continues the existing
