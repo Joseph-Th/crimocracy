@@ -404,6 +404,9 @@ impl IntelligenceState {
                 .expect("information holder index must reference information")
         })
     }
+    pub(crate) fn information_count_for_holder(&self, holder: KnowledgeHolder) -> usize {
+        self.by_holder.get(&holder).map_or(0, BTreeSet::len)
+    }
     pub fn information_for_holder_by_topic(
         &self,
         holder: KnowledgeHolder,

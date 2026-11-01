@@ -594,19 +594,37 @@ pub(crate) fn apply_informant_disclosures(
         }
         for informant in state.legal.informants_for_handler(handler) {
             let holder = KnowledgeHolder::Character(informant.character());
-            for (subject, investigations) in &cases_by_subject {
-                for information in state
-                    .intelligence
-                    .information_for_holder_subject(holder, *subject)
-                {
-                    for investigation in investigations.iter().copied().filter(|case| {
-                        state
-                            .legal
-                            .informant_disclosure_for_case_information(*case, information.id())
-                            .is_none()
-                    }) {
-                        candidates.push((informant.id(), information.id(), investigation));
+            // Choose the smaller indexed side of the subject/fact join. Long-lived informants
+            // may accumulate far more historic knowledge than there are active case subjects;
+            // when cases are fewer, keep the holder+subject index probes instead of walking
+            // every held fact. When subjects are numerous, each fact is visited just once.
+            if cases_by_subject.len() <= state.intelligence.information_count_for_holder(holder) {
+                for (subject, investigations) in &cases_by_subject {
+                    for information in state
+                        .intelligence
+                        .information_for_holder_subject(holder, *subject)
+                    {
+                        append_pending_disclosures(
+                            state,
+                            &mut candidates,
+                            informant.id(),
+                            information.id(),
+                            investigations,
+                        );
                     }
+                }
+            } else {
+                for information in state.intelligence.information_for_holder(holder) {
+                    let Some(investigations) = cases_by_subject.get(&information.subject()) else {
+                        continue;
+                    };
+                    append_pending_disclosures(
+                        state,
+                        &mut candidates,
+                        informant.id(),
+                        information.id(),
+                        investigations,
+                    );
                 }
             }
         }
@@ -734,6 +752,24 @@ pub(crate) fn apply_informant_disclosures(
         disclosures.push(disclosure);
     }
     Ok(disclosures)
+}
+
+fn append_pending_disclosures(
+    state: &AppState,
+    candidates: &mut Vec<(InformantId, InformationId, InvestigationId)>,
+    informant: InformantId,
+    information: InformationId,
+    investigations: &BTreeSet<InvestigationId>,
+) {
+    for investigation in investigations.iter().copied() {
+        if state
+            .legal
+            .informant_disclosure_for_case_information(investigation, information)
+            .is_none()
+        {
+            candidates.push((informant, information, investigation));
+        }
+    }
 }
 
 #[cfg(test)]

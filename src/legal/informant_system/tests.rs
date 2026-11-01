@@ -439,6 +439,121 @@ fn autonomous_disclosure_matches_active_case_subjects_not_only_operation_origins
 }
 
 #[test]
+fn autonomous_disclosure_joins_sparse_held_facts_to_many_case_subjects() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant should validate")
+    .commit(&mut fixture.state)
+    .expect("informant should commit");
+    let relevant = record_personal_information(&mut fixture);
+    let mut extra_subjects = Vec::new();
+    for name in [
+        "Unrelated port office",
+        "Unrelated district office",
+        "Remote rival crew",
+    ] {
+        extra_subjects.push(
+            insert_organization(
+                &registry,
+                &mut fixture.state,
+                OrganizationDraft {
+                    name: name.to_owned(),
+                    kind: OrganizationKind::Criminal,
+                },
+            )
+            .expect("extra organization should validate"),
+        );
+    }
+    let unrelated = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(fixture.member),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Organization(extra_subjects[2]),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "The source personally observed a crew outside these case files.".to_owned(),
+        },
+    )
+    .expect("unrelated personal fact should validate")
+    .commit(&mut fixture.state)
+    .expect("unrelated personal fact should commit");
+    let second_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Multi-subject harbor inquiry".to_owned(),
+            subjects: BTreeSet::from([
+                EntityRef::Organization(fixture.criminal),
+                EntityRef::Organization(extra_subjects[0]),
+                EntityRef::Organization(extra_subjects[1]),
+            ]),
+        },
+    )
+    .expect("case containing several unrelated subjects should validate")
+    .commit(&mut fixture.state)
+    .expect("multi-subject case should commit");
+    let holder = KnowledgeHolder::Character(fixture.member);
+    assert_eq!(
+        fixture
+            .state
+            .intelligence()
+            .information_count_for_holder(holder),
+        2
+    );
+
+    let disclosures = apply_informant_disclosures(&mut fixture.state)
+        .expect("one source fact should reach every matching case in one pass");
+    assert_eq!(disclosures.len(), 2);
+    let attributed_cases: Vec<_> = disclosures
+        .iter()
+        .map(|id| {
+            let record = fixture
+                .state
+                .legal()
+                .informant_disclosures()
+                .find(|record| record.id() == *id)
+                .expect("candidate disclosure must persist");
+            assert_eq!(record.informant(), informant);
+            assert_eq!(record.source_information(), relevant);
+            record.investigation()
+        })
+        .collect();
+    assert_eq!(attributed_cases, vec![fixture.investigation, second_case]);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .informant_disclosures()
+            .all(|record| record.source_information() != unrelated),
+        "personally held facts unrelated to every case must not turn into evidence"
+    );
+
+    let mut restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("multi-case disclosures should save"),
+    )
+    .expect("multi-case disclosures should restore");
+    assert!(
+        apply_informant_disclosures(&mut restored)
+            .expect("restored disclosure indexes should prevent repeated reports")
+            .is_empty()
+    );
+    validate_state(&restored).expect("multi-subject disclosure state should remain valid");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn autonomous_disclosure_reaches_each_matching_case_in_one_pass() {
     let registry = build_registry();
     let mut fixture = fixture();
