@@ -8,7 +8,9 @@ use crate::core::invariants::{validate_invariants, validate_state};
 use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
 use crate::economy::BusinessEconomyDraft;
+use crate::economy::business_economy_system::find_due_businesses;
 use crate::economy::business_economy_system::validate_establish_business_economy;
+use crate::enterprises::enterprise_execution::find_due_enterprises;
 use crate::enterprises::enterprise_execution::validate_establish_enterprise;
 use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
 use crate::finance::finance_system::insert_account;
@@ -17,13 +19,25 @@ use crate::legal::JurisdictionDraft;
 use crate::legal::investigation_system::{
     validate_add_evidence, validate_assign_investigator, validate_open_investigation,
 };
-use crate::legal::investigation_work_execution::validate_schedule_investigation_work;
+use crate::legal::investigation_work_execution::{
+    InvestigationWorkRandomness, decide_investigation_work_resolution,
+    find_due_scheduled_investigation_work, validate_investigation_work_resolution_plan,
+    validate_schedule_investigation_work,
+};
 use crate::legal::jurisdiction_system::validate_set_jurisdiction;
 use crate::legal::{
     Admissibility, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
     InvestigationDraft, InvestigationWorkDraft, InvestigationWorkFocus, InvestigationWorkKind,
 };
+use crate::operations::operation_execution::{
+    OperationResolutionRandomness, decide_operation_resolution, find_due_in_progress_operations,
+    validate_operation_resolution_plan,
+};
+use crate::operations::operation_scheduling::{
+    find_due_authorized_operations, find_due_operations_with_missed_deadlines,
+};
 use crate::operations::operation_system::validate_authorize_operation;
+use crate::operations::operation_system::{OperationTransition, apply_transition};
 use crate::operations::{
     OperationApproach, OperationConstraint, OperationContingency, OperationDraft, OperationKind,
     OperationObjective, OperationStatus, RoleKind,
@@ -475,6 +489,63 @@ fn tick_outcome_surfaces_reputation_only_decay_mutation() {
     assert!(outcome.autonomous_enterprises.is_empty());
     assert!(outcome.executive_brief.is_none());
     validate_state(&state).expect("reputation-only tick should remain structurally valid");
+}
+
+#[test]
+fn quiet_nonboundary_reputation_phase_preserves_state_before_later_decay() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xDEC4_1934);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Quiet Reputation Clock".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("reputation fixture organization should validate");
+    apply_reputation_delta(
+        &registry,
+        &mut state,
+        organization,
+        AudienceKind::Police,
+        10,
+    )
+    .expect("fixture impression should move");
+    state.advance_clock(SimDuration::from_minutes(100));
+    let before = bincode::serialize(&state).expect("quiet state should serialize");
+
+    assert_eq!(
+        apply_reputation_phase(&registry, &mut state, &[], &[])
+            .expect("quiet reputation phase should be infallible"),
+        0
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("quiet state should remain serializable"),
+        before,
+        "a non-boundary minute without consequences must preserve the full authoritative state"
+    );
+
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(crate::core::time::DAY_MINUTES - 100)
+            .expect("remaining daily interval must fit the clock duration"),
+    ));
+    assert_eq!(
+        apply_reputation_phase(&registry, &mut state, &[], &[])
+            .expect("day-boundary reputation decay should remain active"),
+        1,
+        "the quiet-minute optimization must not disable scheduled decay"
+    );
+    assert_eq!(
+        resolve_score(
+            &registry,
+            state.reputation(),
+            organization,
+            AudienceKind::Police,
+        ),
+        registry.reputation().baseline() + 10 - registry.reputation().daily_decay_step()
+    );
+    validate_invariants(&state);
 }
 
 #[test]

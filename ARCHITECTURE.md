@@ -139,7 +139,10 @@ determinism and harness contracts.
     ──► validate_invariants               structural + registry re-derivation
 ```
 
-New autonomous work must slot explicitly here with a rationale comment.
+New autonomous work must slot explicitly here with a rationale comment. The reputation
+phase does not build a standing-score projection on quiet non-day-boundary minutes; the
+canonical reputation owner still applies age-gated decay at each due day boundary and every
+same-minute operation or racket consequence is still preflighted before mutation.
 
 Due authorized work is planned as a complete ordered cohort. Every needed pre-start abort
 must pass its owner's validation and the combined artifact-ID budget before any abort commits;
@@ -152,11 +155,16 @@ their required artifacts. A blocked operation never bypasses its abort by beginn
 
 Every `src/` subsystem owns its records and canonical mutation paths. Invariants
 are validated by `src/core/invariants/`. The top-level tick is
-`core::simulation::run_tick`, driven from `AppState` and `Registry`.
+`core::simulation::run_tick`, driven from `AppState` and `Registry`. Its root file owns
+phase order, reputation, executive synthesis, and domain RNG helpers;
+`core/simulation/operations_phase.rs` owns due operation admission/cleanup/resolution and
+`core/simulation/scheduled_phases.rs` owns due investigation-work, business, and enterprise
+cycle orchestration. Those children compose canonical domain mutations rather than creating
+competing state owners.
 
 | Module | Owns | Canonical mutation | Key file |
 |---|---|---|---|
-| `core/` | `SimTime`/`SimDuration`, typed persistent IDs (`IdCounters`), entity refs (`EntityRef`), attention classes, `AppState`, persistence envelope, tick pipeline, invariant validation | `core::simulation` runs the tick; `core::state` owns generated state; `core::invariants::validate_state` | `src/core/state.rs`, `src/core/simulation.rs`, `src/core/invariants/mod.rs` |
+| `core/` | `SimTime`/`SimDuration`, typed persistent IDs (`IdCounters`), entity refs (`EntityRef`), attention classes, `AppState`, persistence envelope, tick pipeline, invariant validation | `core::simulation` runs the tick; `core::state` owns generated state; `core::invariants::validate_state` | `src/core/state.rs`, `src/core/simulation.rs`, `src/core/simulation/operations_phase.rs`, `src/core/simulation/scheduled_phases.rs`, `src/core/invariants/mod.rs` |
 | `registry/` | Immutable authored definitions and validated lookups, including one shared information reliability/specificity quality mapping consumed across domains | `RegistryBuilder` owns registration/completeness; focused authoring validators check domain contracts before insertion; read-only after `content::build_registry` | `src/registry/mod.rs`, `src/registry/builder.rs`, `src/registry/operation_validation.rs` |
 | `src/content/` | Code-owned authored definitions for the registry | `build_registry` | `src/content/mod.rs` owns `CURRENT_CONTENT_REVISION` |
 | `world/` | Organizations, characters, neighborhoods, businesses, institutional profiles, designation, versioned per-policy organization storage, daily payroll; read-only territory-influence aggregation | `world_system` (insertion, designation, world-owned versioned policy write used by governance orchestration); `payroll_execution` (daily wage pass through canonical ledger, relationship, and report paths); `territory_influence` (read-only district summaries, never an omniscience feed) | `src/world/world_system.rs`, `src/world/payroll_execution.rs` |
