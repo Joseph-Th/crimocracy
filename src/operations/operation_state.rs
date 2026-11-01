@@ -66,6 +66,11 @@ pub struct OperationState {
     #[serde(skip)]
     successful_takes_by_business_kind:
         BTreeMap<(BusinessId, OperationKind), BTreeSet<(SimTime, OperationId)>>,
+    /// Completed viable takes including zero-valued hauls. Only these constrain the
+    /// canonical same-minute operation-ID order for resolution histories.
+    #[serde(skip)]
+    viable_takes_by_business_kind:
+        BTreeMap<(BusinessId, OperationKind), BTreeSet<(SimTime, OperationId)>>,
     /// Completed operations that produced held property or cash, keyed by organization and
     /// resolution chronology. Financial reporting uses this sparse projection instead of
     /// rescanning every operation the organization has ever authored.
@@ -101,6 +106,7 @@ impl OperationState {
         self.in_progress_by_resolution_due.clear();
         self.active_by_completion_deadline.clear();
         self.successful_takes_by_business_kind.clear();
+        self.viable_takes_by_business_kind.clear();
         self.financial_resolutions_by_organization.clear();
         self.property_dispositions_by_organization.clear();
         self.cash_dispositions_by_organization.clear();
@@ -150,6 +156,16 @@ impl OperationState {
             if let Some(resolution) = record.resolution() {
                 for information in resolution.discovered_information() {
                     self.by_discovered_information.insert(*information, id);
+                }
+                if record.status() == OperationStatus::Completed
+                    && resolution.objective_outcome()
+                        != crate::operations::OperationObjectiveOutcome::Failed
+                    && let Some(business) = record.objective().taken_business()
+                {
+                    self.viable_takes_by_business_kind
+                        .entry((business, record.kind()))
+                        .or_default()
+                        .insert((resolution.resolved_at(), id));
                 }
                 if record.status() == OperationStatus::Completed
                     && resolution_has_positive_take(resolution)
@@ -666,6 +682,14 @@ impl OperationState {
         let resolution = record
             .resolution()
             .expect("just-attached resolution must be present");
+        if resolution.objective_outcome() != crate::operations::OperationObjectiveOutcome::Failed
+            && let Some(business) = record.objective().taken_business()
+        {
+            self.viable_takes_by_business_kind
+                .entry((business, record.kind()))
+                .or_default()
+                .insert((resolution.resolved_at(), id));
+        }
         if resolution_has_positive_take(resolution)
             && let Some(business) = record.objective().taken_business()
         {
@@ -743,9 +767,9 @@ impl OperationState {
     }
 
     /// A higher-ID take already completed at this instant prevents a lower-ID take from
-    /// resolving now: re-derivation orders equal timestamps by operation ID. Check viable
-    /// empty hauls too, because an earlier positive haul would alter their depletion narrative
-    /// even though only positive hauls enter the recency-penalty index.
+    /// resolving now: historical re-derivation orders equal timestamps by operation ID.
+    /// The target/kind index includes viable empty hauls and avoids walking unrelated
+    /// completed operations in long-lived campaigns.
     pub(crate) fn has_later_same_minute_take(
         &self,
         business: BusinessId,
@@ -753,27 +777,16 @@ impl OperationState {
         at: SimTime,
         current_operation: OperationId,
     ) -> bool {
-        self.by_status
-            .get(&OperationStatus::Completed)
-            .is_some_and(|completed| {
-                completed
+        self.viable_takes_by_business_kind
+            .get(&(business, kind))
+            .is_some_and(|takes| {
+                takes
                     .range((
-                        std::ops::Bound::Excluded(current_operation),
-                        std::ops::Bound::Unbounded,
+                        std::ops::Bound::Excluded((at, current_operation)),
+                        std::ops::Bound::Included((at, OperationId::from_raw(u32::MAX))),
                     ))
-                    .any(|id| {
-                        let record = self
-                            .records
-                            .get(id)
-                            .expect("completed index must have a record");
-                        record.kind() == kind
-                            && record.objective().taken_business() == Some(business)
-                            && record.resolution().is_some_and(|resolution| {
-                                resolution.resolved_at() == at
-                                    && resolution.objective_outcome()
-                                        != crate::operations::OperationObjectiveOutcome::Failed
-                            })
-                    })
+                    .next()
+                    .is_some()
             })
     }
 

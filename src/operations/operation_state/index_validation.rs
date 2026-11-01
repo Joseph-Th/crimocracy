@@ -130,6 +130,23 @@ impl OperationState {
         }
         expected.takes += usize::from(should_index);
 
+        // The ordering index includes zero-valued but viable takes, unlike the
+        // positive-haul index. Both must be exact reconstructions of committed records.
+        let should_index_viable = taken_business.is_some()
+            && record.status() == OperationStatus::Completed
+            && resolution.objective_outcome()
+                != crate::operations::OperationObjectiveOutcome::Failed;
+        let indexed_viable = taken_business
+            .and_then(|business| {
+                self.viable_takes_by_business_kind
+                    .get(&(business, record.kind()))
+            })
+            .is_some_and(|takes| takes.contains(&(resolution.resolved_at(), record.id())));
+        if indexed_viable != should_index_viable {
+            return false;
+        }
+        expected.viable_takes += usize::from(should_index_viable);
+
         let financial = record.status() == OperationStatus::Completed
             && resolution_has_positive_take(resolution);
         let organization = record.responsible_organization();
@@ -216,6 +233,14 @@ impl OperationState {
         if indexed_takes != expected.takes {
             return false;
         }
+        let indexed_viable_takes: usize = self
+            .viable_takes_by_business_kind
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        if indexed_viable_takes != expected.viable_takes {
+            return false;
+        }
         let indexed_financial_resolutions: usize = self
             .financial_resolutions_by_organization
             .values()
@@ -286,6 +311,7 @@ struct OperationIndexExpectations {
     in_progress: usize,
     active_deadlines: usize,
     takes: usize,
+    viable_takes: usize,
     discovered_links: usize,
     financial_resolutions: usize,
     property_dispositions: usize,

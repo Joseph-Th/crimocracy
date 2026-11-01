@@ -1049,13 +1049,59 @@ fn fully_depleted_target_downgrades_achieved_take_to_partial() {
             .depleted_by_recent_take
     );
     assert!(emptied.narrative.summary.contains("lighter than usual"));
+    let empty_operation = emptied.snapshot.operation;
+    let empty_at = emptied.snapshot.resolved_at;
     validate_operation_resolution_plan(&registry, &state, emptied)
         .expect("emptied take should validate")
         .commit(&mut state)
         .expect("emptied take should commit");
+    assert!(
+        state.operations.has_later_same_minute_take(
+            business,
+            OperationKind::Burglary,
+            empty_at,
+            first,
+        ),
+        "a viable empty haul must remain in the ordering index, even without depletion value"
+    );
+    assert!(
+        !state.operations.has_later_same_minute_take(
+            business,
+            OperationKind::Burglary,
+            empty_at,
+            empty_operation,
+        ),
+        "the current operation may not count itself as a later same-minute take"
+    );
+    assert!(
+        !state.operations.has_later_same_minute_take(
+            business,
+            OperationKind::Robbery,
+            empty_at,
+            first,
+        ),
+        "a different kind must not share this venue's ordering channel"
+    );
     validate_state_against_registry(&registry, &state)
         .expect("emptied take history should remain registry-valid");
     validate_invariants(&state);
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("empty take ordering history must save"),
+    )
+    .expect("empty take ordering history must restore");
+    assert!(
+        restored.operations.has_later_same_minute_take(
+            business,
+            OperationKind::Burglary,
+            empty_at,
+            first,
+        ),
+        "restore must reconstruct the viable-take index from completed operation records"
+    );
+    validate_state_against_registry(&registry, &restored)
+        .expect("restored empty haul ordering must validate");
+    validate_invariants(&restored);
 }
 
 #[test]
