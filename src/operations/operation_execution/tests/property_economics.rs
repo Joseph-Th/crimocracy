@@ -7,6 +7,329 @@ use crate::economy::business_economy_system::{
 };
 use crate::reports::organization_financial_report::validate_organization_financial_report;
 
+fn concurrent_cash_take_fixture() -> (Registry, AppState, OperationId, OperationId) {
+    let (registry, mut state, organization, first) = make_operation_fixture();
+    let target = state
+        .operations()
+        .get_operation(first)
+        .expect("first authorized take must persist")
+        .objective()
+        .taken_business()
+        .expect("the intimidation fixture targets cash held at a business");
+    let second_leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Independent Collection Crew Leader".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(90).expect("capability rating must validate"),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second crew leader must validate");
+    let second = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Second concurrent collection".to_owned(),
+            kind: OperationKind::Intimidation,
+            responsible_organization: organization,
+            leader: second_leader,
+            objective: OperationObjective::ObtainCash {
+                target: EntityRef::Business(target),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(RoleKind::Coordinator, second_leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::from_minutes(1),
+        },
+    )
+    .expect("second independent crew should be authorized against the same venue")
+    .commit(&mut state)
+    .expect("second crew authorization must commit");
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![first, second]);
+    state.advance_clock(SimDuration::from_minutes(45));
+    (registry, state, first, second)
+}
+
+#[test]
+fn held_concurrent_cash_resolution_stales_after_first_take_without_mutation() {
+    let (registry, mut state, first, second) = concurrent_cash_take_fixture();
+    let first_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        first,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("first collection must resolve");
+    let second_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        second,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("second collection must resolve");
+    assert_eq!(
+        first_plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Achieved
+    );
+    assert_eq!(
+        second_plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Achieved
+    );
+    let original_second_value = second_plan
+        .outcome
+        .cash_proceeds_plan
+        .proceeds
+        .expect("the second collection must have proceeds")
+        .amount();
+    let first_token = validate_operation_resolution_plan(&registry, &state, first_plan)
+        .expect("first resolution must validate");
+    let second_token = validate_operation_resolution_plan(&registry, &state, second_plan)
+        .expect("both collections may be planned before either one commits");
+    first_token
+        .commit(&mut state)
+        .expect("first collection must persist");
+
+    let before = bincode::serialize(&state).expect("first settled take must serialize");
+    assert!(matches!(
+        second_token.commit(&mut state),
+        Err(OperationResolutionError::StaleCashProceedsContext { operation }) if operation == second
+    ));
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected take must serialize"),
+        before,
+        "stale take token must not consume IDs or partial settlement artifacts"
+    );
+
+    let replanned = decide_operation_resolution(
+        &registry,
+        &state,
+        second,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("second collection should be replannable against updated depletion");
+    assert!(
+        replanned
+            .outcome
+            .cash_proceeds_plan
+            .proceeds
+            .expect("second collection must still yield some cash")
+            .amount()
+            < original_second_value
+    );
+    validate_operation_resolution_plan(&registry, &state, replanned)
+        .expect("repriced second collection must validate")
+        .commit(&mut state)
+        .expect("repriced second collection must commit");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("two settled takes should save"),
+    )
+    .expect("two correctly depleted takes should restore");
+    validate_state_against_registry(&registry, &restored)
+        .expect("updated take proceeds must be independently reproducible");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn reverse_same_minute_take_order_cannot_rewrite_prior_depletion_history() {
+    let (registry, mut state, first, second) = concurrent_cash_take_fixture();
+    let first_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        first,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("lower-ID collection must resolve");
+    let second_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        second,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("higher-ID collection must resolve");
+    let first_token = validate_operation_resolution_plan(&registry, &state, first_plan)
+        .expect("the lower-ID operation is initially valid");
+    validate_operation_resolution_plan(&registry, &state, second_plan)
+        .expect("the higher-ID operation is initially valid")
+        .commit(&mut state)
+        .expect("the higher-ID operation can complete before its peer");
+    let before = bincode::serialize(&state).expect("completed higher-ID take must serialize");
+    assert!(matches!(
+        first_token.commit(&mut state),
+        Err(OperationResolutionError::StaleCashProceedsContext { operation }) if operation == first
+    ));
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected lower-ID take must serialize"),
+        before
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("the higher-ID take alone has coherent history");
+    validate_invariants(&state);
+}
+
+#[test]
+fn held_property_haul_rechecks_recent_take_history_before_commit() {
+    let (registry, mut state, _police, _neighborhood, first) =
+        make_exposed_business_operation_fixture(false);
+    let record = state
+        .operations()
+        .get_operation(first)
+        .expect("burglary must persist");
+    let organization = record.responsible_organization();
+    let business = record
+        .objective()
+        .taken_business()
+        .expect("burglary business");
+    let leader = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Second Burglary Coordinator".to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([
+                (
+                    CapabilityKind::Management,
+                    Rating::try_new(80).expect("valid rating"),
+                ),
+                (
+                    CapabilityKind::Stealth,
+                    Rating::try_new(0).expect("valid rating"),
+                ),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second coordinator");
+    let specialist = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Second Burglary Specialist".to_owned(),
+            organization: Some(organization),
+            supervisor: Some(leader),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([
+                (
+                    CapabilityKind::Burglary,
+                    Rating::try_new(80).expect("valid rating"),
+                ),
+                (
+                    CapabilityKind::Stealth,
+                    Rating::try_new(0).expect("valid rating"),
+                ),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second specialist");
+    let second = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Concurrent property take".to_owned(),
+            kind: OperationKind::Burglary,
+            responsible_organization: organization,
+            leader,
+            objective: OperationObjective::AcquireProperty {
+                target: EntityRef::Business(business),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, leader),
+                (RoleKind::EntrySpecialist, specialist),
+            ]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::from_minutes(1),
+        },
+    )
+    .expect("parallel independent crew must validate")
+    .commit(&mut state)
+    .expect("parallel crew must commit");
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![first, second]
+    );
+    state.advance_clock(SimDuration::from_minutes(45));
+    let first_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        first,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("first burglary must resolve");
+    let second_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        second,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("second burglary must resolve");
+    assert!(first_plan.outcome.property_proceeds_plan.proceeds.is_some());
+    assert!(
+        second_plan
+            .outcome
+            .property_proceeds_plan
+            .proceeds
+            .is_some()
+    );
+    let first_token = validate_operation_resolution_plan(&registry, &state, first_plan)
+        .expect("first burglary must validate");
+    let second_token = validate_operation_resolution_plan(&registry, &state, second_plan)
+        .expect("second burglary must validate before first commits");
+    first_token
+        .commit(&mut state)
+        .expect("first burglary must commit");
+    let before = bincode::serialize(&state).expect("state must serialize");
+    assert!(matches!(
+        second_token.commit(&mut state),
+        Err(OperationResolutionError::StalePropertyProceedsContext { operation })
+            if operation == second
+    ));
+    assert_eq!(
+        bincode::serialize(&state).expect("state must serialize"),
+        before
+    );
+    let replanned = decide_operation_resolution(
+        &registry,
+        &state,
+        second,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("second burglary must reprice");
+    assert!(
+        replanned
+            .outcome
+            .property_proceeds_plan
+            .depleted_by_recent_take
+    );
+    validate_operation_resolution_plan(&registry, &state, replanned)
+        .expect("repriced burglary must validate")
+        .commit(&mut state)
+        .expect("repriced burglary must commit");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("two takes must save"),
+    )
+    .expect("both takes must restore with stable history");
+    validate_state_against_registry(&registry, &restored)
+        .expect("both take valuations must remain reproducible");
+    validate_invariants(&restored);
+}
+
 fn insert_property_disposition_fixture(
     registry: &Registry,
     state: &mut AppState,

@@ -46,7 +46,7 @@ use crate::operations::information_acquisition::{
 use crate::operations::operation_economics::{
     CashProceedsPlan, PropertyProceedsPlan, SABOTAGE_DISRUPTION_CLAUSE, build_depleted_take_clause,
     build_held_cash_clause, build_held_property_clause, downgrade_empty_take_outcome,
-    resolve_cash_proceeds, resolve_property_proceeds,
+    recent_take_times, resolve_cash_proceeds, resolve_property_proceeds,
 };
 use crate::operations::operation_objective::{
     blocker_clause, pressureable_witness_targets_for_cases, resolve_effective_objective_outcome,
@@ -236,8 +236,36 @@ struct OperationResolutionSnapshot {
     /// Even a bookless target is pinned: establishing books after validation must not let
     /// the operation commit a haul priced against the former business condition.
     take_economy_version: Option<(crate::core::id::BusinessId, Option<u32>)>,
+    /// A held resolution token must not persist proceeds priced before another take on the
+    /// same business and of the same kind completed. Only viable takes depend on this history.
+    take_history: Option<(crate::core::time::SimDuration, Vec<SimTime>)>,
     police_snapshot: TargetPoliceSnapshot,
     police_response: Option<PoliceResponseResolutionSnapshot>,
+}
+
+fn take_history_snapshot(
+    registry: &Registry,
+    state: &AppState,
+    operation: &OperationRecord,
+    outcome: OperationObjectiveOutcome,
+) -> Option<(crate::core::time::SimDuration, Vec<SimTime>)> {
+    if outcome == OperationObjectiveOutcome::Failed {
+        return None;
+    }
+    let business = operation.objective().taken_business()?;
+    let execution = registry.get_operation(operation.kind()).execution();
+    let window = execution
+        .property_proceeds()
+        .map(|definition| definition.recent_take_recovery_window())
+        .or_else(|| {
+            execution
+                .cash_proceeds()
+                .map(|definition| definition.recent_take_recovery_window())
+        })?;
+    Some((
+        window,
+        recent_take_times(state, operation, business, window),
+    ))
 }
 
 fn take_economy_version(
@@ -467,6 +495,7 @@ pub(crate) fn decide_operation_resolution(
             expected_operation_version: record.version(),
             resolved_at: state.now(),
             take_economy_version: take_economy_version(state, record),
+            take_history: take_history_snapshot(registry, state, record, objective_outcome),
             police_snapshot,
             police_response,
         },
@@ -710,6 +739,42 @@ fn validate_plan_snapshot(
         return Err(OperationResolutionError::StaleObjectiveContext {
             operation: plan.snapshot.operation,
         });
+    }
+    if let Some((window, expected)) = &plan.snapshot.take_history {
+        let business = record
+            .objective()
+            .taken_business()
+            .expect("take history snapshot requires a business target");
+        // Prior same-minute takes in ascending operation-ID order deplete this result. A
+        // concurrent validated token may have missed a newly committed take, and committing
+        // a lower-ID take after a higher-ID take would break historical re-derivation.
+        if recent_take_times(state, record, business, *window) != *expected
+            || state.operations.has_later_same_minute_take(
+                business,
+                record.kind(),
+                plan.snapshot.resolved_at,
+                record.id(),
+            )
+        {
+            return Err(match record.objective() {
+                OperationObjective::AcquireProperty { .. } => {
+                    OperationResolutionError::StalePropertyProceedsContext {
+                        operation: record.id(),
+                    }
+                }
+                OperationObjective::ObtainCash { .. } => {
+                    OperationResolutionError::StaleCashProceedsContext {
+                        operation: record.id(),
+                    }
+                }
+                OperationObjective::Frighten { .. }
+                | OperationObjective::GatherInformation { .. }
+                | OperationObjective::FreeDetainee { .. }
+                | OperationObjective::DisruptBusiness { .. } => {
+                    unreachable!("take history is only recorded for take objectives")
+                }
+            });
+        }
     }
     let due_at = record
         .resolution_due_at()

@@ -742,6 +742,41 @@ impl OperationState {
             .unwrap_or_default()
     }
 
+    /// A higher-ID take already completed at this instant prevents a lower-ID take from
+    /// resolving now: re-derivation orders equal timestamps by operation ID. Check viable
+    /// empty hauls too, because an earlier positive haul would alter their depletion narrative
+    /// even though only positive hauls enter the recency-penalty index.
+    pub(crate) fn has_later_same_minute_take(
+        &self,
+        business: BusinessId,
+        kind: OperationKind,
+        at: SimTime,
+        current_operation: OperationId,
+    ) -> bool {
+        self.by_status
+            .get(&OperationStatus::Completed)
+            .is_some_and(|completed| {
+                completed
+                    .range((
+                        std::ops::Bound::Excluded(current_operation),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .any(|id| {
+                        let record = self
+                            .records
+                            .get(id)
+                            .expect("completed index must have a record");
+                        record.kind() == kind
+                            && record.objective().taken_business() == Some(business)
+                            && record.resolution().is_some_and(|resolution| {
+                                resolution.resolved_at() == at
+                                    && resolution.objective_outcome()
+                                        != crate::operations::OperationObjectiveOutcome::Failed
+                            })
+                    })
+            })
+    }
+
     pub(super) fn set_property_disposition(
         &mut self,
         id: OperationId,
