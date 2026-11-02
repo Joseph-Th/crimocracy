@@ -66,7 +66,7 @@ pub enum IntelligenceError {
     #[error("source and recipient knowledge holders are identical")]
     SameHolder,
     #[error(
-        "information {source_information} was already transferred to {recipient:?} as information {existing}"
+        "information {source_information} is already known to {recipient:?} through information {existing}"
     )]
     DuplicateTransfer {
         source_information: InformationId,
@@ -552,7 +552,10 @@ fn ensure_transfer_not_duplicate(
     source: InformationId,
     recipient: KnowledgeHolder,
 ) -> Result<(), IntelligenceError> {
-    if let Some(existing) = state.intelligence.internal_transfer_for(source, recipient) {
+    if let Some(existing) = state
+        .intelligence
+        .already_holds_internal_lineage(source, recipient)
+    {
         return Err(IntelligenceError::DuplicateTransfer {
             source_information: source,
             recipient,

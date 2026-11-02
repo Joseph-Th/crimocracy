@@ -521,6 +521,146 @@ fn concurrent_duplicate_internal_transfer_is_rejected_without_mutation() {
     validate_invariants(&restored);
 }
 
+fn add_information_courier(
+    state: &mut AppState,
+    organization: OrganizationId,
+    name: &str,
+) -> CharacterId {
+    insert_character(
+        state,
+        CharacterDraft {
+            name: name.to_owned(),
+            organization: Some(organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("information courier should be valid")
+}
+
+fn transfer_internal_fact(
+    state: &mut AppState,
+    source: InformationId,
+    recipient: KnowledgeHolder,
+) -> InformationId {
+    validate_information_transfer(state, InformationTransferDraft { source, recipient })
+        .expect("new internal fact delivery should validate")
+        .commit(state)
+        .expect("new internal fact delivery should commit")
+}
+
+#[test]
+fn one_observation_cannot_circulate_back_to_a_holder_through_another_member() {
+    let (registry, mut state, organization, origin) = make_transfer_fixture();
+    let colleague = add_information_courier(&mut state, organization, "Second Courier");
+    let intermediary = add_information_courier(&mut state, organization, "Third Courier");
+    let fact = record_character_information(&mut state, origin, organization);
+    let first_hop = transfer_internal_fact(&mut state, fact, KnowledgeHolder::Character(colleague));
+    let second_hop = transfer_internal_fact(
+        &mut state,
+        first_hop,
+        KnowledgeHolder::Character(intermediary),
+    );
+    let original = state.intelligence().get_information(fact).unwrap();
+    let final_copy = state.intelligence().get_information(second_hop).unwrap();
+    assert_eq!(final_copy.observed_at(), original.observed_at());
+    assert_eq!(final_copy.summary(), original.summary());
+    assert_eq!(final_copy.derived_from(), &BTreeSet::from([first_hop]));
+
+    let before = bincode::serialize(&state).expect("fact network must serialize");
+    for (source, recipient, existing) in [
+        (second_hop, KnowledgeHolder::Character(origin), fact),
+        (fact, KnowledgeHolder::Character(intermediary), second_hop),
+        (second_hop, KnowledgeHolder::Character(colleague), first_hop),
+    ] {
+        assert_eq!(
+            validate_information_transfer(&state, InformationTransferDraft { source, recipient },)
+                .err()
+                .expect("already known provenance must not become another fact"),
+            IntelligenceError::DuplicateTransfer {
+                source_information: source,
+                recipient,
+                existing,
+            }
+        );
+    }
+    assert_eq!(bincode::serialize(&state).unwrap(), before);
+
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap())
+        .expect("multi-hop reports must restore with exact recipient provenance");
+    assert_eq!(
+        validate_information_transfer(
+            &restored,
+            InformationTransferDraft {
+                source: second_hop,
+                recipient: KnowledgeHolder::Character(origin),
+            },
+        )
+        .err()
+        .expect("restore must still reject an echo"),
+        IntelligenceError::DuplicateTransfer {
+            source_information: second_hop,
+            recipient: KnowledgeHolder::Character(origin),
+            existing: fact,
+        }
+    );
+    validate_state(&state).expect("multi-hop delivery must remain valid");
+    validate_state(&restored).expect("restored multi-hop delivery must remain valid");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn stale_cross_branch_transfer_cannot_redeliver_a_fact_but_new_observations_can() {
+    let (registry, mut state, organization, origin) = make_transfer_fixture();
+    let colleague = add_information_courier(&mut state, organization, "Other Colleague");
+    let intermediary = add_information_courier(&mut state, organization, "Other Intermediary");
+    let fact = record_character_information(&mut state, origin, organization);
+    let intermediary_copy =
+        transfer_internal_fact(&mut state, fact, KnowledgeHolder::Character(intermediary));
+    let recipient = KnowledgeHolder::Character(colleague);
+    let stale = validate_information_transfer(
+        &state,
+        InformationTransferDraft {
+            source: intermediary_copy,
+            recipient,
+        },
+    )
+    .expect("an as-yet-uninformed recipient can initially receive this fact");
+    let delivered = transfer_internal_fact(&mut state, fact, recipient);
+    let before = bincode::serialize(&state).unwrap();
+    assert_eq!(
+        stale
+            .commit(&mut state)
+            .expect_err("an alternate route cannot deliver already-known information"),
+        IntelligenceError::DuplicateTransfer {
+            source_information: intermediary_copy,
+            recipient,
+            existing: delivered,
+        }
+    );
+    assert_eq!(bincode::serialize(&state).unwrap(), before);
+
+    let new_observation = record_character_information(&mut state, origin, organization);
+    assert_ne!(new_observation, fact);
+    let newly_delivered = transfer_internal_fact(&mut state, new_observation, recipient);
+    assert_ne!(newly_delivered, delivered);
+    validate_state(&state).expect("a truly new observation may reach a previously informed holder");
+    validate_invariants(&state);
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap())
+        .expect("both separate observations should restore with independent lineages");
+    assert_eq!(
+        restored
+            .intelligence()
+            .get_information(newly_delivered)
+            .unwrap()
+            .derived_from(),
+        &BTreeSet::from([new_observation])
+    );
+}
+
 #[test]
 fn typed_signal_survives_internal_transfer_with_lineage() {
     let (_registry, mut state, organization, character) = make_transfer_fixture();

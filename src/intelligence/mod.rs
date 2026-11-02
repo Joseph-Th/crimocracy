@@ -339,8 +339,7 @@ pub struct IntelligenceState {
     #[serde(skip)]
     derived_by_source: BTreeMap<InformationId, BTreeSet<InformationId>>,
     #[serde(skip)]
-    internal_transfer_by_source_recipient:
-        BTreeMap<(InformationId, KnowledgeHolder), InformationId>,
+    internal_transfer_by_root_recipient: BTreeMap<(InformationId, KnowledgeHolder), InformationId>,
 }
 
 impl IntelligenceState {
@@ -353,7 +352,7 @@ impl IntelligenceState {
         self.by_holder_subject.clear();
         self.by_subject.clear();
         self.derived_by_source.clear();
-        self.internal_transfer_by_source_recipient.clear();
+        self.internal_transfer_by_root_recipient.clear();
         for record in self.records.values() {
             let id = record.id();
             self.by_holder
@@ -386,8 +385,10 @@ impl IntelligenceState {
                     .iter()
                     .next()
                     .expect("single-source internal report must have one source");
-                self.internal_transfer_by_source_recipient
-                    .insert((source, record.holder()), id);
+                if let Some(root) = self.internal_report_root(source) {
+                    self.internal_transfer_by_root_recipient
+                        .insert((root, record.holder()), id);
+                }
             }
         }
     }
@@ -437,17 +438,41 @@ impl IntelligenceState {
                     .expect("information holder-subject index must reference information")
             })
     }
-    pub(crate) fn internal_transfer_for(
+    /// A repeated internal handoff carries the original observation, not a new fact. Follow
+    /// internal reports only; independently acquired facts and contact disclosures start their
+    /// own lineage even when they concern the same subject.
+    fn internal_report_root(&self, mut source: InformationId) -> Option<InformationId> {
+        loop {
+            let record = self.records.get(&source)?;
+            if record.source_kind() != InformationSourceKind::InternalReport {
+                return Some(source);
+            }
+            let parent = *record.derived_from().iter().next()?;
+            // Restore rebuilds indexes before provenance validation. A malformed cycle or
+            // forward reference must fail closed, not loop indefinitely during index rebuild.
+            if parent >= source {
+                return None;
+            }
+            source = parent;
+        }
+    }
+
+    pub(crate) fn already_holds_internal_lineage(
         &self,
         source: InformationId,
         recipient: KnowledgeHolder,
     ) -> Option<&InformationRecord> {
-        self.internal_transfer_by_source_recipient
-            .get(&(source, recipient))
+        let root = self.internal_report_root(source)?;
+        let original = self.records.get(&root)?;
+        if original.holder() == recipient {
+            return Some(original);
+        }
+        self.internal_transfer_by_root_recipient
+            .get(&(root, recipient))
             .map(|id| {
                 self.records
                     .get(id)
-                    .expect("internal transfer index must reference information")
+                    .expect("internal lineage index must reference information")
             })
     }
     pub fn information_derived_from(
@@ -497,12 +522,15 @@ impl IntelligenceState {
         if record.source_kind() == InformationSourceKind::InternalReport {
             debug_assert_eq!(record.derived_from().len(), 1);
             if let Some(source) = record.derived_from().iter().next().copied() {
+                let root = self
+                    .internal_report_root(source)
+                    .expect("internal report source must exist before its derivation");
                 let previous = self
-                    .internal_transfer_by_source_recipient
-                    .insert((source, record.holder()), id);
+                    .internal_transfer_by_root_recipient
+                    .insert((root, record.holder()), id);
                 debug_assert!(
                     previous.is_none(),
-                    "duplicate internal information transfer inserted"
+                    "duplicate internal information lineage delivered to one holder"
                 );
             }
         }
@@ -525,7 +553,7 @@ impl IntelligenceState {
         }
         self.partition_index_counts_match(expected)
             && self.derived_source_index_is_consistent(expected.source_entries)
-            && self.internal_transfer_by_source_recipient.len() == expected.internal_transfers
+            && self.internal_transfer_by_root_recipient.len() == expected.internal_transfers
     }
 
     fn record_indexes_are_consistent(
@@ -577,10 +605,17 @@ impl IntelligenceState {
                 .iter()
                 .next()
                 .expect("single-source internal report must have one source");
+            let Some(root) = self.internal_report_root(source) else {
+                return false;
+            };
             if self
-                .internal_transfer_by_source_recipient
-                .get(&(source, record.holder()))
-                != Some(&record.id())
+                .records
+                .get(&root)
+                .is_some_and(|original| original.holder() == record.holder())
+                || self
+                    .internal_transfer_by_root_recipient
+                    .get(&(root, record.holder()))
+                    != Some(&record.id())
             {
                 return false;
             }
