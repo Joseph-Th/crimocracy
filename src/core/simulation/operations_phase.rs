@@ -349,12 +349,22 @@ pub(super) fn run_operation_resolution_phase(
     // for the complete cohort before the first RNG draw or mutation. Outcome-dependent incident
     // and discovery artifacts remain in each resolution's canonical per-item preflight.
     let mut mandatory_budget = Vec::with_capacity(due_operations.len() * 3);
-    for operation in &due_operations {
+    let mut viable_operations = Vec::with_capacity(due_operations.len());
+    for operation in due_operations {
         let record = state
             .operations()
-            .get_operation(*operation)
+            .get_operation(operation)
             .expect("due operation must still exist");
-        mandatory_budget.extend(mandatory_operation_resolution_id_budget(record));
+        let budget = mandatory_operation_resolution_id_budget(record);
+        // If even this operation's guaranteed after-action footprint cannot fit, its
+        // resolution is independently impossible at the finite ID rail. It must not
+        // inflate the shared budget and freeze unrelated operations that *can* finish.
+        // This read-only test consumes neither ID capacity nor operation RNG.
+        if state.ids.reserve_many(&budget).is_err() {
+            continue;
+        }
+        mandatory_budget.extend(budget);
+        viable_operations.push(operation);
     }
     if state.ids.reserve_many(&mandatory_budget).is_err() {
         // Mandatory after-action persistence is part of every resolution. If the complete due
@@ -362,8 +372,8 @@ pub(super) fn run_operation_resolution_phase(
         // allowing an ID-ordered prefix would make terminal behavior depend on stable IDs.
         return Ok(Vec::new());
     }
-    let mut resolved_operations = Vec::with_capacity(due_operations.len());
-    for operation in due_operations {
+    let mut resolved_operations = Vec::with_capacity(viable_operations.len());
+    for operation in viable_operations {
         let kind = state
             .operations()
             .get_operation(operation)

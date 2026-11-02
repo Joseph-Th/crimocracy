@@ -31,7 +31,7 @@ use crate::legal::{
 };
 use crate::operations::operation_execution::{
     OperationResolutionRandomness, decide_operation_resolution, find_due_in_progress_operations,
-    validate_operation_resolution_plan,
+    mandatory_operation_resolution_id_budget, validate_operation_resolution_plan,
 };
 use crate::operations::operation_scheduling::{
     find_due_authorized_operations, find_due_operations_with_missed_deadlines,
@@ -1346,6 +1346,175 @@ fn due_operation_resolution_cohort_preflights_mandatory_reports() {
         );
     }
     validate_state(&state).expect("rejected operation-resolution cohort should remain valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn locally_unresolvable_operation_does_not_block_independent_due_resolution() {
+    let registry = build_registry();
+    let mut state = AppState::new(0x0A0E_D17A);
+    let crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Independent Resolution Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("crew should validate");
+    let neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Independent Resolution Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: test_rating(50),
+                    commercial_activity: test_rating(50),
+                    illicit_demand: test_rating(50),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: test_rating(0),
+                },
+            },
+        },
+    )
+    .expect("neighborhood should validate");
+    let target = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Independent Resolution Store".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood,
+            owner: BusinessOwner::Independent,
+        },
+    )
+    .expect("target should validate");
+    let mut operations = Vec::new();
+    for index in 0..2 {
+        let leader = insert_character(
+            &mut state,
+            CharacterDraft {
+                name: format!("Independent Collector {index}"),
+                organization: Some(crew),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([
+                    (CapabilityKind::Management, test_rating(100)),
+                    (CapabilityKind::Stealth, test_rating(100)),
+                ]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("leader should validate");
+        let mut roles = BTreeMap::from([(RoleKind::Coordinator, leader)]);
+        if index == 0 {
+            let muscle = insert_character(
+                &mut state,
+                CharacterDraft {
+                    name: "Additional Collection Muscle".to_owned(),
+                    organization: Some(crew),
+                    supervisor: None,
+                    autonomy: AutonomyLevel::Guided,
+                    capabilities: BTreeMap::from([(CapabilityKind::Violence, test_rating(100))]),
+                    traits: BTreeSet::new(),
+                    drives: BTreeMap::new(),
+                },
+            )
+            .expect("extra participant should validate");
+            roles.insert(RoleKind::Muscle, muscle);
+        }
+        let operation = validate_authorize_operation(
+            &registry,
+            &state,
+            OperationDraft {
+                title: format!("Independent collection {index}"),
+                kind: OperationKind::Intimidation,
+                responsible_organization: crew,
+                leader,
+                objective: OperationObjective::ObtainCash {
+                    target: EntityRef::Business(target),
+                },
+                approach: OperationApproach::Covert,
+                roles,
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: SimTime::ZERO,
+            },
+        )
+        .expect("operation should validate")
+        .commit(&mut state)
+        .expect("operation should commit");
+        operations.push(operation);
+    }
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    for operation in &operations {
+        apply_transition(
+            &registry,
+            &mut state,
+            *operation,
+            OperationTransition::Begin,
+        )
+        .expect("operation should begin");
+    }
+    let due_at = state
+        .operations()
+        .get_operation(operations[0])
+        .and_then(|record| record.resolution_due_at())
+        .expect("operation must have a due time");
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due_at.as_minutes() - state.now().as_minutes())
+            .expect("duration must fit SimDuration"),
+    ));
+    assert_eq!(find_due_in_progress_operations(&state), operations);
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::Information, u32::MAX - 2);
+    let first_budget = mandatory_operation_resolution_id_budget(
+        state
+            .operations()
+            .get_operation(operations[0])
+            .expect("first operation exists"),
+    );
+    let second_budget = mandatory_operation_resolution_id_budget(
+        state
+            .operations()
+            .get_operation(operations[1])
+            .expect("second operation exists"),
+    );
+    assert!(state.ids.reserve_many(&first_budget).is_err());
+    assert!(state.ids.reserve_many(&second_budget).is_ok());
+
+    let resolved = run_operation_resolution_phase(&registry, &mut state)
+        .expect("only the locally impossible operation should stay due");
+    assert_eq!(
+        resolved,
+        vec![operations[1]],
+        "an unallocatable first operation must not withhold the second one's after-action"
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operations[0])
+            .expect("first operation exists")
+            .status(),
+        OperationStatus::InProgress
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operations[1])
+            .expect("second operation exists")
+            .status(),
+        OperationStatus::Completed
+    );
+    validate_state(&state).expect("independent terminal-resource behavior must remain valid");
     validate_invariants(&state);
 }
 
