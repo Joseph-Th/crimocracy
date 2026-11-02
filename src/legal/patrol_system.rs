@@ -1,5 +1,11 @@
 //! Canonical patrol deployment validation, lifecycle transitions, and time-of-day presence queries.
 
+mod interval_integration;
+
+#[cfg(test)]
+use interval_integration::presence_sum_between;
+use interval_integration::{patrol_daily_presence_segments, scheduled_presence_sum};
+
 use crate::core::id::{IdExhaustionError, NeighborhoodId, OrganizationId, PatrolDeploymentId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES_U16, SimTime};
@@ -485,8 +491,7 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot_with_percent(
     for segment in boundaries.windows(2) {
         let segment_start = segment[0];
         let segment_end = segment[1];
-        let mut daily_presence = [0_u8; DAY_MINUTES_U16 as usize];
-        let mut daily_covered = [false; DAY_MINUTES_U16 as usize];
+        let mut patrol_windows = Vec::new();
         let mut segment_has_patrol = false;
         for deployment in &deployments {
             let Some(revision) = deployment
@@ -498,33 +503,19 @@ pub(crate) fn resolve_patrol_presence_interval_snapshot_with_percent(
             segment_has_patrol = true;
             has_modeled_patrol = true;
             deployment_versions.insert(deployment.id(), revision.version());
-            for window in revision.windows() {
-                let start_minute = usize::from(window.start().value());
-                let presence = window.presence().value();
-                for offset in 0..usize::from(window.duration_minutes()) {
-                    let minute = (start_minute + offset) % usize::from(DAY_MINUTES_U16);
-                    if daily_covered[minute] {
-                        daily_presence[minute] = daily_presence[minute].max(presence);
-                    } else {
-                        daily_presence[minute] = presence;
-                        daily_covered[minute] = true;
-                    }
-                }
-            }
-        }
-        if segment_has_patrol {
-            for (presence, covered) in daily_presence.iter_mut().zip(daily_covered) {
-                if !covered {
-                    *presence = off_window_presence;
-                }
-            }
+            patrol_windows.extend_from_slice(revision.windows());
         }
         let segment_duration = segment_end
             .as_minutes()
             .checked_sub(segment_start.as_minutes())
             .expect("ordered patrol segment must have positive duration");
         total_presence += if segment_has_patrol {
-            scheduled_presence_sum(&daily_presence, segment_start, segment_duration)
+            // Each schedule usually has only a few windows. Integrate the exact maximum
+            // presence over their boundaries instead of expanding every revision into 1,440
+            // minute slots, even for one-minute or many-year exposure intervals.
+            let daily_segments =
+                patrol_daily_presence_segments(&patrol_windows, off_window_presence);
+            scheduled_presence_sum(&daily_segments, segment_start, segment_duration)
         } else {
             u128::from(ambient_presence) * u128::from(segment_duration)
         };
@@ -773,28 +764,6 @@ fn reduced_off_window_presence_value(ambient: u8, off_window_patrol_presence_per
     let scaled = u16::from(ambient) * u16::from(off_window_patrol_presence_percent);
     u8::try_from(scaled.div_ceil(100))
         .expect("bounded ambient police presence percentage must fit u8")
-}
-
-fn scheduled_presence_sum(
-    daily_presence: &[u8; DAY_MINUTES_U16 as usize],
-    start: SimTime,
-    duration: u64,
-) -> u128 {
-    let day_minutes = u64::from(DAY_MINUTES_U16);
-    // Presence is bounded by 100 for every simulated minute, so a u128 accumulator can represent
-    // the exact sum across the entire u64 clock range. Saturating u64 arithmetic would silently
-    // flatten sufficiently long intervals and produce a materially wrong average.
-    let daily_total: u128 = daily_presence.iter().map(|value| u128::from(*value)).sum();
-    let full_days = duration / day_minutes;
-    let remainder = duration % day_minutes;
-    let mut total_presence = daily_total * u128::from(full_days);
-    let start_minute = start.as_minutes() % day_minutes;
-    for offset in 0..remainder {
-        let minute = usize::try_from((start_minute + offset) % day_minutes)
-            .expect("minute-of-day remainder must fit usize");
-        total_presence += u128::from(daily_presence[minute]);
-    }
-    total_presence
 }
 
 pub(crate) fn is_canonical_patrol_schedule(windows: &[PatrolWindow]) -> bool {

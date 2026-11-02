@@ -217,6 +217,165 @@ fn interval_presence_preserves_daily_remainder_across_multiple_days() {
 }
 
 #[test]
+fn sparse_patrol_windows_integrate_exactly_across_midnight_and_overlap() {
+    let windows = [
+        window(1_380, 180, 70),
+        window(30, 90, 90),
+        window(480, 240, 10),
+        window(600, 180, 65),
+        window(900, 1, 1),
+    ];
+    let segments = patrol_daily_presence_segments(&windows, 30);
+    let expected_total: u128 = (0..DAY_MINUTES_U16)
+        .map(|minute| {
+            u128::from(
+                windows
+                    .iter()
+                    .filter(|window| is_minute_within_patrol_window(**window, minute))
+                    .map(|window| window.presence().value())
+                    .max()
+                    .unwrap_or(30),
+            )
+        })
+        .sum();
+    assert_eq!(
+        presence_sum_between(&segments, 0, DAY_MINUTES_U16),
+        expected_total
+    );
+    for minute in 0..DAY_MINUTES_U16 {
+        let expected = windows
+            .iter()
+            .filter(|window| is_minute_within_patrol_window(**window, minute))
+            .map(|window| window.presence().value())
+            .max()
+            .unwrap_or(30);
+        assert_eq!(
+            presence_sum_between(&segments, minute, minute + 1),
+            u128::from(expected),
+            "minute {minute} must preserve concurrent patrol presence and off-window fallback"
+        );
+    }
+}
+
+#[test]
+fn interval_integration_matches_point_queries_across_revisions_and_restore() {
+    let (registry, mut state, police, neighborhood) = make_fixture();
+    let other_police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Second Patrol Authority".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("second authority should validate");
+    validate_set_jurisdiction(
+        &state,
+        JurisdictionDraft {
+            organization: other_police,
+            neighborhoods: BTreeSet::from([neighborhood]),
+            case_intake_priority: Rating::try_new(65).expect("fixture rating should validate"),
+        },
+    )
+    .expect("second jurisdiction should validate")
+    .commit(&mut state)
+    .expect("second jurisdiction should commit");
+
+    let first = validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![window(1_380, 180, 80), window(420, 90, 20)],
+        },
+    )
+    .expect("first patrol should validate")
+    .commit(&mut state)
+    .expect("first patrol should commit");
+    let second = validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: other_police,
+            neighborhood,
+            windows: vec![window(30, 50, 90), window(600, 360, 55)],
+        },
+    )
+    .expect("second patrol should validate")
+    .commit(&mut state)
+    .expect("second patrol should commit");
+
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(1_500));
+    validate_revise_patrol_deployment(
+        &state,
+        first,
+        vec![window(60, 400, 15), window(1_100, 200, 72)],
+    )
+    .expect("schedule revision should validate")
+    .commit(&mut state)
+    .expect("schedule revision should commit");
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(200));
+    validate_patrol_transition(&state, second, PatrolDeploymentTransition::Suspend)
+        .expect("second patrol suspension should validate")
+        .commit(&mut state)
+        .expect("second patrol suspension should commit");
+    state.advance_clock(crate::core::time::SimDuration::from_minutes(500));
+    validate_patrol_transition(&state, second, PatrolDeploymentTransition::Resume)
+        .expect("second patrol resumption should validate")
+        .commit(&mut state)
+        .expect("second patrol resumption should commit");
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("patrol history should save"),
+    )
+    .expect("patrol history should restore");
+    for version in [&state, &restored] {
+        for (start, end) in [
+            (0_u64, 1_u64),
+            (0, 30),
+            (0, 2_500),
+            (1_380, 1_560),
+            (1_499, 1_701),
+            (1_650, 1_751),
+            (2_100, 3_000),
+            (2_880, 4_321),
+        ] {
+            let observed = resolve_patrol_presence_interval_snapshot(
+                &registry,
+                version,
+                neighborhood,
+                SimTime::from_minutes(start),
+                SimTime::from_minutes(end),
+            );
+            let sum: u128 = (start..end)
+                .map(|minute| {
+                    u128::from(
+                        resolve_patrol_presence_snapshot(
+                            &registry,
+                            version,
+                            neighborhood,
+                            SimTime::from_minutes(minute),
+                        )
+                        .presence()
+                        .map(Rating::value)
+                        .unwrap_or(60),
+                    )
+                })
+                .sum();
+            let duration = u128::from(end - start);
+            let expected = ((sum + duration / 2) / duration) as u8;
+            assert_eq!(
+                observed.presence().map(Rating::value),
+                Some(expected),
+                "interval [{start}, {end}) must match exact per-minute integration"
+            );
+        }
+    }
+    validate_state(&restored).expect("restored patrol state should validate");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn authority_presence_wraps_minute_of_day_after_long_campaigns() {
     let (registry, mut state, police, neighborhood) = make_fixture();
     let deployment = validate_establish_patrol_deployment(
