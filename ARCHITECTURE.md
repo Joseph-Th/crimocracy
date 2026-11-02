@@ -171,6 +171,13 @@ semantics. The blocked financial state remains visible and reversible through ca
 ledger or lifecycle commands; unrelated due cycles cannot be held hostage by one saturated
 account. Malformed account ownership, invalid dependencies, and other unexpected finance
 failures still surface as errors rather than being treated as harmless capacity limits.
+When enterprise-cycle IDs are too scarce for every due racket, the scheduler first previews
+each racket's own canonical settlement artifacts without consuming RNG or mutating state.
+Rackets whose minimum artifact footprint is already unallocatable do not consume a slot in
+the mandatory cohort: an unreportable notable loss cannot indefinitely suppress a viable
+routine racket. The remaining cohort must fit the cycle-ID allocator in full before any
+settlement commits; competing viable rackets never receive an arbitrary ID-ordered prefix.
+The ordinary capacity-sufficient path keeps its single sequential economic resolution pass.
 
 ## Source map — one owner per field
 

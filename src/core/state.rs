@@ -267,6 +267,10 @@ impl AppState {
         &mut self.simulation.business_rng
     }
 
+    pub(crate) fn enterprise_rng(&self) -> &ChaCha8Rng {
+        &self.simulation.enterprise_rng
+    }
+
     pub(crate) fn enterprise_rng_mut(&mut self) -> &mut ChaCha8Rng {
         &mut self.simulation.enterprise_rng
     }

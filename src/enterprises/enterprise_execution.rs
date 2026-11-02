@@ -470,7 +470,7 @@ fn validate_cash_account_kind(
 }
 
 impl ValidatedEnterpriseCycle {
-    fn id_budget(&self) -> Result<Vec<(IdKind, u32)>, EnterpriseError> {
+    pub(crate) fn id_budget(&self) -> Result<Vec<(IdKind, u32)>, EnterpriseError> {
         let mut budget = Vec::new();
         if let Some(ledger) = &self.ledger {
             budget.extend(ledger.id_budget());

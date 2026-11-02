@@ -3,7 +3,7 @@
 use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
-use crate::core::id::OrganizationId;
+use crate::core::id::{EnterpriseId, OrganizationId};
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
@@ -11,7 +11,10 @@ use crate::economy::BusinessEconomyDraft;
 use crate::economy::business_economy_system::find_due_businesses;
 use crate::economy::business_economy_system::validate_establish_business_economy;
 use crate::enterprises::enterprise_execution::find_due_enterprises;
-use crate::enterprises::enterprise_execution::validate_establish_enterprise;
+use crate::enterprises::enterprise_execution::{
+    EnterpriseCycleRandomness, decide_enterprise_cycle, validate_enterprise_cycle_plan,
+    validate_establish_enterprise,
+};
 use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
 use crate::finance::finance_system::insert_account;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
@@ -1919,8 +1922,7 @@ fn due_enterprise_cycle_treats_allocator_exhaustion_as_terminal_without_rng_prog
     validate_invariants(&state);
 }
 
-#[test]
-fn due_enterprise_cycle_cohort_preflights_mandatory_cycle_ids() {
+fn make_due_enterprise_cycle_pair() -> (Registry, AppState, EnterpriseId, EnterpriseId) {
     let registry = build_registry();
     let mut state = AppState::new(0xE17E_C0A0);
     let organization = insert_organization(
@@ -2055,6 +2057,12 @@ fn due_enterprise_cycle_cohort_preflights_mandatory_cycle_ids() {
     .expect("gambling enterprise should commit");
     state.advance_clock(SimDuration::from_minutes(1_440));
     assert_eq!(find_due_enterprises(&state), vec![protection, gambling]);
+    (registry, state, protection, gambling)
+}
+
+#[test]
+fn due_enterprise_cycle_cohort_preflights_mandatory_cycle_ids() {
+    let (registry, mut state, protection, gambling) = make_due_enterprise_cycle_pair();
     state
         .ids
         .set_next_raw_for_test(crate::core::id::IdKind::EnterpriseCycle, u32::MAX - 1);
@@ -2078,6 +2086,115 @@ fn due_enterprise_cycle_cohort_preflights_mandatory_cycle_ids() {
     assert_eq!(state.enterprises().cycles_for(gambling).count(), 0);
     validate_state(&state).expect("rejected enterprise-cycle cohort should remain valid");
     validate_invariants(&state);
+}
+
+#[test]
+fn terminally_blocked_notable_racket_does_not_freeze_a_routine_racket() {
+    let (registry, mut state, protection, gambling) = make_due_enterprise_cycle_pair();
+    // At the allocator boundary, the first notable settlement requires a report that cannot
+    // be written. The second routine settlement is independent and requires no report.
+    let mut first_rng = state.enterprise_rng().clone();
+    let first_economics = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics();
+    let first_variance = draw_basis_point_variance(
+        &mut first_rng,
+        first_economics.gross_variance_basis_points(),
+    );
+    let first_roll = u16::try_from(
+        draw_index(
+            &mut first_rng,
+            EnterpriseCycleRandomness::ENFORCEMENT_ATTENTION_ROLL_COUNT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let first = validate_enterprise_cycle_plan(
+        &state,
+        decide_enterprise_cycle(
+            &registry,
+            &state,
+            protection,
+            EnterpriseCycleRandomness::new(first_variance, first_roll),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        first
+            .id_budget()
+            .unwrap()
+            .contains(&(crate::core::id::IdKind::Report, 1)),
+        "the blocked enterprise must have a notable cycle"
+    );
+    let mut second_rng = state.enterprise_rng().clone();
+    let second_economics = registry
+        .get_enterprise(EnterpriseKind::Gambling)
+        .economics();
+    let second_variance = draw_basis_point_variance(
+        &mut second_rng,
+        second_economics.gross_variance_basis_points(),
+    );
+    let second_roll = u16::try_from(
+        draw_index(
+            &mut second_rng,
+            EnterpriseCycleRandomness::ENFORCEMENT_ATTENTION_ROLL_COUNT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let second = validate_enterprise_cycle_plan(
+        &state,
+        decide_enterprise_cycle(
+            &registry,
+            &state,
+            gambling,
+            EnterpriseCycleRandomness::new(second_variance, second_roll),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !second
+            .id_budget()
+            .unwrap()
+            .contains(&(crate::core::id::IdKind::Report, 1)),
+        "the second cycle must remain routine with the first draw"
+    );
+
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Report, u32::MAX);
+    state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::EnterpriseCycle, u32::MAX - 1);
+    let settled = run_enterprise_cycle_phase(&registry, &mut state)
+        .expect("the unallocatable notable racket must not prevent the routine cycle");
+    assert_eq!(settled.len(), 1);
+    assert_eq!(state.enterprises().cycles_for(protection).count(), 0);
+    assert_eq!(state.enterprises().cycles_for(gambling).count(), 1);
+    assert_eq!(
+        state
+            .enterprises()
+            .cycles_for(gambling)
+            .next()
+            .unwrap()
+            .id(),
+        settled[0]
+    );
+    assert_eq!(
+        draw_index(state.enterprise_rng_mut(), 10_000),
+        draw_index(&mut second_rng, 10_000),
+        "only a committed settlement advances the racket RNG stream"
+    );
+    validate_state(&state).expect("blocked and settled rackets must preserve indexes");
+    validate_invariants(&state);
+    let restored = crate::core::persistence::restore_save(
+        &registry,
+        crate::core::persistence::build_save(&registry, &state).unwrap(),
+    )
+    .expect("partially eligible racket cohort must survive save and restore");
+    assert_eq!(find_due_enterprises(&restored), vec![protection]);
 }
 
 #[test]

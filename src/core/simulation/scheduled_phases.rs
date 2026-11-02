@@ -251,26 +251,42 @@ pub(super) fn run_enterprise_cycle_phase(
     state: &mut AppState,
 ) -> Result<Vec<EnterpriseCycleId>, EnterpriseError> {
     let due_enterprises = find_due_enterprises(state);
-    // Later racket decisions intentionally observe earlier same-minute settlements: shared cash
-    // and newly opened enforcement inquiries can change the next racket's economics. We therefore
-    // cannot freeze the complete artifact budget up front without changing simulation semantics.
-    // Every due settlement does, however, unconditionally persist exactly one EnterpriseCycle.
-    // Prove that mandatory cohort capacity before the first mutation so this predictable finite
-    // rail cannot leave a successful prefix merely because stable enterprise order reached it.
-    if state
+    // Later racket decisions observe preceding same-minute settlements: shared cash and newly
+    // opened inquiries can change the next racket's economics. Only mandatory cycle IDs can be
+    // reserved for the whole sequential cohort without freezing those later dependencies.
+    // When those IDs are scarce, exclude individually impossible settlements first; otherwise
+    // avoid the cost of duplicate projections on every ordinary campaign day.
+    let due_enterprises = if state
         .ids
         .reserve(
             IdKind::EnterpriseCycle,
             u32::try_from(due_enterprises.len())
                 .expect("persisted due enterprise count must fit the cycle ID space"),
         )
-        .is_err()
+        .is_ok()
     {
-        // ID exhaustion is a valid finite terminal rail. Do not settle an ID-ordered prefix and
-        // do not consume RNG for work that cannot be persisted; every due racket simply remains
-        // due and inert once no complete cycle-id cohort is representable.
-        return Ok(Vec::new());
-    }
+        due_enterprises
+    } else {
+        if state.ids.reserve(IdKind::EnterpriseCycle, 1).is_err() {
+            return Ok(Vec::new());
+        }
+        let eligible =
+            filter_individually_settleable_enterprises(registry, state, due_enterprises)?;
+        if state
+            .ids
+            .reserve(
+                IdKind::EnterpriseCycle,
+                u32::try_from(eligible.len())
+                    .expect("eligible enterprise count must fit the cycle ID space"),
+            )
+            .is_err()
+        {
+            // No ID-ordered prefix is allowed to consume the last cycle IDs. Every still-due
+            // candidate and the persistent RNG remain untouched if the viable cohort cannot fit.
+            return Ok(Vec::new());
+        }
+        eligible
+    };
     let mut enterprise_cycles = Vec::with_capacity(due_enterprises.len());
     for enterprise in due_enterprises {
         let kind = state
@@ -278,26 +294,11 @@ pub(super) fn run_enterprise_cycle_phase(
             .get_enterprise(enterprise)
             .expect("due enterprise must exist")
             .kind();
-        let economics = registry.get_enterprise(kind).economics();
         let mut advanced_rng = state.enterprise_rng_mut().clone();
-        let variance =
-            draw_basis_point_variance(&mut advanced_rng, economics.gross_variance_basis_points());
-        let enforcement_attention_roll = u16::try_from(
-            draw_index(
-                &mut advanced_rng,
-                crate::enterprises::enterprise_execution::EnterpriseCycleRandomness::ENFORCEMENT_ATTENTION_ROLL_COUNT,
-            )
-                .expect("racket-attention roll range is never empty"),
-        )
-        .expect("racket-attention roll fits u16");
-        let cycle = match decide_enterprise_cycle(
-            registry,
-            state,
-            enterprise,
-            EnterpriseCycleRandomness::new(variance, enforcement_attention_roll),
-        )
-        .and_then(|plan| validate_enterprise_cycle_plan(state, plan))
-        .and_then(|validated| validated.commit(state))
+        let randomness = draw_enterprise_cycle_randomness(registry, kind, &mut advanced_rng);
+        let cycle = match decide_enterprise_cycle(registry, state, enterprise, randomness)
+            .and_then(|plan| validate_enterprise_cycle_plan(state, plan))
+            .and_then(|validated| validated.commit(state))
         {
             Ok(cycle) => cycle,
             Err(error) if enterprise_cycle_is_locally_blocked(&error) => {
@@ -315,6 +316,69 @@ pub(super) fn run_enterprise_cycle_phase(
         enterprise_cycles.push(cycle);
     }
     Ok(enterprise_cycles)
+}
+
+/// Exclude rackets that cannot allocate even their own settlement artifacts before reserving
+/// mandatory cycle IDs for the cohort. Without this pass a notable racket with exhausted report
+/// IDs can indefinitely prevent an unrelated routine racket from settling when fewer cycle IDs
+/// remain than the total number due. Preflight uses speculative draws: only an individually
+/// settleable candidate advances the preview stream, and the real sequential pass still resolves
+/// economics against the state left by preceding committed rackets.
+fn filter_individually_settleable_enterprises(
+    registry: &Registry,
+    state: &AppState,
+    due: Vec<crate::core::id::EnterpriseId>,
+) -> Result<Vec<crate::core::id::EnterpriseId>, EnterpriseError> {
+    let mut preview_rng = state.enterprise_rng().clone();
+    let mut eligible = Vec::with_capacity(due.len());
+    for enterprise in due {
+        let kind = state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .expect("due enterprise must exist")
+            .kind();
+        let mut candidate_rng = preview_rng.clone();
+        let randomness = draw_enterprise_cycle_randomness(registry, kind, &mut candidate_rng);
+        let candidate = decide_enterprise_cycle(registry, state, enterprise, randomness)
+            .and_then(|plan| validate_enterprise_cycle_plan(state, plan));
+        match candidate {
+            Ok(validated) => {
+                let budget = validated.id_budget()?;
+                if state.ids.reserve_many(&budget).is_ok() {
+                    preview_rng = candidate_rng;
+                    eligible.push(enterprise);
+                }
+            }
+            Err(error) if enterprise_cycle_is_locally_blocked(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(eligible)
+}
+
+/// One draw contract for both speculative capacity checks and real sequential settlements.
+/// The district's current case pressure never affects the number or order of RNG draws.
+fn draw_enterprise_cycle_randomness(
+    registry: &Registry,
+    kind: crate::enterprises::EnterpriseKind,
+    rng: &mut impl rand_core::RngCore,
+) -> EnterpriseCycleRandomness {
+    let variance = draw_basis_point_variance(
+        rng,
+        registry
+            .get_enterprise(kind)
+            .economics()
+            .gross_variance_basis_points(),
+    );
+    let enforcement_roll = u16::try_from(
+        draw_index(
+            rng,
+            EnterpriseCycleRandomness::ENFORCEMENT_ATTENTION_ROLL_COUNT,
+        )
+        .expect("enterprise enforcement roll range is never empty"),
+    )
+    .expect("enterprise enforcement roll fits u16");
+    EnterpriseCycleRandomness::new(variance, enforcement_roll)
 }
 
 fn enterprise_cycle_is_locally_blocked(error: &EnterpriseError) -> bool {
