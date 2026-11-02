@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Types of player-facing reports the simulation can generate. Only variants
 /// actually produced by systems are represented here; unused slots were deleted
 /// to preserve exhaustive-match discipline per ARCHITECTURE.md.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ReportKind {
     ExecutiveBrief,
     Financial,
@@ -70,6 +70,10 @@ pub struct ReportState {
     records: BTreeMap<ReportId, ReportRecord>,
     #[serde(skip)]
     by_recipient: BTreeMap<OrganizationId, BTreeSet<ReportId>>,
+    /// Latest append-only report of each kind for each recipient. A brief should not scan
+    /// a long campaign of unrelated report kinds to locate its previous boundary.
+    #[serde(skip)]
+    latest_by_kind: BTreeMap<(OrganizationId, ReportKind), ReportId>,
 }
 
 impl ReportState {
@@ -78,11 +82,15 @@ impl ReportState {
     }
     pub(crate) fn rebuild_derived_indexes(&mut self) {
         self.by_recipient.clear();
+        self.latest_by_kind.clear();
         for report in self.records.values() {
             self.by_recipient
                 .entry(report.recipient())
                 .or_default()
                 .insert(report.id());
+            // Report IDs are monotonic and records are visited in ID order.
+            self.latest_by_kind
+                .insert((report.recipient(), report.kind()), report.id());
         }
     }
     pub fn get_report(&self, id: ReportId) -> Option<&ReportRecord> {
@@ -122,15 +130,10 @@ impl ReportState {
         recipient: OrganizationId,
         kind: ReportKind,
     ) -> Option<&ReportRecord> {
-        self.by_recipient.get(&recipient).and_then(|ids| {
-            ids.iter()
-                .rev()
-                .map(|id| {
-                    self.records
-                        .get(id)
-                        .expect("report recipient index must reference a report")
-                })
-                .find(|report| report.kind() == kind)
+        self.latest_by_kind.get(&(recipient, kind)).map(|id| {
+            self.records
+                .get(id)
+                .expect("latest report-kind index must reference a report")
         })
     }
     pub(crate) fn latest_for_recipient(&self, recipient: OrganizationId) -> Option<&ReportRecord> {
@@ -154,6 +157,13 @@ impl ReportState {
             .entry(report.recipient())
             .or_default()
             .insert(report.id());
+        let previous_latest = self
+            .latest_by_kind
+            .insert((report.recipient(), report.kind()), report.id());
+        debug_assert!(
+            previous_latest.is_none_or(|previous| previous < report.id()),
+            "report-kind index must advance monotonically"
+        );
         let previous = self.records.insert(report.id(), report);
         debug_assert!(
             previous.is_none(),
@@ -162,6 +172,7 @@ impl ReportState {
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         let mut previous_generated_at = None;
+        let mut expected_latest = BTreeMap::new();
         for (stored_id, report) in &self.records {
             if *stored_id != report.id() {
                 return false;
@@ -176,6 +187,7 @@ impl ReportState {
             {
                 return false;
             }
+            expected_latest.insert((report.recipient(), report.kind()), report.id());
             // Report IDs are allocated globally and every canonical report is stamped with the
             // current simulation time. Prove that persisted report chronology never rewinds even
             // across different recipients; recipient-local latest/cursor queries then inherit the
@@ -192,7 +204,7 @@ impl ReportState {
                 }
             }
         }
-        true
+        self.latest_by_kind == expected_latest
     }
 }
 

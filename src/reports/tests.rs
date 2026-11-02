@@ -104,6 +104,110 @@ fn record_empty_report(state: &mut AppState, recipient: OrganizationId, title: &
 }
 
 #[test]
+fn latest_kind_report_tracks_interleaved_recipients_and_rebuilds_after_restore() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xB12E_1937);
+    let first = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "First Report Recipient".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("first recipient should validate");
+    let second = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Second Report Recipient".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("second recipient should validate");
+    let record = |state: &mut AppState, recipient, kind, title: &str| {
+        validate_record_report(
+            state,
+            ReportDraft {
+                recipient,
+                kind,
+                title: title.to_owned(),
+                entries: Vec::new(),
+            },
+        )
+        .expect("interleaved report should validate")
+        .commit(state)
+        .expect("interleaved report should commit")
+    };
+
+    assert!(
+        state
+            .reports()
+            .latest_for_kind(first, ReportKind::Financial)
+            .is_none()
+    );
+    let first_financial = record(&mut state, first, ReportKind::Financial, "First books");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let second_legal = record(&mut state, second, ReportKind::Legal, "Other case");
+    let first_legal = record(&mut state, first, ReportKind::Legal, "Own case");
+    let new_financial = record(&mut state, first, ReportKind::Financial, "New books");
+    let second_financial = record(&mut state, second, ReportKind::Financial, "Other books");
+    let check = |state: &AppState| {
+        let latest = |recipient, kind| {
+            state
+                .reports()
+                .latest_for_kind(recipient, kind)
+                .map(ReportRecord::id)
+        };
+        assert_eq!(latest(first, ReportKind::Financial), Some(new_financial));
+        assert_eq!(latest(first, ReportKind::Legal), Some(first_legal));
+        assert_eq!(
+            latest(second, ReportKind::Financial),
+            Some(second_financial)
+        );
+        assert_eq!(latest(second, ReportKind::Legal), Some(second_legal));
+        assert_eq!(latest(first, ReportKind::AfterAction), None);
+        assert_eq!(latest(first, ReportKind::ExecutiveBrief), None);
+        assert_eq!(
+            state
+                .reports()
+                .reports_for_after(first, Some(first_financial))
+                .map(ReportRecord::id)
+                .collect::<Vec<_>>(),
+            vec![first_legal, new_financial],
+            "the new kind projection must not disturb recipient chronology"
+        );
+        assert_eq!(
+            state
+                .reports()
+                .latest_for_recipient(first)
+                .map(ReportRecord::id),
+            Some(new_financial)
+        );
+        assert!(state.reports.has_consistent_indexes());
+    };
+    check(&state);
+
+    let saved = build_save(&registry, &state).expect("interleaved reports should save");
+    let restored = restore_save(&registry, saved).expect("derived report indexes should rebuild");
+    check(&restored);
+
+    // This index is derived only: a bad in-memory projection must be caught, while
+    // canonical save/restore above derives the correct latest IDs from persisted reports.
+    state
+        .reports
+        .latest_by_kind
+        .insert((first, ReportKind::Financial), first_financial);
+    assert!(!state.reports.has_consistent_indexes());
+    assert!(matches!(
+        crate::core::invariants::validate_state(&state),
+        Err(StateValidationError::IndexInconsistency {
+            subsystem: "reports"
+        })
+    ));
+}
+
+#[test]
 fn restore_rejects_report_time_rewind_after_equal_minute_reports() {
     let registry = build_registry();
     let mut state = AppState::new(0x0A11_CE01);
