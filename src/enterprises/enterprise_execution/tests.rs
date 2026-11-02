@@ -502,6 +502,197 @@ fn smuggling_requires_real_dock_access_and_a_documented_distribution_network() {
 }
 
 #[test]
+fn simultaneous_front_losses_suspend_shared_racket_once_and_settle_both_businesses() {
+    let registry = build_registry();
+    let poor_district = NeighborhoodProfile {
+        economy: NeighborhoodEconomyProfile {
+            wealth: rating(1),
+            commercial_activity: rating(1),
+            illicit_demand: rating(1),
+        },
+        institutions: NeighborhoodInstitutionProfile {
+            police_presence: rating(100),
+        },
+    };
+    let mut fixture = make_test_enterprise_fixture_with_inputs(
+        OrganizationKind::Criminal,
+        AutonomyLevel::Delegated,
+        poor_district,
+        Some(rating(80)),
+    );
+    let owner = BusinessOwner::Organization(fixture.organization);
+    let host = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Losing Waterside Warehouse",
+        BusinessKind::Warehouse,
+        BTreeSet::from([
+            BusinessFunction::DockAccess,
+            BusinessFunction::Warehousing,
+            BusinessFunction::DistributionInfrastructure,
+        ]),
+        owner,
+    );
+    let carrier = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Losing Delivery Wholesaler",
+        BusinessKind::Wholesale,
+        BTreeSet::from([
+            BusinessFunction::VehicleFleet,
+            BusinessFunction::ProfessionalRecords,
+        ]),
+        owner,
+    );
+    let racket = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Smuggling,
+            organization: fixture.organization,
+            authority: fixture.authority,
+            location: EnterpriseLocation::Business(host),
+            supporting_businesses: BTreeSet::from([carrier]),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .expect("the warehouse venue and separate delivery network should sustain the racket")
+    .commit(&mut fixture.state)
+    .expect("the shared enterprise should commit");
+    for business in [host, carrier] {
+        establish_business_economy_for_enterprise_business(&registry, &mut fixture, business);
+    }
+    let businesses = [(host, -500_i16), (carrier, -650_i16)];
+    let threshold = usize::from(
+        registry
+            .get_business(BusinessKind::Warehouse)
+            .economics()
+            .losing_cycles_before_suspension(),
+    );
+    assert_eq!(
+        threshold,
+        usize::from(
+            registry
+                .get_business(BusinessKind::Wholesale)
+                .economics()
+                .losing_cycles_before_suspension()
+        )
+    );
+
+    // The first two rounds produce a shared loss history without suspending the enterprise.
+    for _ in 1..threshold {
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        for (business, variance) in businesses {
+            let plan = decide_business_cycle(&registry, &fixture.state, business, variance)
+                .expect("due loss should be decidable");
+            let cycle = validate_business_cycle_plan(&fixture.state, plan)
+                .expect("loss should validate")
+                .commit(&mut fixture.state)
+                .expect("pre-threshold settlement should commit");
+            assert!(
+                fixture.state.economy().get_cycle(cycle).unwrap().net_cash() < Money::ZERO,
+                "the depressed district must produce a losing cycle for both fronts"
+            );
+        }
+        assert_eq!(
+            fixture
+                .state
+                .enterprises()
+                .get_enterprise(racket)
+                .unwrap()
+                .status(),
+            EnterpriseStatus::Active,
+        );
+    }
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    // Match the business-cycle phase: validate the full due cohort against one immutable
+    // snapshot, reserve every artifact, then commit in stable business order.
+    let mut cohort = Vec::new();
+    let mut budget = Vec::new();
+    for (business, variance) in businesses {
+        let plan = decide_business_cycle(&registry, &fixture.state, business, variance)
+            .expect("both front losses should be due simultaneously");
+        let validated = validate_business_cycle_plan(&fixture.state, plan)
+            .expect("each front must independently preflight the same racket suspension");
+        budget.extend(validated.id_budget());
+        cohort.push(validated);
+    }
+    fixture
+        .state
+        .ids
+        .reserve_many(&budget)
+        .expect("all cycle artifacts should fit");
+    let before_version = fixture
+        .state
+        .enterprises()
+        .get_enterprise(racket)
+        .unwrap()
+        .version();
+    let cycles: Vec<_> = cohort
+        .into_iter()
+        .map(|validated| validated.commit_preflighted(&mut fixture.state))
+        .collect();
+    assert_eq!(cycles.len(), 2);
+    for cycle in &cycles {
+        assert!(
+            fixture
+                .state
+                .economy()
+                .get_cycle(*cycle)
+                .unwrap()
+                .net_cash()
+                < Money::ZERO
+        );
+    }
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(racket)
+            .unwrap()
+            .version(),
+        before_version + 1,
+        "two front shutdowns in one cohort must produce only one racket lifecycle revision"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(racket)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Suspended
+    );
+    for business in [host, carrier] {
+        assert_eq!(
+            fixture
+                .state
+                .economy()
+                .get_business_economy(business)
+                .unwrap()
+                .status(),
+            BusinessOperatingStatus::Suspended,
+        );
+    }
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("shared-dependent-front suspension must be registry consistent");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("shared loss settlement should save"),
+    )
+    .expect("both cycle settlements and one racket shutdown should restore");
+    validate_state_against_registry(&registry, &restored)
+        .expect("restored overlapping suspension cohort should remain valid");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn counterfeiting_requires_a_real_press_and_a_separate_passing_network() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
