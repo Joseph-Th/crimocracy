@@ -233,6 +233,167 @@ fn sensitive_opportunity_cannot_convert_against_a_different_legal_episode() {
 }
 
 #[test]
+fn witness_opportunity_conversion_cannot_borrow_another_targets_case_knowledge() {
+    let mut fixture = make_fixture();
+    let police = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Shared Case Bureau".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .expect("police fixture should validate");
+    let make_witness = |state: &mut AppState, name: &str| {
+        insert_character(
+            state,
+            CharacterDraft {
+                name: name.to_owned(),
+                organization: None,
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("witness fixture should validate")
+    };
+    let first = make_witness(&mut fixture.state, "Known Primary Witness");
+    let second = make_witness(&mut fixture.state, "Context-Only Witness");
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Two separately informed witnesses".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Business(fixture.business)]),
+        },
+    )
+    .expect("shared investigation should validate")
+    .commit(&mut fixture.state)
+    .expect("shared investigation should commit");
+    for witness in [first, second] {
+        validate_register_case_witness(
+            &fixture.state,
+            CaseWitnessDraft {
+                investigation,
+                witness,
+                subject: EntityRef::Business(fixture.business),
+                cooperation: WitnessCooperation::Reluctant,
+            },
+        )
+        .expect("case witness should validate")
+        .commit(&mut fixture.state)
+        .expect("case witness should register");
+    }
+    let organization = fixture.organization;
+    let record_status = |state: &mut AppState, witness| {
+        validate_record_information_with_signal(
+            state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(organization),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::LegalActivity,
+                source_entity: None,
+                subject: EntityRef::Character(witness),
+                observed_at: state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary: "A confirmed witness for the shared investigation.".to_owned(),
+            },
+            InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+                investigation,
+            }),
+        )
+        .expect("typed witness fact should validate")
+        .commit(state)
+        .expect("typed witness fact should commit")
+    };
+    let first_status = record_status(&mut fixture.state, first);
+    // The organization also knows the second person's legal status, so the second operation is
+    // authorized on its own merits, but that fact is deliberately NOT in this opportunity.
+    let _second_status_outside_opportunity = record_status(&mut fixture.state, second);
+    let second_context = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(second),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The second person is relevant context, not a confirmed case witness."
+                .to_owned(),
+        },
+    )
+    .expect("context observation should validate")
+    .commit(&mut fixture.state)
+    .expect("context observation should commit");
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            organization,
+            operation_kind: OperationKind::WitnessPressure,
+            targets: BTreeSet::from([EntityRef::Character(first), EntityRef::Character(second)]),
+            source_information: BTreeSet::from([first_status, second_context]),
+            summary: "Only the first witness's case role supports this particular opening."
+                .to_owned(),
+            valid_until: Some(SimTime::from_minutes(120)),
+        },
+    )
+    .expect("one actionable witness plus contextual target may form an opening")
+    .commit(&mut fixture.state)
+    .expect("multi-target opening should commit");
+    let operation = validate_authorize_operation(
+        &fixture.registry,
+        &fixture.state,
+        OperationDraft {
+            title: "Pressure the contextual witness".to_owned(),
+            kind: OperationKind::WitnessPressure,
+            responsible_organization: organization,
+            leader: fixture.leader,
+            objective: OperationObjective::Frighten {
+                target: EntityRef::Character(second),
+            },
+            approach: OperationApproach::Intimidating,
+            roles: BTreeMap::from([(RoleKind::Coordinator, fixture.leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::from_minutes(10),
+        },
+    )
+    .expect("separately learned second-witness status should authorize independent pressure")
+    .commit(&mut fixture.state)
+    .expect("second-witness operation should commit");
+    let before = bincode::serialize(&fixture.state).expect("state should serialize");
+
+    assert!(matches!(
+        validate_convert_opportunity(&fixture.state, opportunity, operation),
+        Err(OpportunityError::OperationBasisMismatch {
+            operation: rejected_operation,
+            opportunity: rejected_opportunity
+        }) if rejected_operation == operation && rejected_opportunity == opportunity
+    ));
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "conversion cannot borrow a separate target's legal source or mutate opportunity state"
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("rejected conversion must retain a valid state");
+    validate_invariants(&fixture.state);
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("rejected conversion state must save"),
+    )
+    .expect("rejected conversion state must restore with the opening still unconverted");
+}
+
+#[test]
 fn conversion_keeps_discovery_provenance_without_forcing_it_into_execution_intelligence() {
     let mut fixture = make_fixture();
     let opportunity = validate_discover_operation_opportunity(
@@ -2107,6 +2268,130 @@ fn expiry_batch_report_exhaustion_is_terminal_noop_and_leaves_every_due_opportun
         fixture.state.ids.next_raw(IdKind::Report),
         u32::MAX,
         "failed batch preflight must not consume or wrap the exhausted allocator"
+    );
+    validate_state(&fixture.state)
+        .expect("an unreportable expiry cohort must remain a release-valid deferred lifecycle");
+    validate_invariants(&fixture.state);
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("deferred expiry state must save"),
+    )
+    .expect("deferred expiry state must survive restore");
+}
+
+#[test]
+fn report_exhaustion_at_opportunity_deadline_does_not_poison_canonical_ticks() {
+    let mut fixture = make_fixture();
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(2)),
+    )
+    .expect("expiring opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("expiring opportunity should commit");
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Report, u32::MAX);
+
+    let first = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(first.now, SimTime::from_minutes(1));
+    let second = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(second.now, SimTime::from_minutes(2));
+    assert!(second.expired_opportunities.is_empty());
+    let third = run_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(third.now, SimTime::from_minutes(3));
+    assert!(third.expired_opportunities.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .expect("unreportable opportunity must persist")
+            .status(),
+        OpportunityStatus::Open,
+        "expiry remains pending, but the deadline still prevents new conversions"
+    );
+    assert_eq!(
+        validate_dismiss_opportunity(&fixture.registry, &fixture.state, opportunity)
+            .err()
+            .expect("deadline must still block player dismissal of deferred expiry"),
+        OpportunityError::OpportunityExpired {
+            opportunity,
+            valid_until: SimTime::from_minutes(2),
+        }
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("canonical deferred-expiry ticks must remain release-valid");
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("post-deadline state must save"),
+    )
+    .expect("post-deadline deferred expiry must restore");
+}
+
+#[test]
+fn partial_report_budget_defers_the_whole_expiry_cohort_without_invalid_state() {
+    let mut fixture = make_fixture();
+    validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(2)),
+    )
+    .expect("first opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("first opportunity should commit");
+    let mut second_draft = opportunity_draft(&fixture, SimTime::from_minutes(2));
+    second_draft.operation_kind = OperationKind::Robbery;
+    second_draft.summary = "A second deadline shares the same report allocation rail.".to_owned();
+    validate_discover_operation_opportunity(&fixture.registry, &fixture.state, second_draft)
+        .expect("second opportunity should validate")
+        .commit(&mut fixture.state)
+        .expect("second opportunity should commit");
+    fixture.state.advance_clock(SimDuration::from_minutes(2));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Report, u32::MAX - 1);
+
+    let before = bincode::serialize(&fixture.state).expect("state should serialize");
+    assert!(
+        apply_opportunity_expiry(&fixture.registry, &mut fixture.state)
+            .expect("a partial shared report budget must defer the full expiry batch")
+            .is_empty()
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("partial capacity must also permit a valid deferred cohort");
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("deferred shared-capacity state should save"),
+    )
+    .expect("deferred shared-capacity state should restore");
+}
+
+#[test]
+fn overdue_open_opportunity_is_invalid_when_expiry_report_budget_is_available() {
+    let mut fixture = make_fixture();
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(2)),
+    )
+    .expect("short-lived opportunity should validate")
+    .commit(&mut fixture.state)
+    .expect("short-lived opportunity should commit");
+    fixture.state.advance_clock(SimDuration::from_minutes(2));
+
+    assert_eq!(
+        validate_state(&fixture.state),
+        Err(crate::core::invariants::StateValidationError::InvalidOpportunity { opportunity }),
+        "ordinary overdue open records remain invalid when the owner could expire them"
     );
 }
 

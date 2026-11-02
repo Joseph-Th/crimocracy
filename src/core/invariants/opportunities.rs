@@ -2,6 +2,7 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::{EntityRef, is_entity_present};
+use crate::core::id::IdKind;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::intelligence::KnowledgeHolder;
@@ -18,6 +19,19 @@ use crate::world::OrganizationKind;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValidationError> {
+    // Expiry is one all-or-none report-backed cohort. When the report ID rail cannot fit the
+    // complete due cohort, the owner deliberately leaves every deadline-passed opportunity
+    // pending. These are no longer actionable (the deadline check still rejects conversions),
+    // but rejecting the persisted state would panic the canonical tick after its safe no-op.
+    // Admit that deferred lifecycle only while the exact due cohort remains unreportable.
+    let due_count = state.opportunities.find_due_expiring(state.now()).len();
+    let deferred_expiry_is_unreportable = state
+        .ids
+        .reserve(
+            IdKind::Report,
+            u32::try_from(due_count).expect("persisted opportunity count fits the ID space"),
+        )
+        .is_err();
     let mut covered_targets = BTreeSet::<EntityRef>::new();
     let mut open_targets = BTreeMap::<
         (
@@ -27,7 +41,12 @@ pub(super) fn validate_opportunities(state: &AppState) -> Result<(), StateValida
         BTreeSet<EntityRef>,
     >::new();
     for opportunity in state.opportunities.opportunities() {
-        validate_opportunity(state, opportunity, &mut covered_targets)?;
+        validate_opportunity(
+            state,
+            opportunity,
+            &mut covered_targets,
+            deferred_expiry_is_unreportable,
+        )?;
         if opportunity.resolution().is_none() {
             let context = opportunity.context();
             let targets = open_targets
@@ -164,12 +183,18 @@ fn validate_opportunity(
     state: &AppState,
     opportunity: &OpportunityRecord,
     covered_targets: &mut BTreeSet<EntityRef>,
+    deferred_expiry_is_unreportable: bool,
 ) -> Result<(), StateValidationError> {
     validate_opportunity_definition(state, opportunity)?;
     validate_opportunity_targets(state, opportunity)?;
     validate_opportunity_sources(state, opportunity, covered_targets)?;
     validate_opportunity_report(state, opportunity)?;
-    validate_opportunity_resolution(state, opportunity, covered_targets)
+    validate_opportunity_resolution(
+        state,
+        opportunity,
+        covered_targets,
+        deferred_expiry_is_unreportable,
+    )
 }
 
 fn validate_opportunity_definition(
@@ -293,9 +318,10 @@ fn validate_opportunity_resolution(
     state: &AppState,
     opportunity: &OpportunityRecord,
     operation_targets: &mut BTreeSet<EntityRef>,
+    deferred_expiry_is_unreportable: bool,
 ) -> Result<(), StateValidationError> {
     match opportunity.resolution() {
-        None => validate_open_opportunity(state, opportunity),
+        None => validate_open_opportunity(state, opportunity, deferred_expiry_is_unreportable),
         Some(OpportunityResolution::Dismissed { at, report }) => {
             validate_dismissed_opportunity(state, opportunity, at, report)
         }
@@ -311,11 +337,13 @@ fn validate_opportunity_resolution(
 fn validate_open_opportunity(
     state: &AppState,
     opportunity: &OpportunityRecord,
+    deferred_expiry_is_unreportable: bool,
 ) -> Result<(), StateValidationError> {
     if opportunity.version() != 1
-        || opportunity
-            .valid_until()
-            .is_some_and(|valid_until| valid_until <= state.now())
+        || (!deferred_expiry_is_unreportable
+            && opportunity
+                .valid_until()
+                .is_some_and(|valid_until| valid_until <= state.now()))
     {
         return Err(invalid_opportunity(opportunity));
     }
