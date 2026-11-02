@@ -1586,6 +1586,67 @@ fn duplicate_open_opportunity_is_rejected_but_dismissal_allows_later_rediscovery
 }
 
 #[test]
+fn opportunity_target_index_rebuilds_and_releases_on_dismissal() {
+    let mut fixture = make_fixture();
+    let draft = opportunity_draft(&fixture, SimTime::from_minutes(120));
+    let organization = fixture.organization;
+    let first =
+        validate_discover_operation_opportunity(&fixture.registry, &fixture.state, draft.clone())
+            .expect("initial opportunity should validate")
+            .commit(&mut fixture.state)
+            .expect("initial opportunity should commit");
+
+    fixture.state = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("open opportunity should save"),
+    )
+    .expect("open opportunity should restore with its target index");
+    let open_target = |state: &AppState, kind| {
+        state
+            .opportunities()
+            .find_open_operation_overlapping(organization, kind, &draft.targets)
+            .map(|opportunity| opportunity.id())
+    };
+    assert_eq!(
+        open_target(&fixture.state, OperationKind::Burglary),
+        Some(first)
+    );
+    assert_eq!(open_target(&fixture.state, OperationKind::Robbery), None);
+    let before = bincode::serialize(&fixture.state).expect("fixture state should serialize");
+    assert_eq!(
+        validate_discover_operation_opportunity(&fixture.registry, &fixture.state, draft.clone())
+            .err()
+            .expect("restored overlapping target must be rejected"),
+        OpportunityError::ExistingOpenOpportunity(first)
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "overlapping discovery must not mutate authoritative state"
+    );
+
+    validate_dismiss_opportunity(&fixture.registry, &fixture.state, first)
+        .expect("active opportunity should dismiss")
+        .commit(&mut fixture.state)
+        .expect("dismissal should commit");
+    assert_eq!(open_target(&fixture.state, OperationKind::Burglary), None);
+    fixture.state = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("dismissed state should save"),
+    )
+    .expect("dismissed state should restore without a phantom open target");
+    assert_eq!(open_target(&fixture.state, OperationKind::Burglary), None);
+    let second = validate_discover_operation_opportunity(&fixture.registry, &fixture.state, draft)
+        .expect("dismissed target should become discoverable again")
+        .commit(&mut fixture.state)
+        .expect("rediscovered opportunity should commit");
+    assert_ne!(second, first);
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("indexed rediscovery must retain a valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn overlapping_target_set_is_rejected_as_duplicate_open_work() {
     let mut fixture = make_fixture();
     let first = validate_discover_operation_opportunity(
@@ -1699,10 +1760,11 @@ fn restore_rejects_overlapping_open_opportunities_that_canonical_discovery_canno
     assert_eq!(
         error,
         crate::core::persistence::LoadError::InvalidState(
-            crate::core::invariants::StateValidationError::InvalidOpportunity {
-                opportunity: second,
+            crate::core::invariants::StateValidationError::IndexInconsistency {
+                subsystem: "opportunities",
             }
-        )
+        ),
+        "the target index must reject overlapping open opportunities during restore"
     );
 }
 

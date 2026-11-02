@@ -131,43 +131,16 @@ impl OpportunityRecord {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct OperationOpportunityKey {
-    organization: OrganizationId,
-    operation_kind: OperationKind,
-    targets: BTreeSet<EntityRef>,
-}
-
-impl OperationOpportunityKey {
-    fn from_record(record: &OpportunityRecord) -> Self {
-        let context = &record.context;
-        Self {
-            organization: record.organization,
-            operation_kind: context.operation_kind,
-            targets: context.targets.clone(),
-        }
-    }
-
-    fn new(
-        organization: OrganizationId,
-        operation_kind: OperationKind,
-        targets: BTreeSet<EntityRef>,
-    ) -> Self {
-        Self {
-            organization,
-            operation_kind,
-            targets,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OpportunityState {
     records: BTreeMap<OpportunityId, OpportunityRecord>,
     #[serde(skip)]
     by_report: BTreeMap<ReportId, OpportunityId>,
+    /// The canonical discovery rule permits only one open opportunity per
+    /// (organization, operation kind, target). Lookup cost scales with the proposed
+    /// target set rather than every unrelated open opportunity in the campaign.
     #[serde(skip)]
-    open_by_context: BTreeMap<OperationOpportunityKey, OpportunityId>,
+    open_by_target: BTreeMap<(OrganizationId, OperationKind, EntityRef), OpportunityId>,
     #[serde(skip)]
     open_by_expiry: BTreeMap<SimTime, BTreeSet<OpportunityId>>,
     #[serde(skip)]
@@ -181,7 +154,7 @@ impl OpportunityState {
 
     pub(crate) fn rebuild_derived_indexes(&mut self) {
         self.by_report.clear();
-        self.open_by_context.clear();
+        self.open_by_target.clear();
         self.open_by_expiry.clear();
         self.by_operation.clear();
         for record in self.records.values() {
@@ -189,8 +162,16 @@ impl OpportunityState {
             self.by_report.insert(record.report(), id);
             match record.resolution() {
                 None => {
-                    self.open_by_context
-                        .insert(OperationOpportunityKey::from_record(record), id);
+                    for target in record.context().targets() {
+                        self.open_by_target.insert(
+                            (
+                                record.organization(),
+                                record.context().operation_kind(),
+                                *target,
+                            ),
+                            id,
+                        );
+                    }
                     if let Some(valid_until) = record.valid_until() {
                         self.open_by_expiry
                             .entry(valid_until)
@@ -242,47 +223,24 @@ impl OpportunityState {
         (now >= valid_until).then_some((opportunity, valid_until))
     }
 
-    pub fn find_open_operation(
-        &self,
-        organization: OrganizationId,
-        operation_kind: OperationKind,
-        targets: &BTreeSet<EntityRef>,
-    ) -> Option<&OpportunityRecord> {
-        self.open_by_context
-            .get(&OperationOpportunityKey::new(
-                organization,
-                operation_kind,
-                targets.clone(),
-            ))
-            .map(|id| {
-                self.records
-                    .get(id)
-                    .expect("open opportunity context index must reference an opportunity")
-            })
-    }
-
     /// The open opportunity for the same organization and operation kind whose target set
-    /// intersects `targets`, if any. Exact-set equality alone lets `{A}` and `{A,B}` coexist
-    /// over the same target; converting one leaves the other open until it expires with a
-    /// redundant report even though the target already has committed work.
+    /// intersects `targets`, if any. The target index covers both exact duplicates and
+    /// overlapping sets without scanning unrelated open opportunities.
     pub fn find_open_operation_overlapping(
         &self,
         organization: OrganizationId,
         operation_kind: OperationKind,
         targets: &BTreeSet<EntityRef>,
     ) -> Option<&OpportunityRecord> {
-        self.open_by_context
-            .iter()
-            .filter(|(key, _)| {
-                key.organization == organization && key.operation_kind == operation_kind
-            })
-            .filter(|(key, _)| !key.targets.is_disjoint(targets))
-            .map(|(_, id)| {
-                self.records
-                    .get(id)
-                    .expect("open opportunity context index must reference an opportunity")
-            })
-            .next()
+        targets.iter().find_map(|target| {
+            self.open_by_target
+                .get(&(organization, operation_kind, *target))
+                .map(|id| {
+                    self.records
+                        .get(id)
+                        .expect("open opportunity target index must reference an opportunity")
+                })
+        })
     }
 
     pub(crate) fn opportunities(&self) -> impl Iterator<Item = &OpportunityRecord> {
@@ -301,17 +259,25 @@ impl OpportunityState {
 
     fn insert(&mut self, record: OpportunityRecord) {
         let id = record.id();
-        let key = OperationOpportunityKey::from_record(&record);
         debug_assert_eq!(record.status(), OpportunityStatus::Open);
         debug_assert!(!self.records.contains_key(&id));
-        debug_assert!(!self.open_by_context.contains_key(&key));
 
         let previous_report = self.by_report.insert(record.report(), id);
         debug_assert!(
             previous_report.is_none(),
             "one discovery report may describe only one opportunity"
         );
-        self.open_by_context.insert(key, id);
+        for target in record.context().targets() {
+            let previous = self.open_by_target.insert(
+                (
+                    record.organization(),
+                    record.context().operation_kind(),
+                    *target,
+                ),
+                id,
+            );
+            debug_assert!(previous.is_none(), "overlapping open opportunity target");
+        }
         if let Some(valid_until) = record.valid_until() {
             self.open_by_expiry
                 .entry(valid_until)
@@ -354,10 +320,15 @@ impl OpportunityState {
             .get(&id)
             .expect("validated opportunity disappeared before lifecycle commit");
         debug_assert_eq!(record.status(), OpportunityStatus::Open);
-        let key = OperationOpportunityKey::from_record(record);
         let valid_until = record.valid_until();
-        let removed = self.open_by_context.remove(&key);
-        debug_assert_eq!(removed, Some(id));
+        for target in record.context().targets() {
+            let removed = self.open_by_target.remove(&(
+                record.organization(),
+                record.context().operation_kind(),
+                *target,
+            ));
+            debug_assert_eq!(removed, Some(id));
+        }
         if let Some(valid_until) = valid_until {
             let ids = self
                 .open_by_expiry
@@ -380,7 +351,7 @@ impl OpportunityState {
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         self.records_have_consistent_indexes()
             && self.report_index_is_consistent()
-            && self.open_context_index_is_consistent()
+            && self.open_target_index_is_consistent()
             && self.expiry_index_is_consistent()
             && self.operation_index_is_consistent()
     }
@@ -388,7 +359,6 @@ impl OpportunityState {
     /// Every opportunity must occupy exactly the projections implied by its lifecycle state.
     fn records_have_consistent_indexes(&self) -> bool {
         let mut expected_report_entries = 0_usize;
-        let mut expected_open_context_entries = 0_usize;
         let mut expected_expiry_entries = 0_usize;
         let mut expected_operation_entries = 0_usize;
         for (stored_id, record) in &self.records {
@@ -406,13 +376,8 @@ impl OpportunityState {
                 }
                 expected_report_entries += 1;
             }
-            let key = OperationOpportunityKey::from_record(record);
             match record.resolution() {
                 None => {
-                    if self.open_by_context.get(&key) != Some(&id) {
-                        return false;
-                    }
-                    expected_open_context_entries += 1;
                     if let Some(at) = record.valid_until() {
                         if !self
                             .open_by_expiry
@@ -435,7 +400,6 @@ impl OpportunityState {
             }
         }
         self.by_report.len() == expected_report_entries
-            && self.open_by_context.len() == expected_open_context_entries
             && self
                 .open_by_expiry
                 .values()
@@ -471,17 +435,28 @@ impl OpportunityState {
         true
     }
 
-    /// Context deduplication contains open opportunities only and preserves the exact key.
-    fn open_context_index_is_consistent(&self) -> bool {
-        for (key, id) in &self.open_by_context {
-            if self.records.get(id).is_none_or(|record| {
-                record.status() != OpportunityStatus::Open
-                    || OperationOpportunityKey::from_record(record) != *key
-            }) {
-                return false;
+    /// Every open target is indexed exactly once, and no resolved opportunity remains
+    /// indexed. This also detects overlapping open records after save restoration.
+    fn open_target_index_is_consistent(&self) -> bool {
+        let mut count = 0usize;
+        for record in self
+            .records
+            .values()
+            .filter(|record| record.status() == OpportunityStatus::Open)
+        {
+            for target in record.context().targets() {
+                let key = (
+                    record.organization(),
+                    record.context().operation_kind(),
+                    *target,
+                );
+                if self.open_by_target.get(&key) != Some(&record.id()) {
+                    return false;
+                }
+                count += 1;
             }
         }
-        true
+        self.open_by_target.len() == count
     }
 
     /// The expiry schedule contains only open opportunities with that exact expiry instant.

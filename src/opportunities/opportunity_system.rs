@@ -369,16 +369,8 @@ fn validate_discovery_state(
             valid_until,
         });
     }
-    if let Some(existing) = state.opportunities.find_open_operation(
-        draft.organization,
-        draft.operation_kind,
-        &draft.targets,
-    ) {
-        return Err(OpportunityError::ExistingOpenOpportunity(existing.id()));
-    }
-    // Same-target work already has an open opportunity even when the target sets differ:
-    // discovering `{A,B}` while `{A}` is open would leave a duplicate that outlives the
-    // conversion of either one and expires with a redundant report.
+    // Target-index lookup handles exact and intersecting matches alike: discovering `{A,B}`
+    // while `{A}` is open cannot leave redundant work outstanding.
     if let Some(existing) = state.opportunities.find_open_operation_overlapping(
         draft.organization,
         draft.operation_kind,
