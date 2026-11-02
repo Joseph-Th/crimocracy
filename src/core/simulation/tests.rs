@@ -504,7 +504,7 @@ fn tick_outcome_surfaces_reputation_only_decay_mutation() {
         &mut state,
         OrganizationDraft {
             name: "Quiet Reputation Fixture".to_owned(),
-            kind: OrganizationKind::LawEnforcement,
+            kind: OrganizationKind::Criminal,
         },
     )
     .expect("fixture organization should validate");
@@ -553,7 +553,7 @@ fn quiet_nonboundary_reputation_phase_preserves_state_before_later_decay() {
         &mut state,
         OrganizationDraft {
             name: "Quiet Reputation Clock".to_owned(),
-            kind: OrganizationKind::LawEnforcement,
+            kind: OrganizationKind::Criminal,
         },
     )
     .expect("reputation fixture organization should validate");

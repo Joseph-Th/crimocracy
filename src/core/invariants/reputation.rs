@@ -4,6 +4,7 @@ use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::registry::Registry;
+use crate::world::OrganizationKind;
 
 pub(super) fn validate_reputations(state: &AppState) -> Result<(), StateValidationError> {
     for record in state.reputation.records() {
@@ -12,6 +13,15 @@ pub(super) fn validate_reputations(state: &AppState) -> Result<(), StateValidati
             return Err(StateValidationError::MissingEntity {
                 context: "reputation record",
                 entity,
+            });
+        }
+        if state
+            .world
+            .get_organization(record.organization())
+            .is_some_and(|organization| organization.kind() != OrganizationKind::Criminal)
+        {
+            return Err(StateValidationError::InvalidReputationOrganization {
+                organization: record.organization(),
             });
         }
         if record.score() > 100 {

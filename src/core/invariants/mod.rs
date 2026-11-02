@@ -43,6 +43,8 @@ pub enum StateValidationError {
     EmptyEntityName { entity: EntityRef },
     #[error("character {character} has invalid persisted version 0")]
     InvalidCharacterVersion { character: CharacterId },
+    #[error("non-criminal organization {organization} stores a criminal reputation record")]
+    InvalidReputationOrganization { organization: OrganizationId },
     #[error("organization {organization:?} stores an out-of-range {audience:?} reputation score")]
     InvalidReputationScore {
         organization: OrganizationId,

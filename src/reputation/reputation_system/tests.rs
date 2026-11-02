@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::validate_invariants;
+use crate::core::invariants::{StateValidationError, validate_invariants, validate_state};
+use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::core::time::{SimDuration, SimTime};
 use crate::social::RelationshipLevel;
 use crate::world::world_system::{insert_character, insert_organization};
@@ -176,6 +177,110 @@ fn reputation_deltas_reject_unknown_organizations_without_state_change() {
         };
     assert_eq!(error, ReputationError::MissingOrganization(missing));
     assert!(state.reputation.records().next().is_none());
+}
+
+#[test]
+fn noncriminal_organizations_cannot_acquire_criminal_reputation() {
+    let (registry, mut state, criminal) = make_state();
+    let commercial = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Uninvolved Commercial Firm".to_owned(),
+            kind: OrganizationKind::Commercial,
+        },
+    )
+    .expect("commercial organization should validate");
+    for delta in [5, 0, -5] {
+        assert_eq!(
+            apply_reputation_delta(
+                &registry,
+                &mut state,
+                commercial,
+                AudienceKind::Underworld,
+                delta
+            ),
+            Err(ReputationError::InvalidOrganizationKind(commercial))
+        );
+    }
+    assert!(state.reputation.records().next().is_none());
+    apply_reputation_delta(&registry, &mut state, criminal, AudienceKind::Underworld, 5)
+        .expect("criminal reputation should still work");
+    validate_state(&state).expect("legitimate criminal standing should remain valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn persistence_rejects_reputation_reassigned_to_noncriminal_organization() {
+    let (registry, mut state, criminal) = make_state();
+    let commercial = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Uninvolved Reputation Recipient".to_owned(),
+            kind: OrganizationKind::Commercial,
+        },
+    )
+    .expect("commercial organization should validate");
+    apply_reputation_delta(&registry, &mut state, criminal, AudienceKind::Police, 7)
+        .expect("criminal reputation should persist");
+    let original = state
+        .reputation()
+        .get_record(criminal, AudienceKind::Police)
+        .expect("criminal impression should exist");
+    let mut altered = reputation_record_wire(original);
+    altered.organization = commercial;
+    let mut corrupted_state = replace_serialized_reputation_record(&state, original, &altered);
+    let corrupted_record = corrupted_state
+        .reputation
+        .records
+        .remove(&(criminal, AudienceKind::Police))
+        .expect("corrupted record must retain its original serialized map key");
+    assert!(
+        corrupted_state
+            .reputation
+            .records
+            .insert((commercial, AudienceKind::Police), corrupted_record)
+            .is_none(),
+        "replacement target should have no competing reputation record"
+    );
+    assert_eq!(
+        validate_state(&corrupted_state),
+        Err(StateValidationError::InvalidReputationOrganization {
+            organization: commercial
+        })
+    );
+    assert!(matches!(
+        build_save(&registry, &corrupted_state),
+        Err(crate::core::persistence::SaveError::InvalidState(
+            StateValidationError::InvalidReputationOrganization { organization }
+        )) if organization == commercial
+    ));
+
+    // A persisted keyed map must have both its key and record organization changed to remain
+    // internally consistent. Save and restore must reject the semantic cross-kind defect.
+    #[derive(Serialize, serde::Deserialize)]
+    struct EnvelopeWire {
+        format_version: u16,
+        content_revision: u32,
+        state: AppState,
+    }
+    let envelope = build_save(&registry, &state).expect("original state should save");
+    let mut wire: EnvelopeWire = bincode::deserialize(
+        &bincode::serialize(&envelope).expect("valid envelope should serialize"),
+    )
+    .expect("save envelope wire should decode");
+    wire.state = corrupted_state;
+    let envelope: SaveEnvelope = bincode::deserialize(
+        &bincode::serialize(&wire).expect("corrupted envelope should serialize"),
+    )
+    .expect("corrupted save should decode");
+    assert_eq!(
+        restore_save(&registry, envelope).expect_err("noncriminal reputation must not restore"),
+        LoadError::InvalidState(StateValidationError::InvalidReputationOrganization {
+            organization: commercial
+        })
+    );
 }
 
 #[test]

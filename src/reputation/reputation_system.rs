@@ -29,6 +29,8 @@ pub(crate) type OperationReputationEvent = (
 pub enum ReputationError {
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
+    #[error("organization {0} is not criminal and cannot hold underworld reputation")]
+    InvalidOrganizationKind(OrganizationId),
     #[error(transparent)]
     Report(#[from] ReportError),
     #[error(transparent)]
@@ -47,8 +49,12 @@ pub fn apply_reputation_delta(
     audience: AudienceKind,
     delta: i8,
 ) -> Result<u8, ReputationError> {
-    if state.world().get_organization(organization).is_none() {
-        return Err(ReputationError::MissingOrganization(organization));
+    let organization_record = state
+        .world()
+        .get_organization(organization)
+        .ok_or(ReputationError::MissingOrganization(organization))?;
+    if organization_record.kind() != OrganizationKind::Criminal {
+        return Err(ReputationError::InvalidOrganizationKind(organization));
     }
     apply_delta(registry, state, organization, audience, delta)
 }
