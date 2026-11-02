@@ -453,10 +453,10 @@ pub fn run_repeat_take_probe(
 }
 
 /// Proves the enforcement-attention consequence loop end to end through production paths, the way a
-/// boss experiences it: a racket run in a clean district never draws a dedicated inquiry; a
-/// district under sustained originated casework first taxes every cycle with a compounding
-/// street-heat surcharge, and then converts into a racket inquiry opened on the racket itself,
-/// delivered to the organization as provenance-bearing legal knowledge. The casework is
+/// boss experiences it: even a racket in a clean district can draw its first dedicated inquiry;
+/// a district under sustained originated casework taxes every cycle with a compounding
+/// street-heat surcharge, then can convert into an inquiry opened on the racket itself.
+/// Management observes the vice activity, not the institutional case record. The casework is
 /// originated through the canonical incident-intake path; the conversion itself is authored
 /// per-cycle visibility math, so the probe originates enough parallel cases to push the
 /// authored chance to certainty instead of asserting a lucky roll.
@@ -481,8 +481,8 @@ pub fn run_enforcement_attention_probe(
         ..RunMetrics::default()
     };
 
-    // Control cycle: with no active originated casework targeting the district, the visibility
-    // roll is unspent by construction - a clean district can never fabricate attention.
+    // Under this seeded control run the first racket cycle stays quiet. There is no
+    // active district casework or heat surcharge; baseline vice exposure still exists.
     let next_cycle_at = scenario
         .state
         .enterprises()
@@ -499,7 +499,9 @@ pub fn run_enforcement_attention_probe(
     if control_cycle.drew_enforcement_attention()
         || control_cycle.investigation_heat() != Money::ZERO
     {
-        return Err("clean-district control cycle drew attention; the enforcement contract requires clean districts to stay clean".into());
+        return Err(
+            "the seeded quiet control cycle unexpectedly drew a baseline vice inquiry".into(),
+        );
     }
     if detail {
         println!(
@@ -665,7 +667,7 @@ pub fn run_enforcement_attention_probe(
     validate_harness_state(registry, &scenario.state)?;
     if detail {
         println!(
-            "[ENFORCEMENT PASS] clean districts stay clean; sustained casework taxes cycles, opens a dedicated inquiry, and exposes only manager-observable enforcement attention."
+            "[ENFORCEMENT PASS] clean districts can draw a first inquiry; sustained casework taxes cycles, raises detection risk, and exposes only manager-observable enforcement attention."
         );
     }
     Ok(())

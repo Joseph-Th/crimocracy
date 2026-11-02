@@ -239,7 +239,10 @@ fn enforcement_attention_uses_a_half_open_basis_point_roll() {
         .enforcement_attention_basis_points_per_active_case();
     assert!(chance > 0, "fixture requires a positive enforcement chance");
 
-    for (roll, expected_hit) in [(chance - 1, true), (chance, false)] {
+    // One standing racket-exposure source plus one active district case both contribute to
+    // the draw. The exact upper bound remains excluded.
+    let exposed_chance = chance * 2;
+    for (roll, expected_hit) in [(exposed_chance - 1, true), (exposed_chance, false)] {
         let mut fixture = make_test_enterprise_fixture();
         let enterprise = establish_protection(&registry, &mut fixture);
         let neighborhood = match fixture.location {

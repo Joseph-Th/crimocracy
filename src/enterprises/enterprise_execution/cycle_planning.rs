@@ -102,12 +102,14 @@ pub fn decide_enterprise_cycle(
     )?;
     let operating_cost = cost.total;
 
-    // Existing dedicated inquiry suppresses another concurrent inquiry. A zero-pressure district
-    // naturally produces a zero chance, so the half-open roll comparison remains the sole gate.
+    // The racket itself is one standing source of vice exposure even before police have opened
+    // a district case. Otherwise an untouched district would make an operating racket permanently
+    // immune to inquiry unless another crime first created a police file. Each active district
+    // case adds the authored per-case risk. Existing inquiries suppress duplicate intake.
     let enforcement_chance_basis_points = u32::try_from(
         (u64::from(economics.enforcement_attention_basis_points_per_active_case())
-            * u64::from(active_district_cases))
-        .min(10_000),
+            * (u64::from(active_district_cases) + 1))
+            .min(10_000),
     )
     .expect("vice chance is explicitly capped to basis-point range");
     let had_active_enterprise_inquiry = has_active_enterprise_inquiry(state, enterprise);

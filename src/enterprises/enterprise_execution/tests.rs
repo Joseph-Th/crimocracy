@@ -6146,7 +6146,7 @@ fn sustained_district_heat_draws_a_racket_inquiry_onto_the_racket_itself() {
     };
     let police = insert_district_police(&registry, &mut fixture, "Vice Ward Police", neighborhood);
 
-    // A clean district never draws attention even on the strongest visibility roll.
+    // A high roll leaves this district quiet; lacking another police case is not immunity.
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_440));
@@ -6154,7 +6154,10 @@ fn sustained_district_heat_draws_a_racket_inquiry_onto_the_racket_itself() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, 0),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("clean cycle plan should resolve");
     assert_eq!(clean_plan.economics.attention, AttentionClass::Routine);
@@ -6164,7 +6167,7 @@ fn sustained_district_heat_draws_a_racket_inquiry_onto_the_racket_itself() {
         .expect("clean cycle settlement should commit");
     assert!(
         find_racket_investigation(&fixture, police, enterprise).is_none(),
-        "a clean district must not fabricate a racket inquiry"
+        "a high roll must leave a quiet district without a racket inquiry"
     );
 
     // Once originated casework targets the racket's district, a low visibility roll opens a
@@ -6258,6 +6261,102 @@ fn sustained_district_heat_draws_a_racket_inquiry_onto_the_racket_itself() {
 
     validate_state(&fixture.state).expect("vice-attention state should validate");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn routine_racket_exposure_can_open_the_first_district_vice_inquiry() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let neighborhood = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        EnterpriseLocation::Business(_) => panic!("fixture should use a neighborhood location"),
+    };
+    let police = insert_district_police(
+        &registry,
+        &mut fixture,
+        "District Vice Police",
+        neighborhood,
+    );
+    assert_eq!(
+        count_district_originated_cases(&fixture.state, neighborhood),
+        0,
+        "the first inquiry must not depend on unrelated casework"
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, 0),
+    )
+    .expect("an operating racket must have a nonzero baseline detection risk");
+    assert_eq!(plan.economics.investigation_heat, Money::ZERO);
+    assert_eq!(plan.economics.attention, AttentionClass::Notable);
+    let cycle = validate_enterprise_cycle_plan(&fixture.state, plan)
+        .expect("first vice inquiry should validate")
+        .commit(&mut fixture.state)
+        .expect("the first racket inquiry should settle atomically");
+    assert!(
+        fixture
+            .state
+            .enterprises()
+            .get_cycle(cycle)
+            .expect("cycle persists")
+            .drew_enforcement_attention()
+    );
+    assert!(find_racket_investigation(&fixture, police, enterprise).is_some());
+    assert_eq!(
+        fixture
+            .state
+            .intelligence()
+            .information_for_holder_by_topic(
+                KnowledgeHolder::Organization(fixture.organization),
+                crate::intelligence::InformationTopic::LegalActivity,
+            )
+            .filter(|information| information.subject() == EntityRef::Enterprise(enterprise))
+            .count(),
+        0,
+        "formal case knowledge must still require a disclosure channel"
+    );
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let subsequent = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, 0),
+    )
+    .expect("the racket should continue settling under its first inquiry");
+    let second_cycle = validate_enterprise_cycle_plan(&fixture.state, subsequent)
+        .expect("subsequent cycle should validate")
+        .commit(&mut fixture.state)
+        .expect("subsequent cycle should settle");
+    assert!(
+        !fixture
+            .state
+            .enterprises()
+            .get_cycle(second_cycle)
+            .expect("cycle persists")
+            .drew_enforcement_attention(),
+        "an active inquiry must suppress duplicate vice intake even on the lowest roll"
+    );
+    validate_state(&fixture.state).expect("first-inquiry state must remain valid");
+    validate_state_against_registry(&registry, &fixture.state)
+        .expect("first-inquiry state must be registry consistent");
+    validate_invariants(&fixture.state);
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("baseline vice inquiry must remain saveable"),
+    )
+    .expect("baseline vice inquiry must restore without a preexisting district case");
+    validate_state_against_registry(&registry, &restored)
+        .expect("restored first-inquiry history must remain registry consistent");
 }
 
 #[test]
@@ -6784,7 +6883,10 @@ fn shelved_racket_inquiry_releases_the_racket_from_compounded_heat() {
         &registry,
         &fixture.state,
         enterprise,
-        EnterpriseCycleRandomness::new(0, 0),
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
     )
     .expect("quiet cycle plan should resolve");
     assert_eq!(
