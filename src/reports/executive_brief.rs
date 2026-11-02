@@ -196,12 +196,19 @@ fn collect_source_candidates(
         if report.kind() == ReportKind::ExecutiveBrief {
             continue;
         }
+        // Expiry is report-backed and may remain pending when its complete report-ID cohort
+        // cannot be allocated. A persisted Open status is therefore not proof that the discovery
+        // is still actionable; deadline-passed discovery text must not reach a later executive
+        // brief as a fresh opening. An eventual expiry report remains eligible independently.
         if state
             .opportunities()
             .opportunity_for_report(report.id())
             .is_some_and(|opportunity| {
                 report.id() == opportunity.report()
-                    && opportunity.status() != crate::opportunities::OpportunityStatus::Open
+                    && (opportunity.status() != crate::opportunities::OpportunityStatus::Open
+                        || opportunity
+                            .valid_until()
+                            .is_some_and(|deadline| state.now() >= deadline))
             })
         {
             continue;

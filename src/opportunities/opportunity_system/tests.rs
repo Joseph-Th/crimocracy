@@ -2144,6 +2144,105 @@ fn expiry_report_reaches_later_executive_brief_after_discovery_window_has_closed
 }
 
 #[test]
+fn deferred_expiry_does_not_resurface_stale_discoveries_in_an_executive_brief() {
+    use crate::core::attention::AttentionClass;
+    use crate::reports::executive_brief::{decide_executive_brief, validate_executive_brief_plan};
+    use crate::reports::report_system::validate_record_report;
+    use crate::reports::{ReportDraft, ReportEntry, ReportKind};
+
+    let mut fixture = make_fixture();
+    designate_player_organization(&mut fixture.state, fixture.organization)
+        .expect("criminal fixture organization can receive executive briefs");
+    let first = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(2)),
+    )
+    .expect("first opening should validate")
+    .commit(&mut fixture.state)
+    .expect("first opening should commit");
+    let mut second_draft = opportunity_draft(&fixture, SimTime::from_minutes(2));
+    second_draft.operation_kind = OperationKind::Robbery;
+    // Exercise the inclusive deadline boundary alongside one older expired discovery.
+    second_draft.valid_until = Some(SimTime::from_minutes(1_440));
+    second_draft.summary = "A second short-lived opening has also gone stale.".to_owned();
+    let second =
+        validate_discover_operation_opportunity(&fixture.registry, &fixture.state, second_draft)
+            .expect("second opening should validate")
+            .commit(&mut fixture.state)
+            .expect("second opening should commit");
+    let unrelated = "An unrelated legal development still needs executive attention.";
+    validate_record_report(
+        &fixture.state,
+        ReportDraft {
+            recipient: fixture.organization,
+            kind: ReportKind::Legal,
+            title: "Independent legal notice".to_owned(),
+            entries: vec![ReportEntry {
+                attention: AttentionClass::Notable,
+                summary: unrelated.to_owned(),
+                sources: Vec::new(),
+                entities: BTreeSet::new(),
+                decision: None,
+            }],
+        },
+    )
+    .expect("independent report should validate")
+    .commit(&mut fixture.state)
+    .expect("independent report should persist");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(IdKind::Report, u32::MAX - 1);
+    assert!(
+        apply_opportunity_expiry(&fixture.registry, &mut fixture.state)
+            .expect("shared expiry report budget must defer the full cohort")
+            .is_empty()
+    );
+    for opportunity in [first, second] {
+        assert_eq!(
+            fixture
+                .state
+                .opportunities()
+                .get_opportunity(opportunity)
+                .expect("deferred opportunity should persist")
+                .status(),
+            OpportunityStatus::Open,
+        );
+    }
+
+    let plan = decide_executive_brief(&fixture.registry, &fixture.state, fixture.organization)
+        .expect("brief is due despite unresolved expiry reports");
+    let brief = validate_executive_brief_plan(&fixture.state, plan)
+        .expect("brief with a remaining report ID should validate")
+        .commit(&mut fixture.state)
+        .expect("brief should consume the final report ID");
+    let entries = fixture
+        .state
+        .reports()
+        .get_report(brief)
+        .expect("brief should persist")
+        .entries();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expired discoveries must not displace current news"
+    );
+    assert_eq!(entries[0].summary, unrelated);
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("deferred expiry and correct briefing should remain release-valid");
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("deferred expiry and briefing should save"),
+    )
+    .expect("the executive brief and deferred cohort should survive restore");
+}
+
+#[test]
 fn expiry_token_rejects_clock_staleness_without_partial_report_mutation() {
     let mut fixture = make_fixture();
     let opportunity = validate_discover_operation_opportunity(
