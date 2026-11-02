@@ -88,6 +88,10 @@ pub enum WitnessError {
     )]
     StaleRegistrationTime { expected: SimTime, found: SimTime },
     #[error(
+        "witness statement was validated at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleStatementTime { expected: SimTime, found: SimTime },
+    #[error(
         "character {witness} changed after witness validation; expected version {expected}, found {found}"
     )]
     StaleWitnessCharacter {
@@ -425,6 +429,7 @@ pub struct ValidatedWitnessStatement {
     expected_witness_version: u32,
     expected_investigation_version: u32,
     originating_work: Option<InvestigationWorkId>,
+    validated_at: SimTime,
 }
 
 impl ValidatedWitnessStatement {
@@ -433,6 +438,8 @@ impl ValidatedWitnessStatement {
     }
 
     pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), WitnessError> {
+        crate::core::time::ensure_time_current(state.now(), self.validated_at)
+            .map_err(|(expected, found)| WitnessError::StaleStatementTime { expected, found })?;
         let case_witness = validate_witness_mutation_snapshot(
             state,
             self.draft.case_witness,
@@ -649,6 +656,7 @@ fn validate_record_witness_statement_internal(
         expected_witness_version: case_witness.version(),
         expected_investigation_version: investigation.version(),
         originating_work,
+        validated_at: state.now(),
     })
 }
 

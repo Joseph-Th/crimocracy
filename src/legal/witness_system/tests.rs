@@ -62,6 +62,74 @@ fn held_witness_registration_rejects_clock_drift_without_redating_case_history()
     );
 }
 
+#[test]
+fn held_witness_statement_rejects_clock_drift_and_fresh_testimony_has_current_evidence_time() {
+    let registry = build_registry();
+    let mut fixture = make_fixture();
+    let case_witness = validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: fixture.witness,
+            subject: EntityRef::Character(fixture.subject),
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .expect("case-witness registration should validate")
+    .commit(&mut fixture.state)
+    .expect("case-witness registration should commit");
+    let draft = WitnessStatementDraft {
+        case_witness,
+        origin: None,
+        confidence: rating(90),
+        summary: "A witness describes the subject's activities.".to_owned(),
+    };
+    let prepared = validate_record_witness_statement(&registry, &fixture.state, draft.clone())
+        .expect("testimony should validate at the first minute");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let before = bincode::serialize(&fixture.state).expect("fixture should serialize");
+
+    assert_eq!(
+        prepared.commit(&mut fixture.state),
+        Err(WitnessError::StaleStatementTime {
+            expected: SimTime::ZERO,
+            found: SimTime::from_minutes(1),
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("state should serialize"),
+        before,
+        "stale testimony must not create a statement, evidence, case activity, or IDs"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_case_witness(case_witness)
+            .expect("registered witness should persist")
+            .statements()
+            .is_empty()
+    );
+
+    let outcome = validate_record_witness_statement(&registry, &fixture.state, draft)
+        .expect("same testimony can be freshly validated")
+        .commit(&mut fixture.state)
+        .expect("fresh testimony should commit");
+    let evidence = fixture
+        .state
+        .legal()
+        .get_evidence(outcome.evidence)
+        .expect("statement evidence should persist");
+    assert_eq!(evidence.discovered_at(), SimTime::from_minutes(1));
+    validate_state(&fixture.state).expect("fresh statement should preserve state invariants");
+    validate_invariants(&fixture.state);
+    restore_save(
+        &registry,
+        build_save(&registry, &fixture.state).expect("valid witness state must save"),
+    )
+    .expect("fresh statement must survive a persistence round-trip");
+}
+
 #[derive(Clone, Serialize)]
 struct CaseWitnessRecordWire {
     id: CaseWitnessId,
