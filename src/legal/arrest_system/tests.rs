@@ -2997,7 +2997,7 @@ fn stale_operation_preemption_rejects_arrest_before_custody_mutates() {
 
     validate_begin_operation(&fixture.registry, &fixture.state, operation)
         .expect("operation should still be able to begin")
-        .commit(&mut fixture.state)
+        .commit(&fixture.registry, &mut fixture.state)
         .expect("operation begin should commit and stale the held abort token");
     assert_eq!(
         fixture

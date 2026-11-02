@@ -156,6 +156,12 @@ finite version rail remains authorized without an invalid transition. Other due 
 that can still begin are admitted independently, even when one or more aborts cannot persist
 their required artifacts. A blocked operation never bypasses its abort by beginning instead.
 
+Operation begin tokens re-evaluate canonical admission immediately before committing. An
+unchanged operation version and simulation minute alone cannot prove that a business still has
+the required owner or operating status, a crew member remains available, or the same policing
+context still warrants dispatch. The current admissible objective and police-response plan must
+be resolved before any response or operation lifecycle state is persisted.
+
 Due legitimate-business and criminal-enterprise settlements also distinguish an individually
 blocked financial rail from a corrupt transaction. A business whose operating or settlement
 account has insufficient representable balance headroom leaves its cycle due and consumes no

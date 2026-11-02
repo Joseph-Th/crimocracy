@@ -512,6 +512,167 @@ fn due_operation_aborts_before_start_when_objective_became_unavailable() {
     );
 }
 
+#[test]
+fn held_begin_token_rechecks_business_ownership_before_committing() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let EntityRef::Business(business) = target else {
+        panic!("fixture target should be a business");
+    };
+    let operation = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, target),
+    )
+    .expect("foreign business should be actionable at authorization")
+    .commit(&mut state)
+    .expect("authorized operation should persist");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let begin = validate_begin_operation(&registry, &state, operation)
+        .expect("operation should be ready before the target changes hands");
+    let expected_version = state
+        .operations()
+        .get_operation(operation)
+        .expect("operation should persist")
+        .version();
+
+    validate_transfer_business_ownership(
+        &state,
+        business,
+        BusinessOwner::Organization(organization),
+    )
+    .expect("same-minute acquisition should be valid")
+    .commit(&mut state)
+    .expect("same-minute acquisition should commit");
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operation)
+            .unwrap()
+            .version(),
+        expected_version,
+        "ownership transfers do not invalidate an operation's own version token"
+    );
+    let before = bincode::serialize(&state).expect("state should serialize");
+    assert_eq!(
+        begin.commit(&registry, &mut state),
+        Err(OperationError::ObjectiveUnavailable {
+            operation,
+            blocker: OperationObjectiveBlocker::TargetBusinessOwnershipMismatch,
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("rejected state should serialize"),
+        before,
+        "stale begin must not dispatch police or consume IDs before rejecting"
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("ownership change with pending operation remains valid");
+    validate_invariants(&state);
+}
+
+#[test]
+fn held_begin_token_uses_current_police_routing_after_a_jurisdiction_change() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let EntityRef::Business(business) = target else {
+        panic!("fixture target should be a business");
+    };
+    let district = state.world().get_business(business).unwrap().neighborhood();
+    let profile = state.world().get_neighborhood(district).unwrap().profile();
+    let other_district = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Temporary precinct assignment".to_owned(),
+            profile,
+        },
+    )
+    .expect("alternate jurisdiction district should validate");
+    let police = state
+        .world()
+        .organizations()
+        .find(|record| record.kind() == OrganizationKind::LawEnforcement)
+        .expect("fixture must contain the precinct")
+        .id();
+
+    let jurisdiction = |district| crate::legal::JurisdictionDraft {
+        organization: police,
+        neighborhoods: BTreeSet::from([district]),
+        case_intake_priority: Rating::try_new(80).expect("jurisdiction priority must validate"),
+    };
+    crate::legal::jurisdiction_system::validate_set_jurisdiction(
+        &state,
+        jurisdiction(other_district),
+    )
+    .expect("precinct can patrol the alternate district")
+    .commit(&mut state)
+    .expect("precinct relocation should commit");
+    let operation = validate_authorize_operation(
+        &registry,
+        &state,
+        make_test_draft(organization, leader, target),
+    )
+    .expect("a foreign business remains actionable without a district police authority")
+    .commit(&mut state)
+    .expect("authorized operation should persist");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    assert!(
+        crate::legal::jurisdiction_system::resolve_police_response_authority(&state, district)
+            .is_none(),
+        "the original validated start must have no police authority to dispatch"
+    );
+    let begin = validate_begin_operation(&registry, &state, operation)
+        .expect("start should validate without a local response authority");
+
+    crate::legal::jurisdiction_system::validate_set_jurisdiction(&state, jurisdiction(district))
+        .expect("precinct should be able to return before the operation begins")
+        .commit(&mut state)
+        .expect("same-minute precinct return should commit");
+    let execution = registry
+        .get_operation(OperationKind::Intimidation)
+        .execution();
+    let alert = crate::operations::operation_execution::resolve_operation_police_alert_context(
+        &registry,
+        &state,
+        operation,
+        state.now(),
+    );
+    assert!(
+        alert.score() >= execution.police_dispatch_threshold(),
+        "fixture must warrant a response under the new authority"
+    );
+    begin
+        .commit(&registry, &mut state)
+        .expect("start must use the current precinct instead of the stale no-dispatch plan");
+    let operation_record = state.operations().get_operation(operation).unwrap();
+    assert_eq!(operation_record.status(), OperationStatus::InProgress);
+    let response_id = operation_record
+        .police_response()
+        .expect("jurisdiction changed to a dispatching precinct before commit");
+    assert_eq!(
+        state
+            .legal()
+            .get_police_response(response_id)
+            .unwrap()
+            .authority(),
+        police
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("refreshed policing should survive the canonical registry checks");
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("refreshed dispatch should save"),
+    )
+    .expect("refreshed dispatch should restore");
+    assert_eq!(
+        restored
+            .operations()
+            .get_operation(operation)
+            .unwrap()
+            .police_response(),
+        Some(response_id)
+    );
+    validate_invariants(&restored);
+}
+
 fn insert_test_operation_leader(
     state: &mut AppState,
     organization: OrganizationId,
@@ -1295,7 +1456,7 @@ fn delayed_earlier_operation_keeps_priority_over_later_authorized_reservation() 
     state.advance_clock(SimDuration::from_minutes(2));
     validate_begin_operation(&registry, &state, first)
         .expect("a later reservation must not leapfrog overdue earlier work")
-        .commit(&mut state)
+        .commit(&registry, &mut state)
         .expect("delayed earlier operation should begin");
     validate_state_against_registry(&registry, &state)
         .expect("canonical delay-created overlap must remain restore-valid");

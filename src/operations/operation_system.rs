@@ -746,7 +746,7 @@ pub fn apply_transition(
     }
     match (status, transition) {
         (OperationStatus::Authorized, OperationTransition::Begin) => {
-            validate_begin_operation(registry, state, operation)?.commit(state)
+            validate_begin_operation(registry, state, operation)?.commit(registry, state)
         }
         (OperationStatus::Authorized, OperationTransition::Abort)
         | (OperationStatus::InProgress, OperationTransition::Abort) => {

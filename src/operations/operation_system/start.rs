@@ -29,7 +29,11 @@ pub(crate) struct ValidatedOperationStart {
 }
 
 impl ValidatedOperationStart {
-    pub(crate) fn commit(self, state: &mut AppState) -> Result<(), OperationError> {
+    pub(crate) fn commit(
+        self,
+        registry: &Registry,
+        state: &mut AppState,
+    ) -> Result<(), OperationError> {
         let record = state
             .operations
             .get_operation(self.operation)
@@ -50,8 +54,15 @@ impl ValidatedOperationStart {
         }
         crate::core::time::ensure_time_current(state.now(), self.started_at)
             .map_err(|(expected, found)| OperationError::StaleBeginTime { expected, found })?;
-        let entry_at = self.police_response.entry_at();
-        let response = self.police_response.commit_dispatch(state)?;
+        // Operation version and time do not capture mutable context owned by other systems:
+        // business ownership/economy status, custody, prior crew bookings, opportunity expiry,
+        // and jurisdiction/patrol alert routing can all change inside this same minute. Re-run
+        // canonical admission before dispatch and use its current response plan, rather than
+        // beginning an objective that has become impossible or omitting a newly due dispatch.
+        let current = validate_begin_operation(registry, state, self.operation)?;
+        debug_assert_eq!(self.resolution_due_at, current.resolution_due_at);
+        let entry_at = current.police_response.entry_at();
+        let response = current.police_response.commit_dispatch(state)?;
         state.operations.begin(
             self.operation,
             self.started_at,
