@@ -153,6 +153,16 @@ finite version rail remains authorized without an invalid transition. Other due 
 that can still begin are admitted independently, even when one or more aborts cannot persist
 their required artifacts. A blocked operation never bypasses its abort by beginning instead.
 
+Due legitimate-business and criminal-enterprise settlements also distinguish an individually
+blocked financial rail from a corrupt transaction. A business whose operating or settlement
+account has insufficient representable balance headroom leaves its cycle due and consumes no
+business RNG draw; independent businesses settle in the same pass. Enterprise settlements
+apply the same rule per racket while preserving their sequential shared-cash and legal-pressure
+semantics. The blocked financial state remains visible and reversible through canonical
+ledger or lifecycle commands; unrelated due cycles cannot be held hostage by one saturated
+account. Malformed account ownership, invalid dependencies, and other unexpected finance
+failures still surface as errors rather than being treated as harmless capacity limits.
+
 ## Source map — one owner per field
 
 Every `src/` subsystem owns its records and canonical mutation paths. Invariants

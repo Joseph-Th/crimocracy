@@ -154,19 +154,19 @@ pub(super) fn run_business_cycle_phase(
             .get_business(kind)
             .economics()
             .gross_variance_basis_points();
-        // A permanently blocked business must not consume variance or freeze independent
-        // businesses that can still settle. Draw speculatively, publishing this business's
-        // stream progress only once its complete settlement has passed validation.
+        // An individually blocked business, including one whose till has reached finite money
+        // headroom, must not consume variance or freeze independent businesses. Draw
+        // speculatively and publish progress only after its settlement validates.
         let mut candidate_rng = advanced_rng.clone();
         let variance = draw_basis_point_variance(&mut candidate_rng, variance_limit);
         let plan = match decide_business_cycle(registry, state, business, variance) {
             Ok(plan) => plan,
-            Err(error) if business_cycle_is_terminally_blocked(&error) => continue,
+            Err(error) if business_cycle_is_locally_blocked(&error) => continue,
             Err(error) => return Err(error),
         };
         let validated = match validate_business_cycle_plan(state, plan) {
             Ok(validated) => validated,
-            Err(error) if business_cycle_is_terminally_blocked(&error) => continue,
+            Err(error) if business_cycle_is_locally_blocked(&error) => continue,
             Err(error) => return Err(error),
         };
         let cycle_budget = validated.id_budget();
@@ -200,7 +200,7 @@ pub(super) fn run_business_cycle_phase(
     Ok(business_cycles)
 }
 
-fn business_cycle_is_terminally_blocked(
+fn business_cycle_is_locally_blocked(
     error: &crate::economy::business_economy_system::BusinessEconomyError,
 ) -> bool {
     use crate::economy::business_economy_system::BusinessEconomyError;
@@ -210,10 +210,12 @@ fn business_cycle_is_terminally_blocked(
     match error {
         BusinessEconomyError::IdExhaustion(_) | BusinessEconomyError::VersionCapacity(_) => true,
         BusinessEconomyError::Finance(
-            FinanceError::IdExhaustion(_) | FinanceError::VersionCapacity(_),
+            FinanceError::IdExhaustion(_)
+            | FinanceError::VersionCapacity(_)
+            | FinanceError::BalanceOverflow(_),
         ) => true,
         BusinessEconomyError::Intelligence(IntelligenceError::IdExhaustion(_)) => true,
-        BusinessEconomyError::Enterprise(error) => enterprise_cycle_is_terminally_blocked(error),
+        BusinessEconomyError::Enterprise(error) => enterprise_cycle_is_locally_blocked(error),
         BusinessEconomyError::MissingBusiness(_)
         | BusinessEconomyError::MissingBusinessEconomy(_)
         | BusinessEconomyError::MissingBusinessNeighborhood(_)
@@ -298,10 +300,10 @@ pub(super) fn run_enterprise_cycle_phase(
         .and_then(|validated| validated.commit(state))
         {
             Ok(cycle) => cycle,
-            Err(error) if enterprise_cycle_is_terminally_blocked(&error) => {
-                // Capacity exhaustion is not corruption. The failed cycle published neither its
-                // cloned RNG state nor any authoritative mutation, so leave it due and continue
-                // settling later independent rackets rather than panicking the canonical tick.
+            Err(error) if enterprise_cycle_is_locally_blocked(&error) => {
+                // A local finite allocator, version, or account-balance rail is not corruption.
+                // The failed cycle published neither RNG progress nor any mutation; leave it
+                // due and continue settling independent rackets instead of failing the tick.
                 continue;
             }
             Err(error) => return Err(error),
@@ -315,7 +317,7 @@ pub(super) fn run_enterprise_cycle_phase(
     Ok(enterprise_cycles)
 }
 
-fn enterprise_cycle_is_terminally_blocked(error: &EnterpriseError) -> bool {
+fn enterprise_cycle_is_locally_blocked(error: &EnterpriseError) -> bool {
     use crate::finance::finance_system::FinanceError;
     use crate::intelligence::intelligence_system::IntelligenceError;
     use crate::legal::investigation_system::InvestigationError;
@@ -326,7 +328,9 @@ fn enterprise_cycle_is_terminally_blocked(error: &EnterpriseError) -> bool {
         EnterpriseError::IdExhaustion(_)
             | EnterpriseError::VersionCapacity(_)
             | EnterpriseError::Finance(
-                FinanceError::IdExhaustion(_) | FinanceError::VersionCapacity(_)
+                FinanceError::IdExhaustion(_)
+                    | FinanceError::VersionCapacity(_)
+                    | FinanceError::BalanceOverflow(_)
             )
             | EnterpriseError::Intelligence(IntelligenceError::IdExhaustion(_))
             | EnterpriseError::Report(ReportError::IdExhaustion(_))
