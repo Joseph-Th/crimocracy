@@ -322,6 +322,59 @@ fn reputation_phase_treats_standing_report_exhaustion_as_terminal_before_mutatio
 }
 
 #[test]
+fn exhausted_player_standing_reports_do_not_freeze_independent_daily_decay() {
+    let (registry, mut state, player, operations) = make_resolved_player_reputation_pair();
+    let rival = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Aging Standing Rival".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("rival organization should validate");
+    let baseline = registry.reputation().baseline();
+    apply_reputation_delta(&registry, &mut state, rival, AudienceKind::Police, 12)
+        .expect("rival reputation should change");
+    let now = state.now().as_minutes();
+    let day = crate::core::time::DAY_MINUTES;
+    assert!(
+        now < day,
+        "fixture operations must resolve during the first campaign day"
+    );
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(day * 2 - now).expect("two campaign days must fit the clock duration"),
+    ));
+    state.ids.set_next_raw_for_test(IdKind::Report, u32::MAX);
+    let report_count = state.reports().reports().count();
+
+    let changed = apply_reputation_phase(&registry, &mut state, &operations, &[])
+        .expect("unrelated impressions must continue aging despite player report exhaustion");
+
+    assert_eq!(
+        changed, 1,
+        "only the independent reputation decay should commit"
+    );
+    assert_eq!(
+        resolve_score(&registry, state.reputation(), rival, AudienceKind::Police),
+        baseline + 12 - registry.reputation().daily_decay_step(),
+    );
+    assert_eq!(
+        resolve_score(
+            &registry,
+            state.reputation(),
+            player,
+            AudienceKind::Underworld
+        ),
+        baseline,
+        "unreported player operation gains must still be withheld as a complete batch",
+    );
+    assert_eq!(state.reports().reports().count(), report_count);
+    validate_state(&state).expect("independent decay must preserve release-safe invariants");
+    validate_invariants(&state);
+}
+
+#[test]
 fn reputation_phase_preflight_counts_only_consequence_groups_that_still_move() {
     let (registry, mut state, organization, operations) = make_resolved_player_reputation_pair();
     let first_outcome = state

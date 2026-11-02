@@ -99,6 +99,10 @@ pub enum InformantError {
         expected: u32,
         found: u32,
     },
+    #[error(
+        "informant disclosure was validated at {expected:?}, but simulation time is now {found:?}"
+    )]
+    StaleDisclosureTime { expected: SimTime, found: SimTime },
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]
@@ -199,6 +203,7 @@ fn validate_handler(state: &AppState, handler: OrganizationId) -> Result<(), Inf
 pub struct ValidatedInformantDisclosure {
     draft: InformantDisclosureDraft,
     expected_investigation_version: u32,
+    validated_at: SimTime,
 }
 
 impl ValidatedInformantDisclosure {
@@ -211,6 +216,8 @@ impl ValidatedInformantDisclosure {
     }
 
     fn ensure_current(&self, state: &AppState) -> Result<(), InformantError> {
+        crate::core::time::ensure_time_current(state.now(), self.validated_at)
+            .map_err(|(expected, found)| InformantError::StaleDisclosureTime { expected, found })?;
         let investigation = state
             .legal
             .get_investigation(self.draft.investigation)
@@ -328,6 +335,7 @@ pub fn validate_record_informant_disclosure(
     Ok(ValidatedInformantDisclosure {
         draft,
         expected_investigation_version: investigation.version(),
+        validated_at: state.now(),
     })
 }
 

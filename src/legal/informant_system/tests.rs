@@ -65,6 +65,79 @@ fn held_informant_establishment_rejects_clock_drift_without_redating_source() {
     );
 }
 
+#[test]
+fn held_informant_disclosure_rejects_clock_drift_without_redating_evidence() {
+    let mut fixture = fixture();
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("informant establishment should validate")
+    .commit(&mut fixture.state)
+    .expect("informant establishment should commit");
+    let information = record_personal_information(&mut fixture);
+    let prepared = validate_record_informant_disclosure(
+        &fixture.state,
+        InformantDisclosureDraft {
+            informant,
+            investigation: fixture.investigation,
+            source_information: information,
+        },
+    )
+    .expect("source disclosure should validate at the original time");
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let before = bincode::serialize(&fixture.state).expect("fixture should serialize");
+
+    assert_eq!(
+        prepared.commit(&mut fixture.state),
+        Err(InformantError::StaleDisclosureTime {
+            expected: SimTime::ZERO,
+            found: SimTime::from_minutes(1),
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("state should serialize"),
+        before,
+        "rejected disclosure must not allocate evidence or change the investigation"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .informant_disclosures()
+            .next()
+            .is_none()
+    );
+
+    let fresh = validate_record_informant_disclosure(
+        &fixture.state,
+        InformantDisclosureDraft {
+            informant,
+            investigation: fixture.investigation,
+            source_information: information,
+        },
+    )
+    .expect("an unchanged information source remains available for fresh disclosure")
+    .commit(&mut fixture.state)
+    .expect("freshly validated disclosure should commit");
+    let disclosure = fixture
+        .state
+        .legal()
+        .informant_disclosures()
+        .find(|record| record.id() == fresh)
+        .expect("committed disclosure must persist");
+    let evidence = fixture
+        .state
+        .legal()
+        .get_evidence(disclosure.evidence())
+        .expect("disclosure evidence must persist");
+    assert_eq!(evidence.discovered_at(), SimTime::from_minutes(1));
+    validate_state(&fixture.state).expect("freshly disclosed evidence must remain valid");
+}
+
 fn fixture() -> Fixture {
     let registry = build_registry();
     let mut state = AppState::new(0x1F0A_1934);

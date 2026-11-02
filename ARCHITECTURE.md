@@ -145,6 +145,9 @@ New autonomous work must slot explicitly here with a rationale comment. The repu
 phase does not build a standing-score projection on quiet non-day-boundary minutes; the
 canonical reputation owner still applies age-gated decay at each due day boundary and every
 same-minute operation or racket consequence is still preflighted before mutation.
+When player Standing-report IDs cannot fit the full same-minute consequence batch, that
+batch remains unapplied; independent daily decay and non-player standing consequences
+continue instead of freezing the city's impressions for lack of a player report.
 
 Due authorized work is planned as a complete ordered cohort. Every needed pre-start abort
 must pass its owner's validation and the combined artifact-ID budget before any abort commits;

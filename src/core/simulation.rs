@@ -329,23 +329,29 @@ fn apply_reputation_phase(
         })
         .collect();
 
-    match preflight_reputation_phase_reports(
+    let player_consequences_admitted = match preflight_reputation_phase_reports(
         registry,
         state,
         &operation_consequences,
         &racket_inquiries,
     ) {
-        Ok(()) => {}
+        Ok(()) => true,
         Err(crate::reputation::reputation_system::ReputationError::IdExhaustion(_)) => {
-            return Ok(0);
+            // A finite player-report rail cannot authorize unreported standing gains, but it
+            // must not suspend independent daily decay or other organizations' reputations.
+            // The player's complete same-minute consequence batch still remains all-or-none.
+            false
         }
         Err(error) => return Err(error),
-    }
+    };
 
     let mut changed =
         crate::reputation::reputation_system::apply_daily_reputation_decay(registry, state);
     for (organization, kind, approach, objective_outcome, exposure_level) in operation_consequences
     {
+        if !player_consequences_admitted && state.player_organization() == Some(organization) {
+            continue;
+        }
         let shifts = crate::reputation::reputation_system::apply_operation_reputation_consequences(
             registry,
             state,
@@ -360,6 +366,9 @@ fn apply_reputation_phase(
             .expect("one tick cannot contain enough reputation shifts to overflow usize");
     }
     for organization in racket_inquiries {
+        if !player_consequences_admitted && state.player_organization() == Some(organization) {
+            continue;
+        }
         let shifts =
             crate::reputation::reputation_system::apply_racket_inquiry_reputation_consequences(
                 registry,
