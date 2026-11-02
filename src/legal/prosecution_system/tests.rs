@@ -865,6 +865,214 @@ fn assigned_prosecutor_cannot_be_registered_as_source_case_witness() {
 }
 
 #[test]
+fn new_evidence_recuses_one_prosecutor_from_every_review_of_the_same_investigation() {
+    let mut fixture = fixture();
+    let first = open_case(&mut fixture);
+    let criminal = fixture
+        .state
+        .world()
+        .get_character(fixture.defendant)
+        .expect("existing defendant should persist")
+        .organization()
+        .expect("existing defendant must have an organization");
+    let second_defendant = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Defendant in the Shared Police File".to_owned(),
+            organization: Some(criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second defendant should validate");
+    let second_evidence = BTreeSet::from([
+        add_evidence(
+            &mut fixture.state,
+            fixture.police,
+            fixture.investigation,
+            second_defendant,
+            EvidenceKind::Document,
+        ),
+        add_evidence(
+            &mut fixture.state,
+            fixture.police,
+            fixture.investigation,
+            second_defendant,
+            EvidenceKind::KnownAssociation,
+        ),
+    ]);
+    let second_arrest = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: second_defendant,
+            investigation: fixture.investigation,
+            evidence: second_evidence.clone(),
+        },
+    )
+    .expect("second defendant should meet the custody evidence bar")
+    .commit(&mut fixture.state)
+    .expect("second arrest should persist");
+    let second = validate_open_prosecution_case(
+        &fixture.state,
+        ProsecutionCaseDraft {
+            arrest: second_arrest,
+            prosecutor_office: fixture.office,
+            prosecutor: fixture.lead,
+            evidence: second_evidence,
+        },
+    )
+    .expect("same prosecutor may review distinct defendants in one source file")
+    .commit(&mut fixture.state)
+    .expect("second prosecution should persist");
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .reviewing_prosecution_cases_for_prosecutor(fixture.lead)
+            .count(),
+        2
+    );
+    let first_version = fixture
+        .state
+        .legal()
+        .get_prosecution_case(first)
+        .unwrap()
+        .version();
+    let second_version = fixture
+        .state
+        .legal()
+        .get_prosecution_case(second)
+        .unwrap()
+        .version();
+
+    let held_evidence = validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.lead),
+            origin: None,
+            kind: EvidenceKind::Surveillance,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .expect("conflict evidence should validate while both reviewing cases can release counsel");
+
+    // One un-releasable reviewing case must veto the entire new evidence mutation, not
+    // silently release the other case and leave an actionable conflict assigned to counsel.
+    // The persisted terminal version is valid for an existing review but cannot advance.
+    let terminal_case = fixture
+        .state
+        .legal()
+        .get_prosecution_case(second)
+        .unwrap()
+        .clone();
+    let mut exhausted = restore_save(
+        &fixture.registry,
+        replace_serialized_prosecution_case_version(
+            build_save(&fixture.registry, &fixture.state)
+                .expect("both reviewing cases should build a save"),
+            &terminal_case,
+            u32::MAX,
+        ),
+    )
+    .expect("a review with no remaining lifecycle version must remain structurally valid");
+    let before_rejection = bincode::serialize(&exhausted).expect("state should serialize");
+    let rejection = validate_add_evidence(
+        &exhausted,
+        EvidenceDraft {
+            investigation: fixture.investigation,
+            custodian: fixture.police,
+            subject: EntityRef::Character(fixture.lead),
+            origin: None,
+            kind: EvidenceKind::Surveillance,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: exhausted.now(),
+        },
+    )
+    .err()
+    .expect("an un-releasable reviewing assignment must reject new conflicting evidence");
+    assert!(matches!(
+        rejection,
+        crate::legal::investigation_system::InvestigationError::VersionCapacity(_)
+    ));
+    assert!(
+        matches!(
+            held_evidence.commit(&mut exhausted),
+            Err(crate::legal::investigation_system::InvestigationError::VersionCapacity(_))
+        ),
+        "a held evidence token must recheck every prosecution version even when its investigation version is unchanged"
+    );
+    assert_eq!(
+        bincode::serialize(&exhausted).expect("rejected state should serialize"),
+        before_rejection,
+        "rejection must preserve both case assignments and evidence allocation"
+    );
+    validate_invariants(&exhausted);
+
+    add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.lead,
+        EvidenceKind::Surveillance,
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_investigation(fixture.investigation)
+            .unwrap()
+            .subjects()
+            .contains(&EntityRef::Character(fixture.lead))
+    );
+    for (case, prior_version) in [(first, first_version), (second, second_version)] {
+        let record = fixture.state.legal().get_prosecution_case(case).unwrap();
+        assert_eq!(record.status(), ProsecutionCaseStatus::Reviewing);
+        assert_eq!(record.assigned_prosecutor(), None);
+        assert_eq!(
+            record.version(),
+            prior_version + 1,
+            "one new conflict must release each reviewing assignment once"
+        );
+    }
+    assert!(
+        fixture
+            .state
+            .legal()
+            .reviewing_prosecution_cases_for_prosecutor(fixture.lead)
+            .next()
+            .is_none(),
+        "the prosecutor's derived assignment index must release both reviewing cases"
+    );
+    validate_state(&fixture.state).expect("multi-case prosecutor recusal should remain valid");
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("multi-case recusal should build a valid save"),
+    )
+    .expect("multi-case recusal should survive restoration");
+    assert!(
+        restored
+            .legal()
+            .reviewing_prosecution_cases_for_prosecutor(fixture.lead)
+            .next()
+            .is_none()
+    );
+    validate_state(&restored).expect("restored multi-case recusal should remain valid");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn actionable_evidence_against_assigned_prosecutor_recuses_review_for_restaffing() {
     let mut fixture = fixture();
     let case = open_case(&mut fixture);
