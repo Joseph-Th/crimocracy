@@ -107,7 +107,7 @@ pub fn decide_enterprise_cycle(
     // immune to inquiry unless another crime first created a police file. Each active district
     // case adds the authored per-case risk. Existing inquiries suppress duplicate intake.
     let enforcement_chance_basis_points = u32::try_from(
-        (u64::from(economics.enforcement_attention_basis_points_per_active_case())
+        (u64::from(economics.enforcement_attention_basis_points_per_exposure_source())
             * (u64::from(active_district_cases) + 1))
             .min(10_000),
     )

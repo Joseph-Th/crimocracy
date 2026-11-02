@@ -215,7 +215,7 @@ fn authored_fraud_requires_financial_records_and_customer_access() {
     );
     assert_eq!(economics.gross_variance_basis_points(), 1_500);
     assert_eq!(
-        economics.enforcement_attention_basis_points_per_active_case(),
+        economics.enforcement_attention_basis_points_per_exposure_source(),
         400
     );
 }
@@ -249,7 +249,7 @@ fn authored_auto_theft_ring_requires_workshop_resale_and_records_network() {
         Money::from_cents(75)
     );
     assert_eq!(
-        economics.enforcement_attention_basis_points_per_active_case(),
+        economics.enforcement_attention_basis_points_per_exposure_source(),
         520
     );
     assert_eq!(economics.gross_variance_basis_points(), 1_300);
@@ -283,7 +283,7 @@ fn authored_smuggling_requires_dock_storage_and_documented_distribution() {
     );
     assert_eq!(economics.gross_variance_basis_points(), 1_600);
     assert_eq!(
-        economics.enforcement_attention_basis_points_per_active_case(),
+        economics.enforcement_attention_basis_points_per_exposure_source(),
         600
     );
 }
@@ -723,11 +723,11 @@ fn enterprise_economic_validation_preserves_inclusive_authored_boundaries() {
     ));
 
     let mut certain_attention = definition.economics().clone();
-    certain_attention.enforcement_attention_basis_points_per_active_case = 10_000;
+    certain_attention.enforcement_attention_basis_points_per_exposure_source = 10_000;
     register(certain_attention).expect("10000 basis points is a valid certain-attention chance");
 
     let mut invalid_attention = definition.economics().clone();
-    invalid_attention.enforcement_attention_basis_points_per_active_case = 10_001;
+    invalid_attention.enforcement_attention_basis_points_per_exposure_source = 10_001;
     assert!(matches!(
         register(invalid_attention),
         Err(RegistryBuildError::EnterpriseEnforcementAttentionOutOfRange(error_kind))
@@ -829,7 +829,7 @@ fn authored_numbers_racket_is_a_district_network_not_another_fixed_gambling_venu
     );
     assert_eq!(economics.gross_variance_basis_points(), 700);
     assert_eq!(
-        economics.enforcement_attention_basis_points_per_active_case(),
+        economics.enforcement_attention_basis_points_per_exposure_source(),
         360
     );
 }
@@ -860,7 +860,7 @@ fn authored_slot_machine_route_is_distributed_commercial_gambling() {
     );
     assert_eq!(economics.gross_variance_basis_points(), 1_000);
     assert_eq!(
-        economics.enforcement_attention_basis_points_per_active_case(),
+        economics.enforcement_attention_basis_points_per_exposure_source(),
         500
     );
 }
@@ -885,7 +885,7 @@ fn authored_brothel_is_a_wealth_sensitive_lodging_vice_venue() {
         Money::from_cents(35)
     );
     assert_eq!(
-        economics.enforcement_attention_basis_points_per_active_case(),
+        economics.enforcement_attention_basis_points_per_exposure_source(),
         760
     );
 }
@@ -913,7 +913,7 @@ fn authored_prizefighting_requires_a_real_sporting_venue_and_cash_network() {
         Money::from_cents(70)
     );
     assert_eq!(
-        economics.enforcement_attention_basis_points_per_active_case(),
+        economics.enforcement_attention_basis_points_per_exposure_source(),
         420
     );
 }
@@ -951,7 +951,7 @@ fn authored_counterfeiting_requires_a_press_and_commercial_passing_network() {
     );
     assert_eq!(economics.gross_variance_basis_points(), 1_400);
     assert_eq!(
-        economics.enforcement_attention_basis_points_per_active_case(),
+        economics.enforcement_attention_basis_points_per_exposure_source(),
         550
     );
 }

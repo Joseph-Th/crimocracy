@@ -236,7 +236,7 @@ fn enforcement_attention_uses_a_half_open_basis_point_roll() {
     let chance = registry
         .get_enterprise(EnterpriseKind::Protection)
         .economics()
-        .enforcement_attention_basis_points_per_active_case();
+        .enforcement_attention_basis_points_per_exposure_source();
     assert!(chance > 0, "fixture requires a positive enforcement chance");
 
     // One standing racket-exposure source plus one active district case both contribute to
@@ -278,6 +278,53 @@ fn enforcement_attention_uses_a_half_open_basis_point_roll() {
             expected_hit,
             "roll {roll} must use the [0, chance) basis-point convention"
         );
+    }
+}
+
+#[test]
+fn clean_district_racket_exposure_uses_the_exact_half_open_chance() {
+    let registry = build_registry();
+    let chance = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .enforcement_attention_basis_points_per_exposure_source();
+    assert!(chance > 0 && chance < 10_000);
+
+    for (roll, expected_hit) in [(chance - 1, true), (chance, false)] {
+        let mut fixture = make_test_enterprise_fixture();
+        let enterprise = establish_protection(&registry, &mut fixture);
+        let neighborhood = match fixture.location {
+            EnterpriseLocation::Neighborhood(id) => id,
+            EnterpriseLocation::Business(_) => panic!("fixture must use a neighborhood location"),
+        };
+        insert_district_police(
+            &registry,
+            &mut fixture,
+            "Baseline Vice Bureau",
+            neighborhood,
+        );
+        assert_eq!(
+            count_district_originated_cases(&fixture.state, neighborhood),
+            0,
+            "no unrelated police file may be required for baseline vice detection"
+        );
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+
+        let plan = decide_enterprise_cycle(
+            &registry,
+            &fixture.state,
+            enterprise,
+            EnterpriseCycleRandomness::new(0, roll),
+        )
+        .expect("baseline vice cycle should decide");
+        assert_eq!(
+            plan.enforcement_incident.is_some(),
+            expected_hit,
+            "a single racket exposure source must use [0, chance), roll {roll}"
+        );
+        assert_eq!(plan.economics.investigation_heat, Money::ZERO);
     }
 }
 

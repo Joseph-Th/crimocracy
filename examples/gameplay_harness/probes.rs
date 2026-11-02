@@ -513,8 +513,8 @@ pub fn run_enforcement_attention_probe(
     }
 
     // Originate enough parallel district cases through canonical intake that the authored
-    // per-case conversion rate reaches certainty on the racket's next cycle.
-    let per_case_bp = u32::from(
+    // exposure-source conversion rate reaches certainty on the racket's next cycle.
+    let per_source_bp = u32::from(
         registry
             .get_enterprise(
                 scenario
@@ -525,9 +525,10 @@ pub fn run_enforcement_attention_probe(
                     .kind(),
             )
             .economics()
-            .enforcement_attention_basis_points_per_active_case(),
+            .enforcement_attention_basis_points_per_exposure_source(),
     );
-    let needed_cases = 10_000_u32.div_ceil(per_case_bp);
+    // The active racket already contributes one exposure source before the first case opens.
+    let needed_cases = 10_000_u32.div_ceil(per_source_bp) - 1;
     let authority = resolve_case_intake_authority(&scenario.state, neighborhood)
         .ok_or("the scenario district must have a case-intake authority")?;
     for index in 0..needed_cases {
@@ -594,8 +595,8 @@ pub fn run_enforcement_attention_probe(
         .expect("heated cycle must settle");
     if !heated_cycle.drew_enforcement_attention() {
         return Err(format!(
-            "sustained casework at certainty did not draw a racket inquiry: {} active case(s), roll margin {}bp/case",
-            needed_cases, per_case_bp
+            "sustained casework at certainty did not draw a racket inquiry: {} active case(s), roll margin {}bp/exposure source",
+            needed_cases, per_source_bp
         )
         .into());
     }

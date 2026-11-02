@@ -606,10 +606,12 @@ pub struct EnterpriseEconomicsDefinition {
     pub(crate) support_surcharge_per_business: Money,
     /// Per-cycle cost per active investigation targeting the enterprise's neighborhood.
     pub(crate) heat_surcharge_per_active_case: Money,
-    /// Per-cycle chance, in basis points, that each active originated case targeting the
-    /// enterprise's neighborhood draws a racket inquiry onto this enterprise (5_000 = even odds
-    /// per cycle). Sustained institutional attention eventually finds visible street work.
-    pub(crate) enforcement_attention_basis_points_per_active_case: u16,
+    /// Per-cycle detection chance in basis points per exposure source: an operating racket
+    /// contributes one baseline source, and each active originated police case in its district
+    /// contributes one more. The summed chance is capped at 10_000 basis points. A current
+    /// dedicated inquiry suppresses a duplicate draw; lacking other cases grants no immunity
+    /// where an active police intake authority exists.
+    pub(crate) enforcement_attention_basis_points_per_exposure_source: u16,
     pub(crate) gross_variance_basis_points: u16,
     pub(crate) notable_variance_basis_points: u16,
     /// Consecutive net-losing cycles after which the enterprise's own governance suspends it.
@@ -646,8 +648,8 @@ impl EnterpriseEconomicsDefinition {
     pub fn heat_surcharge_per_active_case(&self) -> Money {
         self.heat_surcharge_per_active_case
     }
-    pub fn enforcement_attention_basis_points_per_active_case(&self) -> u16 {
-        self.enforcement_attention_basis_points_per_active_case
+    pub fn enforcement_attention_basis_points_per_exposure_source(&self) -> u16 {
+        self.enforcement_attention_basis_points_per_exposure_source
     }
     pub fn gross_variance_basis_points(&self) -> u16 {
         self.gross_variance_basis_points

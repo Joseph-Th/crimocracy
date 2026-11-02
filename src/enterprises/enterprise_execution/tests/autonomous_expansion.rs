@@ -1947,17 +1947,18 @@ fn same_tick_racket_fear_blocks_due_autonomous_expansion() {
     // Enough independent district-pressure cases make this enterprise's due enforcement roll certain.
     // They deliberately target the neighborhood rather than the enterprise so they create heat
     // without already counting as the dedicated inquiry the cycle should draw.
-    let per_case = u32::from(
+    let per_source = u32::from(
         registry
             .get_enterprise(EnterpriseKind::Protection)
             .economics()
-            .enforcement_attention_basis_points_per_active_case(),
+            .enforcement_attention_basis_points_per_exposure_source(),
     );
     assert!(
-        per_case > 0,
+        per_source > 0,
         "the authored protection racket must carry vice risk"
     );
-    let pressure_case_count = 10_000_u32.div_ceil(per_case);
+    // The racket contributes the first exposure source even before any police case exists.
+    let pressure_case_count = 10_000_u32.div_ceil(per_source) - 1;
     for index in 0..pressure_case_count {
         validate_incident_intake(
             &fixture.state,

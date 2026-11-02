@@ -624,7 +624,7 @@ impl RegistryBuilder {
         }
         // The per-cycle visibility roll is a draw from 0..=9999 compared against these
         // basis points, so anything above 10_000 would mean "an inquiry every cycle".
-        if economics.enforcement_attention_basis_points_per_active_case > 10_000 {
+        if economics.enforcement_attention_basis_points_per_exposure_source > 10_000 {
             return Err(RegistryBuildError::EnterpriseEnforcementAttentionOutOfRange(kind));
         }
         if network_mode == EnterpriseNetworkMode::SupportingBusinessesOnly
