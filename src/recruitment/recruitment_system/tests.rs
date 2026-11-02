@@ -51,6 +51,8 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod autonomous_allocation;
+
 struct Fixture {
     registry: Registry,
     state: AppState,

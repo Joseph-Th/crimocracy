@@ -106,15 +106,29 @@ pub(crate) fn apply_automatic_legal_support(
     let endings = validate_inactive_automatic_representation_endings(state)?;
     let concluded = endings.len();
     let retention_plan = plan_automatic_legal_support_retentions(registry, state)?;
-    let mut id_budget = retention_plan.id_budget;
-    id_budget.extend(endings.iter().flat_map(
-        crate::legal::legal_representation_system::ValidatedLegalRepresentationEnd::id_budget,
-    ));
+    let ending_budget: Vec<_> = endings
+        .iter()
+        .flat_map(
+            crate::legal::legal_representation_system::ValidatedLegalRepresentationEnd::id_budget,
+        )
+        .collect();
+    let mut id_budget = ending_budget.clone();
+    id_budget.extend(retention_plan.id_budget);
     if state.ids.reserve_many(&id_budget).is_err() {
-        // Automatic support is one fully planned governance cohort. At a finite persistence rail,
-        // conclude and retain nothing rather than letting a canonical tick fail after earlier
-        // phases have committed. Direct retention/end commands keep their typed exhaustion errors.
-        return Ok(AutomaticLegalSupportOutcome::default());
+        // New retainer capacity must not keep counsel assigned to finished matters forever.
+        // Closures have distinct authoritative records and no financial side effects, so the
+        // complete closure cohort may still commit when its own information/report budget fits.
+        // Never retain an arbitrary prefix when the combined retention budget is exhausted.
+        if state.ids.reserve_many(&ending_budget).is_err() {
+            return Ok(AutomaticLegalSupportOutcome::default());
+        }
+        for ending in endings {
+            ending.commit_preflighted(state);
+        }
+        return Ok(AutomaticLegalSupportOutcome {
+            retained: Vec::new(),
+            concluded,
+        });
     }
 
     for ending in endings {

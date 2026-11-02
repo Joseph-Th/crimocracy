@@ -149,6 +149,139 @@ fn enable_automatic_defense(fixture: &mut Fixture) {
 }
 
 #[test]
+fn completed_automatic_defense_concludes_when_new_retainers_cannot_allocate() {
+    let mut fixture = fixture();
+    enable_automatic_defense(&mut fixture);
+    let retained = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
+        .expect("initial legal support should validate")
+        .retained;
+    assert_eq!(retained.len(), 1);
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .expect("first matter should be releasable")
+        .commit(&mut fixture.state)
+        .expect("release should commit");
+
+    let second_defendant = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "New Defendant Awaiting Support".to_owned(),
+            organization: Some(fixture.sponsor),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second organization member should validate");
+    let draft = arrest_draft_for_character(&mut fixture, second_defendant, "New counsel matter");
+    let second_arrest = validate_arrest(&fixture.registry, &fixture.state, draft)
+        .expect("second arrest should validate")
+        .commit(&mut fixture.state)
+        .expect("second arrest should commit");
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::LegalRepresentation, u32::MAX);
+
+    let outcome = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
+        .expect("an exhausted new retainer cannot prevent a completed matter's closure");
+    assert_eq!(outcome.concluded, 1);
+    assert!(outcome.retained.is_empty());
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_representation_for_arrest(fixture.arrest)
+            .is_none()
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_representation_for_arrest(second_arrest)
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_legal_representation(retained[0])
+            .expect("concluded defense should remain historical")
+            .end_reason(),
+        Some(LegalRepresentationEndReason::MatterConcluded)
+    );
+    validate_state(&fixture.state).expect("isolated legal closure must preserve state");
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("closure should save"),
+    )
+    .expect("closure must survive restore");
+    assert!(
+        restored
+            .legal()
+            .active_representation_for_arrest(fixture.arrest)
+            .is_none()
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
+fn automatic_support_does_not_choose_a_prefix_when_retainer_ids_are_shared() {
+    let mut fixture = fixture();
+    enable_automatic_defense(&mut fixture);
+    let second_defendant = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Defendant Awaiting Support".to_owned(),
+            organization: Some(fixture.sponsor),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second organization member should validate");
+    let draft = arrest_draft_for_character(&mut fixture, second_defendant, "Second counsel matter");
+    let second_arrest = validate_arrest(&fixture.registry, &fixture.state, draft)
+        .expect("second custody should validate")
+        .commit(&mut fixture.state)
+        .expect("second custody should commit");
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::LegalRepresentation, u32::MAX - 1);
+    let before = bincode::serialize(&fixture.state).expect("two-matter fixture should serialize");
+
+    let outcome = apply_automatic_legal_support(&fixture.registry, &mut fixture.state)
+        .expect("shared retainer-ID shortfall must be a no-op");
+    assert!(outcome.retained.is_empty());
+    assert_eq!(outcome.concluded, 0);
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected legal cohort should serialize"),
+        before,
+        "scarce shared IDs cannot assign counsel only to the first arrested member"
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_representation_for_arrest(fixture.arrest)
+            .is_none()
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .active_representation_for_arrest(second_arrest)
+            .is_none()
+    );
+    validate_state(&fixture.state).expect("rejected cohort must preserve valid state");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn automatic_policy_retains_counsel_for_released_defendant_with_prosecution_only() {
     let mut fixture = fixture();
     enable_automatic_defense(&mut fixture);

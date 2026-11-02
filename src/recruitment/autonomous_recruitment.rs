@@ -90,9 +90,9 @@ pub(crate) fn apply_due_autonomous_recruitment(
         }
         Err(error) => return Err(error),
     };
-    // The daily personnel pass is one fallible cohort. Exact action selection and every
-    // action-specific artifact budget were resolved above without mutation, so allocator
-    // exhaustion cannot leave only the strongest prefix of managers recorded.
+    // The viable daily personnel pass is one fallible cohort. Permanently unallocatable
+    // individual actions were excluded during planning; all remaining actions still share
+    // one aggregate reservation so contested capacity cannot favor an ID-ordered prefix.
     if state.ids.reserve_many(&plan.id_budget).is_err() {
         return Ok(AutonomousRecruitmentOutcome::default());
     }
@@ -158,10 +158,22 @@ fn plan_due_autonomous_recruitment(
                         approach,
                     },
                 )?;
-                id_budget.extend(validated.id_budget());
+                let action_budget = validated.id_budget();
+                // An action that cannot fit even on its own must not suppress unrelated
+                // managers. Shared scarcity between individually viable actions is still
+                // handled by the all-or-none cohort reservation after planning.
+                if state.ids.reserve_many(&action_budget).is_err() {
+                    continue;
+                }
+                id_budget.extend(action_budget);
                 actions.push(PlannedAutonomousRecruitmentAction::Delegated(validated));
             }
             ApprovalPolicy::RequireApproval => {
+                // Request validation does not allocate an ID. In particular, an exhausted
+                // decision allocator must not prevent an independent delegated attempt.
+                if state.ids.reserve(IdKind::DecisionRequest, 1).is_err() {
+                    continue;
+                }
                 let request = validate_request_recruitment_approval(
                     registry,
                     state,
@@ -185,7 +197,8 @@ fn plan_due_autonomous_recruitment(
                     .reserve(IdKind::DecisionRequest, decision_count)
                     .map_err(DecisionError::from)?;
                 if state.player_organization() == Some(organization) {
-                    id_budget.extend(request.id_budget());
+                    let action_budget = request.id_budget();
+                    id_budget.extend(action_budget);
                     actions.push(PlannedAutonomousRecruitmentAction::PlayerApproval(request));
                 } else {
                     let predicted_decision = DecisionRequestId::from_raw(
@@ -201,7 +214,15 @@ fn plan_due_autonomous_recruitment(
                         DecisionResponse::Approve,
                         predicted_decision,
                     )?;
-                    id_budget.extend(prepared.id_budget());
+                    let action_budget = prepared.id_budget();
+                    if state.ids.reserve_many(&action_budget).is_err() {
+                        // The NPC's approved pitch requires more than the decision itself.
+                        // If its own attempt artifacts are exhausted, no phantom approval
+                        // should occupy the candidate or block another manager's pitch.
+                        decision_count -= 1;
+                        continue;
+                    }
+                    id_budget.extend(action_budget);
                     actions.push(PlannedAutonomousRecruitmentAction::AutonomousApproval(
                         prepared,
                     ));

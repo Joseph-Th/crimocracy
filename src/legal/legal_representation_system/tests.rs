@@ -1468,7 +1468,7 @@ fn leave_exactly_one_automatic_retainer_liquid(fx: &mut Fixture) {
 }
 
 #[test]
-fn automatic_legal_support_preflights_conclusion_and_retention_as_one_cohort() {
+fn automatic_legal_support_closes_finished_matter_when_retention_exceeds_shared_report_budget() {
     let mut fx = fixture();
     validate_set_policy(
         &fx.registry,
@@ -1517,17 +1517,18 @@ fn automatic_legal_support_preflights_conclusion_and_retention_as_one_cohort() {
     fx.state
         .ids
         .set_next_raw_for_test(IdKind::Report, u32::MAX - 1);
-    let before = bincode::serialize(&fx.state)
-        .expect("mixed automatic-support cohort should serialize before exhaustion");
-
     let outcome = apply_automatic_legal_support(&fx.registry, &mut fx.state)
-        .expect("mixed support cohort report exhaustion is a terminal autonomous no-op");
+        .expect("completed matter must close even when new retainer reports cannot fit");
     assert!(outcome.retained.is_empty());
-    assert_eq!(outcome.concluded, 0);
+    assert_eq!(outcome.concluded, 1);
     assert_eq!(
-        bincode::serialize(&fx.state).expect("rejected mixed cohort should serialize"),
-        before,
-        "a retention preflight failure must not conclude an earlier automatic matter"
+        fx.state
+            .legal()
+            .get_legal_representation(existing)
+            .expect("concluded representation must persist")
+            .end_reason(),
+        Some(LegalRepresentationEndReason::MatterConcluded),
+        "the available final report ID must be spent on a genuinely finished legal matter"
     );
     assert_eq!(
         fx.state
@@ -1535,7 +1536,7 @@ fn automatic_legal_support_preflights_conclusion_and_retention_as_one_cohort() {
             .get_legal_representation(existing)
             .expect("existing representation should persist")
             .status(),
-        LegalRepresentationStatus::Active
+        LegalRepresentationStatus::Ended
     );
     assert!(
         fx.state
@@ -1543,8 +1544,25 @@ fn automatic_legal_support_preflights_conclusion_and_retention_as_one_cohort() {
             .active_representation_for_arrest(second_arrest)
             .is_none()
     );
-    validate_state(&fx.state).expect("rejected mixed cohort should remain structurally valid");
-    validate_invariants(&fx.state);
+    validate_state(&fx.state).expect("isolated closure must remain structurally valid");
+    let restored = restore_save(
+        &fx.registry,
+        build_save(&fx.registry, &fx.state).expect("isolated closure should save"),
+    )
+    .expect("isolated closure must restore");
+    validate_invariants(&restored);
+
+    let before =
+        bincode::serialize(&fx.state).expect("remaining unrepresented matter should serialize");
+    let next = apply_automatic_legal_support(&fx.registry, &mut fx.state)
+        .expect("exhausted report IDs after closure must be a no-op");
+    assert!(next.retained.is_empty());
+    assert_eq!(next.concluded, 0);
+    assert_eq!(
+        bincode::serialize(&fx.state).expect("blocked follow-up must serialize"),
+        before,
+        "a fully exhausted report budget cannot leave a partial retainer"
+    );
 }
 
 #[test]
