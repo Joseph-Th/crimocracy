@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::build_registry;
-use crate::core::invariants::{validate_invariants, validate_state};
+use crate::core::invariants::{
+    validate_invariants, validate_state, validate_state_against_registry,
+};
 use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
 use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
 use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
@@ -1069,6 +1071,109 @@ fn new_evidence_recuses_one_prosecutor_from_every_review_of_the_same_investigati
             .is_none()
     );
     validate_state(&restored).expect("restored multi-case recusal should remain valid");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn evidence_recusal_preserves_same_prosecutors_unrelated_reviews() {
+    let mut fixture = fixture();
+    let conflicted_case = open_case(&mut fixture);
+    let criminal = fixture
+        .state
+        .world()
+        .get_character(fixture.defendant)
+        .expect("defendant should persist")
+        .organization()
+        .expect("fixture defendant should have a criminal organization");
+    let unaffected_case = open_unstaffed_case(
+        &mut fixture,
+        criminal,
+        "Separate unrelated prosecutor review",
+    );
+    validate_assign_prosecutor(&fixture.state, unaffected_case, fixture.lead)
+        .expect("the same prosecutor may staff a separate conflict-free investigation")
+        .commit(&mut fixture.state)
+        .expect("the independent review assignment should persist");
+    let unrelated_version = fixture
+        .state
+        .legal()
+        .get_prosecution_case(unaffected_case)
+        .unwrap()
+        .version();
+    let unrelated_investigation = fixture
+        .state
+        .legal()
+        .get_prosecution_case(unaffected_case)
+        .unwrap()
+        .source_investigation();
+    assert_ne!(unrelated_investigation, fixture.investigation);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .reviewing_prosecution_cases_for_prosecutor(fixture.lead)
+            .count(),
+        2,
+        "both distinct source investigations should have their own active review"
+    );
+
+    add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.lead,
+        EvidenceKind::Surveillance,
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(conflicted_case)
+            .unwrap()
+            .assigned_prosecutor(),
+        None,
+        "the implicated investigation must release its conflicted prosecutor"
+    );
+    let unaffected = fixture
+        .state
+        .legal()
+        .get_prosecution_case(unaffected_case)
+        .unwrap();
+    assert_eq!(
+        unaffected.assigned_prosecutor(),
+        Some(fixture.lead),
+        "unrelated investigations are not grounds for prosecutor recusal"
+    );
+    assert_eq!(
+        unaffected.version(),
+        unrelated_version,
+        "unrelated reviews must not acquire spurious lifecycle revisions"
+    );
+    let retained_assignments: Vec<_> = fixture
+        .state
+        .legal()
+        .reviewing_prosecution_cases_for_prosecutor(fixture.lead)
+        .map(|case| case.id())
+        .collect();
+    assert_eq!(retained_assignments, vec![unaffected_case]);
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("selective recusal must satisfy registry validation");
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state)
+            .expect("selective recusal should build a save"),
+    )
+    .expect("the unaffected prosecutor assignment should survive restoration");
+    assert_eq!(
+        restored
+            .legal()
+            .reviewing_prosecution_cases_for_prosecutor(fixture.lead)
+            .map(|case| case.id())
+            .collect::<Vec<_>>(),
+        vec![unaffected_case]
+    );
+    validate_state_against_registry(&fixture.registry, &restored)
+        .expect("restored selective recusal must remain registry-consistent");
     validate_invariants(&restored);
 }
 
