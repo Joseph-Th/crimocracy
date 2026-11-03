@@ -1,11 +1,14 @@
 //! Operation-facing police dispatch planning and deterministic response-arrival processing.
+//! Individually unrecordable arrivals remain dispatched without blocking independent response
+//! consequences; viable same-minute arrivals commit only when their shared ID budget all fits.
 
 use crate::core::entity::EntityRef;
 use crate::core::id::{IdExhaustionError, IdKind, OperationId, PoliceResponseId};
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
 use crate::decisions::decision_system::{
-    DecisionError, DecisionRequestOutcome, validate_request_police_arrival_decision_on_arrival,
+    DecisionError, DecisionRequestOutcome, ValidatedDecisionRequest,
+    validate_request_police_arrival_decision_on_arrival,
 };
 use crate::intelligence::intelligence_system::{
     IntelligenceError, ValidatedInformation, validate_record_information,
@@ -17,11 +20,12 @@ use crate::intelligence::{
 use crate::legal::jurisdiction_system::resolve_police_response_authority;
 use crate::legal::patrol_system::resolve_authority_patrol_presence_snapshot;
 use crate::legal::police_response_system::{
-    PoliceResponseDispatchDraft, PoliceResponseError, ValidatedPoliceResponseDispatch,
-    find_due_police_responses, validate_dispatch_police_response, validate_police_response_arrival,
+    PoliceResponseDispatchDraft, PoliceResponseError, ValidatedPoliceResponseArrival,
+    ValidatedPoliceResponseDispatch, find_due_police_responses, validate_dispatch_police_response,
+    validate_police_response_arrival,
 };
 use crate::operations::operation_abort::{
-    can_abort_for_police_arrival, validate_authority_abort_operation,
+    ValidatedOperationAbort, can_abort_for_police_arrival, validate_authority_abort_operation,
     validate_police_arrival_abort_operation,
 };
 use crate::operations::operation_execution::resolve_operation_police_alert_context;
@@ -167,13 +171,58 @@ pub(crate) fn decide_operation_police_response_start(
 pub(crate) fn apply_due_police_response_arrivals(
     state: &mut AppState,
 ) -> Result<PoliceResponseProcessingOutcome, PoliceResponseIntegrationError> {
-    match apply_due_police_response_arrivals_strict(state) {
-        Ok(outcome) => Ok(outcome),
-        Err(error) if police_response_arrival_is_terminally_blocked(&error) => {
-            Ok(PoliceResponseProcessingOutcome::default())
+    let due = find_due_police_responses(state);
+    let mut planned = Vec::with_capacity(due.len());
+    let mut batch_budget = Vec::new();
+    for response_id in due {
+        let plan = match plan_police_response_arrival(state, response_id) {
+            Ok(plan) => plan,
+            Err(error) if police_response_arrival_is_terminally_blocked(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        let budget = plan.id_budget();
+        // A response whose *own* version or artifact rails are exhausted must not indefinitely
+        // prevent enforcement of independent operations. This is a read-only feasibility check,
+        // not first-come-first-served allocation: viable responses still compete below as one
+        // complete same-minute cohort.
+        if state.ids.reserve_many(&budget).is_err() {
+            continue;
         }
-        Err(error) => Err(error),
+        batch_budget.extend(budget);
+        planned.push(plan);
     }
+    // Never give the remaining shared artifact IDs to the earliest response alone. Every
+    // individually feasible arrival either commits with the whole viable cohort or remains
+    // dispatched for a later minute.
+    if state.ids.reserve_many(&batch_budget).is_err() {
+        return Ok(PoliceResponseProcessingOutcome::default());
+    }
+
+    let mut outcome = PoliceResponseProcessingOutcome::default();
+    for plan in planned {
+        plan.arrival
+            .commit(state)
+            .expect("prevalidated distinct police-response arrival must remain current");
+        if let Some(abort) = plan.abort {
+            abort
+                .commit(state)
+                .expect("prevalidated distinct police-arrival abort must remain current");
+            outcome.aborted_operations.push(plan.operation_id);
+        } else if let Some(decision) = plan.decision {
+            outcome.decisions.push(
+                decision
+                    .commit(state)
+                    .expect("prevalidated distinct police-response decision must remain current"),
+            );
+        }
+        for information in plan.participant_pressure {
+            information
+                .commit(state)
+                .expect("police-pressure information IDs were preflighted for the full due set");
+        }
+        outcome.arrived.push(plan.response_id);
+    }
+    Ok(outcome)
 }
 
 fn police_response_arrival_is_terminally_blocked(error: &PoliceResponseIntegrationError) -> bool {
@@ -206,149 +255,122 @@ fn police_response_arrival_is_terminally_blocked(error: &PoliceResponseIntegrati
     }
 }
 
-fn apply_due_police_response_arrivals_strict(
-    state: &mut AppState,
-) -> Result<PoliceResponseProcessingOutcome, PoliceResponseIntegrationError> {
-    let due = find_due_police_responses(state);
-    let mut planned = Vec::with_capacity(due.len());
-    let mut batch_budget = Vec::new();
-    for response_id in due {
-        let (
-            operation_id,
-            should_abort_before_entry,
-            autonomous_leadership_abort,
-            decision,
-            participant_pressure,
-        ) = {
-            let response = state
-                .legal
-                .get_police_response(response_id)
-                .expect("due police response must still exist");
-            let operation = state
-                .operations
-                .get_operation(response.source_operation())
-                .expect("police response source operation must exist");
-            // The owning pre-entry abort predicate, shared with the canonical abort
-            // validator so the tick pass and validation can never disagree.
-            let should_abort = can_abort_for_police_arrival(state, operation, response_id);
-            let requests_leadership = !should_abort
-                && operation.status() == OperationStatus::InProgress
-                && operation
-                    .contingencies()
-                    .contains(&OperationContingency::RequestDecisionOnPoliceArrival);
-            // Only the explicitly designated player organization has an external decision-maker.
-            // Every other organization, including all organizations before player designation,
-            // must resolve the exception autonomously or the operation can remain blocked forever.
-            // Non-player leadership uses the conservative canonical exception rule: abort rather
-            // than create a decision request that no external decision-maker can resolve.
-            let autonomous_leadership_abort = requests_leadership
-                && state.player_organization() != Some(operation.responsible_organization());
-            let decision = if requests_leadership && !autonomous_leadership_abort {
-                Some(validate_request_police_arrival_decision_on_arrival(
-                    state,
-                    response_id,
-                )?)
-            } else {
-                None
-            };
-            // Every participant present when the response arrives holds first-hand exposure
-            // knowledge (`DirectAccess`): rivals later leverage exactly this to poach them,
-            // and informant disclosures carry it onward. A pre-entry abort additionally
-            // records debrief-derived organizational PoliceActivity knowledge through the
-            // abort path — different holder, reliability, and consumer, so both records are
-            // intentional and must stay.
-            let participant_pressure = if operation.status() == OperationStatus::InProgress {
-                validate_participant_police_pressure_information(
-                    state,
-                    operation,
-                    response.authority(),
-                )?
-            } else {
-                Vec::new()
-            };
-            (
-                operation.id(),
-                should_abort,
-                autonomous_leadership_abort,
-                decision,
-                participant_pressure,
-            )
-        };
+struct PlannedPoliceResponseArrival {
+    response_id: PoliceResponseId,
+    operation_id: OperationId,
+    arrival: ValidatedPoliceResponseArrival,
+    abort: Option<ValidatedOperationAbort>,
+    decision: Option<ValidatedDecisionRequest>,
+    participant_pressure: Vec<ValidatedInformation>,
+}
 
-        let arrival = validate_police_response_arrival(state, response_id)?;
-        let abort = if should_abort_before_entry {
-            Some(validate_police_arrival_abort_operation(
+impl PlannedPoliceResponseArrival {
+    fn id_budget(&self) -> Vec<(IdKind, u32)> {
+        let mut budget = Vec::new();
+        if let Some(abort) = &self.abort {
+            budget.extend(abort.id_budget());
+        }
+        if let Some(decision) = &self.decision {
+            budget.extend(decision.id_budget());
+        }
+        budget.push((
+            IdKind::Information,
+            u32::try_from(self.participant_pressure.len())
+                .expect("operation participant count must fit u32"),
+        ));
+        budget
+    }
+}
+
+fn plan_police_response_arrival(
+    state: &AppState,
+    response_id: PoliceResponseId,
+) -> Result<PlannedPoliceResponseArrival, PoliceResponseIntegrationError> {
+    let (
+        operation_id,
+        should_abort_before_entry,
+        autonomous_leadership_abort,
+        decision,
+        participant_pressure,
+    ) = {
+        let response = state
+            .legal
+            .get_police_response(response_id)
+            .expect("due police response must still exist");
+        let operation = state
+            .operations
+            .get_operation(response.source_operation())
+            .expect("police response source operation must exist");
+        // The owning pre-entry abort predicate, shared with the canonical abort
+        // validator so the tick pass and validation can never disagree.
+        let should_abort = can_abort_for_police_arrival(state, operation, response_id);
+        let requests_leadership = !should_abort
+            && operation.status() == OperationStatus::InProgress
+            && operation
+                .contingencies()
+                .contains(&OperationContingency::RequestDecisionOnPoliceArrival);
+        // Only the explicitly designated player organization has an external decision-maker.
+        // Every other organization, including all organizations before player designation,
+        // must resolve the exception autonomously or the operation can remain blocked forever.
+        // Non-player leadership uses the conservative canonical exception rule: abort rather
+        // than create a decision request that no external decision-maker can resolve.
+        let autonomous_leadership_abort = requests_leadership
+            && state.player_organization() != Some(operation.responsible_organization());
+        let decision = if requests_leadership && !autonomous_leadership_abort {
+            Some(validate_request_police_arrival_decision_on_arrival(
                 state,
-                operation_id,
                 response_id,
             )?)
-        } else if autonomous_leadership_abort {
-            Some(validate_authority_abort_operation(state, operation_id)?)
         } else {
             None
         };
-
-        // One arrival is a cross-domain transaction: legal response status, operation abort or
-        // leadership decision, and every participant's first-hand police-pressure knowledge must
-        // appear together. Collect every due response first because valid state gives each
-        // response a distinct source operation, and operation booking prevents those running
-        // operations from sharing participants. Earlier arrival effects therefore cannot stale
-        // another due response's prepared transaction in this same minute.
-        if let Some(abort) = abort.as_ref() {
-            batch_budget.extend(abort.id_budget());
-        }
-        if let Some(decision) = decision.as_ref() {
-            batch_budget.extend(decision.id_budget());
-        }
-        let participant_information = u32::try_from(participant_pressure.len())
-            .expect("operation participant count must fit u32");
-        batch_budget.push((IdKind::Information, participant_information));
-        planned.push((
-            response_id,
-            operation_id,
-            arrival,
-            abort,
+        // Every participant present when the response arrives holds first-hand exposure
+        // knowledge (`DirectAccess`): rivals later leverage exactly this to poach them,
+        // and informant disclosures carry it onward. A pre-entry abort additionally
+        // records debrief-derived organizational PoliceActivity knowledge through the
+        // abort path — different holder, reliability, and consumer, so both records are
+        // intentional and must stay.
+        let participant_pressure = if operation.status() == OperationStatus::InProgress {
+            validate_participant_police_pressure_information(
+                state,
+                operation,
+                response.authority(),
+            )?
+        } else {
+            Vec::new()
+        };
+        (
+            operation.id(),
+            should_abort,
+            autonomous_leadership_abort,
             decision,
             participant_pressure,
-        ));
-    }
+        )
+    };
 
-    // All responses in this due set occur at one simulation instant. Reserve their complete
-    // persistent-ID budget before marking the first response Arrived so global allocator pressure
-    // cannot make stable PoliceResponseId order decide which operation receives same-minute
-    // enforcement consequences.
-    state.ids.reserve_many(&batch_budget)?;
+    let arrival = validate_police_response_arrival(state, response_id)?;
+    let abort = if should_abort_before_entry {
+        Some(validate_police_arrival_abort_operation(
+            state,
+            operation_id,
+            response_id,
+        )?)
+    } else if autonomous_leadership_abort {
+        Some(validate_authority_abort_operation(state, operation_id)?)
+    } else {
+        None
+    };
 
-    let mut arrived = Vec::with_capacity(planned.len());
-    let mut decisions = Vec::new();
-    let mut aborted_operations = Vec::new();
-    for (response_id, operation_id, arrival, abort, decision, participant_pressure) in planned {
-        arrival
-            .commit(state)
-            .expect("prevalidated distinct police-response arrival must remain current");
-        if let Some(abort) = abort {
-            abort
-                .commit(state)
-                .expect("prevalidated distinct police-arrival abort must remain current");
-            aborted_operations.push(operation_id);
-        } else if let Some(decision) = decision {
-            decisions.push(
-                decision
-                    .commit(state)
-                    .expect("prevalidated distinct police-response decision must remain current"),
-            );
-        }
-        for information in participant_pressure {
-            information
-                .commit(state)
-                .expect("police-pressure information IDs were preflighted for the full due set");
-        }
-        arrived.push(response_id);
-    }
-    Ok(PoliceResponseProcessingOutcome {
-        arrived,
-        decisions,
-        aborted_operations,
+    // One arrival is a cross-domain transaction: status, abort/decision, and every
+    // participant's first-hand knowledge. Separate operations cannot share their booked
+    // participants, so one committed arrival cannot stale another's planned transaction.
+    Ok(PlannedPoliceResponseArrival {
+        response_id,
+        operation_id,
+        arrival,
+        abort,
+        decision,
+        participant_pressure,
     })
 }
 

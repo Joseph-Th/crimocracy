@@ -1187,6 +1187,248 @@ fn same_minute_police_arrival_batch_information_exhaustion_is_terminal_noop_atom
 }
 
 #[test]
+fn unreportable_police_abort_does_not_prevent_independent_arrival() {
+    let (registry, mut state, _police, neighborhood, blocked_operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::AbortOnPoliceArrivalBeforeEntry],
+        );
+    let viable_operation =
+        add_parallel_exposed_burglary(&registry, &mut state, neighborhood, blocked_operation);
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(
+        started.started_operations,
+        vec![blocked_operation, viable_operation]
+    );
+    let blocked_response = state
+        .operations()
+        .get_operation(blocked_operation)
+        .and_then(|record| record.police_response())
+        .expect("first burglary must have a dispatched response");
+    let viable_response = state
+        .operations()
+        .get_operation(viable_operation)
+        .and_then(|record| record.police_response())
+        .expect("parallel burglary must also have a dispatched response");
+    let due = state
+        .legal()
+        .get_police_response(blocked_response)
+        .expect("first response must persist")
+        .arrival_due_at();
+    assert_eq!(
+        state
+            .legal()
+            .get_police_response(viable_response)
+            .expect("second response must persist")
+            .arrival_due_at(),
+        due,
+        "both arrivals must compete at the same instant"
+    );
+    assert!(
+        due < state
+            .operations()
+            .get_operation(blocked_operation)
+            .and_then(|record| record.entry_at())
+            .expect("abort-on-arrival operation must have a future entry"),
+        "the first arrival must require a pre-entry abort with a report"
+    );
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due.as_minutes() - state.now().as_minutes())
+            .expect("fixture response delay must fit"),
+    ));
+    let info_before = state.ids.next_raw(IdKind::Information);
+    let history_before = state.ids.next_raw(IdKind::HistoryEvent);
+    state.ids.set_next_raw_for_test(IdKind::Report, u32::MAX);
+
+    let outcome =
+        crate::operations::police_response_integration::apply_due_police_response_arrivals(
+            &mut state,
+        )
+        .expect("one impossible abort must not suppress a viable response");
+    assert_eq!(outcome.arrived, vec![viable_response]);
+    assert!(outcome.decisions.is_empty());
+    assert!(outcome.aborted_operations.is_empty());
+    assert_eq!(
+        state
+            .legal()
+            .get_police_response(blocked_response)
+            .expect("blocked response must persist")
+            .status(),
+        PoliceResponseStatus::Dispatched,
+        "the unreportable arrival must remain atomic and pending"
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_police_response(viable_response)
+            .and_then(|response| response.arrived_at()),
+        Some(due)
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(blocked_operation)
+            .expect("blocked operation must persist")
+            .status(),
+        OperationStatus::InProgress
+    );
+    assert_eq!(
+        state.ids.next_raw(IdKind::Information),
+        info_before + 2,
+        "only the viable crew's two direct observations should consume IDs"
+    );
+    assert_eq!(
+        state.ids.next_raw(IdKind::HistoryEvent),
+        history_before,
+        "no incomplete abort may write history"
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("isolated arrival must preserve authored behavior");
+    validate_invariants(&state);
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("isolated arrival must be saveable"),
+    )
+    .expect("isolated arrival must survive restore");
+    assert_eq!(
+        restored
+            .legal()
+            .get_police_response(blocked_response)
+            .expect("restored blocked response must persist")
+            .status(),
+        PoliceResponseStatus::Dispatched
+    );
+    assert_eq!(
+        restored
+            .legal()
+            .get_police_response(viable_response)
+            .and_then(|response| response.arrived_at()),
+        Some(due)
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
+fn unallocatable_player_decision_does_not_block_independent_police_arrival() {
+    let (registry, mut state, police, neighborhood, blocked_operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+        );
+    let player = state
+        .operations()
+        .get_operation(blocked_operation)
+        .expect("first burglary must persist")
+        .responsible_organization();
+    designate_player_organization(&mut state, player)
+        .expect("police response decision requires a designated player");
+    validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("start of day must be valid"),
+                    1_440,
+                    Rating::try_new(0).expect("zero patrol presence must be valid"),
+                )
+                .expect("all-day patrol window must be valid"),
+            ],
+        },
+    )
+    .expect("patrol schedule must validate")
+    .commit(&mut state)
+    .expect("patrol schedule must persist");
+    let viable_operation =
+        add_parallel_exposed_burglary(&registry, &mut state, neighborhood, blocked_operation);
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(
+        started.started_operations,
+        vec![blocked_operation, viable_operation]
+    );
+    let blocked_response = state
+        .operations()
+        .get_operation(blocked_operation)
+        .and_then(|record| record.police_response())
+        .expect("first burglary must dispatch police");
+    let viable_response = state
+        .operations()
+        .get_operation(viable_operation)
+        .and_then(|record| record.police_response())
+        .expect("parallel burglary must dispatch police");
+    let due = state
+        .legal()
+        .get_police_response(blocked_response)
+        .expect("player response must persist")
+        .arrival_due_at();
+    assert_eq!(
+        state
+            .legal()
+            .get_police_response(viable_response)
+            .expect("parallel response must persist")
+            .arrival_due_at(),
+        due
+    );
+    assert!(
+        due >= state
+            .operations()
+            .get_operation(blocked_operation)
+            .and_then(|record| record.entry_at())
+            .expect("burglary must have entry time"),
+        "player's response must arrive after entry and require a leadership decision"
+    );
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due.as_minutes() - state.now().as_minutes())
+            .expect("fixture response delay must fit"),
+    ));
+    let info_before = state.ids.next_raw(IdKind::Information);
+    state
+        .ids
+        .set_next_raw_for_test(IdKind::DecisionRequest, u32::MAX);
+
+    let outcome =
+        crate::operations::police_response_integration::apply_due_police_response_arrivals(
+            &mut state,
+        )
+        .expect("impossible player decision must not block a distinct routine police response");
+    assert_eq!(outcome.arrived, vec![viable_response]);
+    assert!(outcome.decisions.is_empty());
+    assert!(outcome.aborted_operations.is_empty());
+    assert_eq!(
+        state
+            .legal()
+            .get_police_response(blocked_response)
+            .expect("blocked player response must persist")
+            .status(),
+        PoliceResponseStatus::Dispatched
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_police_response(viable_response)
+            .and_then(|response| response.arrived_at()),
+        Some(due)
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(blocked_operation)
+            .expect("unresolved player operation must persist")
+            .status(),
+        OperationStatus::InProgress
+    );
+    assert_eq!(
+        state.ids.next_raw(IdKind::Information),
+        info_before + 2,
+        "only the independently arrived response records firsthand crew knowledge"
+    );
+    validate_state_against_registry(&registry, &state)
+        .expect("isolated decision starvation must preserve registry-valid state");
+    validate_invariants(&state);
+}
+
+#[test]
 fn arrived_response_penalizes_continuing_operation_and_stales_prearrival_plan() {
     let (registry, mut response_state, _police, _neighborhood, response_operation) =
         make_exposed_business_operation_fixture(true);
