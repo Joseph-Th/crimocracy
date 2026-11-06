@@ -10,13 +10,23 @@ use crate::world::{BusinessKind, NeighborhoodProfile, NeighborhoodRecord, WorldS
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+mod draw;
+mod gpu;
+pub use draw::{CityDrawCommand, CityDrawPlan, DrawDetail, DrawTarget};
+pub use gpu::{GPU_INSTANCE_STRIDE, GpuCityChunk, GpuDrawBatch, GpuInstance};
+
 pub const LOTS_PER_SIDE: usize = 32;
 pub const LOT_CAPACITY: usize = LOTS_PER_SIDE * LOTS_PER_SIDE;
+pub const SECTOR_SIDE_LOTS: usize = 8;
+pub const SECTORS_PER_SIDE: usize = LOTS_PER_SIDE / SECTOR_SIDE_LOTS;
 pub const LOT_PITCH: f32 = 22.0;
 pub const DISTRICT_WIDTH: f32 = LOTS_PER_SIDE as f32 * LOT_PITCH;
-pub const DISTRICT_PITCH: f32 = DISTRICT_WIDTH + 96.0;
+pub const DISTRICT_PITCH: f32 = DISTRICT_WIDTH + 24.0;
 const DISTRICTS_PER_ROW: u32 = 8;
-const ROAD_WIDTH: f32 = 4.0;
+const ARTERIAL_WIDTH: f32 = 10.0;
+const ALLEY_WIDTH: f32 = 3.0;
+const SIDEWALK_SETBACK: f32 = 1.0;
+const BLOCK_SIDE_IN_LOTS: usize = 4;
 
 /// Renderable geometry is a unit box (or a replacement mesh selected by the adapter).
 /// A renderer can upload the instance arrays once and draw one batch per mesh per
@@ -67,6 +77,21 @@ pub struct BuildingBatch {
     pub instances: Vec<BuildingInstance>,
 }
 
+/// An instance range in a district's per-mesh GPU buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct InstanceRange {
+    pub first: u32,
+    pub count: u32,
+}
+
+/// A cullable eight-by-eight block group. Ranges index the shared district
+/// building buffers, so near-camera culling does not duplicate GPU data.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LotSector {
+    pub bounds: Bounds2,
+    pub building_ranges: [InstanceRange; 6],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds2 {
     pub min_x: f32,
@@ -76,8 +101,19 @@ pub struct Bounds2 {
 }
 
 impl Bounds2 {
+    pub fn is_valid(self) -> bool {
+        self.min_x.is_finite()
+            && self.min_z.is_finite()
+            && self.max_x.is_finite()
+            && self.max_z.is_finite()
+            && self.min_x <= self.max_x
+            && self.min_z <= self.max_z
+    }
+
     pub fn intersects(self, other: Self) -> bool {
-        self.min_x <= other.max_x
+        self.is_valid()
+            && other.is_valid()
+            && self.min_x <= other.max_x
             && self.max_x >= other.min_x
             && self.min_z <= other.max_z
             && self.max_z >= other.min_z
@@ -93,6 +129,16 @@ pub struct DistrictChunk {
     pub streets: Vec<InstanceTransform>,
     /// One contiguous upload per mesh class, in stable class order.
     pub buildings: Vec<BuildingBatch>,
+    /// Sixteen independently cullable block groups in row-major order.
+    pub sectors: Vec<LotSector>,
+}
+
+impl DistrictChunk {
+    pub fn visible_sectors(&self, viewport: Bounds2) -> impl Iterator<Item = &LotSector> {
+        self.sectors
+            .iter()
+            .filter(move |sector| sector.bounds.intersects(viewport))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -186,20 +232,30 @@ impl CityScene {
         let origin_z = (district_index / DISTRICTS_PER_ROW) as f32 * DISTRICT_PITCH;
         let district_seed =
             mix64(visual_seed ^ u64::from(id.raw()).wrapping_mul(0x9E3779B97F4A7C15));
+        let mut north_south_roads = [0.0f32; LOTS_PER_SIDE + 1];
+        let mut east_west_roads = [0.0f32; LOTS_PER_SIDE + 1];
+        for n in 0..=LOTS_PER_SIDE {
+            north_south_roads[n] = road_width(district_seed, n, 0x6E73);
+            east_west_roads[n] = road_width(district_seed, n, 0x6577);
+        }
         // An odd stride permutes all 1024 slots without collisions.
         let stride = (((district_seed >> 16) as usize) | 1) & (LOT_CAPACITY - 1);
         let shift = district_seed as usize & (LOT_CAPACITY - 1);
         let mut businesses = vec![None; LOT_CAPACITY];
+        let mut total_businesses = 0usize;
         for (ordinal, business) in world.businesses_in_neighborhood(id).enumerate() {
-            if ordinal >= LOT_CAPACITY {
-                return Err(CityViewError::DistrictCapacity {
-                    neighborhood: id,
-                    businesses: ordinal + 1,
-                    capacity: LOT_CAPACITY,
-                });
+            total_businesses += 1;
+            if ordinal < LOT_CAPACITY {
+                let slot = (ordinal * stride + shift) & (LOT_CAPACITY - 1);
+                businesses[slot] = Some(business);
             }
-            let slot = (ordinal * stride + shift) & (LOT_CAPACITY - 1);
-            businesses[slot] = Some(business);
+        }
+        if total_businesses > LOT_CAPACITY {
+            return Err(CityViewError::DistrictCapacity {
+                neighborhood: id,
+                businesses: total_businesses,
+                capacity: LOT_CAPACITY,
+            });
         }
 
         let mut batches: Vec<_> = BuildingMesh::ALL
@@ -209,71 +265,117 @@ impl CityScene {
                 instances: Vec::new(),
             })
             .collect();
-        for (slot, business) in businesses.into_iter().enumerate() {
-            let col = slot % LOTS_PER_SIDE;
-            let row = slot / LOTS_PER_SIDE;
-            let x = origin_x + (col as f32 + 0.5) * LOT_PITCH;
-            let z = origin_z + (row as f32 + 0.5) * LOT_PITCH;
-            let variation = mix64(district_seed ^ (slot as u64).wrapping_mul(0xD1B54A32D192ED03));
-            let mesh = match business {
-                Some(record) => business_mesh(record.kind()),
-                None => scenery_mesh(neighborhood.profile(), variation),
-            };
-            let height = building_height(mesh, neighborhood.profile(), variation);
-            let transform = InstanceTransform {
-                translation: [x, height * 0.5, z],
-                scale: [
-                    12.0 + (variation & 3) as f32,
-                    height,
-                    12.0 + ((variation >> 2) & 3) as f32,
-                ],
-            };
-            let pick_id = business.map_or(0, |record| {
-                business_pins.insert(
-                    record.id(),
-                    BusinessPin {
-                        neighborhood: id,
-                        position: [x, 0.0, z],
+        let mut sectors = Vec::with_capacity(SECTORS_PER_SIDE * SECTORS_PER_SIDE);
+        for sector_row in 0..SECTORS_PER_SIDE {
+            for sector_col in 0..SECTORS_PER_SIDE {
+                let first: [u32; 6] =
+                    std::array::from_fn(|index| batches[index].instances.len() as u32);
+                for local_row in 0..SECTOR_SIDE_LOTS {
+                    for local_col in 0..SECTOR_SIDE_LOTS {
+                        let col = sector_col * SECTOR_SIDE_LOTS + local_col;
+                        let row = sector_row * SECTOR_SIDE_LOTS + local_row;
+                        let slot = row * LOTS_PER_SIDE + col;
+                        let business = businesses[slot];
+                        let x = origin_x + (col as f32 + 0.5) * LOT_PITCH;
+                        let z = origin_z + (row as f32 + 0.5) * LOT_PITCH;
+                        let variation =
+                            mix64(district_seed ^ (slot as u64).wrapping_mul(0xD1B54A32D192ED03));
+                        let mesh = match business {
+                            Some(record) => business_mesh(record.kind()),
+                            None => scenery_mesh(neighborhood.profile(), variation),
+                        };
+                        let height = building_height(mesh, neighborhood.profile(), variation);
+                        let desired_width = 10.0 + (variation & 7).min(5) as f32;
+                        let desired_depth = 10.0 + ((variation >> 3) & 7).min(5) as f32;
+                        let footprint_x = desired_width.min(
+                            LOT_PITCH
+                                - north_south_roads[col].max(north_south_roads[col + 1])
+                                - 2.0 * SIDEWALK_SETBACK,
+                        );
+                        let footprint_z = desired_depth.min(
+                            LOT_PITCH
+                                - east_west_roads[row].max(east_west_roads[row + 1])
+                                - 2.0 * SIDEWALK_SETBACK,
+                        );
+                        let transform = InstanceTransform {
+                            translation: [x, height * 0.5, z],
+                            scale: [footprint_x, height, footprint_z],
+                        };
+                        let pick_id = business.map_or(0, |record| {
+                            business_pins.insert(
+                                record.id(),
+                                BusinessPin {
+                                    neighborhood: id,
+                                    position: [x, 0.0, z],
+                                },
+                            );
+                            record.id().raw()
+                        });
+                        batches[mesh as usize].instances.push(BuildingInstance {
+                            transform,
+                            variation: (variation >> 48) as u16,
+                            pick_id,
+                        });
+                    }
+                }
+                let building_ranges = std::array::from_fn(|index| InstanceRange {
+                    first: first[index],
+                    count: batches[index].instances.len() as u32 - first[index],
+                });
+                let min_x = origin_x + (sector_col * SECTOR_SIDE_LOTS) as f32 * LOT_PITCH;
+                let min_z = origin_z + (sector_row * SECTOR_SIDE_LOTS) as f32 * LOT_PITCH;
+                sectors.push(LotSector {
+                    bounds: Bounds2 {
+                        min_x,
+                        min_z,
+                        max_x: min_x + SECTOR_SIDE_LOTS as f32 * LOT_PITCH,
+                        max_z: min_z + SECTOR_SIDE_LOTS as f32 * LOT_PITCH,
                     },
-                );
-                record.id().raw()
-            });
-            batches[mesh as usize].instances.push(BuildingInstance {
-                transform,
-                variation: (variation >> 48) as u16,
-                pick_id,
-            });
+                    building_ranges,
+                });
+            }
         }
 
-        let mut streets = Vec::with_capacity((LOTS_PER_SIDE + 1) * 2);
+        let mut streets = Vec::with_capacity((LOTS_PER_SIDE / BLOCK_SIDE_IN_LOTS + 1) * 2 + 16);
         for n in 0..=LOTS_PER_SIDE {
             let offset = n as f32 * LOT_PITCH;
-            streets.push(InstanceTransform {
-                translation: [origin_x + offset, 0.05, origin_z + DISTRICT_WIDTH * 0.5],
-                scale: [ROAD_WIDTH, 0.1, DISTRICT_WIDTH + ROAD_WIDTH],
-            });
-            streets.push(InstanceTransform {
-                translation: [origin_x + DISTRICT_WIDTH * 0.5, 0.05, origin_z + offset],
-                scale: [DISTRICT_WIDTH + ROAD_WIDTH, 0.1, ROAD_WIDTH],
-            });
+            if north_south_roads[n] > 0.0 {
+                streets.push(InstanceTransform {
+                    translation: [origin_x + offset, 0.05, origin_z + DISTRICT_PITCH * 0.5],
+                    scale: [north_south_roads[n], 0.1, DISTRICT_PITCH + ARTERIAL_WIDTH],
+                });
+            }
+            if east_west_roads[n] > 0.0 {
+                streets.push(InstanceTransform {
+                    translation: [origin_x + DISTRICT_PITCH * 0.5, 0.05, origin_z + offset],
+                    scale: [DISTRICT_PITCH + ARTERIAL_WIDTH, 0.1, east_west_roads[n]],
+                });
+            }
         }
         let district = DistrictChunk {
             neighborhood: id,
             bounds: Bounds2 {
-                min_x: origin_x - ROAD_WIDTH * 0.5,
-                min_z: origin_z - ROAD_WIDTH * 0.5,
-                max_x: origin_x + DISTRICT_WIDTH + ROAD_WIDTH * 0.5,
-                max_z: origin_z + DISTRICT_WIDTH + ROAD_WIDTH * 0.5,
+                min_x: origin_x - ARTERIAL_WIDTH * 0.5,
+                min_z: origin_z - ARTERIAL_WIDTH * 0.5,
+                max_x: origin_x + DISTRICT_PITCH + ARTERIAL_WIDTH * 0.5,
+                max_z: origin_z + DISTRICT_PITCH + ARTERIAL_WIDTH * 0.5,
             },
             streets,
             buildings: batches,
+            sectors,
         };
         Ok((district, business_pins))
     }
 
+    /// Uses neighborhood-ID row order to skip invisible northern rows via
+    /// binary search. Only districts in the intersecting rows are examined.
     pub fn visible_districts(&self, viewport: Bounds2) -> impl Iterator<Item = &DistrictChunk> {
-        self.districts
+        let start = self
+            .districts
+            .partition_point(|district| district.bounds.max_z < viewport.min_z);
+        self.districts[start..]
             .iter()
+            .take_while(move |district| district.bounds.min_z <= viewport.max_z)
             .filter(move |district| district.bounds.intersects(viewport))
     }
 
@@ -287,6 +389,18 @@ impl CityScene {
         (pick_id != 0)
             .then(|| BusinessId::from_raw(pick_id))
             .and_then(|id| self.business_pins.get_key_value(&id).map(|(id, _)| *id))
+    }
+}
+
+fn road_width(seed: u64, boundary: usize, axis: u64) -> f32 {
+    if boundary.is_multiple_of(BLOCK_SIDE_IN_LOTS) {
+        ARTERIAL_WIDTH
+    } else if boundary % BLOCK_SIDE_IN_LOTS == 2
+        && mix64(seed ^ (boundary as u64).wrapping_mul(0xA0761D6478BD642F) ^ axis).is_multiple_of(3)
+    {
+        ALLEY_WIDTH
+    } else {
+        0.0
     }
 }
 

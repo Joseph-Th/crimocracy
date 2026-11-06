@@ -106,7 +106,8 @@ fn batches_contain_every_lot_once_with_unique_business_picks() {
     let scene = CityScene::generate(state.world(), 18).unwrap();
     let district = &scene.districts[0];
     assert_eq!(district.buildings.len(), BuildingMesh::ALL.len());
-    assert_eq!(district.streets.len(), (LOTS_PER_SIDE + 1) * 2);
+    assert!(district.streets.len() >= (LOTS_PER_SIDE / BLOCK_SIDE_IN_LOTS + 1) * 2);
+    assert!(district.streets.len() <= (LOTS_PER_SIDE / BLOCK_SIDE_IN_LOTS + 1) * 2 + 16);
     assert_eq!(
         district
             .buildings
@@ -142,8 +143,8 @@ fn spatial_culling_uses_fixed_district_bounds_without_loading_unrelated_chunks()
     let scene = CityScene::generate(state.world(), 11).unwrap();
     let first = &scene.districts[0];
     let second_row = &scene.districts[8];
-    assert_eq!(first.bounds.min_x, -2.0);
-    assert_eq!(second_row.bounds.min_z, DISTRICT_PITCH - 2.0);
+    assert_eq!(first.bounds.min_x, -5.0);
+    assert_eq!(second_row.bounds.min_z, DISTRICT_PITCH - 5.0);
     let viewport = Bounds2 {
         min_x: 0.0,
         min_z: 0.0,
@@ -155,7 +156,232 @@ fn spatial_culling_uses_fixed_district_bounds_without_loading_unrelated_chunks()
         .map(|district| district.neighborhood)
         .collect();
     assert_eq!(visible, vec![first.neighborhood]);
-    assert!(!first.bounds.intersects(second_row.bounds));
+    // Road strips cross the district boundary by design; their culling
+    // bounds overlap even though the developed building lots do not.
+    assert!(first.bounds.intersects(second_row.bounds));
+}
+
+#[test]
+fn generated_building_footprints_do_not_intersect_procedural_roads() {
+    let mut state = AppState::new(77);
+    add_neighborhood(&mut state, "Downtown");
+    let scene = CityScene::generate(state.world(), 0xDEAD_BEEF).unwrap();
+    for district in &scene.districts {
+        for building in district.buildings.iter().flat_map(|batch| &batch.instances) {
+            let [x, _, z] = building.transform.translation;
+            let [width, _, depth] = building.transform.scale;
+            assert!(width > 0.0 && depth > 0.0);
+            for road in &district.streets {
+                let [road_x, _, road_z] = road.translation;
+                let [road_width, _, road_depth] = road.scale;
+                let intersects_x = (x - road_x).abs() * 2.0 < width + road_width;
+                let intersects_z = (z - road_z).abs() * 2.0 < depth + road_depth;
+                assert!(
+                    !(intersects_x && intersects_z),
+                    "building at ({x},{z}) intersects street at ({road_x},{road_z})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn neighboring_district_arterials_join_without_gaps() {
+    let mut state = AppState::new(42);
+    for index in 0..9 {
+        add_neighborhood(&mut state, &format!("Ward {index}"));
+    }
+    let scene = CityScene::generate(state.world(), 123).unwrap();
+    let origin = &scene.districts[0];
+    let east = &scene.districts[1];
+    let south = &scene.districts[8];
+
+    // The main east-west road at z=0 continues through the district gap.
+    let east_west = |chunk: &DistrictChunk| {
+        *chunk
+            .streets
+            .iter()
+            .find(|street| street.scale[0] > street.scale[2] && street.translation[2] == 0.0)
+            .expect("horizontal arterial must span the district")
+    };
+    let road = east_west(origin);
+    let extension = east_west(east);
+    let first_end = road.translation[0] + road.scale[0] * 0.5;
+    let next_start = extension.translation[0] - extension.scale[0] * 0.5;
+    assert!(first_end >= next_start);
+    assert_eq!(road.scale[2], ARTERIAL_WIDTH);
+    assert_eq!(extension.scale[2], ARTERIAL_WIDTH);
+
+    // The north-south road at x=0 likewise crosses the next row's margin.
+    let north_south = |chunk: &DistrictChunk| {
+        *chunk
+            .streets
+            .iter()
+            .find(|street| street.scale[2] > street.scale[0] && street.translation[0] == 0.0)
+            .expect("vertical arterial must span the district")
+    };
+    let road = north_south(origin);
+    let extension = north_south(south);
+    let first_end = road.translation[2] + road.scale[2] * 0.5;
+    let next_start = extension.translation[2] - extension.scale[2] * 0.5;
+    assert!(first_end >= next_start);
+}
+
+#[test]
+fn generated_streets_are_fully_covered_by_their_district_culling_bounds() {
+    let mut state = AppState::new(11);
+    for index in 0..16 {
+        add_neighborhood(&mut state, &format!("Block {index}"));
+    }
+    for seed in [0, 1, 143, u64::MAX] {
+        let scene = CityScene::generate(state.world(), seed).unwrap();
+        for chunk in &scene.districts {
+            for street in &chunk.streets {
+                let [x, _, z] = street.translation;
+                let [width, _, depth] = street.scale;
+                assert!(x - width * 0.5 >= chunk.bounds.min_x);
+                assert!(x + width * 0.5 <= chunk.bounds.max_x);
+                assert!(z - depth * 0.5 >= chunk.bounds.min_z);
+                assert!(z + depth * 0.5 <= chunk.bounds.max_z);
+            }
+        }
+    }
+}
+
+#[test]
+fn sector_instance_ranges_partition_every_mesh_buffer_without_duplication() {
+    let mut state = AppState::new(80);
+    let district = add_neighborhood(&mut state, "Harbor");
+    for &kind in &ALL_BUSINESS_KINDS {
+        add_business(&mut state, district, kind);
+    }
+    let scene = CityScene::generate(state.world(), 911).unwrap();
+    let chunk = &scene.districts[0];
+    assert_eq!(chunk.sectors.len(), SECTORS_PER_SIDE * SECTORS_PER_SIDE);
+    let gpu = GpuCityChunk::encode(chunk);
+    let mut covered = 0;
+    for (mesh_index, batch) in chunk.buildings.iter().enumerate() {
+        let mut expected_first = 0;
+        for sector in &chunk.sectors {
+            let range = sector.building_ranges[mesh_index];
+            assert_eq!(range.first, expected_first);
+            expected_first += range.count;
+            assert!((range.first + range.count) as usize <= batch.instances.len());
+            for instance in &batch.instances[range.first as usize..expected_first as usize] {
+                assert!(sector.bounds.min_x <= instance.transform.translation[0]);
+                assert!(instance.transform.translation[0] <= sector.bounds.max_x);
+                assert!(sector.bounds.min_z <= instance.transform.translation[2]);
+                assert!(instance.transform.translation[2] <= sector.bounds.max_z);
+            }
+        }
+        assert_eq!(expected_first as usize, batch.instances.len());
+        covered += expected_first;
+        if let Some(upload) = gpu
+            .buildings
+            .iter()
+            .find(|upload| upload.mesh == batch.mesh)
+        {
+            assert_eq!(upload.instance_count, expected_first);
+            assert_eq!(
+                upload.bytes.len(),
+                batch.instances.len() * GPU_INSTANCE_STRIDE
+            );
+        } else {
+            assert_eq!(expected_first, 0);
+        }
+    }
+    assert_eq!(covered as usize, LOT_CAPACITY);
+    let close_view = Bounds2 {
+        min_x: 40.0,
+        min_z: 40.0,
+        max_x: 60.0,
+        max_z: 60.0,
+    };
+    let visible: Vec<_> = chunk.visible_sectors(close_view).collect();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(
+        visible[0]
+            .building_ranges
+            .iter()
+            .map(|range| range.count)
+            .sum::<u32>(),
+        64
+    );
+}
+
+#[test]
+fn viewport_query_matches_exhaustive_culling_across_rows_and_invalid_boundaries() {
+    let mut state = AppState::new(27);
+    for index in 0..84 {
+        add_neighborhood(&mut state, &format!("District {index}"));
+    }
+    let scene = CityScene::generate(state.world(), 29).unwrap();
+    let sample_viewports = [
+        Bounds2 {
+            min_x: 0.0,
+            min_z: 0.0,
+            max_x: 50.0,
+            max_z: 50.0,
+        },
+        Bounds2 {
+            min_x: -100.0,
+            min_z: -100.0,
+            max_x: 100.0,
+            max_z: 100.0,
+        },
+        Bounds2 {
+            min_x: 700.0,
+            min_z: 700.0,
+            max_x: 810.0,
+            max_z: 810.0,
+        },
+        Bounds2 {
+            min_x: 0.0,
+            min_z: 7000.0,
+            max_x: 6000.0,
+            max_z: 9000.0,
+        },
+        Bounds2 {
+            min_x: -100.0,
+            min_z: 90000.0,
+            max_x: 10000.0,
+            max_z: 100000.0,
+        },
+        Bounds2 {
+            min_x: 0.0,
+            min_z: f32::NAN,
+            max_x: 800.0,
+            max_z: 800.0,
+        },
+        Bounds2 {
+            min_x: 0.0,
+            min_z: 0.0,
+            max_x: 800.0,
+            max_z: f32::NAN,
+        },
+        Bounds2 {
+            min_x: 80.0,
+            min_z: 80.0,
+            max_x: 20.0,
+            max_z: 20.0,
+        },
+    ];
+    for viewport in sample_viewports {
+        let expected: Vec<_> = scene
+            .districts
+            .iter()
+            .filter(|chunk| chunk.bounds.intersects(viewport))
+            .map(|chunk| chunk.neighborhood)
+            .collect();
+        let actual: Vec<_> = scene
+            .visible_districts(viewport)
+            .map(|chunk| chunk.neighborhood)
+            .collect();
+        assert_eq!(actual, expected, "viewport {viewport:?}");
+        if !viewport.is_valid() {
+            assert!(actual.is_empty());
+        }
+    }
 }
 
 #[test]
@@ -175,7 +401,7 @@ fn exceeding_district_capacity_returns_typed_error_without_dropping_a_business()
     let registry = build_registry();
     let mut state = AppState::new(8);
     let neighborhood = add_neighborhood(&mut state, "Crowded");
-    for index in 0..=LOT_CAPACITY {
+    for index in 0..LOT_CAPACITY + 4 {
         insert_business(
             &registry,
             &mut state,
@@ -193,7 +419,7 @@ fn exceeding_district_capacity_returns_typed_error_without_dropping_a_business()
         CityScene::generate(state.world(), 0),
         Err(CityViewError::DistrictCapacity {
             neighborhood,
-            businesses: LOT_CAPACITY + 1,
+            businesses: LOT_CAPACITY + 4,
             capacity: LOT_CAPACITY,
         })
     );
