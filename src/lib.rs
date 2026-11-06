@@ -12,6 +12,7 @@
 //! `core::simulation::run_tick` pipeline.
 //! Every `src/*/mod.rs` //! header names its canonical mutation path — treat it as contract.
 
+pub mod city_view;
 pub mod contacts;
 pub mod content;
 pub mod core;

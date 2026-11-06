@@ -4,7 +4,7 @@ Deterministic Rust simulation foundation for a systemic crime-organization strat
 
 ## Start here
 
-Use each document for one job. [`AGENTS.md`](AGENTS.md) owns agent execution rules and routing; [`STATUS.md`](STATUS.md) owns implemented scope and exclusions; [`ARCHITECTURE.md`](ARCHITECTURE.md) owns state ownership, mutation, determinism, persistence, invariants, and tick order; [`TESTING.md`](TESTING.md) owns verification and harness evidence; [`GAME_DESIGN.md`](GAME_DESIGN.md) owns product intent.
+Use each document for one job. [`AGENTS.md`](AGENTS.md) owns agent execution rules and routing; [`STATUS.md`](STATUS.md) owns implemented scope and exclusions; [`ARCHITECTURE.md`](ARCHITECTURE.md) owns state ownership, mutation, determinism, persistence, invariants, and tick order; [`TESTING.md`](TESTING.md) owns verification and harness evidence; [`GAME_DESIGN.md`](GAME_DESIGN.md) owns product intent; [`CITY_VIEW.md`](CITY_VIEW.md) describes the read-only procedural city projection for future GUI adapters.
 
 `content::build_registry()` builds immutable authored definitions. `AppState` owns serializable campaign state and deterministic runtime state. [`core::simulation::run_tick`](src/core/simulation.rs) advances exactly one simulated minute through the contractual phase order in [`ARCHITECTURE.md`](ARCHITECTURE.md), returning a typed error without mutation when the finite simulation clock has no successor minute.
 

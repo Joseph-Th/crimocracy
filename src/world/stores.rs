@@ -520,7 +520,8 @@ impl WorldState {
     pub(crate) fn organizations(&self) -> impl Iterator<Item = &OrganizationRecord> {
         self.organizations.values()
     }
-    pub(crate) fn neighborhoods(&self) -> impl Iterator<Item = &NeighborhoodRecord> {
+    /// Read-only geographical inventory in stable persistent-ID order.
+    pub fn neighborhoods(&self) -> impl Iterator<Item = &NeighborhoodRecord> {
         self.neighborhoods.values()
     }
     pub(crate) fn characters(&self) -> impl Iterator<Item = &CharacterRecord> {
