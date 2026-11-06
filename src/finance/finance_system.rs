@@ -543,6 +543,8 @@ pub struct BudgetUsageSummary {
     pub period_end: crate::core::time::SimTime,
     pub limit: Money,
     pub used: Money,
+    /// Spendable authorization still available. A downward revision can leave recorded
+    /// spending above the new limit, but cannot produce negative permission to spend.
     pub remaining: Money,
 }
 
@@ -573,7 +575,8 @@ pub fn resolve_budget_usage(
     let remaining = budget
         .limit
         .checked_sub(used)
-        .ok_or(FinanceError::BudgetOverflow(mandate))?;
+        .ok_or(FinanceError::BudgetOverflow(mandate))?
+        .max(Money::ZERO);
     Ok(BudgetUsageSummary {
         mandate,
         period_start: window.start(),
@@ -693,3 +696,6 @@ pub use laundering::{
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod budget_projection_tests;
