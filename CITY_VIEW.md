@@ -51,10 +51,61 @@ atomically replacing its instance arrays and pick mappings. The adapter should r
 only that district's buffers when modeled businesses change; ownership and ordinary
 operational changes do not need geometry regeneration.
 
-This module deliberately does not introduce a graphics framework, 3D assets, full street
-topology, GPU rendering, real-time citizen movement, or new persistence fields. Geometry
-does not affect line of sight, travel time, policing, or operation resolution. Connecting
-those mechanics would require an explicit spatial game-system design and persisted truth.
+The Rust city-view module deliberately does not depend on a graphics framework or
+own 3D assets, full street topology, GPU resources, real-time citizen movement, or
+new persistence fields. Geometry does not affect line of sight, travel time,
+policing, or operation resolution. Connecting those mechanics would require an
+explicit spatial game-system design and persisted truth.
+
+## Interactive WebGL2 preview
+
+Run `cargo run --locked --example city_gui_preview` from the project root and open
+`target/agent-output/city_preview/index.html` in a WebGL2-capable browser.
+The generated HTML is self-contained: no web server, package manager, remote
+scripts, or CDN is needed. Source files are `gui/city_preview/{index.html,styles.css,app.js}`;
+the Rust exporter is `examples/city_gui_preview.rs`. The output file lives in the
+ignored `target/` directory and can be regenerated whenever the source changes.
+
+The preview renders the actual `CityScene` instance buffers with WebGL2's
+`drawArraysInstanced`, keeping GPU instance buffers resident while camera
+changes create new visible draw ranges. WebGL2 has no base-instance argument
+for this draw operation, so the adapter offsets its per-instance vertex
+attributes into the existing buffers instead of uploading geometry again.
+The separate depth-tested RGBA8 picking framebuffer encodes all four bytes of
+the business ID; the directory acts as the disclosure gate before opening a
+dossier. Each district's geometry remains encoded until the camera first
+visits it; only then is it decoded and uploaded, and the encoded source bytes
+are released from JavaScript memory. District buffers remain cached in WebGL
+for subsequent views. Rendering is demand-driven rather than redrawing
+continuously while idle.
+
+The camera supports left-drag panning, right-drag or Shift-drag orbit, scroll
+zoom anchored to the pointer, Q/E rotation, arrow-key panning, and +/- zoom.
+Click a registered building, a map label, or an entry in the searchable
+directory to select a property. The property dossier presents the information
+deliberately included in the preview's public directory. The center of the
+city remains visible behind the contextual panels.
+
+**Disclosure boundary:** the bundled eight-district, 96-property world is a
+fictional fixture built with the canonical world insertion APIs. All exported
+names and categories are intentionally authored as public. The exporter does
+not serialize live intelligence, owner identities, police records, case details,
+or unrevealed economic information. The browser is a read-only projection, not
+a campaign loader or a gameplay command adapter. A future campaign integration
+must populate public dossier fields from player-visible information sources,
+not from hidden `AppState` truth, and must send gameplay actions through the
+canonical validated systems. Browsing a building must never disclose its
+hidden records by inference from an unfiltered payload.
+
+The opt-in `python scripts/city_preview_browser_smoke.py` check runs a
+headless Chrome/Edge session with an isolated profile and tests real WebGL
+draws, directory searching, navigation, GPU picking, dossier visibility,
+zoom/orbit, camera reset, and a narrower desktop viewport. It requires
+the local `websocket-client` Python package and Chrome/Edge. The script
+closes its own browser and removes its temporary profile. Its screenshots
+are saved under `target/agent-output/city_preview/`. A passing browser
+check verifies functionality in the installed headless browser, not
+hardware-GPU frame rate or final production appearance.
 
 For geometry inspection, run `cargo run --locked --example city_view_workbench`.
 This produces `target/agent-output/city_view_workbench.ppm`, a 1,600-by-1,000

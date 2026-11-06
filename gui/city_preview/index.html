@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crimocracy | City View</title>
+  <!-- CITY_PREVIEW_STYLES -->
+</head>
+<body>
+  <div id="app">
+    <canvas id="city-canvas" aria-label="Interactive three-dimensional city map"></canvas>
+    <div class="atmosphere" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">C</div>
+        <div>
+          <div class="brand-title">CRIMOCRACY</div>
+          <div class="brand-subtitle">CITY OPERATIONS <span class="divider-dot">/</span> VISUAL WORKBENCH</div>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="status"><span class="status-led"></span> READ-ONLY DEMONSTRATION</div>
+        <button id="reset-camera" type="button" class="utility-button">Reset view <span aria-hidden="true">↗</span></button>
+      </div>
+    </header>
+
+    <aside class="left-panel" aria-label="City navigator">
+      <div class="panel-eyebrow">01 / CITY REGISTER</div>
+      <div class="panel-title">The City</div>
+      <p class="panel-description">Eight wards. Every building has a place. Select a registered business to inspect its dossier.</p>
+      <label class="search-wrap">
+        <span class="sr-only">Search registered businesses</span>
+        <span aria-hidden="true" class="search-icon">⌕</span>
+        <input id="search" type="search" placeholder="Find a property" autocomplete="off">
+      </label>
+      <div class="section-caption"><span>WARDS</span><span id="district-count"></span></div>
+      <div id="ward-list" class="ward-list"></div>
+      <div class="section-caption property-header"><span>PUBLIC DIRECTORY</span><span id="property-count"></span></div>
+      <div id="property-list" class="property-list"></div>
+      <div class="sidebar-footnote">This preview displays fictional, deliberately public directory entries only. Ownership, investigations, and other hidden records are not exported.</div>
+    </aside>
+
+    <div class="world-labels" id="world-labels" aria-label="Visible business labels"></div>
+    <div class="scene-counter"><span class="count-label">RENDERED BUILDINGS</span><strong id="visible-count">0</strong><span class="count-rule"></span><span class="count-label">DRAW CALLS</span><strong id="draw-count">0</strong></div>
+    <div class="compass" aria-hidden="true"><span id="compass-arrow">↑</span><small>N</small></div>
+
+    <aside id="dossier" class="dossier is-empty" aria-label="Selected property dossier" aria-live="polite">
+      <div class="dossier-topline"><span>02 / PROPERTY DOSSIER</span><button id="close-dossier" class="close-dossier" type="button" aria-label="Close dossier">×</button></div>
+      <div id="dossier-empty" class="dossier-empty">
+        <div class="empty-glyph" aria-hidden="true">⌖</div>
+        <h2>No property selected</h2>
+        <p>Choose a registered building on the map, from the directory, or from a visible map label.</p>
+        <div class="empty-divider"></div>
+        <div class="empty-note">THE MAP SHOWS LOCATION. THE DOSSIER SHOWS WHAT YOU KNOW.</div>
+      </div>
+      <div id="dossier-detail" class="dossier-detail" hidden>
+        <div class="document-ref">REGISTERED PROPERTY <span id="dossier-number"></span></div>
+        <h2 id="dossier-name"></h2>
+        <div class="document-status">PUBLIC DIRECTORY ENTRY</div>
+        <div class="dossier-rule"></div>
+        <dl class="fact-grid">
+          <div><dt>Establishment</dt><dd id="dossier-kind"></dd></div>
+          <div><dt>District</dt><dd id="dossier-ward"></dd></div>
+          <div><dt>Record source</dt><dd>Published business directory</dd></div>
+          <div><dt>Information</dt><dd>Limited to publicly listed facts</dd></div>
+        </dl>
+        <div class="dossier-rule"></div>
+        <div class="intelligence-title">INTELLIGENCE RECORD</div>
+        <p class="intelligence-note">No private ownership, criminal activity, or investigation information has been disclosed in this demonstration.</p>
+      </div>
+      <button id="focus-property" class="primary-button" type="button" hidden>Focus on location <span aria-hidden="true">◎</span></button>
+    </aside>
+
+    <footer class="bottom-bar">
+      <div class="bottom-left"><span class="shortcut"><kbd>DRAG</kbd> Pan</span><span class="shortcut"><kbd>RIGHT DRAG</kbd> Rotate</span><span class="shortcut"><kbd>SCROLL</kbd> Zoom</span><span class="shortcut"><kbd>Q / E</kbd> Orbit</span></div>
+      <div class="bottom-right"><span id="map-detail">SECTOR CULLING</span><span class="bottom-separator">·</span><span id="render-status">INITIALIZING</span></div>
+    </footer>
+
+    <div class="fatal-error" id="fatal-error" role="alert" hidden></div>
+  </div>
+  <!-- CITY_PREVIEW_DATA -->
+  <!-- CITY_PREVIEW_SCRIPT -->
+</body>
+</html>
