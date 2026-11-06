@@ -23,6 +23,7 @@ fn rating(value: u8) -> Rating {
 fn main() -> Result<(), Box<dyn Error>> {
     let registry = crimocracy::build_registry();
     let mut state = AppState::new(0xC0FFEE);
+    let mut disclosed = BTreeSet::new();
     for index in 0..DISTRICT_COUNT {
         let neighborhood = insert_neighborhood(
             &mut state,
@@ -49,7 +50,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into_iter()
         .enumerate()
         {
-            insert_business(
+            let id = insert_business(
                 &registry,
                 &mut state,
                 BusinessDraft {
@@ -60,6 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     owner: BusinessOwner::Independent,
                 },
             )?;
+            disclosed.insert(id);
         }
     }
 
@@ -68,7 +70,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let generation = generation_start.elapsed();
 
     let upload_start = Instant::now();
-    let uploads: Vec<_> = city.districts.iter().map(GpuCityChunk::encode).collect();
+    let uploads: Vec<_> = city
+        .districts
+        .iter()
+        .map(|district| GpuCityChunk::encode(district, &disclosed))
+        .collect();
     let upload = upload_start.elapsed();
     let encoded_bytes: usize = uploads
         .iter()

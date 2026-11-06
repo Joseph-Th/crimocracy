@@ -22,7 +22,8 @@ pub const SECTORS_PER_SIDE: usize = LOTS_PER_SIDE / SECTOR_SIDE_LOTS;
 pub const LOT_PITCH: f32 = 22.0;
 pub const DISTRICT_WIDTH: f32 = LOTS_PER_SIDE as f32 * LOT_PITCH;
 pub const DISTRICT_PITCH: f32 = DISTRICT_WIDTH + 24.0;
-const DISTRICTS_PER_ROW: u32 = 8;
+const DEFAULT_DISTRICTS_PER_ROW: u32 = 8;
+const MAX_DISTRICTS_PER_ROW: u32 = 32;
 const ARTERIAL_WIDTH: f32 = 10.0;
 const ALLEY_WIDTH: f32 = 3.0;
 const SIDEWALK_SETBACK: f32 = 1.0;
@@ -153,10 +154,13 @@ pub struct CityScene {
     pub districts: Vec<DistrictChunk>,
     business_pins: BTreeMap<BusinessId, BusinessPin>,
     visual_seed: u64,
+    district_columns: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum CityViewError {
+    #[error("city district grid columns must be between 1 and {MAX_DISTRICTS_PER_ROW}, got {0}")]
+    InvalidDistrictColumns(u32),
     #[error("neighborhood {0} does not exist")]
     MissingNeighborhood(NeighborhoodId),
     #[error("neighborhood {neighborhood} has {businesses} businesses but only {capacity} lots")]
@@ -173,10 +177,25 @@ impl CityScene {
     /// A new business takes an unoccupied lot without shifting older businesses.
     /// Layout seeds are presentation data and must stay fixed for a campaign.
     pub fn generate(world: &WorldState, visual_seed: u64) -> Result<Self, CityViewError> {
+        Self::generate_with_columns(world, visual_seed, DEFAULT_DISTRICTS_PER_ROW)
+    }
+
+    /// Uses a caller-selected, stable district grid width. Both the seed and
+    /// column count must be retained by the presentation layer across reloads.
+    /// Adding a district never relocates existing districts.
+    pub fn generate_with_columns(
+        world: &WorldState,
+        visual_seed: u64,
+        district_columns: u32,
+    ) -> Result<Self, CityViewError> {
+        if !(1..=MAX_DISTRICTS_PER_ROW).contains(&district_columns) {
+            return Err(CityViewError::InvalidDistrictColumns(district_columns));
+        }
         let mut districts = Vec::new();
         let mut business_pins = BTreeMap::new();
         for neighborhood in world.neighborhoods() {
-            let (district, pins) = Self::generate_district(world, neighborhood, visual_seed)?;
+            let (district, pins) =
+                Self::generate_district(world, neighborhood, visual_seed, district_columns)?;
             districts.push(district);
             business_pins.extend(pins);
         }
@@ -184,6 +203,7 @@ impl CityScene {
             districts,
             business_pins,
             visual_seed,
+            district_columns,
         })
     }
 
@@ -198,7 +218,8 @@ impl CityScene {
         let record = world
             .get_neighborhood(neighborhood)
             .ok_or(CityViewError::MissingNeighborhood(neighborhood))?;
-        let (replacement, pins) = Self::generate_district(world, record, self.visual_seed)?;
+        let (replacement, pins) =
+            Self::generate_district(world, record, self.visual_seed, self.district_columns)?;
         match self
             .districts
             .binary_search_by_key(&neighborhood, |chunk| chunk.neighborhood)
@@ -224,12 +245,13 @@ impl CityScene {
         world: &WorldState,
         neighborhood: &NeighborhoodRecord,
         visual_seed: u64,
+        district_columns: u32,
     ) -> Result<(DistrictChunk, BTreeMap<BusinessId, BusinessPin>), CityViewError> {
         let mut business_pins = BTreeMap::new();
         let id = neighborhood.id();
         let district_index = id.raw() - 1;
-        let origin_x = (district_index % DISTRICTS_PER_ROW) as f32 * DISTRICT_PITCH;
-        let origin_z = (district_index / DISTRICTS_PER_ROW) as f32 * DISTRICT_PITCH;
+        let origin_x = (district_index % district_columns) as f32 * DISTRICT_PITCH;
+        let origin_z = (district_index / district_columns) as f32 * DISTRICT_PITCH;
         let district_seed =
             mix64(visual_seed ^ u64::from(id.raw()).wrapping_mul(0x9E3779B97F4A7C15));
         let mut north_south_roads = [0.0f32; LOTS_PER_SIDE + 1];

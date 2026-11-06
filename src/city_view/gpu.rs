@@ -5,7 +5,8 @@
 //! vertex buffer without unsafe code or a graphics dependency in the core.
 
 use super::{BuildingMesh, DistrictChunk, InstanceTransform};
-use crate::core::id::NeighborhoodId;
+use crate::core::id::{BusinessId, NeighborhoodId};
+use std::collections::BTreeSet;
 
 /// Six little-endian f32 values followed by two little-endian u32 values.
 /// Shader attributes, in byte order: translation.xyz, scale.xyz, pick ID,
@@ -57,7 +58,12 @@ pub struct GpuCityChunk {
 impl GpuCityChunk {
     /// Prepare only this district for upload. Cache the result in the adapter
     /// and repeat only after refresh_neighborhood replaces this district.
-    pub fn encode(district: &DistrictChunk) -> Self {
+    ///
+    /// Only explicitly disclosed business identities survive encoding. Raw
+    /// GPU vertex data can be inspected by players, so a browser-side dossier
+    /// lookup filter is not an adequate substitute for this disclosure gate.
+    /// The caller must derive this set from authorized player-visible knowledge.
+    pub fn encode(district: &DistrictChunk, disclosed: &BTreeSet<BusinessId>) -> Self {
         let mut streets = Vec::with_capacity(district.streets.len() * GPU_INSTANCE_STRIDE);
         for &transform in &district.streets {
             push_instance(&mut streets, transform, 0, 0);
@@ -70,10 +76,17 @@ impl GpuCityChunk {
             .map(|batch| {
                 let mut bytes = Vec::with_capacity(batch.instances.len() * GPU_INSTANCE_STRIDE);
                 for instance in &batch.instances {
+                    let pick_id = if instance.pick_id != 0
+                        && disclosed.contains(&BusinessId::from_raw(instance.pick_id))
+                    {
+                        instance.pick_id
+                    } else {
+                        0
+                    };
                     push_instance(
                         &mut bytes,
                         instance.transform,
-                        instance.pick_id,
+                        pick_id,
                         u32::from(instance.variation),
                     );
                 }
@@ -162,24 +175,44 @@ mod tests {
                 },
                 BuildingBatch {
                     mesh: BuildingMesh::Office,
-                    instances: vec![BuildingInstance {
-                        transform,
-                        pick_id: 31415,
-                        variation: 42,
-                    }],
+                    instances: vec![
+                        BuildingInstance {
+                            transform,
+                            pick_id: 31415,
+                            variation: 42,
+                        },
+                        BuildingInstance {
+                            transform,
+                            pick_id: 27182,
+                            variation: 12,
+                        },
+                    ],
                 },
             ],
             sectors: Vec::new(),
         };
-        let gpu = GpuCityChunk::encode(&chunk);
+        let disclosed = BTreeSet::from([BusinessId::from_raw(31415)]);
+        let gpu = GpuCityChunk::encode(&chunk, &disclosed);
         assert_eq!(gpu.neighborhood, neighborhood);
         assert_eq!(gpu.street_count, 1);
         assert_eq!(gpu.streets.len(), GPU_INSTANCE_STRIDE);
         assert_eq!(gpu.buildings.len(), 1);
         assert_eq!(gpu.buildings[0].mesh, BuildingMesh::Office);
-        assert_eq!(gpu.buildings[0].instance_count, 1);
-        assert_eq!(gpu.buildings[0].bytes.len(), GPU_INSTANCE_STRIDE);
+        assert_eq!(gpu.buildings[0].instance_count, 2);
+        assert_eq!(gpu.buildings[0].bytes.len(), GPU_INSTANCE_STRIDE * 2);
         assert_eq!(&gpu.buildings[0].bytes[24..28], &31415u32.to_le_bytes());
         assert_eq!(&gpu.buildings[0].bytes[28..32], &42u32.to_le_bytes());
+        assert_eq!(&gpu.buildings[0].bytes[56..60], &0u32.to_le_bytes());
+        assert_eq!(&gpu.buildings[0].bytes[60..64], &12u32.to_le_bytes());
+        let concealed = GpuCityChunk::encode(&chunk, &BTreeSet::new());
+        assert_eq!(&concealed.buildings[0].bytes[24..28], &0u32.to_le_bytes());
+        let both_disclosed = GpuCityChunk::encode(
+            &chunk,
+            &BTreeSet::from([BusinessId::from_raw(31415), BusinessId::from_raw(27182)]),
+        );
+        assert_eq!(
+            &both_disclosed.buildings[0].bytes[56..60],
+            &27182u32.to_le_bytes()
+        );
     }
 }

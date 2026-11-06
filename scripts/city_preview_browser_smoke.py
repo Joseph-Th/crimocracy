@@ -14,6 +14,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,7 @@ PREVIEW = PROJECT / "target" / "agent-output" / "city_preview"
 PROFILE = PREVIEW / "smoke-chrome-profile"
 SCREENSHOT = PREVIEW / "smoke-selected.png"
 NARROW_SCREENSHOT = PREVIEW / "smoke-narrow.png"
+OVERVIEW_SCREENSHOT = PREVIEW / "smoke-overview.png"
 
 
 def find_browser() -> str:
@@ -125,6 +127,35 @@ def check(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def verify_export_disclosure(html: str) -> None:
+    check("Unlisted Private Depot" not in html, "private property names must not enter the HTML")
+    match = re.search(
+        r'<script id="city-preview-data" type="application/json">(.*?)</script>',
+        html,
+        flags=re.DOTALL,
+    )
+    check(match is not None, "generated HTML must embed one readable scene payload")
+    scene = json.loads(match.group(1))
+    disclosed = {int(entry["id"]) for entry in scene["dossiers"]}
+    encoded_ids = set()
+    for district in scene["districts"]:
+        for batch in district["buildings"]:
+            payload = base64.b64decode(batch["bytes"], validate=True)
+            check(
+                len(payload) == int(batch["instance_count"]) * 32,
+                "each GPU instance buffer must have the documented stride",
+            )
+            for offset in range(24, len(payload), 32):
+                pick_id = int.from_bytes(payload[offset:offset + 4], "little")
+                if pick_id:
+                    encoded_ids.add(pick_id)
+    check(
+        encoded_ids == disclosed,
+        f"GPU picking data must contain exactly the public directory IDs; leaked {encoded_ids - disclosed}",
+    )
+    check(len(disclosed) == 96, "preview must contain 96 intentionally public entries")
+
+
 def run_checks(cdp: DevTools) -> None:
     for _ in range(80):
         if cdp.evaluate("document.documentElement?.dataset.webgl ?? null") == "ready":
@@ -146,6 +177,14 @@ def run_checks(cdp: DevTools) -> None:
     check(
         cdp.evaluate("document.querySelectorAll('.property-button').length") == 96,
         "public directory must list all 96 sample properties",
+    )
+    check(
+        0 < cdp.evaluate("document.querySelectorAll('.world-label').length") <= 24,
+        "only a bounded number of on-screen property labels should exist in the DOM",
+    )
+    check(
+        cdp.evaluate("document.querySelectorAll('.world-ward').length") == 0,
+        "ward labels should not be allocated in close-up view",
     )
 
     cdp.evaluate(
@@ -169,8 +208,74 @@ def run_checks(cdp: DevTools) -> None:
     visited_count = json.loads(cdp.evaluate("JSON.stringify(crimocracyCityPreview.stats())"))["uploadedDistricts"]
     check(visited_count > initial["uploadedDistricts"], "visiting a distant ward must upload its district on demand")
 
+    # The GPU cache must release distant geometry and restore exact geometry
+    # and picking IDs when the user revisits a previously evicted district.
+    for ward_id in range(1, 9):
+        cdp.evaluate(f"crimocracyCityPreview.showWard({ward_id})")
+        cdp.next_frame()
+        status = json.loads(cdp.evaluate("JSON.stringify(crimocracyCityPreview.stats())"))
+        check(
+            status["residentDistricts"]
+            <= max(status["maxResidentDistricts"], status["visibleDistricts"]),
+            f"GPU cache retains unnecessary offscreen districts in ward {ward_id}",
+        )
+        check(status["residentInstanceBytes"] > 0, "GPU instance memory must be accounted for")
+    after_tour = json.loads(cdp.evaluate("JSON.stringify(crimocracyCityPreview.stats())"))
+    check(after_tour["uploadedDistricts"] == 8, "a complete ward tour must visit every district")
+    check(after_tour["evictedDistricts"] > 0, "off-screen GPU districts must be evicted under budget")
+    uploads_before_return = after_tour["gpuUploads"]
+    cdp.evaluate("crimocracyCityPreview.showWard(1)")
+    cdp.next_frame()
+    after_return = json.loads(cdp.evaluate("JSON.stringify(crimocracyCityPreview.stats())"))
+    check(
+        after_return["gpuUploads"] > uploads_before_return,
+        "revisiting a previously evicted ward must re-upload its geometry",
+    )
+    check(after_return["uploadedDistricts"] == 8, "re-uploads must not count as newly visited wards")
+
+    cdp.evaluate("document.querySelector('#city-overview').click()")
+    cdp.next_frame()
+    overview = json.loads(cdp.evaluate("JSON.stringify(crimocracyCityPreview.stats())"))
+    check(overview["visibleDistricts"] == 8, "city overview should frame all eight wards")
+    check(overview["buildings"] == 8192, "overview should render every building")
+    check(
+        overview["residentDistricts"] == 8,
+        "GPU budget must not evict districts currently visible in the overview",
+    )
+    check(
+        cdp.evaluate("document.querySelectorAll('.world-label').length") == 0,
+        "off-screen property labels must be removed from the DOM",
+    )
+    check(
+        0 < cdp.evaluate("document.querySelectorAll('.world-ward').length") <= 8,
+        "the overview should instantiate only visible ward labels",
+    )
+    check(
+        not cdp.evaluate(
+            """(() => {
+              const boxes = [...document.querySelectorAll('.world-ward')]
+                .map(node => node.getBoundingClientRect());
+              return boxes.some((a, i) => boxes.slice(i + 1).some(b =>
+                a.left < b.right && a.right > b.left
+                && a.top < b.bottom && a.bottom > b.top));
+            })()"""
+        ),
+        "visible ward labels should not overlap in the actual browser layout",
+    )
+    overview_image = cdp.call(
+        "Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}
+    )
+    OVERVIEW_SCREENSHOT.write_bytes(base64.b64decode(overview_image["data"]))
+
     cdp.evaluate("crimocracyCityPreview.showWard(3)")
     cdp.next_frame()
+    after_overview = json.loads(cdp.evaluate("JSON.stringify(crimocracyCityPreview.stats())"))
+    check(
+        after_overview["residentDistricts"] <= max(
+            after_overview["maxResidentDistricts"], after_overview["visibleDistricts"]
+        ) and after_overview["residentDistricts"] < 8,
+        f"returning from overview should evict only off-screen geometry: {after_overview}",
+    )
     check(
         cdp.evaluate("document.querySelector('.ward-button.active').textContent.includes('Financial Quarter')"),
         "ward navigation must update active ward",
@@ -184,11 +289,17 @@ def run_checks(cdp: DevTools) -> None:
             f"crimocracyCityPreview.focusOnProperty({candidate}); crimocracyCityPreview.selectBusiness(0)"
         )
         cdp.next_frame()
+        before_pick = json.loads(cdp.evaluate("JSON.stringify(crimocracyCityPreview.stats())"))
         coordinates = cdp.evaluate(
             f"JSON.stringify(crimocracyCityPreview.projectProperty({candidate}))"
         )
         x, y = json.loads(coordinates)
         cdp.click(x, y)
+        after_pick = json.loads(cdp.evaluate("JSON.stringify(crimocracyCityPreview.stats())"))
+        check(
+            after_pick["buildings"] == before_pick["buildings"],
+            "GPU picking must not erase normal-render building statistics",
+        )
         selected = int(cdp.evaluate("document.documentElement.dataset.selectedBusiness"))
         if selected == candidate:
             picked_id = selected
@@ -296,6 +407,30 @@ def run_checks(cdp: DevTools) -> None:
         cdp.evaluate("document.documentElement.dataset.selectedBusiness") == "0",
         "closing the dossier must clear its selection",
     )
+    cdp.evaluate(
+        """(() => {
+            document.querySelector('.property-button').click();
+            document.querySelector('#dossier-detail').scrollTop = 160;
+            document.querySelectorAll('.property-button')[1].click();
+        })()"""
+    )
+    check(
+        cdp.evaluate("document.querySelector('#dossier-detail').scrollTop") == 0,
+        "opening another dossier must reset its scroll position",
+    )
+    cdp.evaluate("document.querySelector('#search').focus()")
+    cdp.call(
+        "Input.dispatchKeyEvent",
+        {"type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27},
+    )
+    check(
+        cdp.evaluate("document.documentElement.dataset.selectedBusiness") == "0",
+        "Escape must close a dossier even while the search input is focused",
+    )
+    check(
+        cdp.evaluate("document.activeElement !== document.querySelector('#search')"),
+        "Escape must dismiss search-field focus",
+    )
     cdp.evaluate("document.querySelector('#reset-camera').click()")
     cdp.next_frame()
     check(
@@ -305,17 +440,19 @@ def run_checks(cdp: DevTools) -> None:
     print(
         f"PASS: WebGL2 rendered {initial['buildings']} buildings in "
         f"{initial['drawCalls']} draw calls; directory filtering, ward navigation, "
-        f"on-demand chunk uploads, GPU picking of business {picked_id}, dossier, cursor-anchored zoom, "
-        f"orbit, responsive resize, close, and camera reset work"
+        f"bounded GPU cache, eviction/re-upload, whole-city overview, GPU picking of business {picked_id}, dossier, cursor-anchored zoom, "
+        f"orbit, label decluttering, responsive resize, dismissal, and camera reset work"
     )
     print(f"Captured interacting GUI screenshot: {SCREENSHOT.relative_to(PROJECT)}")
     print(f"Captured narrow GUI screenshot: {NARROW_SCREENSHOT.relative_to(PROJECT)}")
+    print(f"Captured city overview screenshot: {OVERVIEW_SCREENSHOT.relative_to(PROJECT)}")
 
 
 def main() -> None:
     html = PREVIEW / "index.html"
     if not html.is_file():
         raise RuntimeError("Run cargo run --locked --example city_gui_preview first")
+    verify_export_disclosure(html.read_text(encoding="utf-8"))
     shutil.rmtree(PROFILE, ignore_errors=True)
     browser = find_browser()
     args = [

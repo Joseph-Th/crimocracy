@@ -4,6 +4,7 @@
   const $ = (id) => document.getElementById(id);
   const canvas = $("city-canvas");
   const errorBox = $("fatal-error");
+  let renderFailed = false;
   const meshColors = [
     [0.42, 0.51, 0.55], // residential
     [0.69, 0.54, 0.36], // storefront
@@ -17,8 +18,12 @@
   const streetMesh = 6;
   const groundMesh = 7;
   const stride = 32;
+  // Only off-screen districts are eligible for eviction. A wide camera may
+  // temporarily exceed this budget to draw every district in view.
+  const maxResidentDistricts = 4;
 
   function fail(message) {
+    renderFailed = true;
     errorBox.hidden = false;
     errorBox.textContent = message;
     $("render-status").textContent = "RENDERER UNAVAILABLE";
@@ -251,11 +256,11 @@
     }
     configureInstanceAttributes(0);
     gl.bindVertexArray(null);
-    return { vao, instanceBuffer, count, mesh };
+    return { vao, instanceBuffer, count, mesh, bytes: encoded.byteLength };
   }
 
-  // Retain the encoded buffers of offscreen districts. Convert and upload a
-  // chunk only when the camera reaches it, then release its base64 payload.
+  // Retain the encoded buffers so an evicted district can be re-uploaded
+  // without regenerating its procedural geometry or changing selection IDs.
   const gpuDistricts = scene.districts.map((district) => {
       const prepared = {
         id: district.id,
@@ -266,14 +271,32 @@
         encodedStreets: district.streets,
         encodedBuildings: district.buildings,
         gpu: null,
+        lastUsedFrame: 0,
+        visited: false,
       };
       district.streets = null;
       district.buildings = null;
       return prepared;
   });
   let uploadedDistricts = 0;
+  let gpuUploads = 0;
+  let evictedDistricts = 0;
+  let residentDistricts = 0;
+  let residentInstanceBytes = 0;
+  let frameIndex = 0;
+  function gpuBatches(gpu) {
+    return [gpu.ground, gpu.streets, ...gpu.buildings].filter(Boolean);
+  }
   function ensureGpu(district) {
     if (district.gpu) return district.gpu;
+    // Decode only once. The retained compact binary copy is the source for
+    // later uploads after eviction; do not retain a second base64 copy.
+    if (typeof district.encodedStreets === "string") {
+      district.encodedStreets = decodeBase64(district.encodedStreets);
+    }
+    for (const batch of district.encodedBuildings) {
+      if (typeof batch.bytes === "string") batch.bytes = decodeBase64(batch.bytes);
+    }
     const cx = (district.bounds[0] + district.bounds[2]) / 2;
     const cz = (district.bounds[1] + district.bounds[3]) / 2;
     const ground = makeGpuBatch(
@@ -281,16 +304,39 @@
       groundMesh, 1
     );
     const streets = makeGpuBatch(
-      decodeBase64(district.encodedStreets), streetMesh, district.street_count
+      district.encodedStreets, streetMesh, district.street_count
     );
     const buildings = district.encodedBuildings.map((batch) => makeGpuBatch(
-      decodeBase64(batch.bytes), batch.mesh, batch.instance_count
+      batch.bytes, batch.mesh, batch.instance_count
     ));
     district.gpu = { ground, streets, buildings };
-    district.encodedStreets = null;
-    district.encodedBuildings = null;
-    uploadedDistricts++;
+    residentDistricts++;
+    gpuUploads++;
+    if (!district.visited) {
+      district.visited = true;
+      uploadedDistricts++;
+    }
+    for (const batch of gpuBatches(district.gpu)) {
+      residentInstanceBytes += batch.bytes;
+    }
     return district.gpu;
+  }
+  function evictOffscreen(visibleIds) {
+    if (residentDistricts <= maxResidentDistricts) return;
+    const candidates = gpuDistricts
+      .filter((district) => district.gpu && !visibleIds.has(district.id))
+      .sort((a, b) => a.lastUsedFrame - b.lastUsedFrame || a.id - b.id);
+    for (const district of candidates) {
+      if (residentDistricts <= maxResidentDistricts) break;
+      for (const batch of gpuBatches(district.gpu)) {
+        gl.deleteVertexArray(batch.vao);
+        gl.deleteBuffer(batch.instanceBuffer);
+        residentInstanceBytes -= batch.bytes;
+      }
+      district.gpu = null;
+      residentDistricts--;
+      evictedDistricts++;
+    }
   }
 
   let pickingTarget = null;
@@ -335,9 +381,16 @@
   let selectedId = 0;
   let selectedWard = firstDistrict.id;
   const properties = new Map(scene.dossiers.map((entry) => [entry.id >>> 0, entry]));
+  const dossiersByWard = new Map();
+  for (const entry of scene.dossiers) {
+    if (!dossiersByWard.has(entry.ward_id)) dossiersByWard.set(entry.ward_id, []);
+    dossiersByWard.get(entry.ward_id).push(entry);
+  }
   const labelNodes = new Map();
   const wardLabelNodes = new Map();
-  const visibleStats = { buildings: 0, drawCalls: 0 };
+  const maxMapLabels = 24;
+  const maxDirectoryEntries = 200;
+  const visibleStats = { buildings: 0, drawCalls: 0, visibleDistricts: 0 };
 
   function basis() {
     const c = Math.cos(camera.yaw);
@@ -371,23 +424,22 @@
     const z = (axes.right[0] * sy - axes.up[0] * sx) / determinant;
     return [camera.x + x, camera.z + z];
   }
-  function worldViewport(axes) {
-    const corners = [
-      groundFromScreen(0, 0, axes),
-      groundFromScreen(canvas.clientWidth, 0, axes),
-      groundFromScreen(canvas.clientWidth, canvas.clientHeight, axes),
-      groundFromScreen(0, canvas.clientHeight, axes),
-    ];
-    const buffer = 100;
-    return [
-      Math.min(...corners.map((c) => c[0])) - buffer,
-      Math.min(...corners.map((c) => c[1])) - buffer,
-      Math.max(...corners.map((c) => c[0])) + buffer,
-      Math.max(...corners.map((c) => c[1])) + buffer,
-    ];
-  }
-  function intersects(a, b) {
-    return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
+  function visibleInView(bounds, axes) {
+    // Test the rectangle directly in camera space. A world-axis AABB of the
+    // rotated viewport admits many wholly invisible districts and defeats
+    // resource eviction. Include roof height for conservative vertical cull.
+    const dx = (bounds[0] + bounds[2]) * 0.5 - camera.x;
+    const dz = (bounds[1] + bounds[3]) * 0.5 - camera.z;
+    const hx = (bounds[2] - bounds[0]) * 0.5;
+    const hz = (bounds[3] - bounds[1]) * 0.5;
+    const x = dx * axes.right[0] + dz * axes.right[2];
+    const rx = hx * Math.abs(axes.right[0]) + hz * Math.abs(axes.right[2]);
+    const y = dx * axes.up[0] + dz * axes.up[2];
+    const ry = hx * Math.abs(axes.up[0]) + hz * Math.abs(axes.up[2]);
+    const roofMargin = 40 * axes.up[1];
+    return x + rx >= -axes.halfWidth && x - rx <= axes.halfWidth
+      && y + ry + roofMargin >= -axes.halfHeight
+      && y - ry <= axes.halfHeight;
   }
 
   function drawBatch(gpu, start, count, picking) {
@@ -397,14 +449,13 @@
     gl.bindBuffer(gl.ARRAY_BUFFER, gpu.instanceBuffer);
     configureInstanceAttributes(start * stride);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, count);
-    visibleStats.drawCalls++;
+    if (!picking) visibleStats.drawCalls++;
     if (gpu.mesh < 6 && !picking) visibleStats.buildings += count;
   }
 
   function drawPass(picking) {
     resize();
     const axes = basis();
-    const viewport = worldViewport(axes);
     const sectorMode = camera.zoom < 680;
     $("map-detail").textContent = sectorMode ? "SECTOR CULLING" : "DISTRICT CULLING";
     const fb = picking ? pickingTarget.framebuffer : null;
@@ -420,13 +471,23 @@
     gl.uniform2f(uniforms.halfExtents, axes.halfWidth, axes.halfHeight);
     gl.uniform1i(uniforms.picking, picking ? 1 : 0);
     gl.uniform1ui(uniforms.selected, selectedId >>> 0);
-    visibleStats.buildings = 0;
-    visibleStats.drawCalls = 0;
+    if (!picking) {
+      visibleStats.buildings = 0;
+      visibleStats.drawCalls = 0;
+      visibleStats.visibleDistricts = 0;
+    }
+    const visibleIds = new Set();
+    frameIndex++;
     for (const district of gpuDistricts) {
-      if (!intersects(district.bounds, viewport)) continue;
+      if (!visibleInView(district.bounds, axes)) continue;
+      if (!picking) visibleStats.visibleDistricts++;
+      visibleIds.add(district.id);
+      district.lastUsedFrame = frameIndex;
       const gpu = ensureGpu(district);
-      drawBatch(gpu.ground, 0, 1, picking);
-      drawBatch(gpu.streets, 0, district.street_count, picking);
+      if (!picking) {
+        drawBatch(gpu.ground, 0, 1, false);
+        drawBatch(gpu.streets, 0, district.street_count, false);
+      }
       for (let index = 0; index < gpu.buildings.length; index++) {
         const batch = gpu.buildings[index];
         if (!batch) continue;
@@ -442,7 +503,7 @@
           count = 0;
         };
         for (const sector of district.sectors) {
-          if (!intersects(sector.bounds, viewport)) continue;
+          if (!visibleInView(sector.bounds, axes)) continue;
           const range = sector.ranges[batch.mesh];
           if (range[1] === 0) continue;
           if (first >= 0 && first + count === range[0]) {
@@ -457,11 +518,12 @@
       }
     }
     gl.bindVertexArray(null);
+    evictOffscreen(visibleIds);
     if (!picking) {
       $("visible-count").textContent = visibleStats.buildings.toLocaleString();
       $("draw-count").textContent = visibleStats.drawCalls.toLocaleString();
       $("render-status").textContent = "WEBGL2 ACTIVE";
-      updateLabels(axes);
+      updateLabels(axes, visibleIds);
       $("compass-arrow").style.transform = `rotate(${-camera.yaw * 180 / Math.PI}deg)`;
       document.documentElement.dataset.webgl = "ready";
     }
@@ -469,7 +531,7 @@
 
   let scheduled = false;
   function requestDraw() {
-    if (scheduled) return;
+    if (scheduled || renderFailed) return;
     scheduled = true;
     window.requestAnimationFrame(() => {
       scheduled = false;
@@ -503,6 +565,36 @@
     updateWardButtons();
     requestDraw();
   }
+  function centerOnCity() {
+    const bounds = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const district of scene.districts) {
+      bounds[0] = Math.min(bounds[0], district.bounds[0]);
+      bounds[1] = Math.min(bounds[1], district.bounds[1]);
+      bounds[2] = Math.max(bounds[2], district.bounds[2]);
+      bounds[3] = Math.max(bounds[3], district.bounds[3]);
+    }
+    camera.yaw = Math.PI / 4;
+    camera.elevation = 0.89;
+    camera.x = (bounds[0] + bounds[2]) / 2;
+    camera.z = (bounds[1] + bounds[3]) / 2;
+    const axes = basis();
+    const xSpan = bounds[2] - bounds[0];
+    const zSpan = bounds[3] - bounds[1];
+    const horizontal = Math.abs(axes.right[0]) * xSpan + Math.abs(axes.right[2]) * zSpan;
+    const vertical = Math.abs(axes.up[0]) * xSpan + Math.abs(axes.up[2]) * zSpan;
+    const freeWidth = Math.max(160,
+      $("dossier").getBoundingClientRect().left
+      - document.querySelector(".left-panel").getBoundingClientRect().right - 40);
+    const freeHeight = Math.max(160,
+      document.querySelector(".bottom-bar").getBoundingClientRect().top
+      - document.querySelector(".topbar").getBoundingClientRect().bottom - 40);
+    camera.zoom = Math.min(6000, Math.max(
+      55,
+      horizontal * canvas.clientHeight / (2 * freeWidth),
+      vertical * canvas.clientHeight / (2 * freeHeight)
+    ) * 1.10);
+    requestDraw();
+  }
   function focusOnProperty(id) {
     const entry = properties.get(id);
     if (!entry) return;
@@ -516,6 +608,7 @@
 
   function selectBusiness(id) {
     const entry = properties.get(id);
+    const previousId = selectedId;
     selectedId = entry ? entry.id >>> 0 : 0;
     const isSelected = !!entry;
     $("dossier").classList.toggle("is-empty", !isSelected);
@@ -523,6 +616,7 @@
     $("dossier-detail").hidden = !isSelected;
     $("focus-property").hidden = !isSelected;
     if (entry) {
+      if (selectedId !== previousId) $("dossier-detail").scrollTop = 0;
       $("dossier-number").textContent = String(entry.id).padStart(5, "0");
       $("dossier-name").textContent = entry.name;
       $("dossier-kind").textContent = entry.kind;
@@ -579,7 +673,7 @@
     if (entries.length === 0) {
       $("property-list").append(makeElement("div", "directory-empty", "No directory entries match your search."));
     }
-    for (const entry of entries) {
+    for (const entry of entries.slice(0, maxDirectoryEntries)) {
       const button = makeElement("button", "property-button");
       button.type = "button";
       button.append(makeElement("span", "property-name", entry.name));
@@ -591,65 +685,116 @@
       propertyButtons.set(entry.id, button);
       $("property-list").append(button);
     }
+    if (entries.length > maxDirectoryEntries) {
+      $("property-list").append(makeElement(
+        "div", "directory-empty",
+        `Showing the first ${maxDirectoryEntries} entries. Refine your search to find a specific property.`
+      ));
+    }
     updatePropertyButtons();
   }
   $("search").addEventListener("input", renderDirectory);
   renderDirectory();
 
-  for (const entry of scene.dossiers) {
-    const label = makeElement("button", "world-label", entry.name);
-    label.type = "button";
-    label.addEventListener("click", () => {
-      selectBusiness(entry.id);
-      focusOnProperty(entry.id);
-    });
-    $("world-labels").append(label);
-    labelNodes.set(entry.id, label);
+  const districtById = new Map(scene.districts.map((district) => [district.id, district]));
+  function trimLabels(labels, keep) {
+    for (const [id, node] of labels) {
+      if (keep.has(id)) continue;
+      node.remove();
+      labels.delete(id);
+    }
   }
-  for (const district of scene.districts) {
-    const label = makeElement("button", "world-ward");
-    label.type = "button";
-    label.append(makeElement("span", "", district.name));
-    label.append(makeElement("small", "", "FOCUS DISTRICT"));
-    label.addEventListener("click", () => centerOnWard(district.id));
-    $("world-labels").append(label);
-    wardLabelNodes.set(district.id, label);
-  }
-  function updateLabels(axes) {
-    for (const entry of scene.dossiers) {
-      const label = labelNodes.get(entry.id);
-      const [x, y] = worldToScreen([entry.pin[0], entry.roof_height + 6, entry.pin[2]], axes);
-      const visible = camera.zoom < 550
-        && x >= 280 && x <= canvas.clientWidth - 325
-        && y >= 85 && y <= canvas.clientHeight - 82;
-      label.hidden = !visible;
-      if (visible) {
+  function updateLabels(axes, visibleWardIds) {
+    // Labels are only instantiated when a public entity is on-screen.
+    // Reclaim off-screen nodes, and declutter screen-space collisions instead
+    // of creating one hidden DOM node for every business in the city.
+    const left = document.querySelector(".left-panel").getBoundingClientRect().right + 10;
+    const right = $("dossier").getBoundingClientRect().left - 10;
+    const top = document.querySelector(".topbar").getBoundingClientRect().bottom + 10;
+    const bottom = document.querySelector(".bottom-bar").getBoundingClientRect().top - 10;
+    const occupied = [];
+    function reserve(x, y, width, height) {
+      const box = [x - width / 2, y - height / 2, x + width / 2, y + height / 2];
+      if (box[0] < left || box[2] > right || box[1] < top || box[3] > bottom) return false;
+      if (occupied.some((other) =>
+        box[0] < other[2] + 7 && box[2] + 7 > other[0]
+        && box[1] < other[3] + 7 && box[3] + 7 > other[1]
+      )) return false;
+      occupied.push(box);
+      return true;
+    }
+    const keptProperties = new Set();
+    if (camera.zoom < 550) {
+      const candidates = [];
+      for (const wardId of visibleWardIds) {
+        candidates.push(...(dossiersByWard.get(wardId) || []));
+      }
+      candidates.sort((a, b) =>
+        Number(b.id === selectedId) - Number(a.id === selectedId) || a.id - b.id
+      );
+      for (const entry of candidates) {
+        if (keptProperties.size >= maxMapLabels) break;
+        const [x, y] = worldToScreen(
+          [entry.pin[0], entry.roof_height + 6, entry.pin[2]], axes
+        );
+        const width = Math.min(175, Math.max(60, 20 + entry.name.length * 6.4));
+        if (!reserve(x, y - 26, width, 36)) continue;
+        let label = labelNodes.get(entry.id);
+        if (!label) {
+          label = makeElement("button", "world-label", entry.name);
+          label.type = "button";
+          label.addEventListener("click", () => {
+            selectBusiness(entry.id);
+            focusOnProperty(entry.id);
+          });
+          $("world-labels").append(label);
+          labelNodes.set(entry.id, label);
+        }
+        label.classList.toggle("selected", entry.id === selectedId);
         label.style.left = x + "px";
         label.style.top = y + "px";
+        keptProperties.add(entry.id);
       }
     }
-    for (const district of scene.districts) {
-      const label = wardLabelNodes.get(district.id);
-      const midpoint = [
-        (district.bounds[0] + district.bounds[2]) / 2,
-        0,
-        (district.bounds[1] + district.bounds[3]) / 2,
-      ];
-      const [x, y] = worldToScreen(midpoint, axes);
-      const visible = camera.zoom >= 680
-        && x >= 285 && x <= canvas.clientWidth - 325
-        && y >= 95 && y <= canvas.clientHeight - 90;
-      label.hidden = !visible;
-      label.classList.toggle("active", district.id === selectedWard);
-      if (visible) {
+    trimLabels(labelNodes, keptProperties);
+
+    const keptWards = new Set();
+    if (camera.zoom >= 680) {
+      const wards = [...visibleWardIds].map((id) => districtById.get(id)).filter(Boolean);
+      wards.sort((a, b) =>
+        Number(b.id === selectedWard) - Number(a.id === selectedWard) || a.id - b.id
+      );
+      for (const district of wards) {
+        const midpoint = [
+          (district.bounds[0] + district.bounds[2]) / 2,
+          0,
+          (district.bounds[1] + district.bounds[3]) / 2,
+        ];
+        const [x, y] = worldToScreen(midpoint, axes);
+        const width = 48 + district.name.length * 8;
+        if (!reserve(x, y, width, 64)) continue;
+        let label = wardLabelNodes.get(district.id);
+        if (!label) {
+          label = makeElement("button", "world-ward");
+          label.type = "button";
+          label.append(makeElement("span", "", district.name));
+          label.append(makeElement("small", "", "FOCUS DISTRICT"));
+          label.addEventListener("click", () => centerOnWard(district.id));
+          $("world-labels").append(label);
+          wardLabelNodes.set(district.id, label);
+        }
+        label.classList.toggle("active", district.id === selectedWard);
         label.style.left = x + "px";
         label.style.top = y + "px";
+        keptWards.add(district.id);
       }
     }
+    trimLabels(wardLabelNodes, keptWards);
   }
 
   $("close-dossier").addEventListener("click", () => selectBusiness(0));
   $("focus-property").addEventListener("click", () => focusOnProperty(selectedId));
+  $("city-overview").addEventListener("click", centerOnCity);
   $("reset-camera").addEventListener("click", () => {
     camera.yaw = Math.PI / 4;
     camera.elevation = 0.89;
@@ -715,10 +860,15 @@
     requestDraw();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      selectBusiness(0);
+      if (event.target instanceof HTMLInputElement) event.target.blur();
+      event.preventDefault();
+      return;
+    }
     if (event.target instanceof HTMLInputElement) return;
     const step = camera.zoom * 0.12;
-    if (event.key === "Escape") selectBusiness(0);
-    else if (event.key === "q" || event.key === "Q") camera.yaw -= 0.16;
+    if (event.key === "q" || event.key === "Q") camera.yaw -= 0.16;
     else if (event.key === "e" || event.key === "E") camera.yaw += 0.16;
     else if (event.key === "+" || event.key === "=") camera.zoom *= 0.82;
     else if (event.key === "-") camera.zoom *= 1.22;
@@ -739,10 +889,15 @@
 
   // Small, read-only inspection surface for headless renderer checks.
   window.crimocracyCityPreview = Object.freeze({
-    stats: () => ({ ...visibleStats, uploadedDistricts, selectedId, camera: { ...camera } }),
+    stats: () => ({
+      ...visibleStats, uploadedDistricts, gpuUploads, evictedDistricts,
+      residentDistricts, residentInstanceBytes, maxResidentDistricts,
+      selectedId, camera: { ...camera },
+    }),
     selectBusiness: (id) => selectBusiness(Number(id) >>> 0),
     focusOnProperty: (id) => focusOnProperty(Number(id) >>> 0),
     showWard: (id) => centerOnWard(Number(id)),
+    showCity: centerOnCity,
     groundAt: (x, y) => groundFromScreen(Number(x), Number(y), basis()),
     projectProperty: (id) => {
       const entry = properties.get(Number(id) >>> 0);

@@ -9,9 +9,14 @@ selection, highlighting, shaders, and dossiers.
 
 - A stable caller-supplied visual seed determines appearance without reading or consuming
   gameplay RNG. The GUI must retain the seed across saves and reloads for identical visuals.
-- Each neighborhood has one independently cullable district chunk, positioned in an
-  eight-column city grid by persistent neighborhood ID. This regular city plan is an
-  initial placeholder for future terrain and simulation-backed transport topology.
+- Each neighborhood has one independently cullable district chunk, positioned in a
+  regular grid by persistent neighborhood ID. `CityScene::generate` retains the
+  original eight-column default; `generate_with_columns` accepts 1–32 columns
+  for different city shapes (the WebGL2 preview uses four). Both the visual
+  seed and column count belong to the presentation configuration and must remain
+  fixed across save/restore. Adding neighborhoods does not move earlier
+  districts. The grid remains an initial placeholder for future terrain and
+  simulation-backed transport topology.
 - Each district contains a 32-by-32 lot grid, 4-by-4-lot street blocks, 10-meter
   arterial roads, and seed-varied 3-meter alleys. District road strips connect across
   the 24-meter district margins. Generated building footprints respect road setbacks.
@@ -27,8 +32,9 @@ selection, highlighting, shaders, and dossiers.
   buffer-range draw commands for either mode and merges contiguous sector
   ranges, so full-coverage sector draws collapse back to the same calls as a
   whole-district view. The `GpuCityChunk::encode`
-  adapter emits exact little-endian 32-byte records (translation.xyz, scale.xyz,
-  pick ID, variation), one contiguous GPU upload buffer per nonempty building
+  adapter requires an explicit set of disclosed business IDs and emits exact
+  little-endian 32-byte records (translation.xyz, scale.xyz, disclosed pick ID
+  or zero, variation), one contiguous GPU upload buffer per nonempty building
   mesh and one road buffer. Use instance step mode and one mesh/material per
   class. This is instancing, not skeletal skinning.
 - Building picking renders the business's persistent raw ID as an integer into a separate
@@ -73,24 +79,35 @@ for this draw operation, so the adapter offsets its per-instance vertex
 attributes into the existing buffers instead of uploading geometry again.
 The separate depth-tested RGBA8 picking framebuffer encodes all four bytes of
 the business ID; the directory acts as the disclosure gate before opening a
-dossier. Each district's geometry remains encoded until the camera first
-visits it; only then is it decoded and uploaded, and the encoded source bytes
-are released from JavaScript memory. District buffers remain cached in WebGL
-for subsequent views. Rendering is demand-driven rather than redrawing
-continuously while idle.
+dossier. Each district's geometry remains base64-encoded until the camera
+first visits it; then the bytes are decoded once and reused for subsequent
+GPU uploads. The adapter keeps at most four resident districts where the
+viewport permits; it evicts least-recently-used offscreen GPU buffers while
+retaining a single CPU copy for re-upload when revisited. If more than four
+districts are visible simultaneously, all visible districts remain resident.
+Picking draws only buildings and does not overwrite normal-render statistics.
+Rendering is demand-driven rather than redrawing continuously while idle.
 
 The camera supports left-drag panning, right-drag or Shift-drag orbit, scroll
-zoom anchored to the pointer, Q/E rotation, arrow-key panning, and +/- zoom.
+zoom anchored to the pointer, Q/E rotation, arrow-key panning, +/- zoom,
+and a whole-city overview framed around the currently available map area.
 Click a registered building, a map label, or an entry in the searchable
 directory to select a property. The property dossier presents the information
 deliberately included in the preview's public directory. The center of the
-city remains visible behind the contextual panels.
+city remains visible behind the contextual panels. Map labels are created only
+for visible public properties and removed as they leave the view; screen-space
+collision checks and a 24-label limit avoid clutter. The directory caps its
+rendered rows at 200 and retains search across the full authorized directory.
+Escape dismisses selection even when the search box has focus.
 
 **Disclosure boundary:** the bundled eight-district, 96-property world is a
 fictional fixture built with the canonical world insertion APIs. All exported
 names and categories are intentionally authored as public. The exporter does
 not serialize live intelligence, owner identities, police records, case details,
-or unrevealed economic information. The browser is a read-only projection, not
+or unrevealed economic information. An additional unlisted sample property
+proves that the binary GPU instance buffers mask its persistent ID to zero;
+player-facing exports must explicitly supply their authorized public directory
+IDs to `GpuCityChunk::encode`. The browser is a read-only projection, not
 a campaign loader or a gameplay command adapter. A future campaign integration
 must populate public dossier fields from player-visible information sources,
 not from hidden `AppState` truth, and must send gameplay actions through the

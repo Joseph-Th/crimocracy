@@ -77,6 +77,62 @@ fn generated_city_is_deterministic_and_does_not_mutate_simulation_state() {
 }
 
 #[test]
+fn explicit_city_grid_width_preserves_determinism_positions_and_incremental_updates() {
+    let registry = build_registry();
+    let mut state = AppState::new(13);
+    for index in 0..8 {
+        add_neighborhood(&mut state, &format!("Ward {index}"));
+    }
+    let business = add_business(
+        &mut state,
+        NeighborhoodId::from_raw(6),
+        BusinessKind::Warehouse,
+    );
+    assert_eq!(
+        CityScene::generate_with_columns(state.world(), 90, 0),
+        Err(CityViewError::InvalidDistrictColumns(0)),
+    );
+    assert_eq!(
+        CityScene::generate_with_columns(state.world(), 90, 33),
+        Err(CityViewError::InvalidDistrictColumns(33)),
+    );
+    let original = CityScene::generate_with_columns(state.world(), 90, 4).unwrap();
+    assert_eq!(
+        original.districts[3].bounds.min_x,
+        DISTRICT_PITCH * 3.0 - 5.0
+    );
+    assert_eq!(original.districts[4].bounds.min_x, -5.0);
+    assert_eq!(original.districts[4].bounds.min_z, DISTRICT_PITCH - 5.0);
+    assert_eq!(original.districts[7].bounds.min_z, DISTRICT_PITCH - 5.0);
+    assert_ne!(original, CityScene::generate(state.world(), 90).unwrap());
+
+    let saved = build_save(&registry, &state).unwrap();
+    let restored = restore_save(&registry, saved).unwrap();
+    assert_eq!(
+        CityScene::generate_with_columns(restored.world(), 90, 4).unwrap(),
+        original,
+    );
+
+    let ninth = add_neighborhood(&mut state, "New Ward");
+    let mut updated = original.clone();
+    updated.refresh_neighborhood(state.world(), ninth).unwrap();
+    assert_eq!(
+        updated,
+        CityScene::generate_with_columns(state.world(), 90, 4).unwrap(),
+    );
+    assert_eq!(updated.districts[8].bounds.min_x, -5.0);
+    assert_eq!(
+        updated.districts[8].bounds.min_z,
+        DISTRICT_PITCH * 2.0 - 5.0
+    );
+    assert_eq!(
+        updated.business_pin(business),
+        original.business_pin(business)
+    );
+    assert_eq!(&updated.districts[..8], &original.districts[..]);
+}
+
+#[test]
 fn adding_a_business_does_not_move_preexisting_buildings_or_other_districts() {
     let mut state = AppState::new(7);
     let first = add_neighborhood(&mut state, "Central");
@@ -252,13 +308,14 @@ fn generated_streets_are_fully_covered_by_their_district_culling_bounds() {
 fn sector_instance_ranges_partition_every_mesh_buffer_without_duplication() {
     let mut state = AppState::new(80);
     let district = add_neighborhood(&mut state, "Harbor");
-    for &kind in &ALL_BUSINESS_KINDS {
-        add_business(&mut state, district, kind);
-    }
+    let disclosed: BTreeSet<_> = ALL_BUSINESS_KINDS
+        .iter()
+        .map(|&kind| add_business(&mut state, district, kind))
+        .collect();
     let scene = CityScene::generate(state.world(), 911).unwrap();
     let chunk = &scene.districts[0];
     assert_eq!(chunk.sectors.len(), SECTORS_PER_SIDE * SECTORS_PER_SIDE);
-    let gpu = GpuCityChunk::encode(chunk);
+    let gpu = GpuCityChunk::encode(chunk, &disclosed);
     let mut covered = 0;
     for (mesh_index, batch) in chunk.buildings.iter().enumerate() {
         let mut expected_first = 0;

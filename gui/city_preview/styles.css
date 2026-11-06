@@ -30,8 +30,8 @@ button:disabled { cursor: default; opacity: .5; }
 .brand-title { font-family: Georgia, "Times New Roman", serif; font-weight: 700; letter-spacing: .23em; font-size: 19px; }
 .brand-subtitle { font-size: 9px; letter-spacing: .18em; color: #a6a7a0; margin-top: 7px; }
 .divider-dot { padding: 0 9px; color: var(--accent); }
-.topbar-right { display: flex; gap: 30px; align-items: center; }
-.status { font-size: 10px; letter-spacing: .15em; color: #b3b8ad; white-space: nowrap; }
+.topbar-right { display: flex; gap: 9px; align-items: center; }
+.status { font-size: 10px; letter-spacing: .15em; color: #b3b8ad; white-space: nowrap; margin-right: 18px; }
 .status-led { display: inline-block; width: 7px; height: 7px; background: var(--green); border-radius: 50%; margin-right: 8px; box-shadow: 0 0 10px #8ea99555; }
 .utility-button { border: 1px solid #64706e; background: #263034; color: var(--text); padding: 10px 15px; border-radius: 2px; font-size: 11px; letter-spacing: .07em; }
 .utility-button:hover { border-color: var(--accent); }

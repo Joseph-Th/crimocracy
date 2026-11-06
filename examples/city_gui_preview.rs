@@ -119,6 +119,7 @@ fn make_preview() -> Result<PreviewData, Box<dyn Error>> {
     let registry = crimocracy::build_registry();
     let mut state = AppState::new(1931);
     let mut public_directory = Vec::new();
+    let mut first_neighborhood = None;
 
     for (index, &ward_name) in WARDS.iter().enumerate() {
         let neighborhood = insert_neighborhood(
@@ -137,6 +138,9 @@ fn make_preview() -> Result<PreviewData, Box<dyn Error>> {
                 },
             },
         )?;
+        if index == 0 {
+            first_neighborhood = Some(neighborhood);
+        }
         for &(short_name, kind, category) in &BUSINESSES {
             let name = format!("{short_name} · {ward_name}");
             let id = insert_business(
@@ -154,7 +158,21 @@ fn make_preview() -> Result<PreviewData, Box<dyn Error>> {
         }
     }
 
-    let city = CityScene::generate(state.world(), 0x1931_B0C5)?;
+    // A physically present but unlisted property verifies that GPU instance
+    // buffers do not disclose stable business IDs outside the public directory.
+    insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Unlisted Private Depot".to_owned(),
+            kind: BusinessKind::Warehouse,
+            functions: BTreeSet::new(),
+            neighborhood: first_neighborhood.expect("the preview has a first neighborhood"),
+            owner: BusinessOwner::Independent,
+        },
+    )?;
+    let disclosed: BTreeSet<_> = public_directory.iter().map(|(id, ..)| *id).collect();
+    let city = CityScene::generate_with_columns(state.world(), 0x1931_B0C5, 4)?;
     let visual_roofs: BTreeMap<u32, f32> = city
         .districts
         .iter()
@@ -172,7 +190,7 @@ fn make_preview() -> Result<PreviewData, Box<dyn Error>> {
         .districts
         .iter()
         .map(|chunk| {
-            let gpu = GpuCityChunk::encode(chunk);
+            let gpu = GpuCityChunk::encode(chunk, &disclosed);
             let name = state
                 .world()
                 .get_neighborhood(chunk.neighborhood)
@@ -343,6 +361,7 @@ mod tests {
         assert!(!html.contains("business_owner"));
         assert!(!html.contains("police_presence"));
         assert!(!html.contains("illicit_demand"));
+        assert!(!html.contains("Unlisted Private Depot"));
         assert!(!html.contains("<!-- CITY_PREVIEW_DATA -->"));
     }
 
