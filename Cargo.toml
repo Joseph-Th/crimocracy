@@ -19,8 +19,8 @@ thiserror = "1.0"
 bincode = "1.3.3"
 serde_json = "1.0"
 
-# Routine development/test work shares its normal incremental caches. Only the explicit deep
-# gameplay study below uses a separate optimized profile because unoptimized simulation is much slower.
+# Routine development/test work shares its normal incremental caches. Only explicitly opted-in
+# deep gameplay studies and deep harness contracts use a separate optimized profile.
 [profile.dev]
 debug = false
 incremental = true
@@ -32,8 +32,9 @@ overflow-checks = true
 [profile.test]
 debug = false
 
-# Full gameplay evaluation is simulation-heavy and explicitly opt-in. Give only that deep lane
-# a modest optimization profile; smoke, focused tests, and checks keep their normal warm caches.
+# Full gameplay evaluation and its deep scenario contracts are simulation-heavy and explicitly
+# opt-in. A modest optimization keeps these studies practical without changing the normal smoke,
+# focused-test, or check caches; dev's debug assertions and overflow checks still apply.
 [profile.harness]
 inherits = "dev"
 opt-level = 1

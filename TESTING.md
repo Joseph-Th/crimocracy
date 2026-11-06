@@ -93,7 +93,7 @@ cannot silently drop deep coverage. These deeper tiers are evidence, not prerequ
 | One test / module | `cargo test-focused <filter>` | owning module's `#[cfg(test)]` |
 | Harness contracts | `cargo test-harness` | harness implementation tests; deep scenario tests excluded |
 | One harness behavior | `cargo test-harness <filter>` | matching harness tests only (check the pass count; a typo matches zero) |
-| Deep harness contracts | `cargo test-harness-deep` | explicit scenario-scale comparison tests |
+| Deep harness contracts | `cargo test-harness-deep` | all ignored scenario-scale tests in the existing optimized `harness` profile; debug assertions and overflow checks remain enabled |
 | Auto-rerun on save | `.\scripts\watch.cmd` (`-Filter`, `-Harness`, or both) | lib check by default; lib focused, harness smoke, or harness focused on demand |
 | Harness smoke, one strategy | `cargo harness-rush` / `-press` / `-recon` | one strategy branch |
 | Full-mode batch | `cargo harness-full --samples 8` | all strategies, matched seeds, artifacts |
