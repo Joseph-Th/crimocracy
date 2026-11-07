@@ -1,10 +1,14 @@
 //! Report validation and insertion; reports expose known information rather than world truth.
+//!
+//! A validated report is bound to its observation minute. A held financial or operational
+//! synthesis cannot be inserted at a later minute with a misleading new generation timestamp.
 
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
     DecisionRequestId, IdExhaustionError, InformationId, OrganizationId, ReportId,
 };
 use crate::core::state::AppState;
+use crate::core::time::SimTime;
 use crate::intelligence::KnowledgeHolder;
 use crate::intelligence::intelligence_system::PlannedInformationSource;
 use crate::reports::{ReportDraft, ReportEntry, ReportKind, ReportRecord};
@@ -16,6 +20,8 @@ pub enum ReportError {
     EmptyTitle,
     #[error("report entry {0} has an empty summary")]
     EmptyEntry(usize),
+    #[error("report was validated at {expected:?}, but simulation time is now {found:?}")]
+    StaleTime { expected: SimTime, found: SimTime },
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
     #[error("information record {0} does not exist")]
@@ -45,10 +51,13 @@ pub enum ReportError {
 
 pub struct ValidatedReport {
     draft: ReportDraft,
+    validated_at: SimTime,
     planned_information: Option<PlannedInformationSource>,
 }
 impl ValidatedReport {
     pub fn commit(self, state: &mut AppState) -> Result<ReportId, ReportError> {
+        crate::core::time::ensure_time_current(state.now(), self.validated_at)
+            .map_err(|(expected, found)| ReportError::StaleTime { expected, found })?;
         if let Some(planned) = self.planned_information {
             let information = state
                 .intelligence
@@ -124,6 +133,7 @@ fn validate_report_draft_with_planned_information(
     }
     Ok(ValidatedReport {
         draft,
+        validated_at: state.now(),
         planned_information: planned,
     })
 }
@@ -201,14 +211,96 @@ mod tests {
     use super::*;
     use crate::build_registry;
     use crate::core::attention::AttentionClass;
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::core::time::{SimDuration, SimTime};
     use crate::intelligence::intelligence_system::validate_record_information;
     use crate::intelligence::{
         InformationDraft, InformationSourceKind, KnowledgeHolder, Reliability, Specificity,
     };
+    use crate::reports::organization_financial_report::validate_organization_financial_report;
     use crate::reports::{ReportEntry, ReportKind};
     use crate::world::world_system::insert_organization;
     use crate::world::{OrganizationDraft, OrganizationKind};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn financial_report_validated_before_a_clock_advance_cannot_be_stamped_as_current() {
+        let registry = build_registry();
+        let mut state = AppState::new(0xB12E_1934);
+        let organization = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Financial Snapshot Sponsor".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .expect("report recipient should be valid");
+        let stale = validate_organization_financial_report(
+            &state,
+            organization,
+            SimTime::ZERO,
+            state.now(),
+        )
+        .expect("financial snapshot should validate");
+        let validated_at = state.now();
+        state.advance_clock(SimDuration::ONE_MINUTE);
+        let before = bincode::serialize(&state).expect("report state should serialize");
+        let next_report = state.ids.next_raw(crate::core::id::IdKind::Report);
+
+        assert_eq!(
+            stale
+                .commit(&mut state)
+                .expect_err("old snapshot must not receive a new timestamp"),
+            ReportError::StaleTime {
+                expected: validated_at,
+                found: state.now(),
+            }
+        );
+        assert_eq!(
+            bincode::serialize(&state).expect("rejected state should serialize"),
+            before,
+            "stale report rejection must preserve authoritative state and indexes"
+        );
+        assert_eq!(
+            state.ids.next_raw(crate::core::id::IdKind::Report),
+            next_report
+        );
+
+        let fresh = validate_organization_financial_report(
+            &state,
+            organization,
+            SimTime::ZERO,
+            state.now(),
+        )
+        .expect("current financial snapshot should validate");
+        let report = fresh
+            .commit(&mut state)
+            .expect("current snapshot should commit");
+        assert_eq!(
+            state
+                .reports()
+                .get_report(report)
+                .expect("report must persist")
+                .generated_at(),
+            state.now()
+        );
+        crate::core::invariants::validate_invariants(&state);
+        let restored = restore_save(
+            &registry,
+            build_save(&registry, &state).expect("fresh financial report should save"),
+        )
+        .expect("fresh financial report should restore");
+        assert_eq!(
+            restored
+                .reports()
+                .get_report(report)
+                .expect("restored financial report must persist")
+                .generated_at(),
+            state.now()
+        );
+        crate::core::invariants::validate_invariants(&restored);
+    }
 
     #[test]
     fn generic_report_path_cannot_forge_an_executive_brief() {
