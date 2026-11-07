@@ -150,6 +150,7 @@ fn operation_phase_batch_is_terminally_blocked(error: &OperationPhaseBatchError)
             DecisionError::IdExhaustion(_) | DecisionError::VersionCapacity(_) => true,
             DecisionError::Operation(error) => operation_error_is_terminally_blocked(error),
             DecisionError::EmptySummary
+            | DecisionError::StaleRequestTime { .. }
             | DecisionError::StaleResolutionTime { .. }
             | DecisionError::InvalidAttention
             | DecisionError::MissingOperation(_)

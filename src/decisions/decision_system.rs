@@ -52,6 +52,8 @@ use thiserror::Error;
 pub enum DecisionError {
     #[error("decision summary must not be empty")]
     EmptySummary,
+    #[error("decision request was validated at {expected:?} but committed at {found:?}")]
+    StaleRequestTime { expected: SimTime, found: SimTime },
     #[error("decision resolution was validated at {expected:?} but committed at {found:?}")]
     StaleResolutionTime { expected: SimTime, found: SimTime },
     #[error("decision attention must be Exception or Crisis")]
@@ -329,6 +331,7 @@ pub struct ValidatedDecisionRequest {
     expected_operation_version: u32,
     police_response: PoliceResponseDecisionDependency,
     options: BTreeSet<DecisionResponse>,
+    validated_at: SimTime,
 }
 
 impl ValidatedDecisionRequest {
@@ -337,6 +340,10 @@ impl ValidatedDecisionRequest {
     }
 
     pub fn commit(self, state: &mut AppState) -> Result<DecisionRequestOutcome, DecisionError> {
+        // A police-arrival exception belongs to its arrival minute. Even if no operation
+        // version changes, a held request may not invent a later event timestamp or pause.
+        crate::core::time::ensure_time_current(state.now(), self.validated_at)
+            .map_err(|(expected, found)| DecisionError::StaleRequestTime { expected, found })?;
         let operation_id = self.operation();
         let operation = state
             .operations
@@ -471,6 +478,7 @@ pub(crate) fn validate_request_police_arrival_decision_on_arrival(
             expected_version,
         },
         options: BTreeSet::from([DecisionResponse::Continue, DecisionResponse::Abort]),
+        validated_at: state.now(),
     })
 }
 

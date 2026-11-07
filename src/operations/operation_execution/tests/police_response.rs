@@ -107,6 +107,119 @@ fn add_parallel_exposed_burglary(
 }
 
 #[test]
+fn held_police_arrival_request_cannot_be_timestamped_in_a_later_minute() {
+    let (registry, mut state, police, neighborhood, operation) =
+        make_exposed_business_operation_fixture_with_contingencies(
+            true,
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+        );
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .expect("exposed operation should exist")
+        .responsible_organization();
+    designate_player_organization(&mut state, organization)
+        .expect("responsible organization should be the player");
+    validate_establish_patrol_deployment(
+        &state,
+        PatrolDeploymentDraft {
+            organization: police,
+            neighborhood,
+            windows: vec![
+                PatrolWindow::try_new(
+                    DayMinute::try_new(0).expect("valid test patrol start"),
+                    1_440,
+                    Rating::try_new(0).expect("valid zero patrol presence"),
+                )
+                .expect("valid test patrol window"),
+            ],
+        },
+    )
+    .expect("patrol deployment should validate")
+    .commit(&mut state)
+    .expect("patrol deployment should commit");
+    let started = run_tick(&registry, &mut state);
+    assert_eq!(started.started_operations, vec![operation]);
+    let response = state
+        .operations()
+        .get_operation(operation)
+        .and_then(|record| record.police_response())
+        .expect("exposed operation should dispatch a police response");
+    let due = state
+        .legal()
+        .get_police_response(response)
+        .expect("dispatched response should exist")
+        .arrival_due_at();
+    let minutes_until_due = due.as_minutes() - state.now().as_minutes();
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(minutes_until_due).expect("authored response delay fits duration"),
+    ));
+    // The canonical arrival pipeline validates the decision against the due dispatched
+    // response, then commits its arrival before inserting the decision. Test both halves.
+    let held = validate_request_police_arrival_decision_on_arrival(&state, response)
+        .expect("due dispatched response should support a leadership request");
+    let validated_at = state.now();
+    let mut timely = state.clone();
+    let current = validate_request_police_arrival_decision_on_arrival(&timely, response)
+        .expect("same-minute request should validate");
+    crate::legal::police_response_system::validate_police_response_arrival(&timely, response)
+        .expect("due arrival should validate")
+        .commit(&mut timely)
+        .expect("due arrival should commit");
+    let outcome = current
+        .commit(&mut timely)
+        .expect("same-minute request should pause the operation");
+    assert_eq!(
+        timely
+            .decisions()
+            .get_decision(outcome.decision)
+            .expect("decision should be persisted")
+            .requested_at(),
+        validated_at
+    );
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &timely).expect("decision should save"),
+    )
+    .expect("same-minute request should restore");
+    validate_state_against_registry(&registry, &restored)
+        .expect("restored leadership request must remain coherent");
+    validate_invariants(&restored);
+
+    crate::legal::police_response_system::validate_police_response_arrival(&state, response)
+        .expect("due arrival should validate for held request")
+        .commit(&mut state)
+        .expect("due arrival should commit for held request");
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let before = bincode::serialize(&state).expect("state should serialize before rejection");
+
+    assert_eq!(
+        held.commit(&mut state)
+            .expect_err("held police-arrival request must reject time drift"),
+        DecisionError::StaleRequestTime {
+            expected: validated_at,
+            found: state.now(),
+        }
+    );
+    assert_eq!(
+        bincode::serialize(&state).expect("state should serialize after rejection"),
+        before,
+        "stale request must not allocate a decision or pause an operation"
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(operation)
+            .expect("running operation should persist")
+            .status(),
+        OperationStatus::InProgress
+    );
+    assert!(state.decisions().pending_for_operation(operation).is_none());
+
+    validate_invariants(&state);
+}
+
+#[test]
 fn rival_post_entry_police_exception_aborts_instead_of_waiting_for_player_direction() {
     let (registry, mut state, police, neighborhood, operation) =
         make_exposed_business_operation_fixture_with_contingencies(
