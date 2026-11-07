@@ -1522,6 +1522,71 @@ fn conversion_rejects_same_minute_plan_that_first_starts_at_expiry() {
 }
 
 #[test]
+fn dismissal_token_held_across_a_minute_returns_typed_staleness_without_mutation() {
+    let mut fixture = make_fixture();
+    let opportunity = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(120)),
+    )
+    .expect("opportunity discovery should validate")
+    .commit(&mut fixture.state)
+    .expect("opportunity discovery should commit");
+    let stale = validate_dismiss_opportunity(&fixture.registry, &fixture.state, opportunity)
+        .expect("opportunity should be dismissible");
+    let validated_at = fixture.state.now();
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let before = bincode::serialize(&fixture.state).expect("state should serialize");
+
+    assert_eq!(
+        stale
+            .commit(&mut fixture.state)
+            .expect_err("held dismissal must not commit an old report at the new minute"),
+        OpportunityError::Report(ReportError::StaleTime {
+            expected: validated_at,
+            found: fixture.state.now(),
+        })
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).expect("rejected state should serialize"),
+        before,
+        "stale dismissal must not allocate a report or change the opportunity"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .expect("opportunity should remain available")
+            .status(),
+        OpportunityStatus::Open
+    );
+
+    let fresh = validate_dismiss_opportunity(&fixture.registry, &fixture.state, opportunity)
+        .expect("opportunity remains dismissible at the new minute");
+    let report = fresh
+        .commit(&mut fixture.state)
+        .expect("fresh dismissal should commit");
+    assert_eq!(
+        fixture
+            .state
+            .reports()
+            .get_report(report)
+            .expect("dismissal report should persist")
+            .generated_at(),
+        fixture.state.now()
+    );
+    fixture.state = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("dismissal should save"),
+    )
+    .expect("dismissal should restore");
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("restored dismissal must preserve the report/opportunity link");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn duplicate_open_opportunity_is_rejected_but_dismissal_allows_later_rediscovery() {
     let mut fixture = make_fixture();
     let draft = opportunity_draft(&fixture, SimTime::from_minutes(120));

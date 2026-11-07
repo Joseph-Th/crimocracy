@@ -475,10 +475,9 @@ impl ValidatedOpportunityDismissal {
         }
         ensure_version_can_advance(record.version(), "opportunity")?;
         validate_not_expired(state, record)?;
-        let report = self
-            .report
-            .commit(state)
-            .expect("dismissal report ID was preflighted before mutation");
+        // A dismissal may remain eligible after the validated report's minute has passed.
+        // Propagate the report owner's stale-time rejection before changing opportunity state.
+        let report = self.report.commit(state)?;
         state
             .opportunities
             .dismiss(self.opportunity, state.now(), report);
