@@ -223,13 +223,9 @@ pub(crate) fn apply_autonomous_investigator_staffing(
     state: &mut AppState,
 ) -> Result<Vec<(InvestigationId, CharacterId)>, InvestigationError> {
     let mut investigations: Vec<_> = state.legal.active_investigations_without_lead().collect();
-    // Scarce detective capacity is allocated by case substance rather than record creation
-    // order. Prefer cases with more actionable evidence, then the strongest such evidence,
-    // broader evidence, and more recent institutional activity. The case id is only the final
-    // deterministic tie-break when the institution has no modeled reason to prefer either file.
-    investigations.sort_unstable_by_key(|investigation| {
-        investigation_staffing_priority(state, *investigation)
-    });
+    if investigations.is_empty() {
+        return Ok(Vec::new());
+    }
 
     // Availability and Investigation capability are authority-wide facts for this staffing pass.
     // Build each authority's ranked pool once instead of rescanning every member for every
@@ -277,6 +273,30 @@ pub(crate) fn apply_autonomous_investigator_staffing(
         );
     }
 
+    // Cases with no available detective in their authority, or no remaining version headroom,
+    // cannot be staffed this minute. Skip expensive evidence-strength ranking for these cases:
+    // while the cohort is read-only, neither roster availability nor case version can change.
+    investigations.retain(|investigation_id| {
+        let investigation = state
+            .legal
+            .get_investigation(*investigation_id)
+            .expect("unstaffed-investigation index must reference an investigation");
+        investigation.version() <= u32::MAX - 2
+            && candidates_by_owner
+                .get(&investigation.owner())
+                .is_some_and(|candidates: &Vec<CharacterId>| !candidates.is_empty())
+    });
+    if investigations.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Scarce detective capacity is allocated by case substance rather than record creation
+    // order. Prefer cases with more actionable evidence, then the strongest such evidence,
+    // broader evidence, and more recent institutional activity. The case id is only the final
+    // deterministic tie-break when the institution has no modeled reason to prefer either file.
+    investigations.sort_unstable_by_key(|investigation| {
+        investigation_staffing_priority(state, *investigation)
+    });
+
     // Collect all conflict-free candidates before making a staffing choice. A flexible case
     // should not monopolize the only qualified detective for a more constrained case.
     let mut eligible_by_case = BTreeMap::new();
@@ -286,10 +306,6 @@ pub(crate) fn apply_autonomous_investigator_staffing(
             .legal
             .get_investigation(investigation_id)
             .ok_or(InvestigationError::MissingInvestigation(investigation_id))?;
-        // An unstaffable finite-version case must not block other cases.
-        if investigation.version() > u32::MAX - 2 {
-            continue;
-        }
         let eligible: Vec<_> = candidates_by_owner
             .get(&investigation.owner())
             .into_iter()

@@ -11,10 +11,10 @@ use super::{
     resolve_autonomous_cash_account, resolve_available_owned_businesses,
     resolve_max_autonomous_working_capital, settlement_account_is_available,
 };
-use crate::core::id::{FinancialAccountId, MandateId, NeighborhoodId, OrganizationId};
+use crate::core::id::{BusinessId, FinancialAccountId, MandateId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
-use crate::delegation::MandateRecord;
 use crate::delegation::delegation_system::DelegationError;
+use crate::delegation::{MandateRecord, ResponsibilityFunction, ResponsibilityScope};
 use crate::enterprises::autonomous_planning::{
     AutonomousEnterpriseError, ObservedDistrictPressure, reserve_working_capital,
     resolve_committed_working_capital, resolve_observed_district_pressure,
@@ -23,8 +23,8 @@ use crate::enterprises::enterprise_execution::resolve_location_neighborhood;
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseStatus};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
-use crate::world::AutonomyLevel;
 use crate::world::territory_influence::{resolve_neighborhood_influence, unique_economic_leader};
+use crate::world::{AutonomyLevel, BusinessRecord};
 use std::collections::{BTreeMap, BTreeSet};
 
 struct PhaseExpansionCandidate {
@@ -88,6 +88,20 @@ pub(super) fn plan_due_autonomous_expansions(
             fresh_settlement_accounts: 0,
         });
     }
+    // Ownership and operating status cannot change while this pass plans read-only. Snapshot
+    // each organization's viable venues once; only projected working capital, occupied slots,
+    // and district leadership change between iterations. Re-scanning every owned storefront
+    // for every competing mandate would make large autonomous cohorts needlessly quadratic.
+    let available_venues: BTreeMap<OrganizationId, BTreeMap<BusinessId, &BusinessRecord>> =
+        mandates
+            .keys()
+            .map(|organization| {
+                (
+                    *organization,
+                    resolve_available_owned_businesses(state, *organization),
+                )
+            })
+            .collect();
     let observed_district_pressure = resolve_observed_district_pressure(registry, state)?;
     // Working capital is a capacity constraint, not a balance-presence check. Existing active
     // rackets already rely on their cash accounts for one current operating cycle, and each new
@@ -113,6 +127,7 @@ pub(super) fn plan_due_autonomous_expansions(
             &occupied_locations,
             &district_leaders,
             &mandates,
+            &available_venues,
         )?
         else {
             break;
@@ -181,6 +196,7 @@ fn select_phase_expansion_candidate(
     occupied_locations: &BTreeSet<(EnterpriseKind, EnterpriseLocation)>,
     district_leaders: &BTreeMap<NeighborhoodId, Option<OrganizationId>>,
     mandates: &BTreeMap<OrganizationId, Vec<MandateRecord>>,
+    available_venues: &BTreeMap<OrganizationId, BTreeMap<BusinessId, &BusinessRecord>>,
 ) -> Result<Option<PhaseExpansionCandidate>, AutonomousEnterpriseError> {
     let iteration = ExpansionIterationContext {
         registry,
@@ -197,7 +213,9 @@ fn select_phase_expansion_candidate(
         ) else {
             continue;
         };
-        let owned_venues = resolve_available_owned_businesses(state, *organization);
+        let owned_venues = available_venues
+            .get(organization)
+            .expect("eligible expansion organization must have a venue snapshot");
         for (mandate_index, mandate) in organization_mandates.iter().enumerate() {
             let Some(plan) = decide_autonomous_expansion(
                 &iteration,
@@ -253,6 +271,19 @@ fn resolve_eligible_expansion_mandates(
     let mut by_organization = BTreeMap::new();
     for mandate in state.delegation().active_mandates() {
         if excluded_mandates.contains(&mandate.id()) {
+            continue;
+        }
+        // Personnel, finance, legal, and other function-only mandates cannot establish an
+        // enterprise. Exclude them before building district and financial projections rather
+        // than repeatedly examining an empty enterprise candidate set.
+        if !mandate.scopes().iter().any(|scope| {
+            matches!(
+                scope,
+                ResponsibilityScope::Neighborhood(_)
+                    | ResponsibilityScope::Business(_)
+                    | ResponsibilityScope::Function(ResponsibilityFunction::Enterprise)
+            )
+        }) {
             continue;
         }
         let organization = mandate.organization();
