@@ -16,8 +16,8 @@ use crate::core::state::AppState;
 use crate::delegation::delegation_system::DelegationError;
 use crate::delegation::{MandateRecord, ResponsibilityFunction, ResponsibilityScope};
 use crate::enterprises::autonomous_planning::{
-    AutonomousEnterpriseError, ObservedDistrictPressure, reserve_working_capital,
-    resolve_committed_working_capital, resolve_observed_district_pressure,
+    AutonomousEnterpriseError, reserve_working_capital, resolve_committed_working_capital,
+    resolve_observed_district_pressure,
 };
 use crate::enterprises::enterprise_execution::resolve_location_neighborhood;
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseStatus};
@@ -119,13 +119,16 @@ pub(super) fn plan_due_autonomous_expansions(
     // until the parent has reserved the complete cohort's finite resources.
     while !mandates.is_empty() {
         let district_leaders = territory.leaders();
-        let Some(selected) = select_phase_expansion_candidate(
+        let iteration = ExpansionIterationContext {
             registry,
             state,
-            &observed_district_pressure,
+            observed_district_pressure: &observed_district_pressure,
+            district_leaders: &district_leaders,
+        };
+        let Some(selected) = select_phase_expansion_candidate(
+            &iteration,
             &working_capital_reservations,
             &occupied_locations,
-            &district_leaders,
             &mandates,
             &available_venues,
         )?
@@ -189,25 +192,16 @@ pub(super) fn plan_due_autonomous_expansions(
 }
 
 fn select_phase_expansion_candidate(
-    registry: &Registry,
-    state: &AppState,
-    observed_district_pressure: &ObservedDistrictPressure,
+    iteration: &ExpansionIterationContext<'_>,
     working_capital_reservations: &BTreeMap<FinancialAccountId, Money>,
     occupied_locations: &BTreeSet<(EnterpriseKind, EnterpriseLocation)>,
-    district_leaders: &BTreeMap<NeighborhoodId, Option<OrganizationId>>,
     mandates: &BTreeMap<OrganizationId, Vec<MandateRecord>>,
     available_venues: &BTreeMap<OrganizationId, BTreeMap<BusinessId, &BusinessRecord>>,
 ) -> Result<Option<PhaseExpansionCandidate>, AutonomousEnterpriseError> {
-    let iteration = ExpansionIterationContext {
-        registry,
-        state,
-        observed_district_pressure,
-        district_leaders,
-    };
     let mut winner: Option<PhaseExpansionCandidate> = None;
     for (organization, organization_mandates) in mandates {
         let Some(available_working_capital) = resolve_max_autonomous_working_capital(
-            state,
+            iteration.state,
             *organization,
             working_capital_reservations,
         ) else {
@@ -218,19 +212,20 @@ fn select_phase_expansion_candidate(
             .expect("eligible expansion organization must have a venue snapshot");
         for (mandate_index, mandate) in organization_mandates.iter().enumerate() {
             let Some(plan) = decide_autonomous_expansion(
-                &iteration,
+                iteration,
                 *organization,
                 mandate,
                 available_working_capital,
                 occupied_locations,
-                &owned_venues,
+                owned_venues,
             )?
             else {
                 continue;
             };
-            let neighborhood = resolve_location_neighborhood(state, plan.location)
+            let neighborhood = resolve_location_neighborhood(iteration.state, plan.location)
                 .expect("autonomous candidate location must resolve to a live neighborhood");
-            let district_leader = district_leaders
+            let district_leader = iteration
+                .district_leaders
                 .get(&neighborhood)
                 .copied()
                 .expect("autonomous candidate neighborhood must retain its influence snapshot");
