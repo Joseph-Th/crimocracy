@@ -77,9 +77,10 @@ owns it. Each `src/*/mod.rs` `//!` header names the canonical mutation path.
 - **Indexes and projections** — derived views maintained from authoritative records. Never independent truth.
 - **Adapters** — own filesystem, process, network, and UI effects. Core systems receive explicit data and return explicit outcomes.
 
-The player-driven text adapter lives in `examples/gameplay_harness/text_play/`,
-separate from the scripted policy evaluator but sharing its canonical authored
-starting scenario. The adapter owns parsing, player-knowledge projections,
+The player-driven text adapter lives in `examples/gameplay_harness/text_play/`
+and can start from either the generated authoritative city or a canonical
+authored opening without running a scripted evaluator. It owns parsing,
+player-knowledge projections,
 interactive/scripted session I/O, and save-file publication. Restored sessions
 derive their organization and records directly from production persistence
 without reconstructing the authored fixture. Its public storefront directory
@@ -91,6 +92,31 @@ moves same-kind liquid funds: street money cannot become accounted money except
 through its canonical conversion path. Consequential mutation still belongs
 to validators/commits and the one-minute `run_tick`; the save envelope owns
 future-affecting state, not the text client.
+
+The generation composer `src/city_generation.rs` builds a new `AppState`
+from a caller-supplied seed and bounded district/business/rival budgets.
+An independent, platform-stable SplitMix64 stream selects district names,
+economic archetypes and institutional presence, unique people, crew capabilities,
+land uses, ownership, and starting relationships. It does not consume the
+simulation's persisted operation, business, enterprise or investigation RNG
+streams. Every entity is inserted or committed through the owning production
+system: world organizations, people, neighborhoods and businesses; police
+jurisdiction and patrol deployments; legitimate operating economies and
+business-ledger accounts; initial street-cash treasury transactions; managerial
+delegation mandates; genuine player and rival gambling enterprises; contact and
+social records; information sources and first burglary opportunities. The
+complete starting state is invariant-checked and has no generator-owned parallel
+truth or persistent metadata. Preset sizes produce 4/8/16 districts with
+48/144/384 businesses; custom plans are validated before any construction.
+The first generated neighborhood is the home label for a saved campaign, while
+the persistent world and all simulation state are restored directly from the
+normal `SaveEnvelope`. Authored openings continue to build through
+`examples/gameplay_harness/scenario.rs` for fixed-situation tests.
+The read-only `city_view::CityScene` projects existing streets, lots and
+modeled business geometry deterministically from the generated `WorldState`;
+road strips are visual topology and do not create persisted transport routes,
+line of sight or pedestrian movement. Public browser exports filter both
+dossier fields and GPU pick IDs through the authorized public directory.
 
 Player governance orders remain in `delegation_system` through validated
 policy and mandate operations, including assignment, revision and revocation.
@@ -297,6 +323,7 @@ competing state owners.
 
 | Module | Owns | Canonical mutation | Key file |
 |---|---|---|---|
+| `city_generation/` and `city_view/` | Seeded composition of simulated districts, businesses, institutions, rival crews, capital, rackets and leads, plus deterministic read-only geometry. No parallel generator-owned runtime state or save schema. | Generator composes existing domain `insert_*` and `validate_* → commit` operations; `CityScene` projects `WorldState`. | `src/city_generation.rs`, `src/city_generation/tests.rs`, `src/city_view.rs`, `examples/city_gui_preview.rs` |
 | `core/` | `SimTime`/`SimDuration`, typed persistent IDs (`IdCounters`), entity refs (`EntityRef`), attention classes, `AppState`, persistence envelope, tick pipeline, invariant validation; due-operation resolution excludes individually unallocatable mandatory after-actions before the shared all-or-none cohort budget so a permanently blocked operation cannot freeze independent work | `core::simulation` runs the tick; `core::state` owns generated state; `core::invariants::validate_state` | `src/core/state.rs`, `src/core/simulation.rs`, `src/core/simulation/operations_phase.rs`, `src/core/simulation/scheduled_phases.rs`, `src/core/invariants/mod.rs` |
 | `registry/` | Immutable authored definitions and validated lookups, including one shared information reliability/specificity quality mapping consumed across domains | `RegistryBuilder` owns registration/completeness; focused authoring validators check domain contracts before insertion; read-only after `content::build_registry` | `src/registry/mod.rs`, `src/registry/builder.rs`, `src/registry/operation_validation.rs` |
 | `src/content/` | Code-owned authored definitions for the registry | `build_registry` | `src/content/mod.rs` owns `CURRENT_CONTENT_REVISION` |

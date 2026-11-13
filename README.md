@@ -37,9 +37,51 @@ cargo text-play --seed 12
 cargo text-play --seed 12 --opening thin-crew
 cargo text-play --load campaign_01
 cargo text-play --seed 12 --script target/text-play/commands.txt
+cargo text-play --generate --seed 12 --city-size small
+cargo text-play --generate --seed 1931 --city-size medium
+cargo text-play --generate --city-size large
 ```
 
-The initial authored city has public storefronts, several owned businesses,
+New procedurally generated campaigns use a fixed world seed and a selectable
+city size:
+
+| Size | Districts | Businesses | Criminal rivals | Police precincts |
+| --- | ---: | ---: | ---: | ---: |
+| Small | 4 | 48 | 2 | 1 |
+| Medium (default) | 8 | 144 | 3 | 2 |
+| Large | 16 | 384 | 5 | 4 |
+
+Each generated city has distinct district names and correlated economic/policing
+profiles, named civilian and institutional characters, staffed police and rival
+organizations, law enforcement jurisdictions and patrols, operating storefronts
+across all 25 business types, real business and criminal ledger accounts,
+delegation mandates, active rival and player rackets, starting crew relationships,
+approachable recruitment prospects, and two actionable burglary leads. Generation
+uses deterministic local randomness for construction; gameplay then follows the
+same authoritative minute ticks, validated operations, finances and persistence
+as authored campaigns. No rival ownership or investigation details are revealed
+just because a generated storefront appears in the public directory.
+
+The seeded city can also be projected into the existing interactive WebGL2 map:
+
+```powershell
+cargo run --locked --example city_gui_preview -- --generate --seed 12 --city-size medium
+python scripts/generated_city_browser_smoke.py
+```
+
+Open `target/agent-output/city_preview/index.html` to inspect generated
+district streets, lots and registered business locations. The map remains a
+read-only visualization. Road geometry and travel routes are not yet a
+simulation-backed transport or movement network. Debug-mode long advances
+may be slow because every simulated minute validates all state invariants;
+use an optimized release build for longer generated-city sessions:
+
+```powershell
+cargo run --locked --release --example gameplay_harness -- --generate --seed 12 --city-size medium
+```
+
+Without `--generate`, the historical authored opening remains the default.
+The authored city has public storefronts, several owned businesses,
 an established racket, connected recruitment prospects, and two burglary leads.
 For example, the following commands work together in a new `--seed 12` session:
 
@@ -152,16 +194,16 @@ representation only when its legal constraints allow it. Alternatively,
 and funding exist. `advance` interrupts on arrests and releases of members
 so manual counsel decisions are not skipped.
 
-New games currently use the canonical authored city scenario, not a generated
-open-world campaign. The `--opening` option chooses among `night-trap`,
+Games may use seeded procedural cities through `--generate` or one of the
+original authored test openings. The `--opening` option chooses among `night-trap`,
 `late-patrol`, `fleeting-window`, `veteran-crew`, `thin-crew`, and `green-scout`;
-these are authored alternative opening conditions, not new campaign generators.
+these are authored alternative opening conditions, not procedural seeds.
 Each unseeded start chooses a fresh replayable world seed;
 the opening banner prints it. Saves use production `build_save` / `restore_save`
 inside `target/text-play/<slot>.sav`. Scripts are ordinary command-per-line
 transcripts and reject invalid actions rather than silently correcting them.
-Loading reads the saved campaign directly, without rebuilding the authored
-starting fixture. The text client shows the player's records, available public
+Loading reads the saved campaign directly, without rebuilding the procedural
+city or authored fixture. The text client shows the player's records, available public
 directory fields, and organization-held intelligence, not hidden law-enforcement
 or rival state. [`TESTING.md`](TESTING.md) distinguishes play from regression evidence.
 

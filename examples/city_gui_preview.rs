@@ -7,6 +7,7 @@
 //! the production player-knowledge adapter or an authoritative campaign save.
 
 use crimocracy::AppState;
+use crimocracy::city_generation::{CityScale, generate_city};
 use crimocracy::city_view::{CityScene, GpuCityChunk};
 use crimocracy::world::world_system::{insert_business, insert_neighborhood};
 use crimocracy::world::{
@@ -97,8 +98,8 @@ struct ExportedDistrict {
 struct PublicDossier {
     id: u32,
     name: String,
-    kind: &'static str,
-    ward: &'static str,
+    kind: String,
+    ward: String,
     ward_id: u32,
     pin: [f32; 3],
     /// Visible mesh roof position for labels and accurate click testing.
@@ -154,7 +155,13 @@ fn make_preview() -> Result<PreviewData, Box<dyn Error>> {
                     owner: BusinessOwner::Independent,
                 },
             )?;
-            public_directory.push((id, name, category, ward_name, neighborhood));
+            public_directory.push((
+                id,
+                name,
+                category.to_owned(),
+                ward_name.to_owned(),
+                neighborhood,
+            ));
         }
     }
 
@@ -171,8 +178,47 @@ fn make_preview() -> Result<PreviewData, Box<dyn Error>> {
             owner: BusinessOwner::Independent,
         },
     )?;
+    project_world(&state, 0x1931_B0C5, public_directory)
+}
+
+/// Preview the same generated authoritative campaign that --generate starts in
+/// text play. Public names/industries are the only disclosed fields; no hidden
+/// ownership, law-enforcement or operational data is embedded in HTML.
+fn make_generated_preview(seed: u64, size: CityScale) -> Result<PreviewData, Box<dyn Error>> {
+    let registry = crimocracy::build_registry();
+    let generated = generate_city(&registry, size.config(seed))
+        .map_err(|error| Box::<dyn Error>::from(error.to_string()))?;
+    let directory = generated
+        .state
+        .world()
+        .public_business_directory()
+        .map(|(id, name, kind, ward)| {
+            let ward_name = generated
+                .state
+                .world()
+                .get_neighborhood(ward)
+                .expect("public directory points to an existing ward")
+                .name()
+                .to_owned();
+            (id, name.to_owned(), format!("{kind:?}"), ward_name, ward)
+        })
+        .collect();
+    project_world(&generated.state, seed ^ 0x9E37_79B9_7F4A_7C15, directory)
+}
+
+fn project_world(
+    state: &AppState,
+    visual_seed: u64,
+    public_directory: Vec<(
+        crimocracy::core::id::BusinessId,
+        String,
+        String,
+        String,
+        crimocracy::core::id::NeighborhoodId,
+    )>,
+) -> Result<PreviewData, Box<dyn Error>> {
     let disclosed: BTreeSet<_> = public_directory.iter().map(|(id, ..)| *id).collect();
-    let city = CityScene::generate_with_columns(state.world(), 0x1931_B0C5, 4)?;
+    let city = CityScene::generate_with_columns(state.world(), visual_seed, 4)?;
     let visual_roofs: BTreeMap<u32, f32> = city
         .districts
         .iter()
@@ -307,7 +353,50 @@ fn render_html(data: &PreviewData) -> Result<String, serde_json::Error> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let data = make_preview()?;
+    let mut generated = false;
+    let mut seed = None;
+    let mut size = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--generate" if !generated => generated = true,
+            "--seed" if seed.is_none() => {
+                let raw = args.next().ok_or("--seed requires a number")?;
+                seed = Some(
+                    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+                        u64::from_str_radix(hex, 16)?
+                    } else {
+                        raw.parse::<u64>()?
+                    },
+                );
+            }
+            "--city-size" if size.is_none() => {
+                size = Some(
+                    match args.next().ok_or("--city-size requires a value")?.as_str() {
+                        "small" => CityScale::Small,
+                        "medium" => CityScale::Medium,
+                        "large" => CityScale::Large,
+                        _ => return Err("--city-size must be small, medium or large".into()),
+                    },
+                );
+            }
+            "--help" => {
+                eprintln!("city_gui_preview [--generate --seed N --city-size small|medium|large]");
+                return Ok(());
+            }
+            other => {
+                return Err(format!("unknown or repeated city preview option {other:?}").into());
+            }
+        }
+    }
+    if !generated && (seed.is_some() || size.is_some()) {
+        return Err("--seed and --city-size require --generate".into());
+    }
+    let data = if generated {
+        make_generated_preview(seed.unwrap_or(12), size.unwrap_or(CityScale::Medium))?
+    } else {
+        make_preview()?
+    };
     let html = render_html(&data)?;
     let output = Path::new(OUTPUT);
     if let Some(parent) = output.parent() {
@@ -366,14 +455,49 @@ mod tests {
     }
 
     #[test]
+    fn generated_campaign_export_uses_the_same_public_city_without_private_state() {
+        let preview = make_generated_preview(12, CityScale::Small).unwrap();
+        let replay = make_generated_preview(12, CityScale::Small).unwrap();
+        assert_eq!(preview.districts.len(), 4);
+        assert_eq!(preview.dossiers.len(), 48);
+        assert_eq!(
+            serde_json::to_vec(&preview).unwrap(),
+            serde_json::to_vec(&replay).unwrap(),
+            "same city seed must export the same geometry and public directory"
+        );
+        let registry = crimocracy::build_registry();
+        let city = generate_city(&registry, CityScale::Small.config(12)).unwrap();
+        let public_names: BTreeSet<_> = city
+            .state
+            .world()
+            .public_business_directory()
+            .map(|(_, name, _, _)| name.to_owned())
+            .collect();
+        let preview_names: BTreeSet<_> = preview
+            .dossiers
+            .iter()
+            .map(|dossier| dossier.name.clone())
+            .collect();
+        assert_eq!(public_names, preview_names);
+        assert!(preview.dossiers.iter().all(|dossier| dossier.ward_id > 0));
+        let html = render_html(&preview).unwrap();
+        assert!(!html.contains("player_organization"));
+        assert!(!html.contains("case_witness"));
+        assert!(!html.contains("police_presence"));
+        assert!(!html.contains("business_owner"));
+        assert!(html.contains("Silver Basin"));
+        assert!(html.contains("drawArraysInstanced"));
+    }
+
+    #[test]
     fn embedded_json_cannot_close_its_script_element() {
         let malicious = PreviewData {
             districts: Vec::new(),
             dossiers: vec![PublicDossier {
                 id: 1,
                 name: "</script><script>alert('x')</script>".to_owned(),
-                kind: "Retail",
-                ward: "Test",
+                kind: "Retail".to_owned(),
+                ward: "Test".to_owned(),
                 ward_id: 1,
                 pin: [0.0, 0.0, 0.0],
                 roof_height: 3.5,

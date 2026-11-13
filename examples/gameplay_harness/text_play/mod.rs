@@ -1,6 +1,6 @@
 //! Line-oriented player client. The scripted evaluator is not involved in command selection.
 //!
-//! The initial campaign uses the existing canonical authored scenario. All subsequent
+//! Campaigns can begin in a generated city or an authored opening. All subsequent
 //! actions run through the same production validation, commit and minute-tick owners
 //! as the evaluation harness. Views contain only the player's staff, books, reports,
 //! and organization-held intelligence; scenario diagnostics never enter this client.
@@ -8,6 +8,7 @@
 use crate::campaign::{
     EvaluationSeeds, FixtureVariation, ScenarioProfile, build_scenario, parse_seed_value,
 };
+use crimocracy::city_generation::{CityScale, generate_city};
 use crimocracy::contacts::contact_system::{
     InstitutionalContactDraft, find_pending_disclosure_sources, validate_contact_disclosure,
     validate_establish_contact, validate_terminate_contact,
@@ -197,6 +198,8 @@ struct Options {
     seed: Option<u64>,
     policy_seed: Option<u64>,
     opening: Option<ScenarioProfile>,
+    generated: bool,
+    city_size: Option<CityScale>,
     load: Option<String>,
     script: Option<PathBuf>,
     brief: bool,
@@ -208,6 +211,8 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         seed: None,
         policy_seed: None,
         opening: None,
+        generated: false,
+        city_size: None,
         load: None,
         script: None,
         brief: false,
@@ -244,6 +249,24 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 let raw = value("--opening", &mut args)?;
                 options.opening = Some(parse_opening(&raw)?);
             }
+            "--generate" => {
+                if options.generated {
+                    return Err("--generate may only appear once".to_owned());
+                }
+                options.generated = true;
+            }
+            "--city-size" => {
+                if options.city_size.is_some() {
+                    return Err("--city-size may only appear once".to_owned());
+                }
+                let raw = value("--city-size", &mut args)?;
+                options.city_size = Some(match raw.as_str() {
+                    "small" => CityScale::Small,
+                    "medium" => CityScale::Medium,
+                    "large" => CityScale::Large,
+                    _ => return Err("--city-size must be small, medium or large".to_owned()),
+                });
+            }
             "--load" => {
                 if options.load.is_some() {
                     return Err("--load may only appear once".to_owned());
@@ -261,9 +284,23 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         }
     }
     if options.load.is_some()
-        && (options.seed.is_some() || options.policy_seed.is_some() || options.opening.is_some())
+        && (options.seed.is_some()
+            || options.policy_seed.is_some()
+            || options.opening.is_some()
+            || options.generated
+            || options.city_size.is_some())
     {
-        return Err("--load cannot be combined with seed or opening options".to_owned());
+        return Err(
+            "--load cannot be combined with generation, seed or opening options".to_owned(),
+        );
+    }
+    if options.city_size.is_some() && !options.generated {
+        return Err("--city-size requires --generate".to_owned());
+    }
+    if options.generated && (options.opening.is_some() || options.policy_seed.is_some()) {
+        return Err(
+            "--generate cannot be combined with an authored opening or policy seed".to_owned(),
+        );
     }
     Ok(options)
 }
@@ -407,7 +444,7 @@ struct Session<'a> {
     state: AppState,
     player: OrganizationId,
     seeds: EvaluationSeeds,
-    district: &'static str,
+    district: String,
     district_variant: &'static str,
 }
 
@@ -457,8 +494,32 @@ impl<'a> Session<'a> {
             state: scenario.state,
             player: scenario.player,
             seeds,
-            district: scenario.variation.neighborhood_name(),
+            district: scenario.variation.neighborhood_name().to_owned(),
             district_variant: scenario.variation.label(),
+        })
+    }
+
+    fn new_generated(
+        registry: &'a Registry,
+        seeds: EvaluationSeeds,
+        size: CityScale,
+    ) -> Result<Self, String> {
+        let city = generate_city(registry, size.config(seeds.world))
+            .map_err(|error| format!("city generation failed: {error}"))?;
+        let district = city
+            .state
+            .world()
+            .get_neighborhood(city.home)
+            .ok_or("generated home district missing")?
+            .name()
+            .to_owned();
+        Ok(Self {
+            registry,
+            state: city.state,
+            player: city.player,
+            seeds,
+            district,
+            district_variant: "PROCEDURAL",
         })
     }
 
@@ -470,8 +531,20 @@ impl<'a> Session<'a> {
             bincode::deserialize(&bytes).map_err(|e| format!("invalid campaign file: {e}"))?;
         // Derive presentation labels from saved metadata without recreating
         // the authored scenario or touching its persisted world state.
-        let variation = FixtureVariation::from_seed(file.world_seed);
         let state = restore_save(registry, file.campaign).map_err(|e| e.to_string())?;
+        let generated = state.world().neighborhoods().count() > 2;
+        let variation = FixtureVariation::from_seed(file.world_seed);
+        let district = if generated {
+            state
+                .world()
+                .neighborhoods()
+                .next()
+                .ok_or("generated city has no districts")?
+                .name()
+                .to_owned()
+        } else {
+            variation.neighborhood_name().to_owned()
+        };
         let player = state
             .player_organization()
             .ok_or("saved campaign has no player organization")?;
@@ -480,8 +553,12 @@ impl<'a> Session<'a> {
             state,
             player,
             seeds: EvaluationSeeds::new(file.world_seed, file.policy_seed),
-            district: variation.neighborhood_name(),
-            district_variant: variation.label(),
+            district,
+            district_variant: if generated {
+                "PROCEDURAL"
+            } else {
+                variation.label()
+            },
         })
     }
 
@@ -841,6 +918,8 @@ mod contact_play;
 mod debrief_play;
 #[cfg(test)]
 mod debrief_tests;
+#[cfg(test)]
+mod generation_tests;
 mod governance;
 #[cfg(test)]
 mod legal_disclosure_tests;
@@ -870,7 +949,7 @@ fn run_with_io(
 ) -> Result<(), String> {
     let options = parse_options(args)?;
     if options.help {
-        writeln!(output, "Text play: --seed N [--policy-seed N] [--opening PROFILE] [--script FILE] [--brief], or --load SLOT [--script FILE]\nOpenings: night-trap, late-patrol, fleeting-window, veteran-crew, thin-crew, green-scout\n{HELP}").map_err(|e| e.to_string())?;
+        writeln!(output, "Text play: --generate [--city-size small|medium|large] [--seed N] [--script FILE] [--brief]\nOr: --seed N [--policy-seed N] [--opening PROFILE] [--script FILE] [--brief]\nOr: --load SLOT [--script FILE]\nAuthored openings: night-trap, late-patrol, fleeting-window, veteran-crew, thin-crew, green-scout\n{HELP}").map_err(|e| e.to_string())?;
         return Ok(());
     }
     let (mut session, label) = if let Some(slot) = options.load {
@@ -878,15 +957,23 @@ fn run_with_io(
     } else {
         let world = options.seed.unwrap_or_else(fresh_seed);
         let seeds = EvaluationSeeds::new(world, options.policy_seed.unwrap_or(world));
-        let opening = options.opening.unwrap_or(ScenarioProfile::NightTrap);
-        (
-            if opening == ScenarioProfile::NightTrap {
-                Session::new(registry, seeds)?
-            } else {
-                Session::new_with_opening(registry, seeds, opening)?
-            },
-            format!("New authored city opening: {}", opening.label()),
-        )
+        if options.generated {
+            let size = options.city_size.unwrap_or(CityScale::Medium);
+            (
+                Session::new_generated(registry, seeds, size)?,
+                format!("New procedurally generated {} city", size.label()),
+            )
+        } else {
+            let opening = options.opening.unwrap_or(ScenarioProfile::NightTrap);
+            (
+                if opening == ScenarioProfile::NightTrap {
+                    Session::new(registry, seeds)?
+                } else {
+                    Session::new_with_opening(registry, seeds, opening)?
+                },
+                format!("New authored city opening: {}", opening.label()),
+            )
+        }
     };
     writeln!(
         output,

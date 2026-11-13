@@ -72,6 +72,24 @@ scripts, or CDN is needed. Source files are `gui/city_preview/{index.html,styles
 the Rust exporter is `examples/city_gui_preview.rs`. The output file lives in the
 ignored `target/` directory and can be regenerated whenever the source changes.
 
+The preview also supports real procedurally generated campaign cities:
+
+```powershell
+cargo run --locked --example city_gui_preview -- --generate --seed 12 --city-size medium
+python scripts/generated_city_browser_smoke.py
+```
+
+`--city-size` accepts `small` (4 districts, 48 modeled businesses),
+`medium` (8, 144), or `large` (16, 384). The exporter calls the same
+`city_generation::generate_city` as `cargo text-play --generate`, then
+derives public streets, lots and buildings through `CityScene` using the
+same seed. It exports only public business/district names, business kinds
+and pick IDs; hidden ownership, investigations and player intelligence are
+not serialized. `scripts/generated_city_browser_smoke.py` checks all
+nonzero GPU business IDs against the complete public directory and tests
+real WebGL2 rendering, navigation, selection and city overview. The
+rendered screenshot is saved to `target/agent-output/city_preview/generated-overview.png`.
+
 The preview renders the actual `CityScene` instance buffers with WebGL2's
 `drawArraysInstanced`, keeping GPU instance buffers resident while camera
 changes create new visible draw ranges. WebGL2 has no base-instance argument
@@ -100,17 +118,18 @@ collision checks and a 24-label limit avoid clutter. The directory caps its
 rendered rows at 200 and retains search across the full authorized directory.
 Escape dismisses selection even when the search box has focus.
 
-**Disclosure boundary:** the bundled eight-district, 96-property world is a
-fictional fixture built with the canonical world insertion APIs. All exported
-names and categories are intentionally authored as public. The exporter does
+**Disclosure boundary:** the no-argument default still renders the bundled
+eight-district, 96-property fictional fixture through canonical world insertion
+APIs; `--generate` uses an actual generated campaign. Names/categories come
+from the deliberately public business directory in either mode. The exporter does
 not serialize live intelligence, owner identities, police records, case details,
 or unrevealed economic information. An additional unlisted sample property
 proves that the binary GPU instance buffers mask its persistent ID to zero;
 player-facing exports must explicitly supply their authorized public directory
 IDs to `GpuCityChunk::encode`. The browser is a read-only projection, not
-a campaign loader or a gameplay command adapter. A future campaign integration
-must populate public dossier fields from player-visible information sources,
-not from hidden `AppState` truth, and must send gameplay actions through the
+a campaign loader or a gameplay command adapter. A future interactive campaign
+integration must continue populating dossiers only from player-visible
+information and must send gameplay actions through the
 canonical validated systems. Browsing a building must never disclose its
 hidden records by inference from an unfiltered payload.
 

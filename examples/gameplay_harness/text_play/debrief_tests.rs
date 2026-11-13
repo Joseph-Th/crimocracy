@@ -166,7 +166,7 @@ fn debrief_preserves_personal_source_lineage_and_is_idempotent_on_repeat() {
         state: restored,
         player: session.player,
         seeds: session.seeds,
-        district: session.district,
+        district: session.district.clone(),
         district_variant: session.district_variant,
     };
     assert_eq!(after, snapshot(&registry, &resumed));

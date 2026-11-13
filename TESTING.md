@@ -148,9 +148,10 @@ Documentation contracts are intentionally outside Rust's integration-test graph.
 
 Use `cargo text-play` to play through decisions and consequences without an
 automated evaluation policy selecting the player's moves. This is a thin
-terminal adapter under `examples/gameplay_harness/text_play/`; it shares the
-canonical authored starting scenario in `scenario.rs` but does not run any
-automated strategy or rebuild that fixture during save restoration. Its
+terminal adapter under `examples/gameplay_harness/text_play/`; it can start
+from `city_generation::generate_city` or the existing authored `scenario.rs`
+fixture, but never runs an automated player strategy or reconstructs either
+world during save restoration. Its
 `mod.rs` owns session creation, current-version saves, options, and the
 player-scoped read-only selection rules; `commands.rs` dispatches interactive
 player choices, `governance.rs` delegates policy/mandate mutation to the
@@ -175,7 +176,9 @@ business acquisition, enterprise establishment and lifecycle, burglary and
 reconnaissance, discovery, disposition, and decision resolution all use canonical
 owner paths. Generic money movement is not a laundering or minting shortcut.
 The `--opening` option selects one of six deterministic authored alternatives;
-`--load` excludes all seed/opening overrides and restores its saved campaign.
+`--generate [--city-size small|medium|large] [--seed N]` constructs a fresh
+seeded world and does not accept authored opening or policy seed overrides.
+`--load` excludes generation/seed/opening overrides and restores its saved campaign.
 `operation-kinds` derives role, approach, duration and relevant intelligence
 topics from the registry. `plan` uses the current player roster, rejects
 automatic assignment of untrained specialists, globally matches the required
@@ -258,19 +261,71 @@ non-mutating rejection, real laundering fees, and save/restore stability.
 their existing indexed queries, restricted to current player assets and to
 business cycles actually earned during player ownership.
 
-Start with `cargo text-play --seed 12` for reproducibility and use `help` for
+Start with `cargo text-play --generate --seed 12 --city-size small`
+or `cargo text-play --seed 12` for reproducibility and use `help` for
 the available actions. Script input is one command per line, with blank lines
 and lines beginning `#` ignored. Interactive command rejection prints a
 reason without ending the session; a rejected scripted command fails with its
 line number. Excess or malformed command arguments are rejected before any
-mutation. The currently playable opening is an authored scenario, not general
-campaign generation. An initial crew is authored, but current crew membership
-and skills determine available orders and recruitment changes that roster.
+mutation. Procedural campaigns create real initial rosters, independent
+businesses, district profiles and patrol schedules from the world seed;
+authored scenario openings remain available to test fixed situations.
+Current crew membership and skills determine available orders and recruitment
+changes that roster.
 The terminal exposes the production surveillance/infiltration target shapes,
 but detailed investigation discovery and witness/detention status acquisition
 still depend on information produced by the modeled world and contacts;
 watching an authority can reveal active casework without revealing its private
-case IDs. Organic campaign generation remains outside the authored opening.
+case IDs. The city generator does not simulate transportation topology, traffic,
+citizen schedules or moving street actors: the presentation road grid is not
+authoritative travel state.
+
+## Procedural city generation
+
+`src/city_generation.rs` owns deterministic starting-world composition,
+not a competing subsystem. Its independent SplitMix64 construction RNG
+chooses unique district and person names, correlated wealth/commerce/demand/
+police profiles, staffing, relationships, business types/functions and owners.
+Every durable record is created through the same production insertion and
+validated commit paths used in normal play. Starter police coverage and
+patrol windows, rival organizational autonomy, operating business accounts,
+player/rival enterprise accounts, and burglary leads are actually present and
+participate in the canonical tick. Construction does not consume the four
+independent persisted simulation RNG streams. Generated starting identities
+are temporary return values, not a second save schema; the original campaign
+envelope saves only authoritative state. Validated custom city budgets are
+bounded to 4-24 districts and 8-40 businesses per district.
+
+`src/city_generation/tests.rs` checks exact same-seed serialized state
+and visual layout, changed-seed diversity, invariant-safe creation for
+24 small-city seeds, all three scale envelopes and the maximum supported
+24-district/960-business/8-rival configuration containing all 25 business
+kinds, real minute ticks, business books, rival rackets, police coverage, and save/restore
+equivalence. `text_play/generation_tests.rs` checks startup flags and
+mutual exclusions, world and district identity after actual slot save/load,
+player-safe target rejection and real district surveillance, and all CLI sizes.
+The generated preview case in `examples/city_gui_preview.rs` checks the
+public-dossier names against the generated world and ensures that hidden
+ownership, legal or intelligence state is not serialized to the browser.
+
+End-to-end inspection commands:
+
+```powershell
+cargo test --locked --lib city_generation
+cargo test --locked --example gameplay_harness generation_tests
+cargo test --locked --example city_gui_preview generated_campaign_export
+cargo text-play --generate --seed 12 --city-size small
+cargo run --locked --example city_gui_preview -- --generate --seed 12 --city-size medium
+python scripts/generated_city_browser_smoke.py
+```
+
+The generated WebGL2 smoke checks the actual headless render, every nonzero
+GPU business ID against the public directory, player-safe payload fields,
+district navigation, property selection and whole-city overview. Its screenshot
+is written under `target/agent-output/city_preview/`. Longer sessions
+should use `cargo run --locked --release --example gameplay_harness -- --generate --seed 12`
+where practical: debug `run_tick` performs an
+expensive full invariant check after each of the canonical minute ticks.
 
 Text play is the primary judge of comprehension, usability, and campaign
 pacing. Do not reintroduce a scripted policy that selects the player's moves:

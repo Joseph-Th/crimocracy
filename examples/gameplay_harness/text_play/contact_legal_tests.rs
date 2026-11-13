@@ -101,7 +101,7 @@ fn text_play_legal_contact_can_be_established_saved_and_terminated() {
         state: saved,
         player: session.player,
         seeds: session.seeds,
-        district: session.district,
+        district: session.district.clone(),
         district_variant: session.district_variant,
     };
     assert_eq!(before, snapshot(&registry, &resumed));
@@ -376,7 +376,7 @@ fn text_play_player_can_retain_and_withdraw_counsel_in_real_custody() {
         state: restored_state,
         player: session.player,
         seeds: session.seeds,
-        district: session.district,
+        district: session.district.clone(),
         district_variant: session.district_variant,
     };
     assert_eq!(after, snapshot(&registry, &restored));

@@ -16,12 +16,18 @@ Crimocracy text play
 
 Usage:
   cargo text-play                    Start a new campaign from the default opening
+  cargo text-play --generate          Generate a new simulated city
+  cargo text-play --generate --city-size small|medium|large
+                                     Select generated city scale (default medium)
   cargo text-play --seed <n>         Start from an explicit world seed
   cargo text-play --policy-seed <n>  Vary authored opening timing independently
   cargo text-play --opening <name>   night-trap | late-patrol | fleeting-window |
                                      veteran-crew | thin-crew | green-scout
   cargo text-play --script <file>    Read commands from a file instead of a terminal
   cargo text-play --load <slot>      Resume a saved campaign
+
+For longer procedurally generated campaigns, use an optimized build:
+  cargo run --locked --release --example gameplay_harness -- --generate --seed 12
 
 Inside a session, `help` lists player commands and `brief` states the situation.
 ";

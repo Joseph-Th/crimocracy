@@ -132,7 +132,7 @@ fn text_play_ledger_is_owner_scoped_and_internal_transfers_are_unique() {
         state: restored,
         player: session.player,
         seeds: session.seeds,
-        district: session.district,
+        district: session.district.clone(),
         district_variant: session.district_variant,
     };
     assert_eq!(

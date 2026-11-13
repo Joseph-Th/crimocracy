@@ -73,7 +73,7 @@ fn text_play_governance_policy_and_mandate_changes_are_canonical() {
         state: restore_save(&registry, save).unwrap(),
         player: session.player,
         seeds: session.seeds,
-        district: session.district,
+        district: session.district.clone(),
         district_variant: session.district_variant,
     };
     assert!(

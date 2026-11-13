@@ -79,7 +79,7 @@ fn text_play_reconnaissance_directory_guards_unknown_world_and_admin_ids() {
         state: restored,
         player: session.player,
         seeds: session.seeds,
-        district: session.district,
+        district: session.district.clone(),
         district_variant: session.district_variant,
     };
     assert_eq!(directory, resumed.execute("known-targets").unwrap().0);
