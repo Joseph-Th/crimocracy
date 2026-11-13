@@ -103,6 +103,31 @@ organization-held character/personnel information. Sensitive witness and
 detention objectives require the production operation owner's typed legal-person
 status proof, never inspection of hidden cases from the player adapter.
 
+Broad reconnaissance target selection lives in `text_play/reconnaissance.rs`.
+The player adapter admits deliberately public neighborhoods and business
+identities without further discovery. Organizations, people and administrative
+records require a known ID from player membership, contact institutions,
+recruitment candidate discovery, own operations/enterprises, or explicit
+organization-held information; case-witness signals identify the specific
+investigation without revealing its live state. The adapter uses generic labels
+for learned rival records, never reads hidden titles or current status to
+populate the targeting directory, and defers objective viability to the
+operation owner. Surveillance and infiltration observe the target through
+`surveillance_integration`, producing first-party intel after the simulated
+resolution rather than at authorization. An institutional sightline about
+player-originated cases does not confer access to all the authority's cases.
+
+The planner attaches the registry's supported police contingencies, bounded
+relative scheduling, completion deadlines and known-topic requirements to
+`OperationDraft`; `operation_system` validates entry-stage support,
+execution windows, intelligence freshness and crew reservations. Manual
+`cancel` delegates to `operation_system::apply_transition` with its
+authority-abort transition and never directly rewrites operation runtime.
+The client treats a current recruitment prospect as identified because the
+production recruitment owner already established a playable relationship to
+that person. Typed legal-person operation authorization remains stricter than
+being generally acquainted with a character.
+
 The contact interface derives candidates from organization-held identities,
 existing sponsor-owned contact records, and actual social relationships to
 current staff. Undisclosed source details remain behind

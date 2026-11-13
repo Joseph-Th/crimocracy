@@ -89,15 +89,32 @@ Leadership decisions include `policies`, `policy`, `mandates`, `delegate`, and
 `mandate` for organization-level recruitment and legal-support rules, managerial
 territory/functions, standing orders, budgets, and revocation. `districts` and
 `directory` expose public district IDs needed for territorial delegation.
-`operation-kinds` lists the complete authored operation vocabulary with required
-crew skills and supported approaches. `plan <kind> <business-id>` accepts
-player-driven plans using those definitions; `plan` also accepts `char-N` for
-witness pressure and extraction when the organization has learned the relevant
-legal-person status. `known-people` lists people the organization has identified,
-not every person in the simulation. Automatic staffing requires rated skill for
-each required role, while an explicit `Role=char-N` assignment permits the player
-to take the risk of an untrained participant. Burglary continues to use `burgle`
-so existing known opportunities are converted through their actual lifecycle.
+`operation-kinds` lists the authored operation vocabulary, required crew skills,
+supported approaches, and relevant intelligence topics. `plan <kind> <target-id>`
+authorizes operations against eligible business targets. Surveillance and
+infiltration additionally accept public `district-N` and `business-N` targets,
+or identified `char-N`, `org-N`, `operation-N`, `investigation-N`,
+and `enterprise-N` records. `known-targets` lists identified institutional and
+administrative targets; it never searches hidden case or rival rosters.
+`known-people` includes current crew, observed people, contacts, and recruitment
+prospects. `plan` also accepts `char-N` for witness pressure and extraction
+when the organization has learned typed, episode-specific legal status.
+
+All `plan` orders accept optional `approach=...`, `leader=char-N`,
+`Role=char-N`, `police=press|ask|abort`, `delay=2h`, `deadline=6h`,
+and `need=PoliceActivity` options. Delays and deadlines are measured from the
+current simulated minute and capped at seven days. `police=press` is the default:
+the crew continues under any response penalties. `police=ask` requests a
+leadership decision; `police=abort` adds a pre-entry escape when the operation
+has an actual authored entry stage, then asks leadership on later arrivals.
+`need` requires usable organization-held intelligence of an applicable topic
+before authorization. The production owner validates every constraint and crew
+booking. Automatic staffing requires trained roles, while explicit
+`Role=char-N` permits knowingly untrained people.
+`cancel operation-N` withdraws an authorized or running operation through
+the canonical abort path, files its report, and releases personnel; pending
+leadership decisions must instead be resolved with `decide`. Burglary still uses
+`burgle` to consume actual leads through their conversion lifecycle.
 
 Institutional relationships and legal defense are player-managed.
 `connections` lists known outside acquaintances and eligible handlers;

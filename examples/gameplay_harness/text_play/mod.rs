@@ -14,7 +14,9 @@ use crimocracy::contacts::contact_system::{
 };
 use crimocracy::contacts::{ContactKind, ContactStatus};
 use crimocracy::core::entity::EntityRef;
-use crimocracy::core::id::{ArrestId, BusinessId, CharacterId, OrganizationId};
+use crimocracy::core::id::{
+    ArrestId, BusinessId, CharacterId, EnterpriseId, InvestigationId, OperationId, OrganizationId,
+};
 use crimocracy::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::state::AppState;
@@ -58,14 +60,16 @@ use crimocracy::legal::legal_representation_system::{
 use crimocracy::legal::{
     LegalRepresentationDraft, LegalRepresentationEndReason, LegalRepresentationOrigin,
 };
-use crimocracy::operations::operation_system::validate_authorize_operation;
+use crimocracy::operations::operation_system::{
+    OperationTransition, apply_transition, validate_authorize_operation,
+};
 use crimocracy::operations::property_disposition::{
     CashDispositionDraft, PropertyDispositionDraft, validate_deposit_operation_cash,
     validate_dispose_property,
 };
 use crimocracy::operations::{
-    ALL_OPERATION_KINDS, OperationApproach, OperationContingency, OperationDraft, OperationKind,
-    OperationObjective, OperationStatus, RoleKind,
+    ALL_OPERATION_KINDS, OperationApproach, OperationConstraint, OperationContingency,
+    OperationDraft, OperationKind, OperationObjective, OperationStatus, RoleKind,
 };
 use crimocracy::opportunities::opportunity_system::{
     validate_convert_opportunity, validate_discover_operation_opportunity,
@@ -93,7 +97,8 @@ const MAX_ADVANCE: u64 = DAY_MINUTES * 7;
 const HELP: &str = "Commands:
   brief                  Leadership's current situation
   people                 Your current organization members
-  known-people           People identified by your intelligence or current membership
+  known-people           Your members, identified people, and approach-ready prospects
+  known-targets          Identified organizations, operations, cases, and enterprises
   connections            Known institutional acquaintances with an existing staff relationship
   contacts               Your established institutional channels and their pending disclosures
   connect <handler-id> <known-person-id>  Establish a contact using a real relationship
@@ -142,12 +147,16 @@ const HELP: &str = "Commands:
                          Transfer between same-kind organization accounts
   intelligence           Information held by your organization
   operation-kinds        Authorized operation families and required crew roles
-  plan <kind> <business-id|char-id> [approach=covert] [leader=char-id] [Role=char-id...]
-                         Authorize an operation with optional explicit crew assignments
+  plan <kind> <target-id> [approach=...] [leader=char-id] [Role=char-id...] [police=press|ask|abort]
+                         [delay=Nh] [deadline=Nh] [need=InformationTopic]
+                         Authorize with optional crew, contingency, schedule and knowledge gates.
+                         Surveillance/infiltration also target
+                         known org-, char-, district-, operation-, investigation-, enterprise-IDs
   opportunities          Known burglary leads and their deadlines
   discover <business-id> File a burglary lead from observed intelligence
   operations             Your authorized and completed operations
   operation <id>          Inspect your operation, crew, and observed outcome
+  cancel <operation-id>  Withdraw an authorized or active operation; release crew bookings
   dispose <operation-id> <resale-business-id> <cash-id> <settlement-id>
                          Liquidate held property through an owned resale venue
   deposit <operation-id> <cash-id> <settlement-id>
@@ -355,9 +364,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "help" | "quit" | "exit" | "brief" | "people" | "known-people" | "prospects"
         | "directory" | "businesses" | "enterprises" | "racket-kinds" | "finances" | "accounts"
         | "intelligence" | "opportunities" | "operations" | "decisions" | "connections"
-        | "contacts" | "counsel" | "policies" | "mandates" | "operation-kinds" | "districts" => {
-            1..=1
-        }
+        | "contacts" | "counsel" | "policies" | "mandates" | "operation-kinds" | "districts"
+        | "known-targets" => 1..=1,
         "recruit" | "scout" => 2..=3,
         "start-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
@@ -368,10 +376,10 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "ledger" => 1..=2,
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
-        | "wait" | "save" | "transaction" => 2..=2,
+        | "wait" | "save" | "transaction" | "cancel" => 2..=2,
         "policy" | "delegate" => 3..=3,
         "mandate" => 3..=6,
-        "plan" => 3..=14,
+        "plan" => 3..=32,
         "connect" => 3..=3,
         "contact" => 1..=3,
         "retain" => 4..=4,
@@ -642,6 +650,12 @@ impl<'a> Session<'a> {
                 .contacts_for_sponsor(self.player)
                 .map(|contact| contact.contact()),
         );
+        // The recruitment owner has already confirmed a real, player-visible
+        // relationship to every approach-ready prospect. Those individuals
+        // must also be eligible for observation before the boss recruits them.
+        if let Ok(prospects) = self.player_prospects() {
+            known.extend(prospects);
+        }
         for info in self.organization_information() {
             if let EntityRef::Character(id) = info.subject() {
                 known.insert(id);
@@ -658,6 +672,80 @@ impl<'a> Session<'a> {
         self.known_character_ids()
             .into_iter()
             .find(|id| id.raw() == raw)
+    }
+
+    /// Organizational affiliation is not general player knowledge. Only our
+    /// own identity, established contacts, or held information naming an
+    /// institution make it a selectable reconnaissance target.
+    fn known_organization_ids(&self) -> BTreeSet<OrganizationId> {
+        let mut known = BTreeSet::from([self.player]);
+        known.extend(
+            self.state
+                .contacts()
+                .contacts_for_sponsor(self.player)
+                .map(|contact| contact.institution()),
+        );
+        for info in self.organization_information() {
+            for entity in [Some(info.subject()), info.source_entity()]
+                .into_iter()
+                .flatten()
+            {
+                if let EntityRef::Organization(id) = entity {
+                    known.insert(id);
+                }
+            }
+        }
+        known
+    }
+
+    fn known_operation_ids(&self) -> BTreeSet<OperationId> {
+        let mut known = self
+            .state
+            .operations()
+            .operations_for_organization(self.player)
+            .map(|operation| operation.id())
+            .collect::<BTreeSet<_>>();
+        known.extend(self.organization_information().filter_map(|info| {
+            if let EntityRef::Operation(id) = info.subject() {
+                Some(id)
+            } else {
+                None
+            }
+        }));
+        known
+    }
+
+    fn known_enterprise_ids(&self) -> BTreeSet<EnterpriseId> {
+        let mut known = self
+            .state
+            .enterprises()
+            .enterprises_for_organization(self.player)
+            .map(|enterprise| enterprise.id())
+            .collect::<BTreeSet<_>>();
+        known.extend(self.organization_information().filter_map(|info| {
+            if let EntityRef::Enterprise(id) = info.subject() {
+                Some(id)
+            } else {
+                None
+            }
+        }));
+        known
+    }
+
+    fn known_investigation_ids(&self) -> BTreeSet<InvestigationId> {
+        let mut known = BTreeSet::new();
+        for info in self.organization_information() {
+            if let EntityRef::Investigation(id) = info.subject() {
+                known.insert(id);
+            }
+            if let Some(InformationSignal::LegalPersonStatus(
+                LegalPersonStatusSignal::CaseWitness { investigation },
+            )) = info.signal()
+            {
+                known.insert(*investigation);
+            }
+        }
+        known
     }
 
     fn known_opportunities(&self) -> Vec<&crimocracy::opportunities::OpportunityRecord> {
@@ -739,11 +827,18 @@ impl<'a> Session<'a> {
     }
 }
 
+#[cfg(test)]
+mod cancellation_tests;
 mod commands;
 mod contact_play;
 mod governance;
 mod legal_play;
 mod planning;
+#[cfg(test)]
+mod planning_options_tests;
+mod reconnaissance;
+#[cfg(test)]
+mod reconnaissance_tests;
 
 pub fn run(registry: &Registry, args: &[String]) -> Result<(), String> {
     let stdin = std::io::stdin();

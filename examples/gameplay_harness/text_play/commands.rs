@@ -44,7 +44,9 @@ impl Session<'_> {
                     .unwrap();
                 }
             }
-            "operation-kinds" | "plan" => out = self.execute_planning(&words)?,
+            "operation-kinds" | "known-targets" | "plan" => {
+                out = self.execute_planning(&words)?;
+            }
             "people" => {
                 for person in state.world().characters_in_organization(self.player) {
                     let supervisor = person
@@ -82,7 +84,7 @@ impl Session<'_> {
                     let relationship = if person.organization() == Some(self.player) {
                         "organization member"
                     } else {
-                        "identified by intelligence"
+                        "identified outside person"
                     };
                     writeln!(
                         out,
@@ -869,8 +871,9 @@ impl Session<'_> {
                 }
                 writeln!(
                     out,
-                    "Planning intelligence: {} record(s); contingencies: {:?}",
+                    "Planning intelligence: {} record(s); constraints: {:?}; contingencies: {:?}",
                     op.intelligence().len(),
+                    op.constraints(),
                     op.contingencies()
                 )
                 .unwrap();
@@ -906,6 +909,25 @@ impl Session<'_> {
                 if op.abort_record().is_some() {
                     out.push_str("Operation was aborted. See the reports for the crew's debrief.");
                 }
+            }
+            "cancel" => {
+                let raw = parse_number(words[1], "operation")?;
+                let operation = state
+                    .operations()
+                    .operations_for_organization(self.player)
+                    .find(|record| record.id().raw() == raw)
+                    .ok_or("operation is not owned by your organization")?
+                    .id();
+                apply_transition(
+                    self.registry,
+                    &mut self.state,
+                    operation,
+                    OperationTransition::Abort,
+                )
+                .map_err(|error| error.to_string())?;
+                writeln!(out,
+                    "Withdrew operation-{}. Its authoritative abort report was filed and assigned crew were released.",
+                    operation.raw()).unwrap();
             }
             "dispose" => {
                 if words.len() != 5 {

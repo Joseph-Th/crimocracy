@@ -176,13 +176,30 @@ reconnaissance, discovery, disposition, and decision resolution all use canonica
 owner paths. Generic money movement is not a laundering or minting shortcut.
 The `--opening` option selects one of six deterministic authored alternatives;
 `--load` excludes all seed/opening overrides and restores its saved campaign.
-`operation-kinds` derives actual role/approach/duration requirements from the
-registry. `plan` uses the current player roster, rejects automatic assignment
-of untrained specialists, and accepts explicit role/leader choices. Foreign
-businesses require organization-held target information; person-targeted
-extraction and witness pressure require identified characters, while canonical
-authorization enforces typed, episode-bound learned legal-status facts. A
-general observation about a person is not evidence of witness status or arrest.
+`operation-kinds` derives role, approach, duration and relevant intelligence
+topics from the registry. `plan` uses the current player roster, rejects
+automatic assignment of untrained specialists, and accepts explicit crew,
+leader, police-response, start-delay, completion-deadline, and required-topic
+options through canonical authorization. Foreign business actions require
+organization-held target information. Surveillance/infiltration can begin at
+public venues and neighborhoods, but non-public organizations, operations,
+investigations, people and enterprises must already be identified by sponsor
+contacts, recruitment prospects, ownership, or organization-held information.
+No typed ID creates knowledge of a hidden record. Witness pressure and
+extraction still require actual episode-bound learned legal-person status;
+ordinary person sightings or authority-level case-activity sightings are
+not equivalent to witness registration or custody evidence.
+
+`reconnaissance_tests.rs` covers all selectable target forms, foreign
+institution/case boundaries, full district patrol observations, recruitment
+prospect surveillance, watchable own operation/enterprise records, and a real
+police sightline after a criminal incident. `planning_options_tests.rs`
+proves bounded schedule arithmetic, deadline and pre-entry contingency gates,
+same-state rejection, persistence, and the flow from surveillance-learned
+personnel information into a genuine required-intelligence infiltration.
+`cancellation_tests.rs` proves player-only cancellation of scheduled and
+in-progress operations via the production abort owner, durable debriefs,
+crew-booking release, and restored state equivalence.
 
 Leadership pauses for pending decisions, enabled urgent-report attention, and
 terminal outcomes of its own operations, plus player-member arrests and releases
@@ -227,9 +244,11 @@ line number. Excess or malformed command arguments are rejected before any
 mutation. The currently playable opening is an authored scenario, not general
 campaign generation. An initial crew is authored, but current crew membership
 and skills determine available orders and recruitment changes that roster.
-The CLI still covers only business and legally identified person targets; other
-valid operation target forms, organic campaign generation, and proactive legal
-intelligence acquisition remain outside this adapter's current command surface.
+The terminal exposes the production surveillance/infiltration target shapes,
+but detailed investigation discovery and witness/detention status acquisition
+still depend on information produced by the modeled world and contacts;
+watching an authority can reveal active casework without revealing its private
+case IDs. Organic campaign generation remains outside the authored opening.
 
 Text play is the primary judge of comprehension, usability, and campaign
 pacing. Do not reintroduce a scripted policy that selects the player's moves:
