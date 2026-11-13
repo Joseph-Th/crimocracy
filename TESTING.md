@@ -199,6 +199,26 @@ The independently employed lawyer in the authored opening does not grant free
 representation. Production saves retain these relationships, cases, and payments
 and reconstruct their indexes on restoration.
 
+The economy client also exposes manual storefront suspension/resumption and
+district-wide enterprises backed by zero or more actual owned support businesses.
+A racket with required host functions cannot be started at a district-only
+location; all account, delegation, infrastructure and settlement checks remain
+canonical. Suspended business books keep their laundering-window history, and
+active hosted or supporting rackets lock their own storefront dependencies.
+`economy_play_tests.rs` covers multi-support establishments, duplicate
+rejection, genuine daily settlement alongside business-hosted rackets, lifecycle
+gating, and persistence.
+
+`finance_play.rs` presents a bounded, newest-first journal selected by
+the finance owner's per-account chronology indexes. Transfers touching multiple
+player accounts appear once, and a guessed rival transaction ID is not enough
+to display rival books. The detail view prints only player-owned postings.
+`finance_play_tests.rs` proves ownership isolation, same-minute ordering,
+non-mutating rejection, real laundering fees, and save/restore stability.
+`economy_history.rs` lists historical business and enterprise cycles from
+their existing indexed queries, restricted to current player assets and to
+business cycles actually earned during player ownership.
+
 Start with `cargo text-play --seed 12` for reproducibility and use `help` for
 the available actions. Script input is one command per line, with blank lines
 and lines beginning `#` ignored. Interactive command rejection prints a

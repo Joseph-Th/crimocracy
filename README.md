@@ -67,6 +67,24 @@ accounts of the same spendable money kind, never dirty cash directly to clean
 funds. `operation`, `dispose` and `deposit` handle held proceeds through
 production reports and ledger transactions.
 
+`start-racket` accepts either an owned `business-N` venue or a public
+`district-N` for rackets that do not require a physical host. Supply any
+number of distinct owned support-business IDs after the two account IDs;
+distributed numbers and slot-machine rackets need multiple actual business
+functions across that network. `racket-kinds` lists the required
+functions. `business business-N suspend` pauses a player-owned storefront
+only after its active racket dependencies are suspended;
+`business business-N resume` restarts its real operating cycle without resetting the
+current laundering window. Rackets must be resumed separately.
+
+For financial review, `ledger [count]` lists recent transactions touching
+organization-owned accounts, and `transaction transaction-N` shows only
+the player's own postings, excluding the counterparties' private books.
+`business-cycles business-N [count]` summarizes actual storefront
+settlements earned under player ownership;
+`racket-cycles enterprise-N [count]` reports gross, operating costs, net cash and enforcement costs.
+All histories are read-only and survive save/load.
+
 Leadership decisions include `policies`, `policy`, `mandates`, `delegate`, and
 `mandate` for organization-level recruitment and legal-support rules, managerial
 territory/functions, standing orders, budgets, and revocation. `districts` and
@@ -85,8 +103,8 @@ Institutional relationships and legal defense are player-managed.
 `connections` lists known outside acquaintances and eligible handlers;
 `connect <handler-id> <known-person-id>` establishes a real institutional
 channel only when the modeled social relationship supports it. `contacts`
-lists established channels and outstanding disclosures; `contact [contact-id]
-[ask|end]` requests available knowledge or terminates a channel. The
+lists established channels and outstanding disclosures;
+`contact [contact-id] [ask|end]` requests available knowledge or terminates a channel. The
 no-argument `contact` command continues to consult the police contact.
 The authored city includes a known lawyer at Cedar Street Legal, but players
 must form that connection.

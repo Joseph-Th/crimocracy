@@ -33,6 +33,9 @@ use crimocracy::economy::business_acquisition::{
 use crimocracy::economy::business_economy_system::{
     BusinessProfitSweepDraft, validate_sweep_business_profits,
 };
+use crimocracy::economy::business_economy_system::{
+    validate_resume_business_economy, validate_suspend_business_economy,
+};
 use crimocracy::enterprises::enterprise_execution::{
     validate_establish_enterprise, validate_resume_enterprise, validate_retire_enterprise,
     validate_suspend_enterprise,
@@ -116,15 +119,23 @@ const HELP: &str = "Commands:
                          Approach a known prospect
   directory              Public city business names, kinds, and standard prices
   businesses             Owned storefronts and known leads
+  business <business-id> <suspend|resume>
+                         Pause or restart a player-owned legitimate storefront
+  business-cycles <business-id> [count]
+                         Settled revenue and costs under your ownership
   buy <business-id>      Acquire a business at its standard price using clean funds
   launder <business-id> <cents>  Convert street cash via an owned front
   enterprises            Your rackets and their operating status
   racket-kinds           Available racket kinds and venue requirements
-  start-racket <kind> <business-id> <cash-id> <settlement-id> [support-id]
-                         Establish a racket with active delegated authority
+  start-racket <kind> <business-id|district-id> <cash-id> <settlement-id> [support-business-id...]
+                         Establish a delegated racket backed by owned infrastructure
   racket <id> <suspend|resume|retire>  Change your racket's lifecycle
+  racket-cycles <enterprise-id> [count]
+                         Historical racket earnings and enforcement attention
   finances               Your actual organization accounts
   accounts               Inspect your organization account IDs and balances
+  ledger [count]          Recent transactions touching your books (default 10)
+  transaction <id>        Inspect owned-account postings without rival books
   open-account <street|concealed|accounted|settlement>
                          Open an empty account in the organization's own books
   move <source-id> <dest-id> <cents>
@@ -348,14 +359,16 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
             1..=1
         }
         "recruit" | "scout" => 2..=3,
-        "start-racket" => 5..=6,
+        "start-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
-        "racket" | "launder" | "sweep" | "decide" => 3..=3,
+        "racket" | "launder" | "sweep" | "decide" | "business" => 3..=3,
         "move" | "deposit" => 4..=4,
         "dispose" => 5..=5,
         "reports" => 1..=2,
+        "ledger" => 1..=2,
+        "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
-        | "wait" | "save" => 2..=2,
+        | "wait" | "save" | "transaction" => 2..=2,
         "policy" | "delegate" => 3..=3,
         "mandate" => 3..=6,
         "plan" => 3..=14,
@@ -540,35 +553,53 @@ impl<'a> Session<'a> {
             .map_err(|e| e.to_string())
     }
 
-    /// Choose a current mandate with authority over this venue. The canonical
+    /// Choose a current mandate with authority over this location. The canonical
     /// enterprise establishment validator will check the entire authority state.
-    fn enterprise_authority(&self, business: BusinessId) -> Result<MandateAuthority, String> {
-        let district = self
-            .state
-            .world()
-            .get_business(business)
-            .ok_or("business not found")?
-            .neighborhood();
-        [
+    fn enterprise_authority(
+        &self,
+        location: EnterpriseLocation,
+    ) -> Result<MandateAuthority, String> {
+        let (district, business) = match location {
+            EnterpriseLocation::Business(business) => (
+                self.state
+                    .world()
+                    .get_business(business)
+                    .ok_or("business not found")?
+                    .neighborhood(),
+                Some(business),
+            ),
+            EnterpriseLocation::Neighborhood(district) => (
+                self.state
+                    .world()
+                    .get_neighborhood(district)
+                    .ok_or("district not found")?
+                    .id(),
+                None,
+            ),
+        };
+        let mut scopes = vec![
             ResponsibilityScope::Function(ResponsibilityFunction::Enterprise),
             ResponsibilityScope::Neighborhood(district),
-            ResponsibilityScope::Business(business),
-        ]
-        .into_iter()
-        .find_map(|scope| {
-            self.state
-                .delegation()
-                .active_for_scope(scope)
-                .find(|record| record.organization() == self.player)
-                .map(|record| MandateAuthority {
-                    mandate: record.id(),
-                    manager: record.manager(),
-                    scope,
-                })
-        })
-        .ok_or_else(|| {
-            "no active organization mandate covers enterprise work at that property".to_owned()
-        })
+        ];
+        if let Some(business) = business {
+            scopes.push(ResponsibilityScope::Business(business));
+        }
+        scopes
+            .into_iter()
+            .find_map(|scope| {
+                self.state
+                    .delegation()
+                    .active_for_scope(scope)
+                    .find(|record| record.organization() == self.player)
+                    .map(|record| MandateAuthority {
+                        mandate: record.id(),
+                        manager: record.manager(),
+                        scope,
+                    })
+            })
+            .ok_or_else(|| {
+                "no active organization mandate covers enterprise work at that location".to_owned()
+            })
     }
 
     fn known_business(&self, raw: u32) -> Option<BusinessId> {
@@ -577,6 +608,23 @@ impl<'a> Session<'a> {
             .public_business_directory()
             .find(|(id, _, _, _)| id.raw() == raw)
             .map(|(id, _, _, _)| id)
+    }
+
+    /// Public business/district names are available independently of hidden
+    /// ownership and police intelligence.
+    fn enterprise_location_label(&self, location: EnterpriseLocation) -> String {
+        match location {
+            EnterpriseLocation::Business(id) => self.state.world().get_business(id).map_or_else(
+                || format!("business-{}", id.raw()),
+                |business| format!("business-{} {}", id.raw(), business.name()),
+            ),
+            EnterpriseLocation::Neighborhood(id) => {
+                self.state.world().get_neighborhood(id).map_or_else(
+                    || format!("district-{}", id.raw()),
+                    |district| format!("district-{} {}", id.raw(), district.name()),
+                )
+            }
+        }
     }
 
     /// Read the organization's member roster and typed personnel information,
@@ -785,6 +833,12 @@ fn run_with_io(
 
 #[cfg(test)]
 mod contact_legal_tests;
+mod economy_history;
+#[cfg(test)]
+mod economy_play_tests;
+mod finance_play;
+#[cfg(test)]
+mod finance_play_tests;
 #[cfg(test)]
 mod governance_tests;
 #[cfg(test)]

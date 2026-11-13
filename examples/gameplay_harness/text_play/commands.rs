@@ -20,6 +20,10 @@ impl Session<'_> {
                 ));
             }
             "brief" => out = self.brief(),
+            "ledger" | "transaction" => out = self.execute_finance_history(&words)?,
+            "business-cycles" | "racket-cycles" => {
+                out = self.execute_economy_history(&words)?;
+            }
             "connections" | "contacts" | "connect" | "contact" => {
                 out = self.execute_contacts(&words)?;
             }
@@ -244,6 +248,32 @@ impl Session<'_> {
                 writeln!(out, "Acquired business {} for {} accounted cents; initialized operating economy: {}.",
                     acquired.business.raw(), acquired.price.cents(), acquired.established_economy).unwrap();
             }
+            "business" => {
+                let raw = parse_number(words[1], "business")?;
+                let id = state
+                    .world()
+                    .businesses_owned_by_organization(self.player)
+                    .find(|business| business.id().raw() == raw)
+                    .ok_or("business is not owned by your organization")?
+                    .id();
+                match words[2] {
+                    "suspend" => validate_suspend_business_economy(&self.state, id)
+                        .map_err(|error| error.to_string())?
+                        .commit(&mut self.state)
+                        .map_err(|error| error.to_string())?,
+                    "resume" => validate_resume_business_economy(self.registry, &self.state, id)
+                        .map_err(|error| error.to_string())?
+                        .commit(&mut self.state)
+                        .map_err(|error| error.to_string())?,
+                    _ => return Err("business <business-id> <suspend|resume>".to_owned()),
+                }
+                let economy = self
+                    .state
+                    .economy()
+                    .get_business_economy(id)
+                    .ok_or("owned business operating books disappeared")?;
+                writeln!(out, "Business {raw}: {:?}.", economy.status()).unwrap();
+            }
             "launder" => {
                 if words.len() != 3 {
                     return Err("launder <business-id> <cents>".to_owned());
@@ -374,14 +404,27 @@ impl Session<'_> {
                 {
                     writeln!(
                         out,
-                        "{} {:?} | {:?} at {:?} | next settlement {}",
+                        "{} {:?} | {:?} at {} | next settlement {}",
                         enterprise.id().raw(),
                         enterprise.kind(),
                         enterprise.status(),
-                        enterprise.location(),
+                        self.enterprise_location_label(enterprise.location()),
                         enterprise
                             .next_cycle_at()
                             .map_or("none".to_owned(), |at| time_label(at.as_minutes()),)
+                    )
+                    .unwrap();
+                    writeln!(
+                        out,
+                        "  Manager char-{} | cash account-{} | settlement account-{} | supports {:?}",
+                        enterprise.manager().raw(),
+                        enterprise.cash_account().raw(),
+                        enterprise.settlement_account().raw(),
+                        enterprise
+                            .supporting_businesses()
+                            .iter()
+                            .map(|id| format!("business-{}", id.raw()))
+                            .collect::<Vec<_>>(),
                     )
                     .unwrap();
                     let book = state
@@ -410,9 +453,14 @@ impl Session<'_> {
                 }
                 for kind in ALL_ENTERPRISE_KINDS {
                     let definition = self.registry.get_enterprise(kind);
+                    let location_hint = if definition.required_business_functions().is_empty() {
+                        "business-N or district-N (district uses its supporting network)"
+                    } else {
+                        "business-N (physical host required)"
+                    };
                     writeln!(
                         out,
-                        "{kind:?} | host needs {:?} | network needs {:?}",
+                        "{kind:?} | host needs {:?} | network needs {:?} | {location_hint}",
                         definition.required_business_functions(),
                         definition.required_network_functions()
                     )
@@ -420,17 +468,36 @@ impl Session<'_> {
                 }
             }
             "start-racket" => {
-                if !(5..=6).contains(&words.len()) {
-                    return Err("start-racket <kind> <business-id> <cash-account-id> <settlement-account-id> [support-business-id]".to_owned());
-                }
                 let kind = parse_enterprise_kind(words[1])?;
-                let venue = parse_number(words[2], "business")?;
-                let business = state
-                    .world()
-                    .businesses_owned_by_organization(self.player)
-                    .find(|record| record.id().raw() == venue)
-                    .ok_or("venue is not one of your owned businesses")?
-                    .id();
+                let location = if words[2].starts_with("district-") {
+                    if !self
+                        .registry
+                        .get_enterprise(kind)
+                        .required_business_functions()
+                        .is_empty()
+                    {
+                        return Err(format!(
+                            "{kind:?} requires a physical host with authored functions; use business-N"
+                        ));
+                    }
+                    let raw = parse_number(words[2], "district")?;
+                    let district = state
+                        .world()
+                        .neighborhoods()
+                        .find(|record| record.id().raw() == raw)
+                        .ok_or("district is not in the public city directory")?
+                        .id();
+                    EnterpriseLocation::Neighborhood(district)
+                } else {
+                    let raw = parse_number(words[2], "business")?;
+                    let business = state
+                        .world()
+                        .businesses_owned_by_organization(self.player)
+                        .find(|record| record.id().raw() == raw)
+                        .ok_or("venue is not one of your owned businesses")?
+                        .id();
+                    EnterpriseLocation::Business(business)
+                };
                 let cash = parse_number(words[3], "account")?;
                 let settlement = parse_number(words[4], "account")?;
                 let owner = FinancialOwner::Organization(self.player);
@@ -446,18 +513,20 @@ impl Session<'_> {
                     .find(|account| account.id().raw() == settlement)
                     .ok_or("settlement account is not owned by your organization")?
                     .id();
-                let supporting_businesses = if let Some(raw) = words.get(5) {
+                let mut supporting_businesses = BTreeSet::new();
+                for raw in &words[5..] {
                     let support = parse_number(raw, "business")?;
-                    BTreeSet::from([state
+                    let business = state
                         .world()
                         .businesses_owned_by_organization(self.player)
                         .find(|record| record.id().raw() == support)
                         .ok_or("support property is not owned by your organization")?
-                        .id()])
-                } else {
-                    BTreeSet::new()
-                };
-                let authority = self.enterprise_authority(business)?;
+                        .id();
+                    if !supporting_businesses.insert(business) {
+                        return Err("support business was listed more than once".to_owned());
+                    }
+                }
+                let authority = self.enterprise_authority(location)?;
                 let established = validate_establish_enterprise(
                     self.registry,
                     &self.state,
@@ -465,7 +534,7 @@ impl Session<'_> {
                         kind,
                         organization: self.player,
                         authority,
-                        location: EnterpriseLocation::Business(business),
+                        location,
                         supporting_businesses,
                         cash_account,
                         settlement_account,
@@ -476,9 +545,10 @@ impl Session<'_> {
                 .map_err(|error| error.to_string())?;
                 writeln!(
                     out,
-                    "Established {kind:?} enterprise {} at business {}.",
+                    "Established {kind:?} enterprise {} at {}, using {} supporting business(es).",
                     established.raw(),
-                    business.raw()
+                    self.enterprise_location_label(location),
+                    words.len() - 5,
                 )
                 .unwrap();
             }

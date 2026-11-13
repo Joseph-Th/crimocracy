@@ -118,6 +118,20 @@ interrupts on own-member arrests and releases from the canonical
 legal-support decisions remain in the production tick before detainee informant
 decisions.
 
+The finance owner exposes a bounded recent-transaction projection indexed from
+the organization's accounts and an ownership-checked direct lookup; a transaction
+touching two owned accounts is returned only once. The text adapter never renders
+counterparty postings. Business and enterprise settlement history uses indexed
+`cycles_for` queries, with current asset ownership checked by the adapter
+and pre-acquisition business cycles excluded by their immutable settlement owner.
+Player business status changes are validated and committed by
+`business_economy_system`; the player cannot bypass an active racket
+dependency or reset laundering capacity by suspending a front. District racket
+creation resolves delegation authority against a real neighborhood; the
+adapter requires the registry's physical-host functions before allowing a
+business kind at district-only scale. All other supporting-network, account
+and operating-state checks stay with `enterprise_execution`.
+
 Static definitions describe what may exist. Runtime records describe what does exist.
 Mutable progress does not live in the registry. Future-affecting generated state is
 persisted, not reconstructed.

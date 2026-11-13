@@ -330,6 +330,70 @@ impl FinanceState {
             })
     }
 
+    /// A ledger entry is visible to an owner only when an account that owner
+    /// controls actually participates in it. An ID alone never grants access
+    /// to the transaction history of a rival or independent business.
+    pub fn transaction_for_owner(
+        &self,
+        owner: FinancialOwner,
+        id: LedgerTransactionId,
+    ) -> Option<&LedgerTransactionRecord> {
+        self.transactions.get(&id).filter(|transaction| {
+            transaction.postings().iter().any(|posting| {
+                self.accounts
+                    .get(&posting.account)
+                    .is_some_and(|account| account.owner() == owner)
+            })
+        })
+    }
+
+    /// Raw-number lookup for presentation adapters, preserving the same
+    /// account-ownership check as the typed query. Never use a raw ID alone
+    /// to grant access to transaction details.
+    pub fn transaction_by_number_for_owner(
+        &self,
+        owner: FinancialOwner,
+        number: u32,
+    ) -> Option<&LedgerTransactionRecord> {
+        self.transaction_for_owner(owner, LedgerTransactionId::from_raw(number))
+    }
+
+    /// Newest transactions touching this owner's books, including transfers
+    /// between two of its own accounts exactly once. Per-account chronology
+    /// indexes bound the walk to at most `limit` entries per owned account
+    /// rather than scanning every other organization's campaign ledger.
+    /// Timestamp then transaction ID provide a deterministic ordering through
+    /// save/restore, including multiple postings at the same minute.
+    pub fn recent_transactions_for_owner(
+        &self,
+        owner: FinancialOwner,
+        limit: usize,
+    ) -> Vec<&LedgerTransactionRecord> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut newest = BTreeSet::<(SimTime, LedgerTransactionId)>::new();
+        for account in self.accounts_for(owner) {
+            if let Some(entries) = self.transactions_by_account.get(&account.id()) {
+                for entry in entries.iter().rev().take(limit) {
+                    newest.insert(*entry);
+                    if newest.len() > limit {
+                        newest.pop_first();
+                    }
+                }
+            }
+        }
+        newest
+            .into_iter()
+            .rev()
+            .map(|(_, id)| {
+                self.transactions
+                    .get(&id)
+                    .expect("per-account chronology index must reference a ledger transaction")
+            })
+            .collect()
+    }
+
     pub(crate) fn transactions_for_account_through(
         &self,
         account: FinancialAccountId,
