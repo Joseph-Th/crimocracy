@@ -110,6 +110,14 @@ If a route is unclear, use the bounded diagnostic declared above or search the o
 
 ## Harness and extensions
 
+`cargo text-play` is the primary player-experience inspection surface. Its
+`examples/gameplay_harness/text_play/` adapter accepts interactive or scripted
+commands, shows only player-held or deliberately public information, and uses
+the production operation and persistence paths. Load restores `AppState`
+directly without reconstructing a scenario or carrying fixture character IDs.
+Use the typed player command tests and a real text session when changing it.
+[`TESTING.md`](TESTING.md) owns the text-play and regression proof lanes.
+
 `examples/gameplay_harness/` uses canonical production operations and its documented player-visible information. `[DEV AUDIT]` diagnostics never inform decisions. Acting policy uses actionable observations, not inferred safe windows from vague patrol text. [TESTING.md](TESTING.md) owns modes, matched-seed comparison, reports, and evidence limits.
 
 For new domains, extend the architecture ownership map and existing private-state, canonical-operation, index, and invariant patterns. For authored kinds, update the closed vocabulary, registry, exhaustive consumers, and registry-dependent validation together. Do not add inert fields or variants. New tests exercise production operations with typed rejection, unchanged state, and explicit deterministic inputs.

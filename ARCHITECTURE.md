@@ -77,12 +77,20 @@ owns it. Each `src/*/mod.rs` `//!` header names the canonical mutation path.
 - **Indexes and projections** — derived views maintained from authoritative records. Never independent truth.
 - **Adapters** — own filesystem, process, network, and UI effects. Core systems receive explicit data and return explicit outcomes.
 
-The text-play adapter lives in `examples/gameplay_harness/text_play.rs` and
-shares the canonical authored scenario setup with the bounded regression
-harness. It owns text parsing, player-visible readouts, interactive or scripted
-session I/O, and save-file publication, never gameplay state. Gameplay mutation
-still belongs to domain validators/commits and the one-minute `run_tick`; the
-production persistence envelope owns durable state, not the text client.
+The player-driven text adapter lives in `examples/gameplay_harness/text_play/`,
+separate from the scripted policy evaluator but sharing its canonical authored
+starting scenario. The adapter owns parsing, player-knowledge projections,
+interactive/scripted session I/O, and save-file publication. Restored sessions
+derive their organization and records directly from production persistence
+without reconstructing the authored fixture. Its public storefront directory
+projects only name, kind, identity, and district through `WorldState` and never
+exposes private ownership or law-enforcement state. Commands validate current
+player membership, account ownership and available authority before composing
+production owner transactions. The generic treasury allocation command only
+moves same-kind liquid funds: street money cannot become accounted money except
+through its canonical conversion path. Consequential mutation still belongs
+to validators/commits and the one-minute `run_tick`; the save envelope owns
+future-affecting state, not the text client.
 
 Static definitions describe what may exist. Runtime records describe what does exist.
 Mutable progress does not live in the registry. Future-affecting generated state is

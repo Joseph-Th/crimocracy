@@ -29,9 +29,7 @@ intent. If authorities conflict, repair the owning document and implementation.
 ## Play the simulation in text
 
 `cargo text-play` starts an interactive, line-oriented leadership session over the
-production simulation. It accepts commands such as `brief`, `reports`, `people`,
-`opportunities`, `scout 1`, `burgle 1 abort`, `advance 6h`, `decisions`,
-and `save campaign_01`. Enter `help` for the complete vocabulary.
+production simulation. Enter `help` for the full command reference.
 
 ```powershell
 cargo text-play
@@ -40,13 +38,43 @@ cargo text-play --load campaign_01
 cargo text-play --seed 12 --script target/text-play/commands.txt
 ```
 
+The initial authored city has public storefronts, several owned businesses,
+an established racket, connected recruitment prospects, and two burglary leads.
+For example, the following commands work together in a new `--seed 12` session:
+
+```text
+brief
+prospects
+recruit 7 appeal
+scout 5 char-5
+advance 3h
+discover 5
+burgle 3 char-4 char-3 press
+operations
+accounts
+save campaign_01
+```
+
+Organizational expansion and economic decisions use the same player interface:
+`directory` lists public establishments, `buy` spends accounted funds on
+independent businesses, `launder` converts street cash within an owned front's
+real capacity, `businesses` shows earned owner-withdrawal headroom, and
+`racket-kinds` lists enterprise requirements. `open-account`, `move`,
+and `start-racket` let leadership fund and establish more enterprises with
+actual mandates and existing books. Ordinary `move` transfers only between
+accounts of the same spendable money kind, never dirty cash directly to clean
+funds. `operation`, `dispose` and `deposit` handle held proceeds through
+production reports and ledger transactions.
+
 New games currently use the canonical authored city scenario, not a generated
 open-world campaign. Each unseeded start chooses a fresh replayable world seed;
 the opening banner prints it. Saves use production `build_save` / `restore_save`
 inside `target/text-play/<slot>.sav`. Scripts are ordinary command-per-line
 transcripts and reject invalid actions rather than silently correcting them.
-The text client shows the player organization's own records and information, not
-diagnostic world truth. [`TESTING.md`](TESTING.md) distinguishes play from regression evidence.
+Loading reads the saved campaign directly, without rebuilding the authored
+starting fixture. The text client shows the player's records, available public
+directory fields, and organization-held intelligence, not hidden law-enforcement
+or rival state. [`TESTING.md`](TESTING.md) distinguishes play from regression evidence.
 
 ## Local commands
 

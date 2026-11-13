@@ -154,26 +154,41 @@ Documentation contracts are intentionally outside Rust's integration-test graph.
 
 Use `cargo text-play` to play through decisions and consequences without an
 automated evaluation policy selecting the player's moves. This is a thin
-terminal mode under `examples/gameplay_harness/text_play.rs`; it reuses the
-canonical authored setup in `scenario.rs` while taking commands from stdin or
-`--script FILE`. The player owns command selection, production owners validate
-and commit actions, and `run_tick` remains the only way to advance simulation
-time. The terminal reads organization-held intelligence, reports, pending
-decisions, owned assets, and its own operations; it must never browse hidden
-legal or rival records to recommend an action. Leadership pauses for pending
-decisions, enabled urgent-report attention, and terminal outcomes of its own
-operations. Saving uses the current production envelope and restoring rebuilds
-its derived indexes.
+terminal adapter under `examples/gameplay_harness/text_play/`; it shares the
+canonical authored starting scenario in `scenario.rs` but does not run any
+automated strategy or rebuild that fixture during save restoration. Its
+`mod.rs` owns session creation, current-version saves, options, and the
+player-scoped read-only selection rules; `commands.rs` dispatches interactive
+player choices through production validators and commits; `tests.rs` proves
+those transitions with real tick continuation and rejection integrity.
+`run_tick` remains the only way to advance simulation time.
+
+Views show public business-directory identities (not ownership), organization-held
+intelligence, its own finances, people, businesses and enterprises, delivered
+reports, and pending decisions. Public business names do not themselves become
+intelligence. The CLI must not read hidden legal cases or rival records to
+recommend actions. Role assignments come from current organization members;
+no participant/authority IDs from the starting fixture are retained. Entity
+selection checks organizational ownership before producing actionable plans.
+Opening accounts, same-kind treasury allocation, laundering, recruitment,
+business acquisition, enterprise establishment and lifecycle, burglary and
+reconnaissance, discovery, disposition, and decision resolution all use canonical
+owner paths. Generic money movement is not a laundering or minting shortcut.
+
+Leadership pauses for pending decisions, enabled urgent-report attention, and
+terminal outcomes of its own operations. The production save envelope preserves
+campaign state and reconstructs derived indexes on restoration.
 
 Start with `cargo text-play --seed 12` for reproducibility and use `help` for
 the available actions. Script input is one command per line, with blank lines
 and lines beginning `#` ignored. Interactive command rejection prints a
 reason without ending the session; a rejected scripted command fails with its
-line number. The currently playable opening is an authored scenario, not
-general campaign generation. The first interface covers reconnaissance,
-burglary, decisions, contact disclosures, lead dismissal, earned-profit
-withdrawals, leadership readouts, and time advancement. Its fixed starting
-crew is a limitation of this adapter, not a second game mechanic.
+line number. Excess or malformed command arguments are rejected before any
+mutation. The currently playable opening is an authored scenario, not general
+campaign generation. An initial crew is authored, but current crew membership
+and skills determine available orders and recruitment changes that roster.
+The CLI covers a subset of the implemented operation and governance families,
+not every kind of authority, case, or criminal activity in the simulation.
 
 Automated harness runs below remain **regression and comparative evidence**,
 not the primary judge of player comprehension, usability, or campaign pacing.

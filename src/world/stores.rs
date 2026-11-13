@@ -2,7 +2,7 @@
 //! derived views maintained only through `world_system` mutations.
 
 use super::{
-    BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord, CharacterRecord,
+    BusinessKind, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord, CharacterRecord,
     NeighborhoodRecord, OrganizationRecord, PolicySetting,
 };
 use crate::core::id::{
@@ -281,6 +281,20 @@ impl WorldState {
     }
     pub fn get_business(&self, id: BusinessId) -> Option<&BusinessRecord> {
         self.businesses.records.get(&id)
+    }
+    /// Public city-directory fields only. Owning organizations, people, and
+    /// operational activity are not disclosed through this projection.
+    pub fn public_business_directory(
+        &self,
+    ) -> impl Iterator<Item = (BusinessId, &str, BusinessKind, NeighborhoodId)> {
+        self.businesses.records.values().map(|business| {
+            (
+                business.id(),
+                business.name(),
+                business.kind(),
+                business.neighborhood(),
+            )
+        })
     }
     pub(crate) fn organization_id_bounds(&self) -> Option<(u32, u32)> {
         self.organizations.id_bounds()
