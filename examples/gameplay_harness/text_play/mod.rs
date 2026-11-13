@@ -5,7 +5,7 @@
 //! as the evaluation harness. Views contain only the player's staff, books, reports,
 //! and organization-held intelligence; scenario diagnostics never enter this client.
 
-use crate::{EvaluationSeeds, ScenarioProfile, build_scenario};
+use crate::campaign::{EvaluationSeeds, ScenarioProfile, build_scenario, parse_seed_value};
 use crimocracy::contacts::contact_system::{
     find_pending_disclosure_sources, validate_contact_disclosure,
 };
@@ -18,6 +18,11 @@ use crimocracy::core::state::AppState;
 use crimocracy::core::time::{DAY_MINUTES, SimDuration};
 use crimocracy::decisions::DecisionResponse;
 use crimocracy::decisions::decision_system::validate_resolve_decision;
+use crimocracy::delegation::delegation_system::{
+    MandateRevisionDraft, validate_assign_mandate, validate_revise_mandate,
+    validate_revoke_mandate, validate_set_policy,
+};
+use crimocracy::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};
 use crimocracy::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crimocracy::economy::business_acquisition::{
     BusinessAcquisitionDraft, BusinessAcquisitionError, validate_acquire_business,
@@ -40,15 +45,15 @@ use crimocracy::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
-use crimocracy::intelligence::KnowledgeHolder;
+use crimocracy::intelligence::{InformationSignal, KnowledgeHolder, LegalPersonStatusSignal};
 use crimocracy::operations::operation_system::validate_authorize_operation;
 use crimocracy::operations::property_disposition::{
     CashDispositionDraft, PropertyDispositionDraft, validate_deposit_operation_cash,
     validate_dispose_property,
 };
 use crimocracy::operations::{
-    OperationApproach, OperationContingency, OperationDraft, OperationKind, OperationObjective,
-    OperationStatus, RoleKind,
+    ALL_OPERATION_KINDS, OperationApproach, OperationContingency, OperationDraft, OperationKind,
+    OperationObjective, OperationStatus, RoleKind,
 };
 use crimocracy::opportunities::opportunity_system::{
     validate_convert_opportunity, validate_discover_operation_opportunity,
@@ -60,7 +65,10 @@ use crimocracy::recruitment::recruitment_system::{
 };
 use crimocracy::recruitment::{RecruitmentApproach, RecruitmentDraft};
 use crimocracy::registry::Registry;
-use crimocracy::world::{ALL_CAPABILITY_KINDS, CapabilityKind};
+use crimocracy::world::{
+    ALL_CAPABILITY_KINDS, ALL_POLICY_KINDS, ApprovalPolicy, CapabilityKind, LegalSupportPolicy,
+    PolicyKind, PolicySetting,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -73,6 +81,18 @@ const MAX_ADVANCE: u64 = DAY_MINUTES * 7;
 const HELP: &str = "Commands:
   brief                  Leadership's current situation
   people                 Your current organization members
+  known-people           People identified by your intelligence or current membership
+  policies               Organization standing policies
+  policy <recruitment|legal> <approve|delegate|case|automatic>
+                         Change organization-level governance
+  districts              Public district names and IDs for delegated scopes
+  mandates               Current manager scopes, standing orders, and budgets
+  delegate <member-id> <scope>  Assign a manager with delegated authority
+  mandate <id> <add|remove> <scope>  Adjust an active mandate's scope
+  mandate <id> order <recruitment|legal> <approve|delegate|case|automatic|inherit>
+  mandate <id> budget <daily|weekly> <account-id> <cents>
+  mandate <id> budget clear
+  mandate <id> revoke    Revoke authority when no active racket depends on it
   prospects              Contacts available for executive recruitment
   recruit <id> [offer|advancement|protection|appeal]
                          Approach a known prospect
@@ -92,6 +112,9 @@ const HELP: &str = "Commands:
   move <source-id> <dest-id> <cents>
                          Transfer between same-kind organization accounts
   intelligence           Information held by your organization
+  operation-kinds        Authorized operation families and required crew roles
+  plan <kind> <business-id|char-id> [approach=covert] [leader=char-id] [Role=char-id...]
+                         Authorize an operation with optional explicit crew assignments
   opportunities          Known burglary leads and their deadlines
   discover <business-id> File a burglary lead from observed intelligence
   operations             Your authorized and completed operations
@@ -129,6 +152,7 @@ struct CampaignFile {
 struct Options {
     seed: Option<u64>,
     policy_seed: Option<u64>,
+    opening: Option<ScenarioProfile>,
     load: Option<String>,
     script: Option<PathBuf>,
     brief: bool,
@@ -139,6 +163,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut options = Options {
         seed: None,
         policy_seed: None,
+        opening: None,
         load: None,
         script: None,
         brief: false,
@@ -154,26 +179,61 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         match arg.as_str() {
             "--help" | "-h" => options.help = true,
             "--seed" => {
+                if options.seed.is_some() {
+                    return Err("--seed may only appear once".to_owned());
+                }
                 let raw = value("--seed", &mut args)?;
-                options.seed =
-                    Some(crate::parse_seed_value("--seed", &raw).map_err(|e| e.to_string())?);
+                options.seed = Some(parse_seed_value("--seed", &raw).map_err(|e| e.to_string())?);
             }
             "--policy-seed" => {
+                if options.policy_seed.is_some() {
+                    return Err("--policy-seed may only appear once".to_owned());
+                }
                 let raw = value("--policy-seed", &mut args)?;
-                options.policy_seed = Some(
-                    crate::parse_seed_value("--policy-seed", &raw).map_err(|e| e.to_string())?,
-                );
+                options.policy_seed =
+                    Some(parse_seed_value("--policy-seed", &raw).map_err(|e| e.to_string())?);
             }
-            "--load" => options.load = Some(value("--load", &mut args)?),
-            "--script" => options.script = Some(PathBuf::from(value("--script", &mut args)?)),
+            "--opening" => {
+                if options.opening.is_some() {
+                    return Err("--opening may only appear once".to_owned());
+                }
+                let raw = value("--opening", &mut args)?;
+                options.opening = Some(parse_opening(&raw)?);
+            }
+            "--load" => {
+                if options.load.is_some() {
+                    return Err("--load may only appear once".to_owned());
+                }
+                options.load = Some(value("--load", &mut args)?);
+            }
+            "--script" => {
+                if options.script.is_some() {
+                    return Err("--script may only appear once".to_owned());
+                }
+                options.script = Some(PathBuf::from(value("--script", &mut args)?));
+            }
             "--brief" => options.brief = true,
             other => return Err(format!("unknown text-play option '{other}'")),
         }
     }
-    if options.load.is_some() && (options.seed.is_some() || options.policy_seed.is_some()) {
-        return Err("--load cannot be combined with seed options".to_owned());
+    if options.load.is_some()
+        && (options.seed.is_some() || options.policy_seed.is_some() || options.opening.is_some())
+    {
+        return Err("--load cannot be combined with seed or opening options".to_owned());
     }
     Ok(options)
+}
+
+fn parse_opening(raw: &str) -> Result<ScenarioProfile, String> {
+    match raw {
+        "night-trap" => Ok(ScenarioProfile::NightTrap),
+        "late-patrol" => Ok(ScenarioProfile::LatePatrol),
+        "fleeting-window" => Ok(ScenarioProfile::FleetingWindow),
+        "veteran-crew" => Ok(ScenarioProfile::VeteranCrew),
+        "thin-crew" => Ok(ScenarioProfile::ThinCrew),
+        "green-scout" => Ok(ScenarioProfile::GreenScout),
+        _ => Err("opening must be night-trap, late-patrol, fleeting-window, veteran-crew, thin-crew or green-scout".to_owned()),
+    }
 }
 
 fn fresh_seed() -> u64 {
@@ -264,9 +324,10 @@ fn parse_account_kind(raw: &str) -> Result<AccountKind, String> {
 /// Scripted commands reject extraneous arguments instead of silently ignoring them.
 fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
     let range = match command {
-        "help" | "quit" | "exit" | "brief" | "people" | "prospects" | "directory"
-        | "businesses" | "enterprises" | "racket-kinds" | "finances" | "accounts"
-        | "intelligence" | "opportunities" | "operations" | "decisions" | "contact" => 1..=1,
+        "help" | "quit" | "exit" | "brief" | "people" | "known-people" | "prospects"
+        | "directory" | "businesses" | "enterprises" | "racket-kinds" | "finances" | "accounts"
+        | "intelligence" | "opportunities" | "operations" | "decisions" | "contact"
+        | "policies" | "mandates" | "operation-kinds" | "districts" => 1..=1,
         "recruit" | "scout" => 2..=3,
         "start-racket" => 5..=6,
         "burgle" => 2..=5,
@@ -276,6 +337,9 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "reports" => 1..=2,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
         | "wait" | "save" => 2..=2,
+        "policy" | "delegate" => 3..=3,
+        "mandate" => 3..=6,
+        "plan" => 3..=14,
         _ => return Ok(()),
     };
     if range.contains(&words) {
@@ -292,17 +356,26 @@ struct Session<'a> {
     state: AppState,
     player: OrganizationId,
     seeds: EvaluationSeeds,
+    district: &'static str,
+    district_variant: &'static str,
 }
 
 impl<'a> Session<'a> {
     fn new(registry: &'a Registry, seeds: EvaluationSeeds) -> Result<Self, String> {
-        let mut scenario = build_scenario(registry, seeds, ScenarioProfile::NightTrap)
-            .map_err(|e| e.to_string())?;
+        Self::new_with_opening(registry, seeds, ScenarioProfile::NightTrap)
+    }
+
+    fn new_with_opening(
+        registry: &'a Registry,
+        seeds: EvaluationSeeds,
+        opening: ScenarioProfile,
+    ) -> Result<Self, String> {
+        let mut scenario = build_scenario(registry, seeds, opening).map_err(|e| e.to_string())?;
         for (target, source, summary, deadline) in [
             (
                 scenario.target,
                 scenario.opportunity_information,
-                "Street word identifies an accessible store. The opening window is short.",
+                scenario.variation.opportunity_summary(),
                 Some(scenario.timeline.initial_opportunity_valid_until),
             ),
             (
@@ -333,6 +406,8 @@ impl<'a> Session<'a> {
             state: scenario.state,
             player: scenario.player,
             seeds,
+            district: scenario.variation.neighborhood_name(),
+            district_variant: scenario.variation.label(),
         })
     }
 
@@ -351,6 +426,8 @@ impl<'a> Session<'a> {
             state,
             player,
             seeds: EvaluationSeeds::new(file.world_seed, file.policy_seed),
+            district: "the saved campaign's district",
+            district_variant: "saved",
         })
     }
 
@@ -476,6 +553,33 @@ impl<'a> Session<'a> {
             .map(|(id, _, _, _)| id)
     }
 
+    /// Read the organization's member roster and typed personnel information,
+    /// never the world's hidden character index.
+    fn known_character_ids(&self) -> BTreeSet<CharacterId> {
+        let mut known: BTreeSet<_> = self
+            .state
+            .world()
+            .characters_in_organization(self.player)
+            .map(|member| member.id())
+            .collect();
+        for info in self.organization_information() {
+            if let EntityRef::Character(id) = info.subject() {
+                known.insert(id);
+            }
+            if let Some(InformationSignal::PersonnelPresence { characters }) = info.signal() {
+                known.extend(characters.iter().copied());
+            }
+        }
+        known
+    }
+
+    /// A guessed world character ID cannot open a legal or field operation.
+    fn known_character(&self, raw: u32) -> Option<CharacterId> {
+        self.known_character_ids()
+            .into_iter()
+            .find(|id| id.raw() == raw)
+    }
+
     fn known_opportunities(&self) -> Vec<&crimocracy::opportunities::OpportunityRecord> {
         self.state
             .reports()
@@ -547,13 +651,17 @@ impl<'a> Session<'a> {
                 format!("Report {}: {}", report.id().raw(), report.title())
             });
         format!(
-            "{name} | {}\nPeople: {members} | Venues: {venues} | Rackets: {rackets}\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
-            time_label(state.now().as_minutes())
+            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} | Rackets: {rackets}\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
+            time_label(state.now().as_minutes()),
+            self.district,
+            self.district_variant
         )
     }
 }
 
 mod commands;
+mod governance;
+mod planning;
 
 pub fn run(registry: &Registry, args: &[String]) -> Result<(), String> {
     let stdin = std::io::stdin();
@@ -571,7 +679,7 @@ fn run_with_io(
 ) -> Result<(), String> {
     let options = parse_options(args)?;
     if options.help {
-        writeln!(output, "Text play: --seed N [--policy-seed N] [--script FILE] [--brief], or --load SLOT [--script FILE]\n{HELP}").map_err(|e| e.to_string())?;
+        writeln!(output, "Text play: --seed N [--policy-seed N] [--opening PROFILE] [--script FILE] [--brief], or --load SLOT [--script FILE]\nOpenings: night-trap, late-patrol, fleeting-window, veteran-crew, thin-crew, green-scout\n{HELP}").map_err(|e| e.to_string())?;
         return Ok(());
     }
     let (mut session, label) = if let Some(slot) = options.load {
@@ -579,9 +687,14 @@ fn run_with_io(
     } else {
         let world = options.seed.unwrap_or_else(fresh_seed);
         let seeds = EvaluationSeeds::new(world, options.policy_seed.unwrap_or(world));
+        let opening = options.opening.unwrap_or(ScenarioProfile::NightTrap);
         (
-            Session::new(registry, seeds)?,
-            "New authored city scenario".to_owned(),
+            if opening == ScenarioProfile::NightTrap {
+                Session::new(registry, seeds)?
+            } else {
+                Session::new_with_opening(registry, seeds, opening)?
+            },
+            format!("New authored city opening: {}", opening.label()),
         )
     };
     writeln!(
@@ -636,5 +749,11 @@ fn run_with_io(
     output.flush().map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
+mod governance_tests;
+#[cfg(test)]
+mod legal_planning_tests;
+#[cfg(test)]
+mod openings_tests;
 #[cfg(test)]
 mod tests;

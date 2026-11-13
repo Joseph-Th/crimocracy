@@ -4,7 +4,7 @@ Deterministic Rust simulation foundation for a systemic crime-organization strat
 
 ## Start here
 
-Use each document for one job. [`AGENTS.md`](AGENTS.md) owns agent execution rules and routing; [`STATUS.md`](STATUS.md) owns implemented scope and exclusions; [`ARCHITECTURE.md`](ARCHITECTURE.md) owns state ownership, mutation, determinism, persistence, invariants, and tick order; [`TESTING.md`](TESTING.md) owns verification and harness evidence; [`GAME_DESIGN.md`](GAME_DESIGN.md) owns product intent; [`CITY_VIEW.md`](CITY_VIEW.md) describes the read-only procedural city projection for future GUI adapters.
+Use each document for one job. [`AGENTS.md`](AGENTS.md) owns agent execution rules and routing; [`STATUS.md`](STATUS.md) owns implemented scope and exclusions; [`ARCHITECTURE.md`](ARCHITECTURE.md) owns state ownership, mutation, determinism, persistence, invariants, and tick order; [`TESTING.md`](TESTING.md) owns verification and text play evidence; [`GAME_DESIGN.md`](GAME_DESIGN.md) owns product intent; [`CITY_VIEW.md`](CITY_VIEW.md) describes the read-only procedural city projection for future GUI adapters.
 
 `content::build_registry()` builds immutable authored definitions. `AppState` owns serializable campaign state and deterministic runtime state. [`core::simulation::run_tick`](src/core/simulation.rs) advances exactly one simulated minute through the contractual phase order in [`ARCHITECTURE.md`](ARCHITECTURE.md), returning a typed error without mutation when the finite simulation clock has no successor minute.
 
@@ -34,6 +34,7 @@ production simulation. Enter `help` for the full command reference.
 ```powershell
 cargo text-play
 cargo text-play --seed 12
+cargo text-play --seed 12 --opening thin-crew
 cargo text-play --load campaign_01
 cargo text-play --seed 12 --script target/text-play/commands.txt
 ```
@@ -66,8 +67,25 @@ accounts of the same spendable money kind, never dirty cash directly to clean
 funds. `operation`, `dispose` and `deposit` handle held proceeds through
 production reports and ledger transactions.
 
+Leadership decisions include `policies`, `policy`, `mandates`, `delegate`, and
+`mandate` for organization-level recruitment and legal-support rules, managerial
+territory/functions, standing orders, budgets, and revocation. `districts` and
+`directory` expose public district IDs needed for territorial delegation.
+`operation-kinds` lists the complete authored operation vocabulary with required
+crew skills and supported approaches. `plan <kind> <business-id>` accepts
+player-driven plans using those definitions; `plan` also accepts `char-N` for
+witness pressure and extraction when the organization has learned the relevant
+legal-person status. `known-people` lists people the organization has identified,
+not every person in the simulation. Automatic staffing requires rated skill for
+each required role, while an explicit `Role=char-N` assignment permits the player
+to take the risk of an untrained participant. Burglary continues to use `burgle`
+so existing known opportunities are converted through their actual lifecycle.
+
 New games currently use the canonical authored city scenario, not a generated
-open-world campaign. Each unseeded start chooses a fresh replayable world seed;
+open-world campaign. The `--opening` option chooses among `night-trap`,
+`late-patrol`, `fleeting-window`, `veteran-crew`, `thin-crew`, and `green-scout`;
+these are authored alternative opening conditions, not new campaign generators.
+Each unseeded start chooses a fresh replayable world seed;
 the opening banner prints it. Saves use production `build_save` / `restore_save`
 inside `target/text-play/<slot>.sav`. Scripts are ordinary command-per-line
 transcripts and reject invalid actions rather than silently correcting them.
@@ -89,12 +107,6 @@ cargo test-focused <filter>
 .\scripts\verify.cmd -Harness
 .\scripts\verify.cmd
 cargo test-harness
-cargo harness
-cargo harness-rush
-cargo harness-press
-cargo harness-recon
-cargo harness-full --samples 8
-cargo harness-full-detail --samples 8
 ```
 
 Optional Rust diagnostics are deliberately outside the completion lanes:
@@ -107,6 +119,6 @@ Optional Rust diagnostics are deliberately outside the completion lanes:
 .\scripts\rust-diagnostics.cmd Expand -Item core::id -Filter OrganizationId -Context 3 -MaxLines 120
 ```
 
-[`TESTING.md`](TESTING.md) owns which lane completes each class of change and what each harness mode proves. [`scripts/verify.ps1`](scripts/verify.ps1) owns the verification gate; [`scripts/verify.cmd`](scripts/verify.cmd) is its wrapper. Verification is local and does not depend on hosted CI.
+[`TESTING.md`](TESTING.md) owns which lane completes each class of change and what a text play session establishes. [`scripts/verify.ps1`](scripts/verify.ps1) owns the verification gate; [`scripts/verify.cmd`](scripts/verify.cmd) is its wrapper. Verification is local and does not depend on hosted CI.
 
 Build-profile tuning and measured performance notes live with Cargo configuration rather than in the current contract documents.

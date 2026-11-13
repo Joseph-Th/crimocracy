@@ -92,6 +92,17 @@ through its canonical conversion path. Consequential mutation still belongs
 to validators/commits and the one-minute `run_tick`; the save envelope owns
 future-affecting state, not the text client.
 
+Player governance orders remain in `delegation_system` through validated
+policy and mandate operations, including assignment, revision and revocation.
+The text operation planner derives role capabilities, supported approaches and
+completion timing from immutable registry definitions. Automatic crew selection
+uses current player member capabilities, without inventing trained personnel;
+explicit assignments permit knowingly untrained members. Business directories
+are public, while people are targetable only if current members or learned from
+organization-held character/personnel information. Sensitive witness and
+detention objectives require the production operation owner's typed legal-person
+status proof, never inspection of hidden cases from the player adapter.
+
 Static definitions describe what may exist. Runtime records describe what does exist.
 Mutable progress does not live in the registry. Future-affecting generated state is
 persisted, not reconstructed.
@@ -119,7 +130,7 @@ the first mutation, so the terminal representable minute is a valid state with n
 
 Phase order is the coupling contract. Comments at `src/core/simulation.rs`
 explain each “runs after X so Y is visible” dependency. Reordering breaks
-determinism and harness contracts.
+determinism and client contracts.
 
 ```text
  0  checked next minute                    reject ClockExhausted before mutation
@@ -195,6 +206,14 @@ routine racket. The remaining cohort must fit the cycle-ID allocator in full bef
 settlement commits; competing viable rackets never receive an arbitrary ID-ordered prefix.
 The ordinary capacity-sufficient path keeps its single sequential economic resolution pass.
 
+Confidential-source reports can enter a police case from several informants who learned the
+same original observation through internal handoffs. The informant system counts that
+observation once per investigation, not once per person repeating it: direct disclosure
+validation and the autonomous same-minute cohort deduplicate by the internal information
+root before issuing evidence. Independent direct observations remain separate and may both
+be disclosed. Case-scoped indexed reads avoid scanning unrelated historical disclosures;
+restore validation rejects duplicate case/root evidence provenance.
+
 ## Source map — one owner per field
 
 Every `src/` subsystem owns its records and canonical mutation paths. Invariants
@@ -228,7 +247,7 @@ competing state owners.
 | `recruitment/` | Relationship-gated recruitment, cooldowns, approvals, membership changes; autonomous cross-organization prospect contention is relationship-priority rather than mandate-ID priority, a pending approval exclusively owns that organization/candidate route so generic world reassignment cannot bypass it while the exact approved decision can complete it, and the canonical candidate-discovery query excludes pending approval routes and prospects whose cooldown endpoints lie beyond the finite simulation clock while an explicit attempt against the latter retains the typed overflow. Autonomous manager contention consumes that already-filtered snapshot and tracks only newly claimed prospects, with no duplicate availability policy. The daily planner excludes individually unallocatable pitches or approvals without claiming their prospects or suppressing independent routes, but reserves the complete viable cohort's artifact budget before committing anything so shared ID scarcity cannot favor an arbitrary prefix. | `recruitment_system` owns canonical recruitment transactions; its private `planning.rs` child owns read-only plan construction plus held-plan state/definition revalidation; `autonomous_recruitment` owns the deterministic daily delegated policy pass; `world_system` owns the guarded membership mutation; `scoring` owns factor/margin arithmetic shared by planning and invariant re-derivation | `src/recruitment/recruitment_system.rs`, `src/recruitment/recruitment_system/planning.rs`, `src/recruitment/autonomous_recruitment.rs`, `src/recruitment/scoring.rs`, `src/world/world_system.rs` |
 | `reputation/` | Criminal-organization-only per-audience standing: direct mutation rejects non-criminal organizations, and persistence validation rejects non-criminal reputation records even when keys and contents are internally consistent. Per-dimension movement freshness and age-gated baseline decay; fed by operation consequences (non-surveillance success competence, exposure police fear for every kind, violent-approach business and resident fear) and enterprise vice inquiries, consumed by recruitment scoring and expansion posture; player shifts surface atomically with Standing reports, and reported deltas are the actual bounded score movement after clamping rather than the larger requested change | `reputation_system` (`apply_reputation_delta` is the single score mutation path; consequence composition and decay are tick passes) | `src/reputation/reputation_system.rs` |
 
-Adapters, the harness at [`examples/gameplay_harness/`](examples/gameplay_harness/main.rs), and verification at [`scripts/verify.ps1`](scripts/verify.ps1) / [`scripts/verify.cmd`](scripts/verify.cmd) live outside `src/` and use the canonical paths above.
+The text play client at [`examples/gameplay_harness/`](examples/gameplay_harness/main.rs), and verification at [`scripts/verify.ps1`](scripts/verify.ps1) / [`scripts/verify.cmd`](scripts/verify.cmd), live outside `src/` and use the canonical paths above.
 
 ## Canonical operations — one production path
 

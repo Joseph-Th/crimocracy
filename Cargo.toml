@@ -19,8 +19,7 @@ thiserror = "1.0"
 [dev-dependencies]
 serde_json = "1.0"
 
-# Routine development/test work shares its normal incremental caches. Only explicitly opted-in
-# deep gameplay studies and deep harness contracts use a separate optimized profile.
+# Routine development/test work shares its normal incremental caches.
 [profile.dev]
 debug = false
 incremental = true
@@ -31,14 +30,6 @@ overflow-checks = true
 # unnecessary link work while preserving debug assertions and overflow checks.
 [profile.test]
 debug = false
-
-# Full gameplay evaluation and its deep scenario contracts are simulation-heavy and explicitly
-# opt-in. A modest optimization keeps these studies practical without changing the normal smoke,
-# focused-test, or check caches; dev's debug assertions and overflow checks still apply.
-[profile.harness]
-inherits = "dev"
-opt-level = 1
-
 # Dependencies are optimized in development because they change only with dependency updates
 # while several sit on hot deterministic simulation paths.
 [profile.dev.package."*"]

@@ -1,9 +1,8 @@
 [alias]
 # Inner-loop checks avoid linking and keep focused domain tests cheap to invoke.
 check-fast = ["check", "--locked", "--lib"]
-# Check both library and harness surfaces in one invocation so Cargo shares the library build.
 check-all = ["check", "--locked", "--lib", "--example", "gameplay_harness"]
-# Harness surface only (adapter-facing example) without lib tests.
+# Text play client only (adapter-facing example) without lib tests.
 check-harness = ["check", "--locked", "--example", "gameplay_harness"]
 
 # ── tests ─────────────────────────────────────────────────────────────────────
@@ -30,31 +29,11 @@ test-all = ["test", "--locked", "--lib", "--quiet"]
 test-release = ["test", "--locked", "--release", "--quiet"]
 # Soak stress test only (mixed-state invariant exercise).
 soak = ["test", "--locked", "--lib", "--quiet", "soak", "--", "--nocapture"]
-# Harness implementation contracts. Scenario-scale checks are explicitly ignored from the
-# routine target; the deep lane runs every ignored harness test. Reuse the optimized profile
-# of harness-full for these long simulation tests while preserving debug/overflow checks.
-# Focused harness iteration appends a filter substring, mirroring test-focused:
-#   cargo test-harness press_stand_down   # one harness behavior only
-# Focused strategy smoke stays on the warm dev cache for sub-second iteration:
-#   cargo harness-rush  (or -press / -recon)  # one strategy branch only
-test-harness = ["test", "--locked", "--quiet", "--example", "gameplay_harness"]
-test-harness-deep = ["test", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--ignored"]
-
-# ── gameplay harness ──────────────────────────────────────────────────────────
+# ── text play ─────────────────────────────────────────────────────────────────
 # Interactive and scripted terminal play against the same canonical simulation.
+# Tests cover the client's typed command surface; there is no scripted evaluator.
+test-harness = ["test", "--locked", "--quiet", "--example", "gameplay_harness"]
 text-play = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--play"]
-# Smoke/focused harness execution stays on the ordinary dev profile so normal iteration reuses
-# one gameplay-build cache. The harness owns its own output; Cargo build logging stays quiet.
-# Windows: if rebuilds feel pathological, exclude the repository target directory
-# from Defender real-time scanning.
-harness = ["run", "--locked", "--quiet", "--example", "gameplay_harness"]
-harness-rush = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "rush"]
-harness-press = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "press"]
-harness-recon = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke", "--strategy", "recon"]
-# Full comparison is a deep, simulation-heavy lane. Use the modestly optimized harness profile
-# so repeated studies spend time simulating rather than interpreting unoptimized minute ticks.
-harness-full = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full"]
-harness-full-detail = ["run", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--mode", "full", "--detail"]
 
 [term]
 quiet = false

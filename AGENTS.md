@@ -4,7 +4,7 @@
 
 **Rust agent diagnostics:** advisory. Use `scripts/rust-diagnostics.ps1`. Use bounded diagnostics only for unresolved ownership, test-strength, or macro questions; commands and verification routing: [TESTING.md](TESTING.md).
 
-**Profiles:** Universal, Stateful Application, Deterministic System, Automated Behavior Evaluation
+**Profiles:** Universal, Stateful Application, Deterministic System
 
 This is the execution card for agents changing this system. It keeps high-risk
 guardrails local and routes detailed contracts to their single owners. Ownership is in
@@ -88,7 +88,7 @@ It returns bounded authority, verification, and likely-source evidence. Tool out
 
 1. Preserve unrelated work. Use the source map in [ARCHITECTURE.md](ARCHITECTURE.md) to identify the owning `AppState` field and module; check the relevant supported scope in [STATUS.md](STATUS.md).
 2. Read the owner's `//!` contract and focused tests in `src/<owner>/tests.rs` or the owning `*_system.rs`. Locate the existing `validate_*` / `decide_*` operation before adding a path.
-3. Read only the architecture, persistence, tick, or harness sections touched by the change. [GAME_DESIGN.md](GAME_DESIGN.md) owns intent, not implemented capability.
+3. Read only the architecture, persistence, tick, or text play sections touched by the change. [GAME_DESIGN.md](GAME_DESIGN.md) owns intent, not implemented capability.
 4. Select the smallest complete lane from [TESTING.md](TESTING.md), implement through the owner, and update the single authority whose contract changed.
 
 If a route is unclear, use the bounded diagnostic declared above or search the owning domain. Reconcile conflicting documentation and implementation; neither is permission to ignore the other.
@@ -108,17 +108,21 @@ If a route is unclear, use the bounded diagnostic declared above or search the o
 - Every future-affecting value survives `build_save → restore_save` in `src/core/persistence.rs`. State changes require serialization, invariant/load checks, and round-trip/continuation evidence. Derived indexes remain reconstructible from records.
 - Incompatible schema/content fails closed under the current-version policy in [STATUS.md](STATUS.md). Preserve ID high-water marks, typed references, chronology, lifecycle relationships, and registry-derived invariants.
 
-## Harness and extensions
+## Text play and extensions
 
-`cargo text-play` is the primary player-experience inspection surface. Its
-`examples/gameplay_harness/text_play/` adapter accepts interactive or scripted
-commands, shows only player-held or deliberately public information, and uses
-the production operation and persistence paths. Load restores `AppState`
-directly without reconstructing a scenario or carrying fixture character IDs.
-Use the typed player command tests and a real text session when changing it.
-[`TESTING.md`](TESTING.md) owns the text-play and regression proof lanes.
+`cargo text-play` is the player-experience inspection surface and the only actor
+that chooses moves. Its `examples/gameplay_harness/` client accepts interactive
+or scripted commands, shows only player-held or deliberately public information,
+and uses the production operation and persistence paths. `campaign.rs` owns the
+authored opening vocabulary and seed channels; `scenario.rs` builds that opening
+through canonical operations; `text_play/` translates input into production
+commands. Load restores `AppState` directly without reconstructing a scenario or
+carrying fixture character IDs. Use the typed client tests and a real text session
+when changing it. [`TESTING.md`](TESTING.md) owns the text-play proof lanes.
 
-`examples/gameplay_harness/` uses canonical production operations and its documented player-visible information. `[DEV AUDIT]` diagnostics never inform decisions. Acting policy uses actionable observations, not inferred safe windows from vague patrol text. [TESTING.md](TESTING.md) owns modes, matched-seed comparison, reports, and evidence limits.
+Do not add a scripted policy that selects the player's moves. It duplicates game
+rules in the client, drifts from the shipped game, and cannot judge comprehension,
+pacing, or fun.
 
 For new domains, extend the architecture ownership map and existing private-state, canonical-operation, index, and invariant patterns. For authored kinds, update the closed vocabulary, registry, exhaustive consumers, and registry-dependent validation together. Do not add inert fields or variants. New tests exercise production operations with typed rejection, unchanged state, and explicit deterministic inputs.
 
@@ -129,7 +133,7 @@ Use [TESTING.md](TESTING.md) and repository aliases/scripts; they own lockfile, 
 - Documentation/routes: `.\scripts\check-docs.cmd` (compile-free).
 - One-owner behavior: `.\scripts\verify.cmd -Fast -Filter <filter>`.
 - Broader library behavior: `.\scripts\verify.cmd -Fast`.
-- Harness implementation: `.\scripts\verify.cmd -Harness`.
+- Text play client: `.\scripts\verify.cmd -Harness`.
 - Persistence, invariants, cross-domain work, verification infrastructure, or an explicit broad checkpoint: `.\scripts\verify.cmd`.
 
 Review the task diff for the affected ownership, determinism, persistence, invariant, adapter, and documentation contracts.

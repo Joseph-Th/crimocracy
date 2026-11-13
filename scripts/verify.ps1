@@ -113,8 +113,8 @@ function Invoke-CargoStage {
             "lib*tests"         { "re-run: cargo test-focused <filter>  or  cargo test --lib -- --nocapture" }
             "test-focused*"     { "re-run: cargo test-focused <filter> -- --nocapture" }
             "test-harness*"     { "re-run: cargo test-harness <filter> -- --nocapture" }
-            "harness contracts*" { "re-run: cargo test-harness -- --nocapture" }
-            "harness smoke"     { "re-run: cargo harness  or  cargo harness-rush" }
+            "text play contracts*" { "re-run: cargo test-harness -- --nocapture" }
+            "text play contracts" { "re-run: cargo test-harness" }
             "clippy*"           { "fix lints: cargo clippy --lib --example gameplay_harness -- -D warnings" }
             "check*"            { "re-run: cargo check-fast  or  cargo check-all" }
             default             { "" }
@@ -329,7 +329,7 @@ if ($Check) {
     Invoke-CargoStage "check lib" @("check", "--locked", "--lib")
     $gate.Stop()
     Write-Host "CHECK PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  type-check only" -ForegroundColor Green
-    Write-Host "  harness compile: cargo check-harness  |  behavior: cargo test-focused <filter>" -ForegroundColor DarkGray
+    Write-Host "  client compile: cargo check-harness  |  behavior: cargo test-focused <filter>" -ForegroundColor DarkGray
     exit 0
 }
 
@@ -338,26 +338,25 @@ if ($Check) {
 if ($Harness) {
     $gate = [System.Diagnostics.Stopwatch]::StartNew()
     if ($Filter) {
-        Write-Host "HARNESS: focused harness tests matching '$Filter'" -ForegroundColor Yellow
+        Write-Host "TEXT PLAY: focused client tests matching '$Filter'" -ForegroundColor Yellow
         if (-not $NoFmt) { Invoke-FmtStage -ChangedOnly }
         Invoke-CargoStage "test-harness $Filter" @("test", "--locked", "--quiet", "--example", "gameplay_harness", $Filter) -MinimumPassed 1 -ShowOutputOnPass:$Detail
         $gate.Stop()
-        Write-Host "HARNESS PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  filter: $Filter" -ForegroundColor Green
-        Write-Host "  full harness completion: .\scripts\verify.cmd -Harness  |  strategy smoke: cargo harness-rush" -ForegroundColor DarkGray
+        Write-Host "TEXT PLAY PASS ($([math]::Round($gate.Elapsed.TotalSeconds,1))s)  filter: $Filter" -ForegroundColor Green
+        Write-Host "  full client suite: .\scripts\verify.cmd -Harness  |  play a session: cargo text-play" -ForegroundColor DarkGray
         exit 0
     }
-    Write-Host "HARNESS LANE: implementation contracts + canonical smoke" -ForegroundColor Yellow
+    Write-Host "TEXT PLAY LANE: client command contracts" -ForegroundColor Yellow
     if (-not $NoFmt) { Invoke-FmtStage }
-    Invoke-CargoStage "harness contracts" @("test", "--locked", "--quiet", "--example", "gameplay_harness")
-    Invoke-CargoStage "harness smoke" @("run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke")
+    Invoke-CargoStage "text play contracts" @("test", "--locked", "--quiet", "--example", "gameplay_harness")
     $gate.Stop()
     $totalSec = [math]::Round($gate.Elapsed.TotalSeconds, 1)
     if ($script:GateTimings.Count -gt 0) {
         $table = ($script:GateTimings | ForEach-Object { "$($_.Stage): $($_.Seconds)s" }) -join "  |  "
         Write-Host "  stages: $table" -ForegroundColor DarkGray
     }
-    Write-Host "HARNESS PASS ($totalSec`s)" -ForegroundColor Green
-    Write-Host "  scenario-scale checks remain explicit: cargo test-harness-deep  |  cargo harness-full" -ForegroundColor DarkGray
+    Write-Host "TEXT PLAY PASS ($totalSec`s)" -ForegroundColor Green
+    Write-Host "  observe real play with: cargo text-play --seed <n> --script <file>" -ForegroundColor DarkGray
     exit 0
 }
 
@@ -421,15 +420,15 @@ Invoke-CargoStage "lib tests (no soak)" @("test", "--locked", "--lib", "--quiet"
 # not by rerunning every harness implementation contract. Harness contracts stay
 # in the Harness lane (`verify -Harness`), where harness code itself is the change.
 if (Test-ChangesTouch $script:SmokeRelevant) {
-    Invoke-CargoStage "harness smoke" @("run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--mode", "smoke")
+    Invoke-CargoStage "text play contracts" @("test", "--locked", "--quiet", "--example", "gameplay_harness")
 } else {
-    Skip-Stage -Name "harness smoke" -Reason "no src/harness changes"
+    Skip-Stage -Name "text play contracts" -Reason "no src/client changes"
 }
 
 if ($NoClippy) {
-    Skip-Stage -Name "clippy (lib+harness)" -Reason "--NoClippy"
+    Skip-Stage -Name "clippy (lib+text play)" -Reason "--NoClippy"
 } else {
-    Invoke-CargoStage "clippy (lib+harness)" @("clippy", "--locked", "--lib", "--example", "gameplay_harness", "--", "-D", "warnings")
+    Invoke-CargoStage "clippy (lib+text play)" @("clippy", "--locked", "--lib", "--example", "gameplay_harness", "--", "-D", "warnings")
 }
 
 $gate.Stop()
@@ -442,4 +441,4 @@ if ($script:GateTimings.Count -gt 0) {
 }
 $skippedNote = if ($script:GateStagesSkipped -gt 0) { ", $($script:GateStagesSkipped) skipped by flag" } else { "" }
 Write-Host "BROAD PASS  $($script:GateStagesPassed) stages$skippedNote in ${totalSec}s" -ForegroundColor Green
-Write-Host "  deep gameplay evidence stays explicit: cargo test-harness-deep  |  cargo harness-full --samples N" -ForegroundColor DarkGray
+Write-Host "  real play observation stays explicit: cargo text-play --seed <n> --script <file>" -ForegroundColor DarkGray
