@@ -9,11 +9,12 @@ use crate::campaign::{
     EvaluationSeeds, FixtureVariation, ScenarioProfile, build_scenario, parse_seed_value,
 };
 use crimocracy::contacts::contact_system::{
-    find_pending_disclosure_sources, validate_contact_disclosure,
+    InstitutionalContactDraft, find_pending_disclosure_sources, validate_contact_disclosure,
+    validate_establish_contact, validate_terminate_contact,
 };
 use crimocracy::contacts::{ContactKind, ContactStatus};
 use crimocracy::core::entity::EntityRef;
-use crimocracy::core::id::{BusinessId, CharacterId, OrganizationId};
+use crimocracy::core::id::{ArrestId, BusinessId, CharacterId, OrganizationId};
 use crimocracy::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::state::AppState;
@@ -48,6 +49,12 @@ use crimocracy::finance::{
     Money,
 };
 use crimocracy::intelligence::{InformationSignal, KnowledgeHolder, LegalPersonStatusSignal};
+use crimocracy::legal::legal_representation_system::{
+    validate_end_legal_representation, validate_retain_legal_representation,
+};
+use crimocracy::legal::{
+    LegalRepresentationDraft, LegalRepresentationEndReason, LegalRepresentationOrigin,
+};
 use crimocracy::operations::operation_system::validate_authorize_operation;
 use crimocracy::operations::property_disposition::{
     CashDispositionDraft, PropertyDispositionDraft, validate_deposit_operation_cash,
@@ -84,6 +91,15 @@ const HELP: &str = "Commands:
   brief                  Leadership's current situation
   people                 Your current organization members
   known-people           People identified by your intelligence or current membership
+  connections            Known institutional acquaintances with an existing staff relationship
+  contacts               Your established institutional channels and their pending disclosures
+  connect <handler-id> <known-person-id>  Establish a contact using a real relationship
+  contact [contact-id] [ask|end]  Ask a channel for new knowledge or terminate it
+  counsel                Known arrests of current staff and their retained lawyers
+  retain <arrest-id> <legal-contact-id> <fee-cents>
+                         Retain legal counsel for a current member's known case
+  end-counsel <representation-id> <concluded|replace|withdraw>
+                         End representation through the legal owner
   policies               Organization standing policies
   policy <recruitment|legal> <approve|delegate|case|automatic>
                          Change organization-level governance
@@ -132,11 +148,10 @@ const HELP: &str = "Commands:
   burgle <lead-id> [entry-id] [coordinator-id] [abort|press]
                          Authorize a burglary with your chosen crew
   dismiss <lead-id>      Reject a lead through its canonical lifecycle
-  contact                Ask the established police contact for one new disclosure
   decide <id> <continue|abort|approve|reject>
                          Resolve a pending decision
   sweep <business-id> <cents>  Withdraw earned storefront surplus to clean books
-  advance <minutes|Nh|Nd>     Advance up to seven days, stopping for decisions
+  advance <minutes|Nh|Nd>     Advance up to seven days, stopping for decisions, crew custody, and critical reports
   save <slot>            Write a validated current-schema campaign save
   quit                   End this session
 
@@ -328,8 +343,10 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
     let range = match command {
         "help" | "quit" | "exit" | "brief" | "people" | "known-people" | "prospects"
         | "directory" | "businesses" | "enterprises" | "racket-kinds" | "finances" | "accounts"
-        | "intelligence" | "opportunities" | "operations" | "decisions" | "contact"
-        | "policies" | "mandates" | "operation-kinds" | "districts" => 1..=1,
+        | "intelligence" | "opportunities" | "operations" | "decisions" | "connections"
+        | "contacts" | "counsel" | "policies" | "mandates" | "operation-kinds" | "districts" => {
+            1..=1
+        }
         "recruit" | "scout" => 2..=3,
         "start-racket" => 5..=6,
         "burgle" => 2..=5,
@@ -342,6 +359,10 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "policy" | "delegate" => 3..=3,
         "mandate" => 3..=6,
         "plan" => 3..=14,
+        "connect" => 3..=3,
+        "contact" => 1..=3,
+        "retain" => 4..=4,
+        "end-counsel" => 3..=3,
         _ => return Ok(()),
     };
     if range.contains(&words) {
@@ -567,6 +588,12 @@ impl<'a> Session<'a> {
             .characters_in_organization(self.player)
             .map(|member| member.id())
             .collect();
+        known.extend(
+            self.state
+                .contacts()
+                .contacts_for_sponsor(self.player)
+                .map(|contact| contact.contact()),
+        );
         for info in self.organization_information() {
             if let EntityRef::Character(id) = info.subject() {
                 known.insert(id);
@@ -665,7 +692,9 @@ impl<'a> Session<'a> {
 }
 
 mod commands;
+mod contact_play;
 mod governance;
+mod legal_play;
 mod planning;
 
 pub fn run(registry: &Registry, args: &[String]) -> Result<(), String> {
@@ -754,6 +783,8 @@ fn run_with_io(
     output.flush().map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
+mod contact_legal_tests;
 #[cfg(test)]
 mod governance_tests;
 #[cfg(test)]

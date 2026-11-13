@@ -891,6 +891,92 @@ pub fn build_scenario(
     .commit(&mut state)
     .expect("alternate opportunity source information fixture should commit");
 
+    // A genuine legal-services connection gives the player a way to prepare for
+    // criminal exposure rather than relying only on the police contact. Add it
+    // after the opening opportunities to preserve all existing opening record
+    // identities. The lawyer is an independently employed professional, not a
+    // player-owned crew member; establishing and using the contact remain
+    // explicit player decisions subject to the social and legal validators.
+    let law_firm = insert_organization(
+        registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Cedar Street Legal".to_owned(),
+            kind: OrganizationKind::LegalServices,
+        },
+    )?;
+    let lawyer = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Nora Keene".to_owned(),
+            organization: Some(law_firm),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([
+                (CapabilityKind::LegalKnowledge, rating(84)),
+                (CapabilityKind::Negotiation, rating(68)),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )?;
+    insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(law_firm),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )?;
+    validate_set_relationship(
+        &state,
+        boss,
+        lawyer,
+        RelationshipDimensions {
+            trust: level(62),
+            respect: level(78),
+            fear: level(0),
+            affection: level(35),
+            dependence: level(12),
+            resentment: level(0),
+            debt: level(15),
+        },
+    )?
+    .commit(&mut state)?;
+    // The lieutenant also knows counsel personally. This is strategically
+    // important: if the boss becomes a detainee, a lawful non-detained handler
+    // can still establish and manage a legal channel through an actual
+    // relationship instead of an automatic, omniscient rescue.
+    validate_set_relationship(
+        &state,
+        lieutenant,
+        lawyer,
+        RelationshipDimensions {
+            trust: level(54),
+            respect: level(67),
+            fear: level(0),
+            affection: level(21),
+            dependence: level(8),
+            resentment: level(0),
+            debt: level(0),
+        },
+    )?
+    .commit(&mut state)?;
+    validate_record_information(
+        &state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(player),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: Some(EntityRef::Character(boss)),
+            subject: EntityRef::Character(lawyer),
+            observed_at: state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "Nora Keene at Cedar Street Legal is a personal acquaintance of Joseph Marrow and takes criminal defense retainers.".to_owned(),
+        },
+    )?
+    .commit(&mut state)?;
+
     let scenario = Scenario {
         registry,
         state,

@@ -20,6 +20,12 @@ impl Session<'_> {
                 ));
             }
             "brief" => out = self.brief(),
+            "connections" | "contacts" | "connect" | "contact" => {
+                out = self.execute_contacts(&words)?;
+            }
+            "counsel" | "retain" | "end-counsel" => {
+                out = self.execute_legal(&words)?;
+            }
             "policies" | "policy" | "mandates" | "delegate" | "mandate" => {
                 out = self.execute_governance(&words)?;
             }
@@ -1184,46 +1190,6 @@ impl Session<'_> {
                     .map_err(|e| e.to_string())?;
                 writeln!(out, "Lead {raw} dismissed.").unwrap();
             }
-            "contact" => {
-                let contact = self
-                    .state
-                    .contacts()
-                    .contacts_for_sponsor(self.player)
-                    .find(|contact| {
-                        contact.kind() == ContactKind::Police
-                            && contact.status() == ContactStatus::Active
-                    })
-                    .ok_or("your organization has no active police contact")?
-                    .id();
-                let sources = find_pending_disclosure_sources(&self.state, contact);
-                match sources.first().copied() {
-                    None => out.push_str("Your police contact has nothing new to disclose."),
-                    Some(source) => {
-                        let disclosure = validate_contact_disclosure(&self.state, contact, source)
-                            .map_err(|e| e.to_string())?
-                            .commit(&mut self.state)
-                            .map_err(|e| e.to_string())?;
-                        let information = self
-                            .state
-                            .contacts()
-                            .get_disclosure(disclosure)
-                            .ok_or("disclosure record missing")?
-                            .disclosed_information();
-                        let fact = self
-                            .state
-                            .intelligence()
-                            .get_information(information)
-                            .ok_or("disclosed information missing")?;
-                        writeln!(
-                            out,
-                            "Contact disclosed {}: {}",
-                            fact.id().raw(),
-                            fact.summary()
-                        )
-                        .unwrap();
-                    }
-                }
-            }
             "decide" => {
                 let raw = parse_number(
                     words.get(1).ok_or("decide needs a decision ID")?,
@@ -1341,6 +1307,20 @@ impl Session<'_> {
                                 .get_operation(*id)
                                 .is_some_and(|op| op.responsible_organization() == self.player)
                         });
+                    let own_custody_event = |arrests: &[ArrestId]| {
+                        arrests.iter().any(|id| {
+                            self.state.legal().get_arrest(*id).is_some_and(|arrest| {
+                                self.state
+                                    .world()
+                                    .get_character(arrest.character())
+                                    .is_some_and(|person| {
+                                        person.organization() == Some(self.player)
+                                    })
+                            })
+                        })
+                    };
+                    let own_arrest = own_custody_event(&tick.evidence_arrests);
+                    let own_release = own_custody_event(&tick.custody_releases);
                     if self
                         .state
                         .decisions()
@@ -1349,6 +1329,11 @@ impl Session<'_> {
                         .is_some()
                     {
                         reason = Some("leadership decision pending");
+                    } else if own_arrest {
+                        reason =
+                            Some("your member entered custody; review 'counsel' and 'contacts'");
+                    } else if own_release {
+                        reason = Some("your member was released from custody; review 'counsel'");
                     } else if urgent {
                         reason = Some("high-priority report");
                     } else if operation_ended {

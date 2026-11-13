@@ -155,9 +155,12 @@ automated strategy or rebuild that fixture during save restoration. Its
 player-scoped read-only selection rules; `commands.rs` dispatches interactive
 player choices, `governance.rs` delegates policy/mandate mutation to the
 production delegation owner, and `planning.rs` composes registry-directed
-operation drafts. `tests.rs`, `governance_tests.rs`, `openings_tests.rs`, and
-`legal_planning_tests.rs` prove actual tick continuation, player information
-boundaries, saving, authorization, and rejection integrity.
+operation drafts. `contact_play.rs` owns the player contact interface and
+`legal_play.rs` direct-counsel commands; both use the existing canonical
+contact and legal systems. `tests.rs`, `governance_tests.rs`, `openings_tests.rs`,
+`legal_planning_tests.rs`, and `contact_legal_tests.rs` prove real tick
+continuation, legal ledger payments, saving, information boundaries,
+authorization, and rejection integrity.
 `run_tick` remains the only way to advance simulation time.
 
 Views show public business-directory identities (not ownership), organization-held
@@ -182,8 +185,19 @@ authorization enforces typed, episode-bound learned legal-status facts. A
 general observation about a person is not evidence of witness status or arrest.
 
 Leadership pauses for pending decisions, enabled urgent-report attention, and
-terminal outcomes of its own operations. The production save envelope preserves
-campaign state and reconstructs derived indexes on restoration.
+terminal outcomes of its own operations, plus player-member arrests and releases
+from the actual tick outcome. This prevents long advances from skipping the
+manual-counsel window before one-time informant decisions. Contact candidates
+are drawn from identified people with real relationships to current,
+non-detained staff; unrevealed contact information stays private until canonical
+disclosure. Legal defense targets known custody or learned detention episodes
+of current members. A retainer debits sponsor liquidity and credits the provider's
+real operating account, with active-representation and contact lifecycle
+restrictions enforced by their owners. Automatic legal-support policy acts through
+the production legal phase on the arrest minute when contact and funds exist.
+The independently employed lawyer in the authored opening does not grant free
+representation. Production saves retain these relationships, cases, and payments
+and reconstruct their indexes on restoration.
 
 Start with `cargo text-play --seed 12` for reproducibility and use `help` for
 the available actions. Script input is one command per line, with blank lines

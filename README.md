@@ -81,6 +81,25 @@ each required role, while an explicit `Role=char-N` assignment permits the playe
 to take the risk of an untrained participant. Burglary continues to use `burgle`
 so existing known opportunities are converted through their actual lifecycle.
 
+Institutional relationships and legal defense are player-managed.
+`connections` lists known outside acquaintances and eligible handlers;
+`connect <handler-id> <known-person-id>` establishes a real institutional
+channel only when the modeled social relationship supports it. `contacts`
+lists established channels and outstanding disclosures; `contact [contact-id]
+[ask|end]` requests available knowledge or terminates a channel. The
+no-argument `contact` command continues to consult the police contact.
+The authored city includes a known lawyer at Cedar Street Legal, but players
+must form that connection.
+
+`counsel` displays known custody matters involving current members and their
+actual representation. `retain <arrest-id> <legal-contact-id> <fee-cents>`
+hires counsel through a live legal contact and the production ledger.
+`end-counsel <representation-id> <concluded|replace|withdraw>` closes
+representation only when its legal constraints allow it. Alternatively,
+`policy legal automatic` enables automatic retention when a legal contact
+and funding exist. `advance` interrupts on arrests and releases of members
+so manual counsel decisions are not skipped.
+
 New games currently use the canonical authored city scenario, not a generated
 open-world campaign. The `--opening` option chooses among `night-trap`,
 `late-patrol`, `fleeting-window`, `veteran-crew`, `thin-crew`, and `green-scout`;

@@ -103,6 +103,21 @@ organization-held character/personnel information. Sensitive witness and
 detention objectives require the production operation owner's typed legal-person
 status proof, never inspection of hidden cases from the player adapter.
 
+The contact interface derives candidates from organization-held identities,
+existing sponsor-owned contact records, and actual social relationships to
+current staff. Undisclosed source details remain behind
+`contact_system::validate_contact_disclosure`. Institutional establishment
+and termination use the contact owner. `legal_play.rs` reads current member
+custody and typed member detention knowledge, then retains or ends counsel
+through `legal_representation_system`, funding a legal-services operating
+account with a balanced ledger transaction. The authored opening contains an
+independent legal-services organization, a known lawyer, and two real staff
+relationships, not an automatic retainer. Extended text-play advancement
+interrupts on own-member arrests and releases from the canonical
+`TickOutcome`, rather than inferring unseen investigations. Automatic
+legal-support decisions remain in the production tick before detainee informant
+decisions.
+
 Static definitions describe what may exist. Runtime records describe what does exist.
 Mutable progress does not live in the registry. Future-affecting generated state is
 persisted, not reconstructed.
