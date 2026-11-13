@@ -149,7 +149,7 @@ pub fn validate_sweep_business_profits(
     if draft.amount <= Money::ZERO {
         return Err(BusinessProfitSweepError::NonPositiveAmount);
     }
-    let context = resolve_business_profit_sweep_context(state, &draft)?;
+    let context = resolve_business_profit_sweep_context(state, draft.organization, draft.business)?;
     validate_business_profit_sweep_destination(state, &draft)?;
     validate_business_profit_sweep_capacity(
         &draft,
@@ -190,52 +190,52 @@ pub fn validate_sweep_business_profits(
     })
 }
 
-struct BusinessProfitSweepContext {
-    operating_account: FinancialAccountId,
-    operating_balance: Money,
-    capital_floor: Money,
+pub(super) struct BusinessProfitSweepContext {
+    pub(super) operating_account: FinancialAccountId,
+    pub(super) operating_balance: Money,
+    pub(super) capital_floor: Money,
     business_name: String,
-    business_version: u32,
-    economy_version: u32,
+    pub(super) business_version: u32,
+    pub(super) economy_version: u32,
 }
 
-fn resolve_business_profit_sweep_context(
+pub(super) fn resolve_business_profit_sweep_context(
     state: &AppState,
-    draft: &BusinessProfitSweepDraft,
+    organization: OrganizationId,
+    business: BusinessId,
 ) -> Result<BusinessProfitSweepContext, BusinessProfitSweepError> {
-    if state.world.get_organization(draft.organization).is_none() {
-        return Err(BusinessProfitSweepError::MissingOrganization(
-            draft.organization,
-        ));
+    if state.world.get_organization(organization).is_none() {
+        return Err(BusinessProfitSweepError::MissingOrganization(organization));
     }
     let business_record = state
         .world
-        .get_business(draft.business)
-        .ok_or(BusinessProfitSweepError::MissingBusiness(draft.business))?;
-    if business_record.owner() != crate::world::BusinessOwner::Organization(draft.organization) {
-        return Err(BusinessProfitSweepError::ForeignBusiness(draft.business));
+        .get_business(business)
+        .ok_or(BusinessProfitSweepError::MissingBusiness(business))?;
+    if business_record.owner() != crate::world::BusinessOwner::Organization(organization) {
+        return Err(BusinessProfitSweepError::ForeignBusiness(business));
     }
-    let economy = state.economy.get_business_economy(draft.business).ok_or(
-        BusinessProfitSweepError::MissingBusinessEconomy(draft.business),
-    )?;
+    let economy = state
+        .economy
+        .get_business_economy(business)
+        .ok_or(BusinessProfitSweepError::MissingBusinessEconomy(business))?;
     let operating = state
         .finance
         .get_account(economy.operating_account())
         .ok_or(BusinessProfitSweepError::CorruptTillAccount {
-            business: draft.business,
+            business,
             account: economy.operating_account(),
         })?;
-    if operating.owner() != FinancialOwner::Business(draft.business)
+    if operating.owner() != FinancialOwner::Business(business)
         || operating.kind() != AccountKind::LegitimateOperating
     {
         return Err(BusinessProfitSweepError::CorruptTillAccount {
-            business: draft.business,
+            business,
             account: economy.operating_account(),
         });
     }
     if economy.capital_floor_business_version() != business_record.version() {
         return Err(BusinessProfitSweepError::StaleCapitalBasis {
-            business: draft.business,
+            business,
             basis_version: economy.capital_floor_business_version(),
             current_version: business_record.version(),
         });
@@ -271,7 +271,16 @@ fn validate_business_profit_sweep_destination(
     Ok(())
 }
 
-fn validate_business_profit_sweep_capacity(
+/// Shared ceiling for manual and automatic withdrawals. Negative or unavailable retained
+/// capital never turns into a positive withdrawable balance.
+pub(super) fn available_business_profit(operating_balance: Money, capital_floor: Money) -> Money {
+    operating_balance
+        .checked_sub(capital_floor)
+        .unwrap_or(Money::ZERO)
+        .max(Money::ZERO)
+}
+
+pub(super) fn validate_business_profit_sweep_capacity(
     draft: &BusinessProfitSweepDraft,
     operating_balance: Money,
     capital_floor: Money,
@@ -283,14 +292,7 @@ fn validate_business_profit_sweep_capacity(
             requested_cents: draft.amount.cents(),
         });
     }
-    let available_surplus = operating_balance
-        .checked_sub(capital_floor)
-        .ok_or(BusinessProfitSweepError::InsufficientEarnedSurplus {
-            business: draft.business,
-            available_cents: 0,
-            requested_cents: draft.amount.cents(),
-        })?
-        .max(Money::ZERO);
+    let available_surplus = available_business_profit(operating_balance, capital_floor);
     if available_surplus < draft.amount {
         return Err(BusinessProfitSweepError::InsufficientEarnedSurplus {
             business: draft.business,

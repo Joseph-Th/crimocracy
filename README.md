@@ -8,6 +8,8 @@ Use each document for one job. [`AGENTS.md`](AGENTS.md) owns agent execution rul
 
 `content::build_registry()` builds immutable authored definitions. `AppState` owns serializable campaign state and deterministic runtime state. [`core::simulation::run_tick`](src/core/simulation.rs) advances exactly one simulated minute through the contractual phase order in [`ARCHITECTURE.md`](ARCHITECTURE.md), returning a typed error without mutation when the finite simulation clock has no successor minute.
 
+On each day boundary, non-player criminal owners distribute legitimate business earnings above each storefront's protected working-capital floor into accounted funds before payroll. The finance owner commits a single balanced, preflighted ledger batch, opening a destination account only when necessary. Player-owned storefronts require an explicit profit-sweep command; neither path treats laundering fees as earned business profit.
+
 Consequential mutation goes through the owning system's `validate_* → commit` or `decide_* → apply_*` path (some owners validate the decided plan before applying it). Tests, examples, adapters, and tools use those same production paths. Do not construct authoritative `*Record` values or patch owner-private state as a shortcut.
 
 ## Reading order

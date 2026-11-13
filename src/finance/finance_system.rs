@@ -404,6 +404,22 @@ pub(crate) fn validate_record_business_transaction(
     )
 }
 
+/// Validated business till movements may atomically open their destination accounted
+/// accounts. The ordinary public ledger remains unable to touch attached business tills.
+pub(crate) fn validate_record_business_transaction_with_openings(
+    state: &AppState,
+    openings: ValidatedFinancialAccountOpenings,
+    draft: LedgerTransactionDraft,
+) -> Result<ValidatedLedgerTransaction, FinanceError> {
+    openings.ensure_current(state)?;
+    validate_record_transaction_with_optional_openings(
+        state,
+        draft,
+        Some(openings),
+        LedgerTransactionAccess::BusinessOperating,
+    )
+}
+
 pub(crate) fn validate_record_transaction_with_openings(
     state: &AppState,
     openings: ValidatedFinancialAccountOpenings,

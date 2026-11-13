@@ -2,6 +2,7 @@
 //! and atomic ledger settlement.
 
 mod autonomous_lifecycle;
+mod autonomous_profit_sweep;
 mod cycle_planning;
 
 #[cfg(test)]
@@ -18,6 +19,7 @@ mod lifecycle;
 mod profit_sweep;
 
 pub(crate) use autonomous_lifecycle::apply_due_autonomous_business_lifecycle;
+pub(crate) use autonomous_profit_sweep::apply_due_autonomous_profit_sweeps;
 pub(crate) use lifecycle::validate_acquisition_restart;
 pub use lifecycle::{
     ValidatedBusinessEconomyStatusChange, validate_resume_business_economy,

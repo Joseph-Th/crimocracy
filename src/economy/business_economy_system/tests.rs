@@ -27,6 +27,7 @@ use crate::world::{
 use serde::Serialize;
 use std::collections::BTreeSet;
 
+mod autonomous_profit_sweeps;
 mod cycle_boundaries;
 
 struct BusinessEconomyFixture {
