@@ -263,7 +263,11 @@ business cycles actually earned during player ownership.
 
 Start with `cargo text-play --generate --seed 12 --city-size small`
 or `cargo text-play --seed 12` for reproducibility and use `help` for
-the available actions. Script input is one command per line, with blank lines
+the available actions. `advance` is the sole time-advance command. It stops at
+player attention events or the finite clock, reporting actual minutes advanced
+instead of rejecting after partial progress. The leadership brief counts active
+and suspended rackets, excluding retired history still visible in `enterprises`.
+Script input is one command per line, with blank lines
 and lines beginning `#` ignored. Interactive command rejection prints a
 reason without ending the session; a rejected scripted command fails with its
 line number. Excess or malformed command arguments are rejected before any

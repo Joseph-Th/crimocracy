@@ -96,7 +96,12 @@ impl ReportState {
     pub fn get_report(&self, id: ReportId) -> Option<&ReportRecord> {
         self.records.get(&id)
     }
-    pub fn reports_for(&self, recipient: OrganizationId) -> impl Iterator<Item = &ReportRecord> {
+    /// Recipient-owned chronology, in report-ID order. Callers can traverse backward from the
+    /// newest record without collecting campaign-length history into a temporary vector.
+    pub fn reports_for(
+        &self,
+        recipient: OrganizationId,
+    ) -> impl DoubleEndedIterator<Item = &ReportRecord> {
         self.by_recipient
             .get(&recipient)
             .into_iter()
@@ -111,7 +116,7 @@ impl ReportState {
         &self,
         recipient: OrganizationId,
         after: Option<ReportId>,
-    ) -> impl Iterator<Item = &ReportRecord> {
+    ) -> impl DoubleEndedIterator<Item = &ReportRecord> {
         use std::ops::Bound::{Excluded, Unbounded};
 
         let lower = after.map_or(Unbounded, Excluded);

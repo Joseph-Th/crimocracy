@@ -183,7 +183,11 @@ relationships, not an automatic retainer. Extended text-play advancement
 interrupts on own-member arrests and releases from the canonical
 `TickOutcome`, rather than inferring unseen investigations. Automatic
 legal-support decisions remain in the production tick before detainee informant
-decisions.
+decisions. The player `advance` handler lives in `text_play/time_play.rs` and
+caps requested ticks at the finite simulation horizon before mutating. The
+leadership brief excludes retired enterprise history from the current racket
+count. The opportunity owner provides an organization-scoped record query;
+the client does not reconstruct leads from duplicate lifecycle reports.
 
 The finance owner exposes a bounded recent-transaction projection indexed from
 the organization's accounts and an ownership-checked direct lookup; a transaction
@@ -191,6 +195,8 @@ touching two owned accounts is returned only once. The text adapter never render
 counterparty postings. Business and enterprise settlement history uses indexed
 `cycles_for` queries, with current asset ownership checked by the adapter
 and pre-acquisition business cycles excluded by their immutable settlement owner.
+Recipient report history provides a double-ended ordered iterator so newest-first
+UI lists consume only requested entries, not entire campaign report histories.
 Player business status changes are validated and committed by
 `business_economy_system`; the player cannot bypass an active racket
 dependency or reset laundering capacity by suspending a front. District racket

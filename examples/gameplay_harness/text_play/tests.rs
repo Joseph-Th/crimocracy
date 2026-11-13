@@ -3,6 +3,112 @@
 use super::*;
 
 #[test]
+fn retired_rackets_are_history_not_current_leadership_assets() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let racket = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .next()
+        .expect("opening has an operating racket")
+        .id();
+    assert!(session.brief().contains("Rackets: 1"));
+    session
+        .execute(&format!("racket {} suspend", racket.raw()))
+        .unwrap();
+    assert!(session.brief().contains("Rackets: 1"));
+    session
+        .execute(&format!("racket {} retire", racket.raw()))
+        .unwrap();
+    assert!(session.brief().contains("Rackets: 0"));
+    assert!(
+        session
+            .execute("enterprises")
+            .unwrap()
+            .0
+            .contains("Retired")
+    );
+    let mut restored = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    restored.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(restored.brief(), session.brief());
+}
+
+#[test]
+fn obsolete_wait_alias_is_not_a_second_time_mutation_path() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(session.execute("wait 1m").is_err());
+    let after = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn latest_reports_use_ordered_recipient_index_after_restore() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    session.execute("advance 1d").unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    let chronological: Vec<_> = restored
+        .reports()
+        .reports_for(session.player)
+        .map(|report| report.id().raw())
+        .collect();
+    let recent: Vec<_> = restored
+        .reports()
+        .reports_for(session.player)
+        .rev()
+        .take(3)
+        .map(|report| report.id().raw())
+        .collect();
+    assert_eq!(
+        recent,
+        chronological.into_iter().rev().take(3).collect::<Vec<_>>()
+    );
+    let display = session.execute("reports 3").unwrap().0;
+    let displayed: Vec<_> = display
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(displayed, recent);
+}
+
+#[test]
+fn leadership_leads_are_single_counted_across_discovery_and_expiry_reports() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    assert_eq!(session.known_opportunities().len(), 2);
+    assert!(session.brief().contains("Open leads: 2"));
+    session.execute("advance 1d").unwrap();
+    let all_leads = session.known_opportunities();
+    assert_eq!(all_leads.len(), 2);
+    assert_eq!(
+        all_leads
+            .iter()
+            .filter(|lead| lead.status() == OpportunityStatus::Expired)
+            .count(),
+        1
+    );
+    assert!(session.brief().contains("Open leads: 1"));
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .opportunities()
+            .opportunities_for_organization(session.player)
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn text_play_script_runs_canonical_scout_and_reports() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();

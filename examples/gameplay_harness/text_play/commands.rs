@@ -1095,14 +1095,7 @@ impl Session<'_> {
                             .map_err(|_| "reports needs a count".to_owned())
                     })?
                     .clamp(1, 40);
-                for report in state
-                    .reports()
-                    .reports_for(self.player)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .take(count)
-                {
+                for report in state.reports().reports_for(self.player).rev().take(count) {
                     writeln!(
                         out,
                         "{} {:?} {} | {}",
@@ -1392,112 +1385,7 @@ impl Session<'_> {
                 )
                 .unwrap();
             }
-            "advance" | "wait" => {
-                let span = parse_advance(words.get(1).ok_or("advance needs a duration")?)?;
-                if self
-                    .state
-                    .decisions()
-                    .pending_for_recipient(self.player)
-                    .next()
-                    .is_some()
-                {
-                    return Err("resolve your pending decisions before advancing".to_owned());
-                }
-                let mut advanced = 0;
-                let mut new_reports = 0;
-                let mut reason = None;
-                for _ in 0..span {
-                    let previous = self
-                        .state
-                        .reports()
-                        .reports_for(self.player)
-                        .last()
-                        .map(|r| r.id());
-                    let tick =
-                        run_tick(self.registry, &mut self.state).map_err(|e| e.to_string())?;
-                    advanced += 1;
-                    let reports: Vec<_> = self
-                        .state
-                        .reports()
-                        .reports_for_after(self.player, previous)
-                        .collect();
-                    new_reports += reports.len();
-                    let urgent = reports.iter().any(|report| {
-                        report.entries().iter().any(|entry| {
-                            entry.attention.can_auto_pause()
-                                && self
-                                    .state
-                                    .attention_settings()
-                                    .is_auto_pause_enabled(entry.attention)
-                        })
-                    });
-                    let operation_ended = tick
-                        .resolved_operations
-                        .iter()
-                        .chain(&tick.aborted_operations)
-                        .any(|id| {
-                            self.state
-                                .operations()
-                                .get_operation(*id)
-                                .is_some_and(|op| op.responsible_organization() == self.player)
-                        });
-                    let own_custody_event = |arrests: &[ArrestId]| {
-                        arrests.iter().any(|id| {
-                            self.state.legal().get_arrest(*id).is_some_and(|arrest| {
-                                self.state
-                                    .world()
-                                    .get_character(arrest.character())
-                                    .is_some_and(|person| {
-                                        person.organization() == Some(self.player)
-                                    })
-                            })
-                        })
-                    };
-                    let own_arrest = own_custody_event(&tick.evidence_arrests);
-                    let own_release = own_custody_event(&tick.custody_releases);
-                    if self
-                        .state
-                        .decisions()
-                        .pending_for_recipient(self.player)
-                        .next()
-                        .is_some()
-                    {
-                        reason = Some("leadership decision pending");
-                    } else if own_arrest {
-                        reason =
-                            Some("your member entered custody; review 'counsel' and 'contacts'");
-                    } else if own_release {
-                        reason = Some("your member was released from custody; review 'counsel'");
-                    } else if urgent {
-                        reason = Some("high-priority report");
-                    } else if operation_ended {
-                        reason = Some("your operation reached a terminal outcome");
-                    }
-                    if reason.is_some() {
-                        break;
-                    }
-                }
-                writeln!(
-                    out,
-                    "Advanced {advanced} minute(s) to {}. {new_reports} new report(s).",
-                    time_label(self.state.now().as_minutes())
-                )
-                .unwrap();
-                if let Some(reason) = reason {
-                    writeln!(out, "Paused: {reason}.").unwrap();
-                }
-                for report in self
-                    .state
-                    .reports()
-                    .reports_for(self.player)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .take(new_reports.min(6))
-                {
-                    writeln!(out, "  report {}: {}", report.id().raw(), report.title()).unwrap();
-                }
-            }
+            "advance" => out = self.execute_advance(words[1])?,
             "save" => out = self.save(words.get(1).ok_or("save needs a slot name")?)?,
             _ => return Err(format!("unknown command '{verb}'; type 'help'")),
         }

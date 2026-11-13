@@ -134,6 +134,10 @@ impl OpportunityRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OpportunityState {
     records: BTreeMap<OpportunityId, OpportunityRecord>,
+    /// Historical and open opportunities remain in the same owner index for the lifetime of
+    /// their records. This is reconstructed from authority on save restoration.
+    #[serde(skip)]
+    by_organization: BTreeMap<OrganizationId, BTreeSet<OpportunityId>>,
     #[serde(skip)]
     by_report: BTreeMap<ReportId, OpportunityId>,
     /// The canonical discovery rule permits only one open opportunity per
@@ -153,12 +157,17 @@ impl OpportunityState {
     }
 
     pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.by_organization.clear();
         self.by_report.clear();
         self.open_by_target.clear();
         self.open_by_expiry.clear();
         self.by_operation.clear();
         for record in self.records.values() {
             let id = record.id();
+            self.by_organization
+                .entry(record.organization())
+                .or_default()
+                .insert(id);
             self.by_report.insert(record.report(), id);
             match record.resolution() {
                 None => {
@@ -192,6 +201,24 @@ impl OpportunityState {
 
     pub fn get_opportunity(&self, id: OpportunityId) -> Option<&OpportunityRecord> {
         self.records.get(&id)
+    }
+
+    /// Opportunities belong to their discovering organization for their entire lifecycle.
+    /// The derived owner index avoids scanning other organizations' opportunities or the
+    /// recipient's growing report history, including duplicate discovery/expiry reports.
+    pub fn opportunities_for_organization(
+        &self,
+        organization: OrganizationId,
+    ) -> impl Iterator<Item = &OpportunityRecord> {
+        self.by_organization
+            .get(&organization)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.records
+                    .get(id)
+                    .expect("opportunity organization index must reference its record")
+            })
     }
 
     pub fn opportunity_for_report(&self, report: ReportId) -> Option<&OpportunityRecord> {
@@ -261,6 +288,11 @@ impl OpportunityState {
         let id = record.id();
         debug_assert_eq!(record.status(), OpportunityStatus::Open);
         debug_assert!(!self.records.contains_key(&id));
+
+        self.by_organization
+            .entry(record.organization())
+            .or_default()
+            .insert(id);
 
         let previous_report = self.by_report.insert(record.report(), id);
         debug_assert!(
@@ -350,6 +382,7 @@ impl OpportunityState {
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         self.records_have_consistent_indexes()
+            && self.organization_index_is_consistent()
             && self.report_index_is_consistent()
             && self.open_target_index_is_consistent()
             && self.expiry_index_is_consistent()
@@ -364,6 +397,13 @@ impl OpportunityState {
         for (stored_id, record) in &self.records {
             let id = record.id();
             if *stored_id != id {
+                return false;
+            }
+            if !self
+                .by_organization
+                .get(&record.organization())
+                .is_some_and(|ids| ids.contains(&id))
+            {
                 return false;
             }
             if self.by_report.get(&record.report()) != Some(&id) {
@@ -401,12 +441,30 @@ impl OpportunityState {
         }
         self.by_report.len() == expected_report_entries
             && self
+                .by_organization
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
+                == self.records.len()
+            && self
                 .open_by_expiry
                 .values()
                 .map(BTreeSet::len)
                 .sum::<usize>()
                 == expected_expiry_entries
             && self.by_operation.len() == expected_operation_entries
+    }
+
+    /// Every indexed organization matches the authoritative owner even for resolved history.
+    fn organization_index_is_consistent(&self) -> bool {
+        self.by_organization.iter().all(|(organization, ids)| {
+            !ids.is_empty()
+                && ids.iter().all(|id| {
+                    self.records
+                        .get(id)
+                        .is_some_and(|record| record.organization() == *organization)
+                })
+        })
     }
 
     /// Every report reverse lookup must be the opportunity's discovery, dismissal, or

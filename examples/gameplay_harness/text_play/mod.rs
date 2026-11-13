@@ -44,7 +44,7 @@ use crimocracy::enterprises::enterprise_execution::{
     validate_suspend_enterprise,
 };
 use crimocracy::enterprises::{
-    ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation,
+    ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseStatus,
 };
 use crimocracy::finance::finance_system::{
     LaunderingDraft, insert_account, remaining_laundering_capacity, validate_launder_funds,
@@ -420,7 +420,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "ledger" => 1..=2,
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
-        | "wait" | "save" | "transaction" | "cancel" | "debrief" | "intel" => 2..=2,
+        | "save" | "transaction" | "cancel" | "debrief" | "intel" => 2..=2,
         "policy" | "delegate" => 3..=3,
         "mandate" => 3..=6,
         "plan" => 3..=32,
@@ -834,17 +834,8 @@ impl<'a> Session<'a> {
 
     fn known_opportunities(&self) -> Vec<&crimocracy::opportunities::OpportunityRecord> {
         self.state
-            .reports()
-            .reports_for(self.player)
-            .filter_map(|report| {
-                self.state
-                    .opportunities()
-                    .opportunity_for_report(report.id())
-            })
-            .filter(|opportunity| opportunity.organization() == self.player)
-            .map(|opportunity| (opportunity.id(), opportunity))
-            .collect::<std::collections::BTreeMap<_, _>>()
-            .into_values()
+            .opportunities()
+            .opportunities_for_organization(self.player)
             .collect()
     }
 
@@ -879,6 +870,7 @@ impl<'a> Session<'a> {
         let rackets = state
             .enterprises()
             .enterprises_for_organization(player)
+            .filter(|enterprise| enterprise.status() != EnterpriseStatus::Retired)
             .count();
         let mut street = 0_i128;
         let mut concealed = 0_i128;
@@ -898,7 +890,7 @@ impl<'a> Session<'a> {
         let latest = state
             .reports()
             .reports_for(player)
-            .last()
+            .next_back()
             .map_or("No reports yet".to_owned(), |report| {
                 format!("Report {}: {}", report.id().raw(), report.title())
             });
@@ -932,6 +924,7 @@ mod reconnaissance;
 mod reconnaissance_tests;
 #[cfg(test)]
 mod staff_matching_tests;
+mod time_play;
 
 pub fn run(registry: &Registry, args: &[String]) -> Result<(), String> {
     let stdin = std::io::stdin();
