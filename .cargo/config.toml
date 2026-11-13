@@ -41,6 +41,8 @@ test-harness = ["test", "--locked", "--quiet", "--example", "gameplay_harness"]
 test-harness-deep = ["test", "--locked", "--profile", "harness", "--quiet", "--example", "gameplay_harness", "--", "--ignored"]
 
 # ── gameplay harness ──────────────────────────────────────────────────────────
+# Interactive and scripted terminal play against the same canonical simulation.
+text-play = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--play"]
 # Smoke/focused harness execution stays on the ordinary dev profile so normal iteration reuses
 # one gameplay-build cache. The harness owns its own output; Cargo build logging stays quiet.
 # Windows: if rebuilds feel pathological, exclude the repository target directory

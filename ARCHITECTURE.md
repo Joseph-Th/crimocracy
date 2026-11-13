@@ -77,6 +77,13 @@ owns it. Each `src/*/mod.rs` `//!` header names the canonical mutation path.
 - **Indexes and projections** — derived views maintained from authoritative records. Never independent truth.
 - **Adapters** — own filesystem, process, network, and UI effects. Core systems receive explicit data and return explicit outcomes.
 
+The text-play adapter lives in `examples/gameplay_harness/text_play.rs` and
+shares the canonical authored scenario setup with the bounded regression
+harness. It owns text parsing, player-visible readouts, interactive or scripted
+session I/O, and save-file publication, never gameplay state. Gameplay mutation
+still belongs to domain validators/commits and the one-minute `run_tick`; the
+production persistence envelope owns durable state, not the text client.
+
 Static definitions describe what may exist. Runtime records describe what does exist.
 Mutable progress does not live in the registry. Future-affecting generated state is
 persisted, not reconstructed.

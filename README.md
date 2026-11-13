@@ -26,9 +26,32 @@ The owning `src/` module and its focused tests are the authority for executable
 behavior. Design intent does not prove implementation and status does not define
 intent. If authorities conflict, repair the owning document and implementation.
 
+## Play the simulation in text
+
+`cargo text-play` starts an interactive, line-oriented leadership session over the
+production simulation. It accepts commands such as `brief`, `reports`, `people`,
+`opportunities`, `scout 1`, `burgle 1 abort`, `advance 6h`, `decisions`,
+and `save campaign_01`. Enter `help` for the complete vocabulary.
+
+```powershell
+cargo text-play
+cargo text-play --seed 12
+cargo text-play --load campaign_01
+cargo text-play --seed 12 --script target/text-play/commands.txt
+```
+
+New games currently use the canonical authored city scenario, not a generated
+open-world campaign. Each unseeded start chooses a fresh replayable world seed;
+the opening banner prints it. Saves use production `build_save` / `restore_save`
+inside `target/text-play/<slot>.sav`. Scripts are ordinary command-per-line
+transcripts and reject invalid actions rather than silently correcting them.
+The text client shows the player organization's own records and information, not
+diagnostic world truth. [`TESTING.md`](TESTING.md) distinguishes play from regression evidence.
+
 ## Local commands
 
 ```powershell
+cargo text-play
 cargo check-fast
 cargo test-focused <filter>
 .\scripts\check-docs.cmd

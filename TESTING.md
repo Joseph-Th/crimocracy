@@ -12,6 +12,7 @@ cockpit routing is in [`AGENTS.md`](AGENTS.md).
 | Syntax / types | `cargo check-fast` (no linking) | `.\scripts\verify.cmd -Check` (adds fmt) |
 | One library behavior | `cargo test-focused <filter>` | `.\scripts\verify.cmd -Fast -Filter <filter>` |
 | Library implementation | `cargo check-fast` or focused test | `.\scripts\verify.cmd -Fast` |
+| Interactive text-play adapter | `cargo test-harness text_play` and `cargo text-play --seed 12` | `.\scripts\verify.cmd -Harness` plus a real text-play session |
 | Harness implementation | `cargo test-harness <filter>` or focused smoke (`cargo harness-rush`) | `.\scripts\verify.cmd -Harness` (or `-Harness -Filter <pat>`, no smoke) |
 | Scenario-scale harness behavior | `cargo test-harness-deep` | `cargo harness-full --samples <N>` |
 | Persistence, invariants, or cross-domain | Owning module's focused test plus a save/restore round-trip | `.\scripts\verify.cmd` (broad gate) |
@@ -148,6 +149,37 @@ state or a clean checkpoint tree runs every stage.
 Gate flags: `-Check` (fmt on changed files + lib type-check) | `-Fast` (library tests, soak excluded; fmt on changed files) | `-Harness` (harness contracts + smoke; with `-Filter <pat>` runs fail-closed focused harness tests without smoke) | `-Filter <pat>` (fail-closed focused tests; implies `-Fast` unless `-Harness` is given) | `-Jobs N` (cap parallelism) | `-NoClippy` / `-NoFmt` (skip known-passing) | `-Verbose` / `-Detail` (show captured output on success).
 
 Documentation contracts are intentionally outside Rust's integration-test graph. The checker reads source declarations directly, so Markdown and command-surface changes have a complete compile-free path and the broad gate no longer links a second test binary merely to validate documentation.
+
+## Text play — primary player-experience surface
+
+Use `cargo text-play` to play through decisions and consequences without an
+automated evaluation policy selecting the player's moves. This is a thin
+terminal mode under `examples/gameplay_harness/text_play.rs`; it reuses the
+canonical authored setup in `scenario.rs` while taking commands from stdin or
+`--script FILE`. The player owns command selection, production owners validate
+and commit actions, and `run_tick` remains the only way to advance simulation
+time. The terminal reads organization-held intelligence, reports, pending
+decisions, owned assets, and its own operations; it must never browse hidden
+legal or rival records to recommend an action. Leadership pauses for pending
+decisions, enabled urgent-report attention, and terminal outcomes of its own
+operations. Saving uses the current production envelope and restoring rebuilds
+its derived indexes.
+
+Start with `cargo text-play --seed 12` for reproducibility and use `help` for
+the available actions. Script input is one command per line, with blank lines
+and lines beginning `#` ignored. Interactive command rejection prints a
+reason without ending the session; a rejected scripted command fails with its
+line number. The currently playable opening is an authored scenario, not
+general campaign generation. The first interface covers reconnaissance,
+burglary, decisions, contact disclosures, lead dismissal, earned-profit
+withdrawals, leadership readouts, and time advancement. Its fixed starting
+crew is a limitation of this adapter, not a second game mechanic.
+
+Automated harness runs below remain **regression and comparative evidence**,
+not the primary judge of player comprehension, usability, or campaign pacing.
+They should remain bounded and should not be expanded solely to script more
+predetermined player narratives. Text-play command tests are included in the
+existing `cargo test-harness` target.
 
 ## Gameplay-harness evidence — bounded evaluation surface
 

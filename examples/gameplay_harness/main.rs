@@ -41,6 +41,7 @@ mod retention;
 mod rival_intelligence;
 mod scenario;
 mod session;
+mod text_play;
 mod violence_leverage;
 
 pub use contracts::*;
@@ -61,7 +62,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let Some(options) = parse_options(std::env::args().skip(1))? else {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|argument| argument == "--play") {
+        let registry = build_registry();
+        return text_play::run(&registry, &args[1..]).map_err(Into::into);
+    }
+    let Some(options) = parse_options(args)? else {
         return Ok(());
     };
 

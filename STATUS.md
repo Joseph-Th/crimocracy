@@ -23,6 +23,11 @@ agent routing is in [`AGENTS.md`](AGENTS.md).
 - Due detective work uses the same isolation rule: a permanently unallocatable evidence or interview outcome remains scheduled without consuming its investigation RNG draw, while other independently resolvable cases finish. The complete viable work cohort still reserves shared artifact IDs before any case mutates.
 - Daily criminal-organization payroll isolates an organization whose own required wage-account, ledger, or shortfall-report IDs are exhausted, without withholding wages from unrelated funded organizations. Feasible payrolls still reserve their entire combined ID budget before the first payment, so a genuinely shared shortfall cannot pay only an ID-ordered prefix.
 
+## Player and evaluation adapters
+
+- `cargo text-play` starts a seeded, line-oriented leadership session using the existing authored city fixture. The interactive/scripted command adapter reads the player's reports, intelligence, own staff, own finances, open opportunities and decisions, and invokes canonical scouting, burglary, contact, decision, business-profit-sweep, and time-advance operations. A player can save a current-version campaign under `target/text-play/` and resume it; the terminal does not expose hidden rival or legal diagnostic state.
+- The text client is the primary player-experience inspection surface, but it does not yet provide an organic campaign generator, arbitrary crew planning, or commands for every implemented subsystem. The legacy smoke/full harness remains for deterministic strategy regressions and multi-seed sensitivity checks, not for evaluating actual interactive usability.
+
 ## Implemented domains
 
 | Domain | Capability | Owner and entry point |
