@@ -178,7 +178,9 @@ The `--opening` option selects one of six deterministic authored alternatives;
 `--load` excludes all seed/opening overrides and restores its saved campaign.
 `operation-kinds` derives role, approach, duration and relevant intelligence
 topics from the registry. `plan` uses the current player roster, rejects
-automatic assignment of untrained specialists, and accepts explicit crew,
+automatic assignment of untrained specialists, globally matches the required
+roles to distinct trained people for maximum total skill and a modest
+supervised-member preference, and accepts explicit crew,
 leader, police-response, start-delay, completion-deadline, and required-topic
 options through canonical authorization. Foreign business actions require
 organization-held target information. Surveillance/infiltration can begin at
@@ -200,6 +202,26 @@ personnel information into a genuine required-intelligence infiltration.
 `cancellation_tests.rs` proves player-only cancellation of scheduled and
 in-progress operations via the production abort owner, durable debriefs,
 crew-booking release, and restored state equivalence.
+
+`debrief_play.rs` offers player orders for transferring a member's
+personally held information to the organization, one source per command. The
+`debriefs` query reveals only counts of unreported observations for current
+staff and excludes detained members. The `debrief` action delegates to
+`intelligence_system::validate_information_transfer`, which ensures
+same-organization membership, source provenance, typed findings, historical
+observation time, and duplicate-lineage exclusion. `intel` displays full
+details only for information already held by the player organization. It
+does not bypass a source holder's personal knowledge. `debrief_tests.rs`
+uses real police-response observations as well as a canonical direct
+observation to prove no premature disclosure, source retention, idempotence,
+custody rejection, and exact persistence. `legal_disclosure_tests.rs`
+proves that an actual police witness record is privately held by the detective
+until the modeled institutional contact discloses it, at which point the
+player can authorize a witness-pressure plan from the typed episode signal.
+`staff_matching_tests.rs` uses overlapping capability matrices to prove
+completeness, maximum score, stable ties, manual-role separation, and no
+fabricated trained crew. The matcher has at most nine roles and evaluates
+512 assignment masks per current member.
 
 Leadership pauses for pending decisions, enabled urgent-report attention, and
 terminal outcomes of its own operations, plus player-member arrests and releases

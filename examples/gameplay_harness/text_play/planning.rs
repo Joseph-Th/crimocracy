@@ -25,6 +25,78 @@ fn parse_operation_kind(raw: &str) -> Result<OperationKind, String> {
         .ok_or_else(|| format!("unknown operation kind '{raw}'; use 'operation-kinds'"))
 }
 
+#[derive(Clone)]
+struct StaffMatch {
+    total_score: i64,
+    // An occupied role stores a real member; unfilled slots remain None.
+    by_role: Vec<Option<CharacterId>>,
+}
+
+/// Maximum-weight one-person-per-role assignment over the *entire* required
+/// crew, not a sequence of locally greedy hires. Each member can take at most
+/// one role. With at most nine authored RoleKind values, the bitmask DP is
+/// bounded by 512 masks per current member and uses no random tie-breaking.
+///
+/// Scores are authored by the caller from trained capabilities and its
+/// supervisory preference; None means the candidate is untrained for that
+/// role. Equal-score crews break ties by lowest role-ordered character IDs.
+pub(super) fn optimal_staff_match(
+    required_role_count: usize,
+    candidate_scores: &[(CharacterId, Vec<Option<i32>>)],
+) -> Option<Vec<CharacterId>> {
+    if required_role_count == 0 {
+        return Some(Vec::new());
+    }
+    if required_role_count > 9 {
+        return None;
+    }
+    let size = 1 << required_role_count;
+    let mut matches: Vec<Option<StaffMatch>> = vec![None; size];
+    matches[0] = Some(StaffMatch {
+        total_score: 0,
+        by_role: vec![None; required_role_count],
+    });
+    for (person, scores) in candidate_scores {
+        let mut next = matches.clone();
+        for (mask, current) in matches.iter().enumerate() {
+            let Some(current) = current else {
+                continue;
+            };
+            for role in 0..required_role_count {
+                if mask & (1 << role) != 0 {
+                    continue;
+                }
+                let Some(score) = scores.get(role).and_then(|score| *score) else {
+                    continue;
+                };
+                let next_mask = mask | (1 << role);
+                let mut choice = current.clone();
+                choice.total_score += i64::from(score);
+                choice.by_role[role] = Some(*person);
+                let better = match &next[next_mask] {
+                    None => true,
+                    Some(other) => {
+                        choice.total_score > other.total_score
+                            || (choice.total_score == other.total_score
+                                && choice.by_role < other.by_role)
+                    }
+                };
+                if better {
+                    next[next_mask] = Some(choice);
+                }
+            }
+        }
+        matches = next;
+    }
+    matches[size - 1].take().map(|match_| {
+        match_
+            .by_role
+            .into_iter()
+            .map(|member| member.expect("complete role mask must have a member in every slot"))
+            .collect()
+    })
+}
+
 impl Session<'_> {
     fn operation_kinds(&self) -> String {
         let mut output = String::new();
@@ -77,11 +149,9 @@ impl Session<'_> {
         output
     }
 
-    /// Assign the scarcest role first, then prefer proficiency over hierarchy.
-    /// A modest supervised-member preference avoids defaulting to the boss when
-    /// a competent subordinate is close in skill. Do not silently appoint an
-    /// untrained person to a field role: the player must explicitly accept that
-    /// risk with a role assignment.
+    /// Match the whole crew for maximum trained capability and a modest
+    /// subordinate preference. Never appoint an untrained member silently;
+    /// the player must explicitly accept that risk with a role assignment.
     fn select_operation_roles(
         &self,
         kind: OperationKind,
@@ -93,56 +163,60 @@ impl Session<'_> {
             .world()
             .characters_in_organization(self.player)
             .collect();
-        let mut used: BTreeSet<_> = explicit.values().copied().collect();
+        let used: BTreeSet<_> = explicit.values().copied().collect();
         if used.len() != explicit.len() {
             return Err("the same character cannot fill two operation roles".to_owned());
         }
         let mut roles = explicit.clone();
-        let mut missing = definition
+        let missing = definition
             .required_roles()
             .iter()
             .filter(|role| !roles.contains_key(role))
             .copied()
             .collect::<Vec<_>>();
-        missing.sort_by_key(|role| {
-            let skill = definition.execution().capability_for_role(*role);
-            let trained = roster
-                .iter()
-                .filter(|member| {
-                    !used.contains(&member.id())
-                        && skill.is_some_and(|skill| {
-                            member
-                                .capability(skill)
-                                .is_some_and(|rating| rating.value() > 0)
-                        })
-                })
-                .count();
-            (trained, *role)
-        });
-        for role in missing {
-            let skill = definition
-                .execution()
-                .capability_for_role(role)
-                .ok_or("operation role has no authored capability")?;
-            let candidate = roster
-                .iter()
-                .filter(|member| !used.contains(&member.id()))
-                .filter(|member| member.capability(skill).is_some_and(|rating| rating.value() > 0))
-                .max_by_key(|member| {
-                    let skill =
-                        i32::from(member.capability(skill).map_or(0, |rating| rating.value()));
-                    let supervisory_bonus = i32::from(member.supervisor().is_some()) * 120;
-                    (
-                        skill * 10 + supervisory_bonus,
-                        std::cmp::Reverse(member.id().raw()),
-                    )
-                })
-                .map(|member| member.id())
-                .ok_or_else(|| format!(
+        let capabilities = missing
+            .iter()
+            .map(|role| {
+                definition
+                    .execution()
+                    .capability_for_role(*role)
+                    .ok_or("operation role has no authored capability")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let candidate_scores = roster
+            .iter()
+            .filter(|member| !used.contains(&member.id()))
+            .map(|member| {
+                let scores = capabilities
+                    .iter()
+                    .map(|skill| {
+                        member
+                            .capability(*skill)
+                            .filter(|rating| rating.value() > 0)
+                            .map(|rating| {
+                                i32::from(rating.value()) * 10
+                                    + i32::from(member.supervisor().is_some()) * 120
+                            })
+                    })
+                    .collect();
+                (member.id(), scores)
+            })
+            .collect::<Vec<_>>();
+        let picked = optimal_staff_match(missing.len(), &candidate_scores).ok_or_else(|| {
+            let untrained = missing.iter().zip(&capabilities).find(|(_, skill)| {
+                !roster.iter().any(|member| !used.contains(&member.id())
+                    && member.capability(**skill).is_some_and(|rating| rating.value() > 0))
+            });
+            if let Some((role, skill)) = untrained {
+                format!(
                     "no unassigned member has trained {skill:?} for {role:?}; use {role:?}=char-N to choose an untrained member explicitly, or recruit a specialist"
-                ))?;
-            used.insert(candidate);
-            roles.insert(role, candidate);
+                )
+            } else {
+                "not enough distinct trained people to cover all roles; explicitly choose a member for a role or recruit specialists".to_owned()
+            }
+        })?;
+        for (role, member) in missing.into_iter().zip(picked) {
+            roles.insert(role, member);
         }
         Ok(roles)
     }

@@ -53,6 +53,10 @@ use crimocracy::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
+use crimocracy::intelligence::InformationTransferDraft;
+use crimocracy::intelligence::intelligence_system::{
+    IntelligenceError, validate_information_transfer,
+};
 use crimocracy::intelligence::{InformationSignal, KnowledgeHolder, LegalPersonStatusSignal};
 use crimocracy::legal::legal_representation_system::{
     validate_end_legal_representation, validate_retain_legal_representation,
@@ -146,6 +150,9 @@ const HELP: &str = "Commands:
   move <source-id> <dest-id> <cents>
                          Transfer between same-kind organization accounts
   intelligence           Information held by your organization
+  intel <information-id> Inspect one held observation, typed finding and provenance
+  debriefs               Your members and counts of unreported personal observations
+  debrief <member-id>    Transfer one new member observation to organization knowledge
   operation-kinds        Authorized operation families and required crew roles
   plan <kind> <target-id> [approach=...] [leader=char-id] [Role=char-id...] [police=press|ask|abort]
                          [delay=Nh] [deadline=Nh] [need=InformationTopic]
@@ -365,7 +372,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         | "directory" | "businesses" | "enterprises" | "racket-kinds" | "finances" | "accounts"
         | "intelligence" | "opportunities" | "operations" | "decisions" | "connections"
         | "contacts" | "counsel" | "policies" | "mandates" | "operation-kinds" | "districts"
-        | "known-targets" => 1..=1,
+        | "known-targets" | "debriefs" => 1..=1,
         "recruit" | "scout" => 2..=3,
         "start-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
@@ -376,7 +383,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "ledger" => 1..=2,
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
-        | "wait" | "save" | "transaction" | "cancel" => 2..=2,
+        | "wait" | "save" | "transaction" | "cancel" | "debrief" | "intel" => 2..=2,
         "policy" | "delegate" => 3..=3,
         "mandate" => 3..=6,
         "plan" => 3..=32,
@@ -831,7 +838,12 @@ impl<'a> Session<'a> {
 mod cancellation_tests;
 mod commands;
 mod contact_play;
+mod debrief_play;
+#[cfg(test)]
+mod debrief_tests;
 mod governance;
+#[cfg(test)]
+mod legal_disclosure_tests;
 mod legal_play;
 mod planning;
 #[cfg(test)]
@@ -839,6 +851,8 @@ mod planning_options_tests;
 mod reconnaissance;
 #[cfg(test)]
 mod reconnaissance_tests;
+#[cfg(test)]
+mod staff_matching_tests;
 
 pub fn run(registry: &Registry, args: &[String]) -> Result<(), String> {
     let stdin = std::io::stdin();

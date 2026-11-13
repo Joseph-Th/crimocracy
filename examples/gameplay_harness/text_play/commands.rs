@@ -20,6 +20,7 @@ impl Session<'_> {
                 ));
             }
             "brief" => out = self.brief(),
+            "debriefs" | "debrief" => out = self.execute_debrief(&words)?,
             "ledger" | "transaction" => out = self.execute_finance_history(&words)?,
             "business-cycles" | "racket-cycles" => {
                 out = self.execute_economy_history(&words)?;
@@ -733,6 +734,47 @@ impl Session<'_> {
                     )
                     .unwrap();
                 }
+            }
+            "intel" => {
+                let raw = parse_number(words[1], "information")?;
+                let fact = self
+                    .organization_information()
+                    .find(|fact| fact.id().raw() == raw)
+                    .ok_or("information is not held by your organization")?;
+                writeln!(
+                    out,
+                    "information-{} | {:?} | {:?} on {:?}",
+                    fact.id().raw(),
+                    fact.source_kind(),
+                    fact.topic(),
+                    fact.subject(),
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "Observed {} | recorded {} | {:?}/{:?}",
+                    time_label(fact.observed_at().as_minutes()),
+                    time_label(fact.recorded_at().as_minutes()),
+                    fact.reliability(),
+                    fact.specificity(),
+                )
+                .unwrap();
+                writeln!(out, "Source: {:?}", fact.source_entity()).unwrap();
+                if let Some(signal) = fact.signal() {
+                    writeln!(out, "Typed finding: {signal:?}").unwrap();
+                }
+                if !fact.derived_from().is_empty() {
+                    writeln!(
+                        out,
+                        "Source information: {:?}",
+                        fact.derived_from()
+                            .iter()
+                            .map(|id| format!("information-{}", id.raw()))
+                            .collect::<Vec<_>>()
+                    )
+                    .unwrap();
+                }
+                writeln!(out, "{}", fact.summary()).unwrap();
             }
             "opportunities" => {
                 for lead in self.known_opportunities() {

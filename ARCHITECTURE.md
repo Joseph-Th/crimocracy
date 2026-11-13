@@ -96,10 +96,13 @@ Player governance orders remain in `delegation_system` through validated
 policy and mandate operations, including assignment, revision and revocation.
 The text operation planner derives role capabilities, supported approaches and
 completion timing from immutable registry definitions. Automatic crew selection
-uses current player member capabilities, without inventing trained personnel;
-explicit assignments permit knowingly untrained members. Business directories
-are public, while people are targetable only if current members or learned from
-organization-held character/personnel information. Sensitive witness and
+uses a bounded maximum-weight role-mask matching over current member skills
+and supervisory preference, without inventing trained personnel or assigning
+the same person twice. Ties select the lowest IDs in stable role order.
+Explicit role assignments remain fixed and can knowingly use untrained members.
+Business directories are public; named people are selectable through current
+membership, established contacts, recruitment prospects, or personally
+identified information held by the organization. Sensitive witness and
 detention objectives require the production operation owner's typed legal-person
 status proof, never inspection of hidden cases from the player adapter.
 
@@ -127,6 +130,19 @@ The client treats a current recruitment prospect as identified because the
 production recruitment owner already established a playable relationship to
 that person. Typed legal-person operation authorization remains stricter than
 being generally acquainted with a character.
+
+Internal member observations stay with `KnowledgeHolder::Character` until
+leadership issues `debrief`. `text_play/debrief_play.rs` enumerates
+only current roster members' pending sources and calls
+`intelligence_system::validate_information_transfer` for a single
+organization-directed handoff. The resulting `InternalReport` preserves
+the original observation, typed semantics, and source lineage. Existing
+duplicate-lineage checks prevent repeated reporting; the adapter blocks
+debriefs of detained members. `intel` queries only the organization's
+holder index and cannot read a guessed personal or rival information ID.
+Case-witness information begins with the staffed investigator; an actual
+institutional contact disclosure conveys its episode-specific typed signal
+to the organization, not mere surveillance of the whole authority.
 
 The contact interface derives candidates from organization-held identities,
 existing sponsor-owned contact records, and actual social relationships to

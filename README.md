@@ -109,8 +109,9 @@ leadership decision; `police=abort` adds a pre-entry escape when the operation
 has an actual authored entry stage, then asks leadership on later arrivals.
 `need` requires usable organization-held intelligence of an applicable topic
 before authorization. The production owner validates every constraint and crew
-booking. Automatic staffing requires trained roles, while explicit
-`Role=char-N` permits knowingly untrained people.
+booking. Automatic staffing solves the whole crew assignment to maximize
+trained capability, with stable ID-based tie-breaking and no duplicate
+participants; explicit `Role=char-N` permits knowingly untrained people.
 `cancel operation-N` withdraws an authorized or running operation through
 the canonical abort path, files its report, and releases personnel; pending
 leadership decisions must instead be resolved with `decide`. Burglary still uses
@@ -125,6 +126,22 @@ lists established channels and outstanding disclosures;
 no-argument `contact` command continues to consult the police contact.
 The authored city includes a known lawyer at Cedar Street Legal, but players
 must form that connection.
+
+Personal field observations do not automatically become organization knowledge.
+`debriefs` lists the count of unreported notes held by current, non-detained
+members. `debrief char-N` transfers the member's next new observation through
+the production intelligence owner, retaining its original observation time,
+typed facts, source, and lineage; repeat to receive additional notes.
+`intel information-N` inspects a specific organization-held observation,
+including its typed signal and provenance, but cannot read an outside contact's
+or member's still-private source just by guessing an ID.
+
+A working police contact may disclose an investigator's actual case-witness
+registration following a criminal incident. After that disclosure,
+`known-people` identifies the witness, and `plan witnesspressure char-N` can
+use the learned episode if the production legal and operation checks permit.
+An institution-level surveillance report about case activity is not itself
+evidence that a specific person is a witness.
 
 `counsel` displays known custody matters involving current members and their
 actual representation. `retain <arrest-id> <legal-contact-id> <fee-cents>`
