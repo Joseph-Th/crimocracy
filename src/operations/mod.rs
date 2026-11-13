@@ -77,7 +77,7 @@ impl OperationKind {
     /// objective whose target is stored as a typed character id, so a non-character cannot even
     /// form a candidate objective. Shape validation remains centralized in
     /// `is_valid_operation_objective`.
-    pub(crate) fn objective_for_target(self, target: EntityRef) -> Option<OperationObjective> {
+    pub fn objective_for_target(self, target: EntityRef) -> Option<OperationObjective> {
         Some(match self.objective_kind() {
             OperationObjectiveKind::AcquireProperty => {
                 OperationObjective::AcquireProperty { target }

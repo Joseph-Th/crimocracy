@@ -20,6 +20,21 @@ impl Session<'_> {
                 ));
             }
             "brief" => out = self.brief(),
+            "policies" | "policy" | "mandates" | "delegate" | "mandate" => {
+                out = self.execute_governance(&words)?;
+            }
+            "districts" => {
+                for district in state.world().neighborhoods() {
+                    writeln!(
+                        out,
+                        "district-{} | {}",
+                        district.id().raw(),
+                        district.name()
+                    )
+                    .unwrap();
+                }
+            }
+            "operation-kinds" | "plan" => out = self.execute_planning(&words)?,
             "people" => {
                 for person in state.world().characters_in_organization(self.player) {
                     let supervisor = person
@@ -45,6 +60,44 @@ impl Session<'_> {
                         .collect::<Vec<_>>();
                     if !capabilities.is_empty() {
                         writeln!(out, "  Capabilities: {}", capabilities.join(", ")).unwrap();
+                    }
+                }
+            }
+            "known-people" => {
+                for id in self.known_character_ids() {
+                    let person = state
+                        .world()
+                        .get_character(id)
+                        .ok_or("known person disappeared")?;
+                    let relationship = if person.organization() == Some(self.player) {
+                        "organization member"
+                    } else {
+                        "identified by intelligence"
+                    };
+                    writeln!(
+                        out,
+                        "char-{} {} | {}",
+                        id.raw(),
+                        person.name(),
+                        relationship
+                    )
+                    .unwrap();
+                    for information in self
+                        .organization_information()
+                        .filter(|info| info.subject() == EntityRef::Character(id))
+                    {
+                        if let Some(InformationSignal::LegalPersonStatus(status)) =
+                            information.signal()
+                        {
+                            let role = match status {
+                                LegalPersonStatusSignal::CaseWitness { .. } => {
+                                    "reported case witness"
+                                }
+                                LegalPersonStatusSignal::Detained { .. } => "reported detention",
+                            };
+                            writeln!(out, "  Learned {role} via information {} (observed {}); current legal status is not confirmed",
+                                information.id().raw(), time_label(information.observed_at().as_minutes())).unwrap();
+                        }
                     }
                 }
             }
@@ -135,10 +188,11 @@ impl Session<'_> {
                         .acquisition_cost();
                     writeln!(
                         out,
-                        "{} {} | {:?} | {} | standard acquisition price {} cents",
+                        "{} {} | {:?} | district-{} {} | standard acquisition price {} cents",
                         id.raw(),
                         name,
                         kind,
+                        district.raw(),
                         ward,
                         price.cents()
                     )

@@ -5,7 +5,9 @@
 //! as the evaluation harness. Views contain only the player's staff, books, reports,
 //! and organization-held intelligence; scenario diagnostics never enter this client.
 
-use crate::campaign::{EvaluationSeeds, ScenarioProfile, build_scenario, parse_seed_value};
+use crate::campaign::{
+    EvaluationSeeds, FixtureVariation, ScenarioProfile, build_scenario, parse_seed_value,
+};
 use crimocracy::contacts::contact_system::{
     find_pending_disclosure_sources, validate_contact_disclosure,
 };
@@ -417,6 +419,9 @@ impl<'a> Session<'a> {
             std::fs::read(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
         let file: CampaignFile =
             bincode::deserialize(&bytes).map_err(|e| format!("invalid campaign file: {e}"))?;
+        // Derive presentation labels from saved metadata without recreating
+        // the authored scenario or touching its persisted world state.
+        let variation = FixtureVariation::from_seed(file.world_seed);
         let state = restore_save(registry, file.campaign).map_err(|e| e.to_string())?;
         let player = state
             .player_organization()
@@ -426,8 +431,8 @@ impl<'a> Session<'a> {
             state,
             player,
             seeds: EvaluationSeeds::new(file.world_seed, file.policy_seed),
-            district: "the saved campaign's district",
-            district_variant: "saved",
+            district: variation.neighborhood_name(),
+            district_variant: variation.label(),
         })
     }
 

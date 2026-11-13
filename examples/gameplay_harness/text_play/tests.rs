@@ -91,6 +91,11 @@ fn text_play_save_restore_continues_exact_simulation() {
     original.save(&slot).unwrap(); // Updating an existing slot must work on Windows.
     let mut restored = Session::load(&registry, &slot).unwrap();
     let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        original.brief(),
+        restored.brief(),
+        "resuming must preserve opening display labels"
+    );
     assert_eq!(restored.state.now(), original.state.now());
     for _ in 0..45 {
         run_tick(&registry, &mut original.state).unwrap();
