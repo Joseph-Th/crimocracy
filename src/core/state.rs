@@ -30,7 +30,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 113;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 114;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -50,6 +50,7 @@ struct SimulationRuntime {
 struct CampaignRuntime {
     player_organization: Option<OrganizationId>,
     attention: AttentionSettings,
+    automatic_profit_sweeps: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -180,6 +181,16 @@ impl AppState {
 
     pub fn history(&self) -> &HistoryState {
         &self.history
+    }
+
+    /// Standing instruction to distribute earned storefront surplus before payroll.
+    /// Manual control is the default; retained operating capital remains protected.
+    pub fn automatic_profit_sweeps(&self) -> bool {
+        self.campaign.automatic_profit_sweeps
+    }
+
+    pub fn set_automatic_profit_sweeps(&mut self, enabled: bool) {
+        self.campaign.automatic_profit_sweeps = enabled;
     }
 
     pub fn attention_settings(&self) -> &AttentionSettings {

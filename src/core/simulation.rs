@@ -60,7 +60,7 @@ pub struct TickOutcome {
     pub business_cycles: Vec<BusinessCycleId>,
     pub resumed_businesses: Vec<crate::core::id::BusinessId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
-    /// Balanced ledger distribution of NPC business earnings, never retained capital.
+    /// Balanced ledger distribution of authorized owners' business earnings, never retained capital.
     pub autonomous_profit_sweeps: Option<crate::core::id::LedgerTransactionId>,
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
     /// Number of individual reputation dimensions that actually moved this tick, including
@@ -180,12 +180,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         .expect("valid state should maintain suspended non-player business economies");
     let enterprise_cycles = run_enterprise_cycle_phase(registry, state)
         .expect("valid due enterprise cycles must settle through the preflighted sequential phase");
-    // Non-player owners withdraw legitimate earnings after both settlement phases, before
-    // payroll. Otherwise profitable fronts can hoard cash in protected tills while their
-    // organizations fail to pay members. Player owner draws remain an explicit decision.
+    // NPC owners and players who explicitly enable daily distributions withdraw legitimate
+    // surplus after both settlement phases, before payroll. Retained capital stays protected.
     let autonomous_profit_sweeps =
         crate::economy::business_economy_system::apply_due_autonomous_profit_sweeps(state)
-            .expect("valid state should distribute due non-player business profits");
+            .expect("valid state should distribute due authorized business profits");
     // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
     // the same day's wages. Reputation then settles the day boundary before recruitment: daily
     // decay advances only impressions old enough to fade, while operation/racket consequences from

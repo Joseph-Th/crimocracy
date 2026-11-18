@@ -2,6 +2,93 @@
 
 use super::*;
 
+#[test]
+fn repeated_identified_operations_build_a_single_case_and_trigger_custody() {
+    let (registry, mut state, police, _neighborhood, first) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, true, Vec::new());
+    let first_record = state.operations().get_operation(first).unwrap();
+    let organization = first_record.responsible_organization();
+    let leader = first_record.leader();
+    let roles = first_record.roles().clone();
+    let objective = first_record.objective().clone();
+    designate_player_organization(&mut state, organization).unwrap();
+
+    let first_tick = run_until_operation_resolved(&registry, &mut state, first);
+    assert!(
+        first_tick.evidence_arrests.is_empty(),
+        "one identified incident cannot supply two independent primary facts"
+    );
+    let first_resolution = state
+        .operations()
+        .get_operation(first)
+        .unwrap()
+        .resolution()
+        .unwrap();
+    assert_eq!(
+        first_resolution.exposure().identified_character(),
+        Some(leader)
+    );
+    let case = first_resolution.exposure().investigation().unwrap();
+    assert_eq!(
+        state.legal().get_investigation(case).unwrap().owner(),
+        police
+    );
+    assert!(state.legal().active_arrest_for_character(leader).is_none());
+
+    let second = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Second observed intimidation".to_owned(),
+            kind: OperationKind::Intimidation,
+            responsible_organization: organization,
+            leader,
+            objective,
+            approach: OperationApproach::Intimidating,
+            roles,
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    let second_tick = run_until_operation_resolved(&registry, &mut state, second);
+    let replay = run_until_operation_resolved(&registry, &mut restored, second);
+    assert_eq!(second_tick, replay);
+    let second_resolution = state
+        .operations()
+        .get_operation(second)
+        .unwrap()
+        .resolution()
+        .unwrap();
+    assert_eq!(
+        second_resolution.exposure().identified_character(),
+        Some(leader)
+    );
+    assert_eq!(second_resolution.exposure().investigation(), Some(case));
+    let file = state.legal().get_investigation(case).unwrap();
+    assert!(file.subjects().contains(&EntityRef::Operation(first)));
+    assert!(file.subjects().contains(&EntityRef::Operation(second)));
+    assert_eq!(file.evidence().len(), 2);
+    let arrest = state
+        .legal()
+        .active_arrest_for_character(leader)
+        .expect("two identified incidents should corroborate custody");
+    assert_eq!(arrest.investigation(), case);
+    let saved = build_save(&registry, &state).unwrap();
+    let roundtrip = restore_save(&registry, saved.clone()).unwrap();
+    assert_eq!(
+        bincode::serialize(&saved).unwrap(),
+        bincode::serialize(&build_save(&registry, &roundtrip).unwrap()).unwrap()
+    );
+    validate_state_against_registry(&registry, &roundtrip).unwrap();
+    validate_invariants(&roundtrip);
+}
+
 #[derive(Clone, Serialize)]
 struct PoliceResponseRoutingWire {
     authority: OrganizationId,

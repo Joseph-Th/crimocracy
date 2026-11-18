@@ -148,8 +148,25 @@ fn text_play_police_disclosure_and_new_legal_channel_remain_independent() {
     assert!(pending.contains("Police Active"));
     assert!(pending.contains("Legal Active"));
     assert!(pending.contains("undisclosed source(s)"));
-    let report = session.execute("contact").unwrap().0;
-    assert!(report.contains("Contact disclosed"), "{report}");
+    let police = session
+        .state
+        .contacts()
+        .contacts_for_sponsor(session.player)
+        .find(|contact| contact.kind() == ContactKind::Police)
+        .unwrap()
+        .id();
+    let pending_count = find_pending_disclosure_sources(&session.state, police).len();
+    assert!(pending_count > 0);
+    let report = session
+        .execute(&format!("contact {} ask-all", police.raw()))
+        .unwrap()
+        .0;
+    assert_eq!(
+        report.matches("Contact disclosed").count(),
+        pending_count.min(64)
+    );
+    assert!(report.contains("observed minute"), "{report}");
+    assert!(find_pending_disclosure_sources(&session.state, police).is_empty());
     assert!(
         session
             .execute("intelligence")

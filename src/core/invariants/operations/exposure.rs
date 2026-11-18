@@ -138,7 +138,9 @@ fn validate_exposure_investigation(
     if !matches!(
         owner.kind(),
         OrganizationKind::LawEnforcement | OrganizationKind::LegalAuthority
-    ) || investigation.opened_at() != resolution.resolved_at()
+    ) || investigation.opened_at() > resolution.resolved_at()
+        || (investigation.origin() == Some(EntityRef::Operation(operation.id()))
+            && investigation.opened_at() != resolution.resolved_at())
         || !investigation
             .subjects()
             .contains(&EntityRef::Operation(operation.id()))

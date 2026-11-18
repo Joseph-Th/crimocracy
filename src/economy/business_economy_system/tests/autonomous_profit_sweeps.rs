@@ -1,4 +1,58 @@
-//! Production-path evidence for non-player owner withdrawals and their payroll consequence.
+//! Production-path evidence for authorized owner withdrawals and their payroll consequence.
+
+#[test]
+fn player_daily_distribution_survives_restore_and_funds_payroll() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    add_boss(&mut fixture);
+    designate_player_organization(&mut fixture.state, fixture.organization).unwrap();
+    establish_business_economy(&registry, &mut fixture);
+    assert!(!fixture.state.automatic_profit_sweeps());
+    fixture.state.set_automatic_profit_sweeps(true);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(ONE_DAY - 1));
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    assert!(restored.automatic_profit_sweeps());
+    let outcome = run_tick(&registry, &mut fixture.state);
+    let replay = run_tick(&registry, &mut restored);
+    assert_eq!(
+        outcome.autonomous_profit_sweeps,
+        replay.autonomous_profit_sweeps
+    );
+    assert!(outcome.autonomous_profit_sweeps.is_some());
+    assert!(
+        outcome
+            .payrolls
+            .iter()
+            .any(|payroll| payroll.organization() == fixture.organization
+                && payroll.paid() > Money::ZERO)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.operating)
+            .unwrap()
+            .balance(),
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .unwrap()
+            .operating_capital_floor()
+    );
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+    restored.set_automatic_profit_sweeps(false);
+    restored.advance_clock(SimDuration::from_minutes(ONE_DAY - 1));
+    let next = run_tick(&registry, &mut restored);
+    assert!(next.autonomous_profit_sweeps.is_none());
+    validate_invariants(&restored);
+}
 
 use super::*;
 use crate::core::id::{BusinessId, NeighborhoodId, OrganizationId};

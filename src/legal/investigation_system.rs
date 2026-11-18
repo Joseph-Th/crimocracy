@@ -115,7 +115,7 @@ pub enum InvestigationError {
     #[error("incident intake names {subject:?} as a case subject without matching evidence")]
     UnsubstantiatedIncidentSubject { subject: EntityRef },
     #[error(
-        "incident intake resumable shelf changed after validation; expected {expected:?}, found {found:?}"
+        "incident intake existing file changed after validation; expected {expected:?}, found {found:?}"
     )]
     StaleIncidentShelf {
         expected: Option<(InvestigationId, u32)>,

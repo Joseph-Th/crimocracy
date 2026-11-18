@@ -271,6 +271,19 @@ fn validate_business_profit_sweep_destination(
     Ok(())
 }
 
+/// Read the earned surplus currently eligible for an organization owner's withdrawal.
+pub fn resolve_available_business_profit(
+    state: &AppState,
+    organization: OrganizationId,
+    business: BusinessId,
+) -> Result<Money, BusinessProfitSweepError> {
+    let context = resolve_business_profit_sweep_context(state, organization, business)?;
+    Ok(available_business_profit(
+        context.operating_balance,
+        context.capital_floor,
+    ))
+}
+
 /// Shared ceiling for manual and automatic withdrawals. Negative or unavailable retained
 /// capital never turns into a positive withdrawable balance.
 pub(super) fn available_business_profit(operating_balance: Money, capital_floor: Money) -> Money {

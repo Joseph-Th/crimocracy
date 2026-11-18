@@ -101,7 +101,7 @@ save campaign_01
 Organizational expansion and economic decisions use the same player interface:
 `directory` lists public establishments, `buy` spends accounted funds on
 independent businesses, `launder` converts street cash within an owned front's
-real capacity, `businesses` shows earned owner-withdrawal headroom, and
+real capacity, `businesses` shows earned owner-withdrawal headroom, `treasury daily` authorizes daily profit distributions before payroll (protected working capital stays in the storefront), `treasury manual` restores explicit withdrawals, and
 `racket-kinds` lists enterprise requirements. `open-account`, `move`,
 and `start-racket` let leadership fund and establish more enterprises with
 actual mandates and existing books. Ordinary `move` transfers only between
@@ -164,7 +164,7 @@ Institutional relationships and legal defense are player-managed.
 `connect <handler-id> <known-person-id>` establishes a real institutional
 channel only when the modeled social relationship supports it. `contacts`
 lists established channels and outstanding disclosures;
-`contact [contact-id] [ask|end]` requests available knowledge or terminates a channel. The
+`contact [contact-id] [ask|ask-all|end]` requests one or up to 64 available disclosures, or terminates a channel. Disclosures carry their original observation minutes. The
 no-argument `contact` command continues to consult the police contact.
 The authored city includes a known lawyer at Cedar Street Legal, but players
 must form that connection.
@@ -192,7 +192,7 @@ hires counsel through a live legal contact and the production ledger.
 representation only when its legal constraints allow it. Alternatively,
 `policy legal automatic` enables automatic retention when a legal contact
 and funding exist. `advance` interrupts on arrests and releases of members
-so manual counsel decisions are not skipped.
+so manual counsel decisions are not skipped. It also pauses on newly suspended own businesses or rackets and payroll shortfalls by default. Use `attention exception off` for uninterrupted routine management; actual pending decisions and own custody changes still interrupt. `brief` displays current daily payroll coverage alongside withdrawable earned surplus.
 
 Games may use seeded procedural cities through `--generate` or one of the
 original authored test openings. The `--opening` option chooses among `night-trap`,

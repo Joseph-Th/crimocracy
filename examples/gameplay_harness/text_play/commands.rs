@@ -20,6 +20,54 @@ impl Session<'_> {
                 ));
             }
             "brief" => out = self.brief(),
+            "attention" => {
+                use crimocracy::core::attention::AttentionClass;
+                match words.as_slice() {
+                    [_] => {}
+                    [_, class, enabled] => {
+                        let class = match *class {
+                            "exception" => AttentionClass::Exception,
+                            "crisis" => AttentionClass::Crisis,
+                            _ => return Err("attention [exception|crisis on|off]".to_owned()),
+                        };
+                        let enabled = match *enabled {
+                            "on" => true,
+                            "off" => false,
+                            _ => return Err("attention [exception|crisis on|off]".to_owned()),
+                        };
+                        self.state
+                            .set_auto_pause(class, enabled)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    _ => return Err("attention [exception|crisis on|off]".to_owned()),
+                }
+                for class in [AttentionClass::Exception, AttentionClass::Crisis] {
+                    writeln!(
+                        out,
+                        "{class:?} auto-pause: {}",
+                        if self.state.attention_settings().is_auto_pause_enabled(class) {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    )
+                    .unwrap();
+                }
+                out.push_str("Pending decisions, own-member custody changes, and completed or aborted operations always pause.");
+            }
+            "treasury" => {
+                match words.get(1).copied() {
+                    None => {}
+                    Some("manual") => self.state.set_automatic_profit_sweeps(false),
+                    Some("daily") => self.state.set_automatic_profit_sweeps(true),
+                    Some(_) => return Err("treasury [manual|daily]".to_owned()),
+                }
+                out = if self.state.automatic_profit_sweeps() {
+                    "Treasury: daily distribution of earned business surplus before payroll; retained operating capital stays protected."
+                } else {
+                    "Treasury: manual owner withdrawals; use 'businesses' and 'sweep' to distribute earned surplus."
+                }.to_owned();
+            }
             "debriefs" | "debrief" => out = self.execute_debrief(&words)?,
             "ledger" | "transaction" => out = self.execute_finance_history(&words)?,
             "business-cycles" | "racket-cycles" => {
@@ -359,11 +407,9 @@ impl Session<'_> {
                             .finance()
                             .get_account(economy.operating_account())
                             .ok_or("operating books reference a missing account")?;
-                        let withdrawable = till
-                            .balance()
-                            .cents()
-                            .saturating_sub(economy.operating_capital_floor().cents())
-                            .max(0);
+                        let withdrawable = crimocracy::economy::business_economy_system::resolve_available_business_profit(
+                            state, self.player, business.id(),
+                        ).map_err(|error| error.to_string())?.cents();
                         let laundering = remaining_laundering_capacity(
                             self.registry,
                             state,

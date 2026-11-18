@@ -1283,10 +1283,14 @@ fn shortfall_reports_once_to_the_player_organization_only() {
     assert_eq!(
         payroll_reports.len(),
         1,
-        "one shortfall produces exactly one notable report"
+        "one shortfall produces exactly one exception report"
     );
     let entry = &payroll_reports[0].entries()[0];
     assert!(entry.summary.contains("went uncovered"));
+    assert_eq!(
+        entry.attention,
+        crate::core::attention::AttentionClass::Exception
+    );
     validate_invariants(&fixture.state);
 }
 

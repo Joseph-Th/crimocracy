@@ -265,8 +265,16 @@ Start with `cargo text-play --generate --seed 12 --city-size small`
 or `cargo text-play --seed 12` for reproducibility and use `help` for
 the available actions. `advance` is the sole time-advance command. It stops at
 player attention events or the finite clock, reporting actual minutes advanced
-instead of rejecting after partial progress. The leadership brief counts active
-and suspended rackets, excluding retired history still visible in `enterprises`.
+instead of rejecting after partial progress. The leadership brief distinguishes active and suspended rackets, excluding retired
+history still visible in `enterprises`. Treasury tests cover explicit daily
+distribution, retained capital, payroll funding, disabling the order, and
+deterministic save/restore. Contact briefing tests exercise the canonical per-source
+disclosure path and observation timestamps. Long advances interrupt fresh
+own-business/racket suspensions and payroll exceptions; the client test proves
+payroll interruption at the exact boundary, read-only coverage, and persistent
+attention preferences. The police-response integration test resolves two complete
+identifying operations and verifies one active file, independent evidence, actual
+custody, and deterministic continuation from a save between incidents.
 Script input is one command per line, with blank lines
 and lines beginning `#` ignored. Interactive command rejection prints a
 reason without ending the session; a rejected scripted command fails with its

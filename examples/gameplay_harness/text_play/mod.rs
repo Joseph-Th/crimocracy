@@ -101,13 +101,14 @@ const MAX_ADVANCE: u64 = DAY_MINUTES * 7;
 
 const HELP: &str = "Commands:
   brief                  Leadership's current situation
+  attention [exception|crisis on|off]  Inspect or configure optional auto-pauses
   people                 Your current organization members
   known-people           Your members, identified people, and approach-ready prospects
   known-targets          Identified organizations, operations, cases, and enterprises
   connections            Known institutional acquaintances with an existing staff relationship
   contacts               Your established institutional channels and their pending disclosures
   connect <handler-id> <known-person-id>  Establish a contact using a real relationship
-  contact [contact-id] [ask|end]  Ask a channel for new knowledge or terminate it
+  contact [contact-id] [ask|ask-all|end]  Ask for one or up to 64 disclosures, or terminate a channel
   counsel                Known arrests of current staff and their retained lawyers
   retain <arrest-id> <legal-contact-id> <fee-cents>
                          Retain legal counsel for a current member's known case
@@ -144,6 +145,7 @@ const HELP: &str = "Commands:
                          Historical racket earnings and enforcement attention
   finances               Your actual organization accounts
   accounts               Inspect your organization account IDs and balances
+  treasury [manual|daily]  Inspect or set daily earned-profit distribution before payroll
   ledger [count]          Recent transactions touching your books (default 10)
   transaction <id>        Inspect owned-account postings without rival books
   open-account <street|concealed|accounted|settlement>
@@ -416,7 +418,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "racket" | "launder" | "sweep" | "decide" | "business" => 3..=3,
         "move" | "deposit" => 4..=4,
         "dispose" => 5..=5,
-        "reports" => 1..=2,
+        "reports" | "treasury" => 1..=2,
+        "attention" => 1..=3,
         "ledger" => 1..=2,
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
@@ -872,6 +875,26 @@ impl<'a> Session<'a> {
             .enterprises_for_organization(player)
             .filter(|enterprise| enterprise.status() != EnterpriseStatus::Retired)
             .count();
+        let active_rackets = state
+            .enterprises()
+            .enterprises_for_organization(player)
+            .filter(|enterprise| enterprise.status() == EnterpriseStatus::Active)
+            .count();
+        let surplus: i128 = state
+            .world()
+            .businesses_owned_by_organization(player)
+            .filter(|business| state.economy().get_business_economy(business.id()).is_some())
+            .map(|business| {
+                i128::from(crimocracy::economy::business_economy_system::resolve_available_business_profit(
+                    state, player, business.id(),
+                ).expect("owned operating books must have a valid capital basis").cents())
+            })
+            .sum();
+        let distribution = if state.automatic_profit_sweeps() {
+            "daily"
+        } else {
+            "manual"
+        };
         let mut street = 0_i128;
         let mut concealed = 0_i128;
         let mut clean = 0_i128;
@@ -887,6 +910,14 @@ impl<'a> Session<'a> {
                 AccountKind::LegitimateOperating | AccountKind::Settlement => {}
             }
         }
+        let (payroll, covered) = crimocracy::world::payroll_execution::payroll_funding_snapshot(
+            self.registry,
+            state,
+            player,
+        )
+        .expect("valid player payroll estimate");
+        let payroll = payroll.cents();
+        let covered = covered.cents();
         let latest = state
             .reports()
             .reports_for(player)
@@ -895,10 +926,11 @@ impl<'a> Session<'a> {
                 format!("Report {}: {}", report.id().raw(), report.title())
             });
         format!(
-            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} | Rackets: {rackets}\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
+            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nDaily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
             time_label(state.now().as_minutes()),
             self.district,
-            self.district_variant
+            self.district_variant,
+            rackets - active_rackets
         )
     }
 }

@@ -32,7 +32,7 @@ use crate::world::OrganizationKind;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub(crate) enum PayrollError {
+pub enum PayrollError {
     #[error("payroll member count exceeds supported range")]
     MemberCountOverflow,
     #[error("payroll arithmetic overflowed")]
@@ -119,6 +119,20 @@ impl PayrollOutcome {
     }
 }
 
+/// Current one-day wage obligation and amount covered by existing spendable reserves.
+/// Uses the same obligation and funding calculations as payroll without allocating wages.
+/// Does not predict intervening revenue.
+pub fn payroll_funding_snapshot(
+    registry: &Registry,
+    state: &AppState,
+    organization: OrganizationId,
+) -> Result<(Money, Money), PayrollError> {
+    let member_count = state.world.characters_in_organization(organization).count();
+    let owed = payroll_obligation(registry.upkeep().per_member_daily(), member_count)?;
+    let funding = find_funding_accounts(state, organization);
+    Ok((owed, resolve_payroll_liquidity(state, &funding, owed)))
+}
+
 /// Payroll shares the executive brief's day-boundary cadence: it runs exactly once per
 /// simulated day and never at minute zero before any campaign time has passed.
 fn is_payroll_due(now: SimTime) -> bool {
@@ -199,9 +213,7 @@ fn plan_organization_payroll(
         return Ok(None);
     }
     let per_member = registry.upkeep().per_member_daily();
-    let owed = per_member
-        .checked_mul(i64::try_from(members.len()).map_err(|_| PayrollError::MemberCountOverflow)?)
-        .ok_or(PayrollError::ArithmeticOverflow)?;
+    let owed = payroll_obligation(per_member, members.len())?;
     let funding = find_funding_accounts(state, organization);
     // Payroll is an organization-level obligation, so every organization-owned liquid cash
     // account is eligible. Enterprise records may reference the same cash account as one another
@@ -352,6 +364,12 @@ fn apply_organization_payroll(
         consequences.commit_preflighted(state);
     }
     Ok(outcome)
+}
+
+fn payroll_obligation(per_member: Money, member_count: usize) -> Result<Money, PayrollError> {
+    per_member
+        .checked_mul(i64::try_from(member_count).map_err(|_| PayrollError::MemberCountOverflow)?)
+        .ok_or(PayrollError::ArithmeticOverflow)
 }
 
 fn resolve_payroll_liquidity(
@@ -705,7 +723,7 @@ fn validate_payroll_shortfall_report(
             kind: ReportKind::Financial,
             title: "Payroll ran short".to_owned(),
             entries: vec![ReportEntry {
-                attention: AttentionClass::Notable,
+                attention: AttentionClass::Exception,
                 summary: format!(
                     "Payroll owed {} but only {} could be paid; {} went uncovered and the shorted crew noticed.",
                     format_money_cents(outcome.owed().cents()),

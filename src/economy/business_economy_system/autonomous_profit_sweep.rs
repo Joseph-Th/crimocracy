@@ -1,8 +1,8 @@
-//! Deterministic daily distribution of earned business profits to non-player criminal owners.
+//! Deterministic daily distribution of earned business profits to criminal owners.
 //!
 //! One balanced ledger batch reuses the canonical owner-sweep capital ceiling and the finance
 //! owner's atomic account-opening path. No withdrawal can spend a front's retained working
-//! capital; player-owned fronts always remain an explicit governance decision.
+//! capital; player-owned fronts participate only under an explicit standing instruction.
 
 use super::profit_sweep::{
     BusinessProfitSweepDraft, BusinessProfitSweepError, available_business_profit,
@@ -112,7 +112,7 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
     }
 
     let mut postings = Vec::new();
-    let mut business_count = 0_usize;
+
     for (organization, group) in &groups {
         let destination = destinations[organization]
             .expect("each profitable owner must have an existing or planned accounted account");
@@ -147,7 +147,6 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
                 account: source.operating_account,
                 amount: source.amount.checked_neg().expect("earned surplus negates"),
             });
-            business_count += 1;
         }
         postings.push(LedgerPosting {
             account: destination,
@@ -157,10 +156,8 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
 
     let draft = LedgerTransactionDraft {
         occurred_at: state.now(),
-        memo: format!(
-            "Daily non-player owner profit distribution from {business_count} business(es) to {} organization(s)",
-            groups.len()
-        ),
+        // The shared ledger memo must not disclose other owners' participation.
+        memo: "Daily owner profit distribution".to_owned(),
         postings,
         authorization: None,
     };
@@ -181,7 +178,8 @@ fn plan_available_profit_sources(
         .organizations()
         .filter(|organization| {
             organization.kind() == OrganizationKind::Criminal
-                && Some(organization.id()) != state.player_organization()
+                && (Some(organization.id()) != state.player_organization()
+                    || state.automatic_profit_sweeps())
         })
         .map(|organization| organization.id())
         .collect();

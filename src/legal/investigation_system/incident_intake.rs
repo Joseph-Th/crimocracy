@@ -1,4 +1,4 @@
-//! Atomic incident-to-case routing, including suspended-shelf continuation and incident evidence.
+//! Atomic incident-to-case routing, including active-file and suspended-shelf continuation.
 
 use super::{
     InvestigationError, InvestigationTransition, ensure_evidence_prosecution_recusal_capacity,
@@ -29,10 +29,9 @@ pub struct IncidentIntakeOutcome {
 pub struct ValidatedIncidentIntake {
     draft: IncidentIntakeDraft,
     validated_at: SimTime,
-    /// The suspended originated shelf (and its pinned version) this intake continues, found
-    /// at validation time and re-checked at commit so a stale token cannot resurrect a shelf
-    /// whose state moved on.
-    resuming: Option<(InvestigationId, u32)>,
+    /// Existing originated case and its pinned version, whether active or suspended.
+    /// Recompute routing at commit, including new matching cases.
+    continuing: Option<(InvestigationId, u32)>,
 }
 
 impl ValidatedIncidentIntake {
@@ -43,7 +42,7 @@ impl ValidatedIncidentIntake {
 
     pub(crate) fn id_budget(&self) -> Result<Vec<(IdKind, u32)>, InvestigationError> {
         let mut budget = Vec::with_capacity(3);
-        if self.resuming.is_none() {
+        if self.continuing.is_none() {
             budget.push((IdKind::Investigation, 1));
         }
         budget.push((IdKind::Evidence, self.evidence_count()?));
@@ -59,19 +58,22 @@ impl ValidatedIncidentIntake {
             InvestigationError::StaleIncidentTime { expected, found }
         })?;
         validate_incident_intake_dependencies(state, &self.draft)?;
-        let found = find_resumable_shelf(state, &self.draft);
-        if found != self.resuming {
+        let found = find_incident_target(state, &self.draft);
+        if found != self.continuing {
             return Err(InvestigationError::StaleIncidentShelf {
-                expected: self.resuming,
+                expected: self.continuing,
                 found,
             });
         }
-        if let Some((shelf, _)) = self.resuming {
-            validate_transition_investigation(state, shelf, InvestigationTransition::Resume)?;
+        if let Some((shelf, _)) = self.continuing {
             let record = state
                 .legal
                 .get_investigation(shelf)
-                .expect("resumable incident shelf must still exist");
+                .expect("continued incident file must exist");
+            let resuming = record.status() == InvestigationStatus::Suspended;
+            if resuming {
+                validate_transition_investigation(state, shelf, InvestigationTransition::Resume)?;
+            }
             if let Some(witness) = &self.draft.witness
                 && record
                     .subjects()
@@ -138,9 +140,9 @@ impl ValidatedIncidentIntake {
                 .evidence_count()?
                 .checked_add(u32::from(self.draft.witness.is_some()))
                 .and_then(|count| count.checked_add(u32::from(adds_incident_context)))
-                .and_then(|count| count.checked_add(1))
+                .and_then(|count| count.checked_add(u32::from(resuming)))
                 .ok_or_else(|| VersionCapacityError::new("investigation"))?;
-            ensure_version_can_advance_by(record.version(), advances, "investigation")?;
+            crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(state, shelf, advances, None)?;
         } else {
             let advances = self
                 .evidence_count()?
@@ -160,12 +162,24 @@ impl ValidatedIncidentIntake {
         // The draft is consumed by this commit, so its subject set moves into the record
         // instead of being cloned.
         let subjects = std::mem::take(&mut self.draft.subjects);
-        let investigation = match self.resuming {
+        let mut resumed_shelf = false;
+        let investigation = match self.continuing {
             Some((shelf, _)) => {
-                // Canonical resume: revalidates the lifecycle gate and refreshes the lead's
-                // personal knowledge through the shared transition path.
-                validate_transition_investigation(state, shelf, InvestigationTransition::Resume)?
+                resumed_shelf = state
+                    .legal
+                    .get_investigation(shelf)
+                    .expect("continued file")
+                    .status()
+                    == InvestigationStatus::Suspended;
+                if resumed_shelf {
+                    // Canonical resume: revalidate lifecycle before extending the file.
+                    validate_transition_investigation(
+                        state,
+                        shelf,
+                        InvestigationTransition::Resume,
+                    )?
                     .commit(state)?;
+                }
                 // A fresh case stores every validated incident subject at opening time. Preserve
                 // the same semantic boundary on continuation instead of making weak-but-valid
                 // non-character subject matter disappear merely because this incident found a
@@ -253,7 +267,7 @@ impl ValidatedIncidentIntake {
         }
         Ok(IncidentIntakeOutcome {
             investigation,
-            resumed_shelf: self.resuming.is_some(),
+            resumed_shelf,
             evidence: evidence_ids,
             case_witness,
         })
@@ -265,14 +279,79 @@ pub fn validate_incident_intake(
     draft: IncidentIntakeDraft,
 ) -> Result<ValidatedIncidentIntake, InvestigationError> {
     validate_incident_intake_dependencies(state, &draft)?;
-    let resuming = find_resumable_shelf(state, &draft);
+    let continuing = find_incident_target(state, &draft);
     let validated = ValidatedIncidentIntake {
         draft,
-        resuming,
+        continuing,
         validated_at: state.now(),
     };
     validated.ensure_current(state)?;
     Ok(validated)
+}
+
+/// Route independent, identified operation incidents into a compatible active police file
+/// before falling back to the existing suspended-shelf rule. This is intake, not a merge of
+/// existing files. Mere district, organization, or anonymous operation overlap is insufficient.
+fn find_incident_target(
+    state: &AppState,
+    draft: &IncidentIntakeDraft,
+) -> Option<(InvestigationId, u32)> {
+    find_active_identified_file(state, draft).or_else(|| find_resumable_shelf(state, draft))
+}
+
+fn find_active_identified_file(
+    state: &AppState,
+    draft: &IncidentIntakeDraft,
+) -> Option<(InvestigationId, u32)> {
+    let origin @ EntityRef::Operation(_) = draft.origin? else {
+        return None;
+    };
+    let organization = case_origin_responsible_organization(state, origin)?;
+    // The production operation intake carries exactly one primary identification and the
+    // operation itself. Other incident vocabularies retain their separate routing contract.
+    let [evidence] = draft.evidence.as_slice() else {
+        return None;
+    };
+    let suspect = evidence.subject.as_character()?;
+    if evidence.origin != Some(origin)
+        || !draft.subjects.contains(&origin)
+        || !draft.subjects.contains(&evidence.subject)
+        || draft.subjects.len() != 2
+        || !evidence_assessment_is_actionable_case_lead(
+            evidence.strength,
+            evidence.reliability,
+            evidence.admissibility,
+        )
+    {
+        return None;
+    }
+    state.legal.active_investigations_for_subject(EntityRef::Character(suspect))
+        .filter(|record| {
+            if record.owner() != draft.owner || record.subjects().contains(&origin) { return false; }
+            let Some(case_origin @ EntityRef::Operation(_)) = record.origin() else { return false; };
+            if case_origin_responsible_organization(state, case_origin) != Some(organization) { return false; }
+            // Avoid creating a second registration for the same named witness, or taking a
+            // witness already assigned to casework. A separate file is valid in either case.
+            if draft.witness.as_ref().is_some_and(|witness| {
+                record.subjects().contains(&EntityRef::Character(witness.character))
+                    || state.legal.case_witness_for(record.id(), witness.character).is_some()
+                    || crate::legal::witness_system::case_witness_role_conflict(state, record.id(), witness.character).is_some()
+            }) { return false; }
+            // Reserve the append plus declared-subject update without stealing revisions from
+            // an already scheduled investigator task. No existing evidence is copied or upgraded.
+            let advances = 2 + u32::from(draft.witness.is_some());
+            if crate::legal::investigation_work_execution::ensure_external_investigation_mutation_capacity(state, record.id(), advances, None).is_err() { return false; }
+            record.evidence().iter().any(|id| {
+                let prior = state.legal.get_evidence(*id).expect("indexed case evidence");
+                prior.subject() == evidence.subject
+                    && prior.origin() != Some(origin)
+                    && prior.origin().is_some_and(|prior_origin| matches!(prior_origin, EntityRef::Operation(_)) && case_origin_responsible_organization(state, prior_origin) == Some(organization))
+                    && prior.derived_from().is_empty()
+                    && evidence_assessment_is_actionable_case_lead(prior.strength(), prior.reliability(), prior.admissibility())
+            })
+        })
+        .max_by_key(|record| (record.last_activity_at(), Reverse(record.id())))
+        .map(|record| (record.id(), record.version()))
 }
 
 /// Finds the owner's suspended originated shelf sharing subject matter with the draft, so a

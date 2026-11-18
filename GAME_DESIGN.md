@@ -379,7 +379,7 @@ Examples:
 
 - Normal protection collections.
 - Expected business revenue.
-- Routine payroll.
+- Routine payroll and authorized distributions of earned business surplus.
 - Ordinary low-risk deliveries.
 
 ## Notable
@@ -399,6 +399,7 @@ A subordinate cannot safely resolve the situation under current policy and reque
 
 Examples:
 
+- Payroll cannot be funded, or a storefront or racket suspends operations.
 - A protected business refuses payment.
 - A planned burglary encounters an unexpected security system.
 - A lieutenant wants permission to retaliate against a rival.
@@ -414,7 +415,7 @@ Examples:
 - A rival attack threatens important personnel.
 - A witness is unexpectedly attempting to leave the city.
 
-The player must be able to customize which classes pause the game.
+The player must be able to customize which classes pause the game. Pending decisions and own-member custody changes must still interrupt advancement so consequential choices cannot be skipped.
 
 ---
 

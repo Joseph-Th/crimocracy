@@ -182,15 +182,39 @@ impl Session<'_> {
                     (id, words.get(2).copied().unwrap_or("ask"))
                 };
                 match action {
-                    "ask" => {
-                        let source = find_pending_disclosure_sources(&self.state, id)
-                            .first()
-                            .copied();
-                        if let Some(source) = source {
-                            let disclosure = validate_contact_disclosure(&self.state, id, source)
-                                .map_err(|e| e.to_string())?
-                                .commit(&mut self.state)
-                                .map_err(|e| e.to_string())?;
+                    "ask" | "ask-all" => {
+                        let active = self
+                            .state
+                            .contacts()
+                            .get_contact(id)
+                            .is_some_and(|record| record.status() == ContactStatus::Active);
+                        if !active {
+                            return Err("contact is no longer active".to_owned());
+                        }
+                        let sources = find_pending_disclosure_sources(&self.state, id);
+                        let limit = if action == "ask-all" { 64 } else { 1 };
+                        if sources.is_empty() {
+                            out.push_str(
+                                "This contact has no new available information to disclose.",
+                            );
+                        }
+                        for (index, source) in sources.iter().copied().take(limit).enumerate() {
+                            // Each disclosure remains a separate canonical transaction. A later
+                            // capacity failure must acknowledge earlier successful disclosures.
+                            let result = validate_contact_disclosure(&self.state, id, source)
+                                .and_then(|token| token.commit(&mut self.state));
+                            let disclosure = match result {
+                                Ok(disclosure) => disclosure,
+                                Err(error) if index == 0 => return Err(error.to_string()),
+                                Err(error) => {
+                                    writeln!(
+                                        out,
+                                        "Briefing stopped after {index} disclosures: {error}"
+                                    )
+                                    .unwrap();
+                                    return Ok(out);
+                                }
+                            };
                             let information = self
                                 .state
                                 .contacts()
@@ -204,23 +228,20 @@ impl Session<'_> {
                                 .ok_or("disclosed information disappeared")?;
                             writeln!(
                                 out,
-                                "Contact disclosed {}: {}",
+                                "Contact disclosed {} (observed minute {}): {}",
                                 fact.id().raw(),
+                                fact.observed_at().as_minutes(),
                                 fact.summary()
                             )
                             .unwrap();
-                        } else {
-                            let active = self
-                                .state
-                                .contacts()
-                                .get_contact(id)
-                                .is_some_and(|record| record.status() == ContactStatus::Active);
-                            if !active {
-                                return Err("contact is no longer active".to_owned());
-                            }
-                            out.push_str(
-                                "This contact has no new available information to disclose.",
-                            );
+                        }
+                        if action == "ask-all" && sources.len() > limit {
+                            writeln!(
+                                out,
+                                "{} more disclosures available; ask-all again.",
+                                sources.len() - limit
+                            )
+                            .unwrap();
                         }
                     }
                     "end" => {
@@ -230,7 +251,7 @@ impl Session<'_> {
                             .map_err(|e| e.to_string())?;
                         writeln!(out, "Contact {} terminated.", id.raw()).unwrap();
                     }
-                    _ => return Err("contact [contact-id] [ask|end]".to_owned()),
+                    _ => return Err("contact [contact-id] [ask|ask-all|end]".to_owned()),
                 }
             }
             _ => return Err("unknown contact command".to_owned()),

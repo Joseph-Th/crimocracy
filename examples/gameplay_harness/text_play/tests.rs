@@ -13,11 +13,19 @@ fn retired_rackets_are_history_not_current_leadership_assets() {
         .next()
         .expect("opening has an operating racket")
         .id();
-    assert!(session.brief().contains("Rackets: 1"));
+    assert!(
+        session
+            .brief()
+            .contains("Rackets: 1 (1 active, 0 suspended)")
+    );
     session
         .execute(&format!("racket {} suspend", racket.raw()))
         .unwrap();
-    assert!(session.brief().contains("Rackets: 1"));
+    assert!(
+        session
+            .brief()
+            .contains("Rackets: 1 (0 active, 1 suspended)")
+    );
     session
         .execute(&format!("racket {} retire", racket.raw()))
         .unwrap();
@@ -33,6 +41,26 @@ fn retired_rackets_are_history_not_current_leadership_assets() {
     restored.state =
         restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
     assert_eq!(restored.brief(), session.brief());
+}
+
+#[test]
+fn treasury_standing_order_is_explicit_and_persistent() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    assert!(session.execute("treasury").unwrap().0.contains("manual"));
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(session.execute("treasury invalid").is_err());
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    session.execute("treasury daily").unwrap();
+    assert!(session.brief().contains("distribution: daily"));
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(session.state.automatic_profit_sweeps());
+    session.execute("treasury manual").unwrap();
+    assert!(!session.state.automatic_profit_sweeps());
 }
 
 #[test]
