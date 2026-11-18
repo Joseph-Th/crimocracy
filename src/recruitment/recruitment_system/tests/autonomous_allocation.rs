@@ -73,6 +73,180 @@ fn add_personnel_crew(
 }
 
 #[test]
+fn blocked_incumbent_report_does_not_discard_viable_recruitment_fallback() {
+    for policy in [ApprovalPolicy::Delegated, ApprovalPolicy::RequireApproval] {
+        let mut fixture = fixture();
+        assign_personnel_mandate(&mut fixture, Some(policy));
+        validate_set_relationship(
+            &fixture.state,
+            fixture.candidate,
+            fixture.recruiter,
+            relationship(100, 100, 0, 100, 100, 0, 100),
+        )
+        .expect("preferred prospect relationship should validate")
+        .commit(&mut fixture.state)
+        .expect("preferred prospect relationship should commit");
+        let fallback = insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: "Unaffiliated fallback prospect".to_owned(),
+                organization: None,
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("fallback prospect should validate");
+        validate_set_relationship(
+            &fixture.state,
+            fallback,
+            fixture.recruiter,
+            relationship(55, 65, 10, 35, 15, 5, 10),
+        )
+        .expect("fallback relationship should validate")
+        .commit(&mut fixture.state)
+        .expect("fallback relationship should commit");
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        fixture
+            .state
+            .ids
+            .set_next_raw_for_test(crate::core::id::IdKind::Report, u32::MAX);
+
+        let outcome = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state)
+            .expect("unavailable incumbent report must not prevent an unaffiliated pitch");
+        assert_eq!(outcome.attempts.len(), 1, "{policy:?}");
+        assert_eq!(
+            outcome.approval_requests.len(),
+            usize::from(policy == ApprovalPolicy::RequireApproval)
+        );
+        let attempt = fixture
+            .state
+            .recruitment()
+            .get_attempt(outcome.attempts[0])
+            .expect("fallback attempt should persist");
+        assert_eq!(attempt.candidate(), fallback);
+        assert_eq!(
+            fixture
+                .state
+                .world()
+                .get_character(fixture.candidate)
+                .expect("blocked prospect should persist")
+                .organization(),
+            Some(fixture.source)
+        );
+        assert_eq!(
+            fixture.state.ids.next_raw(crate::core::id::IdKind::Report),
+            u32::MAX
+        );
+        validate_state_against_registry(&fixture.registry, &fixture.state)
+            .expect("fallback recruitment must preserve valid state");
+        let restored = restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, &fixture.state).expect("fallback should save"),
+        )
+        .expect("fallback should restore");
+        assert_eq!(
+            restored
+                .recruitment()
+                .get_attempt(outcome.attempts[0])
+                .expect("restored fallback attempt should persist")
+                .candidate(),
+            fallback
+        );
+        validate_invariants(&restored);
+    }
+}
+
+#[test]
+fn blocked_npc_pitch_does_not_contest_the_last_viable_approval_id() {
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+    let (_, blocked_manager, blocked_candidate) =
+        add_personnel_crew(&mut fixture, ApprovalPolicy::RequireApproval, "Blocked");
+    let viable_candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Independent approval prospect".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("independent prospect should validate");
+    validate_set_relationship(
+        &fixture.state,
+        viable_candidate,
+        fixture.recruiter,
+        relationship(100, 100, 0, 100, 100, 0, 100),
+    )
+    .expect("first approval prospect relationship should validate")
+    .commit(&mut fixture.state)
+    .expect("first approval prospect relationship should commit");
+    let support = |candidate, manager| {
+        recruitment_relationship_support(
+            fixture.registry.recruitment(),
+            fixture
+                .state
+                .social()
+                .get_relationship(candidate, manager)
+                .expect("prospect relationship must exist")
+                .dimensions(),
+        )
+    };
+    assert!(
+        support(viable_candidate, fixture.recruiter) > support(blocked_candidate, blocked_manager),
+        "the viable pitch must reserve its decision before the blocked pitch is considered"
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Report, u32::MAX);
+    fixture
+        .state
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::DecisionRequest, u32::MAX - 1);
+
+    let outcome = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state)
+        .expect("an individually blocked second pitch must not contest the final approval ID");
+    assert_eq!(outcome.attempts.len(), 1);
+    assert_eq!(outcome.approval_requests.len(), 1);
+    assert_eq!(outcome.approval_requests[0].decision.raw(), u32::MAX - 1);
+    let attempt = fixture
+        .state
+        .recruitment()
+        .get_attempt(outcome.attempts[0])
+        .expect("the viable recruitment attempt should persist");
+    assert_eq!(attempt.candidate(), viable_candidate);
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(blocked_candidate)
+            .expect("blocked prospect must persist")
+            .organization(),
+        Some(fixture.source)
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state)
+        .expect("isolated last approval must preserve valid state");
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).expect("last approval should save"),
+    )
+    .expect("last approval should restore");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn exhausted_approval_ids_do_not_cancel_independent_delegated_recruitment() {
     let mut fixture = fixture();
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));

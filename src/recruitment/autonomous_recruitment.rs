@@ -158,28 +158,31 @@ fn plan_due_autonomous_recruitment(
 ) -> Result<RecruitmentPlanningResult, AutonomousRecruitmentError> {
     let personnel_scope = ResponsibilityScope::Function(ResponsibilityFunction::Personnel);
     let mut authorities = prepare_recruitment_authorities(registry, state, personnel_scope)?;
-    if contested.contains(&IdKind::DecisionRequest) {
-        authorities.retain(|authority| authority.policy == ApprovalPolicy::Delegated);
-    }
+    let id_available = |kind| !contested.contains(&kind) && state.ids.reserve(kind, 1).is_ok();
+    let approval_available = id_available(IdKind::DecisionRequest);
+    let attempt_available =
+        id_available(IdKind::RecruitmentAttempt) && id_available(IdKind::Information);
+    authorities.retain(|authority| {
+        let needs_approval = authority.policy == ApprovalPolicy::RequireApproval;
+        let needs_attempt =
+            !needs_approval || state.player_organization() != Some(authority.organization);
+        (!needs_approval || approval_available) && (!needs_attempt || attempt_available)
+    });
     let mut claimed_this_pass = BTreeSet::new();
     let mut actions = Vec::new();
     let mut id_budget = Vec::new();
     let mut decision_count = 0_u32;
 
-    while !authorities.is_empty() {
-        let Some((authority_index, candidate)) =
-            select_next_recruitment_action(&authorities, &claimed_this_pass)
-        else {
-            break;
-        };
-        let prepared = authorities.remove(authority_index);
-        let PreparedRecruitmentAuthority {
-            mandate,
-            organization,
-            manager,
-            policy,
-            candidates: _,
-        } = prepared;
+    while let Some((authority_index, candidate)) =
+        select_next_recruitment_action(&authorities, &claimed_this_pass)
+    {
+        let prepared = &authorities[authority_index];
+        let (mandate, organization, manager, policy) = (
+            prepared.mandate,
+            prepared.organization,
+            prepared.manager,
+            prepared.policy,
+        );
         let manager_record = state
             .world()
             .get_character(manager)
@@ -190,10 +193,17 @@ fn plan_due_autonomous_recruitment(
             manager,
             scope: personnel_scope,
         };
+        let next_decision_count = decision_count
+            .checked_add(u32::from(policy == ApprovalPolicy::RequireApproval))
+            .expect("persisted mandate count must fit the u32 decision ID space");
+        let decisions_fit = state
+            .ids
+            .reserve(IdKind::DecisionRequest, next_decision_count)
+            .is_ok();
 
-        match policy {
-            ApprovalPolicy::Delegated => {
-                let validated = validate_delegated_recruitment_attempt(
+        let action = match policy {
+            ApprovalPolicy::Delegated => PlannedAutonomousRecruitmentAction::Delegated(
+                validate_delegated_recruitment_attempt(
                     registry,
                     state,
                     authority,
@@ -203,36 +213,9 @@ fn plan_due_autonomous_recruitment(
                         candidate,
                         approach,
                     },
-                )?;
-                let action_budget = validated.id_budget();
-                // An action that cannot fit even on its own must not suppress unrelated
-                // managers. Shared scarcity between individually viable actions is still
-                // handled by the all-or-none cohort reservation after planning.
-                if state.ids.reserve_many(&action_budget).is_err()
-                    || action_budget
-                        .iter()
-                        .any(|(kind, _)| contested.contains(kind))
-                {
-                    continue;
-                }
-                id_budget.extend(action_budget);
-                actions.push(PlannedAutonomousRecruitmentAction::Delegated(validated));
-            }
+                )?,
+            ),
             ApprovalPolicy::RequireApproval => {
-                // An NPC approval always records an information-bearing recruitment attempt.
-                // When either mandatory ID kind is contested it cannot be in this cohort, so
-                // skip it before claiming a decision slot or someone else's prospective recruit.
-                if state.player_organization() != Some(organization)
-                    && (contested.contains(&IdKind::RecruitmentAttempt)
-                        || contested.contains(&IdKind::Information))
-                {
-                    continue;
-                }
-                // Request validation does not allocate an ID. In particular, an exhausted
-                // decision allocator must not prevent an independent delegated attempt.
-                if state.ids.reserve(IdKind::DecisionRequest, 1).is_err() {
-                    continue;
-                }
                 let request = validate_request_recruitment_approval(
                     registry,
                     state,
@@ -246,67 +229,69 @@ fn plan_due_autonomous_recruitment(
                         summary: approval_request_summary(state, manager, candidate, approach),
                     },
                 )?;
-                decision_count = decision_count
-                    .checked_add(1)
-                    .expect("persisted mandate count must fit the u32 decision ID space");
-                // Besides proving this request count is representable, the check makes the
-                // predicted future decision ID below safe to derive without wrapping.
-                if state
-                    .ids
-                    .reserve(IdKind::DecisionRequest, decision_count)
-                    .is_err()
-                {
-                    // The approval cohort cannot all acquire IDs. Do not admit a prefix;
-                    // delegated managers are reconsidered without these provisional claims.
-                    return Ok(RecruitmentPlanningResult::Contested(
-                        IdKind::DecisionRequest,
-                    ));
-                }
                 if state.player_organization() == Some(organization) {
-                    let action_budget = request.id_budget();
-                    id_budget.extend(action_budget);
-                    actions.push(PlannedAutonomousRecruitmentAction::PlayerApproval(request));
+                    PlannedAutonomousRecruitmentAction::PlayerApproval(request)
                 } else {
+                    // Even if the cohort cannot fit another decision, check whether this
+                    // pitch is viable in isolation before declaring shared contention.
+                    // The first free ID is valid for that read-only probe; its token is
+                    // discarded unless the complete decision cohort fits.
+                    let offset = if decisions_fit { decision_count } else { 0 };
                     let predicted_decision = DecisionRequestId::from_raw(
                         state
                             .ids
                             .next_raw(IdKind::DecisionRequest)
-                            .checked_add(decision_count - 1)
-                            .expect("decision-count reserve proved the predicted ID representable"),
+                            .checked_add(offset)
+                            .expect("decision reservation proved the predicted ID representable"),
                     );
-                    let prepared = request.prepare_autonomous_resolution(
-                        registry,
-                        state,
-                        DecisionResponse::Approve,
-                        predicted_decision,
-                    )?;
-                    let action_budget = prepared.id_budget();
-                    if state.ids.reserve_many(&action_budget).is_err()
-                        || action_budget
-                            .iter()
-                            .any(|(kind, _)| contested.contains(kind))
-                    {
-                        // The NPC's approved pitch requires more than the decision itself.
-                        // If its own attempt artifacts are exhausted, no phantom approval
-                        // should occupy the candidate or block another manager's pitch.
-                        decision_count -= 1;
-                        continue;
-                    }
-                    id_budget.extend(action_budget);
-                    actions.push(PlannedAutonomousRecruitmentAction::AutonomousApproval(
-                        prepared,
-                    ));
+                    PlannedAutonomousRecruitmentAction::AutonomousApproval(
+                        request.prepare_autonomous_resolution(
+                            registry,
+                            state,
+                            DecisionResponse::Approve,
+                            predicted_decision,
+                        )?,
+                    )
                 }
             }
+        };
+        let action_budget = action.id_budget();
+        // Only viable pitches can claim prospects or contend for shared capacity. A blocked
+        // prospect does not spend the manager's action: reconsider alternatives in global order.
+        if state.ids.reserve_many(&action_budget).is_err()
+            || action_budget
+                .iter()
+                .any(|(kind, _)| contested.contains(kind))
+        {
+            authorities[authority_index]
+                .candidates
+                .retain(|prospect| prospect.character != candidate);
+            continue;
         }
-        // Every selected route either records an attempt immediately or owns the candidate in a
-        // pending player decision. The read-only planner therefore models the existing same-pass
-        // contention rule exactly without needing a speculative AppState clone.
+        if !decisions_fit {
+            return Ok(RecruitmentPlanningResult::Contested(
+                IdKind::DecisionRequest,
+            ));
+        }
+        decision_count = next_decision_count;
+        id_budget.extend(action_budget);
+        actions.push(action);
         claimed_this_pass.insert(candidate);
+        authorities.remove(authority_index);
     }
     Ok(RecruitmentPlanningResult::Ready(
         AutonomousRecruitmentPlan { actions, id_budget },
     ))
+}
+
+impl PlannedAutonomousRecruitmentAction {
+    fn id_budget(&self) -> Vec<(IdKind, u32)> {
+        match self {
+            Self::Delegated(attempt) => attempt.id_budget(),
+            Self::PlayerApproval(request) => request.id_budget(),
+            Self::AutonomousApproval(prepared) => prepared.id_budget(),
+        }
+    }
 }
 
 impl AutonomousRecruitmentPlan {
@@ -488,10 +473,6 @@ fn resolve_autonomous_recruitment_approach(
     // traits are latent character state, not recruiter knowledge merely because a relationship
     // edge exists. They still affect the candidate's canonical willingness calculation after the
     // manager chooses a pitch, while the manager's own disposition determines what they try.
-    manager_recruitment_preference(manager)
-}
-
-fn manager_recruitment_preference(manager: &crate::world::CharacterRecord) -> RecruitmentApproach {
     if manager.has_trait(TraitKind::Charismatic) {
         RecruitmentApproach::PersonalAppeal
     } else if manager.has_trait(TraitKind::Ambitious) || manager.has_trait(TraitKind::Proud) {
@@ -534,7 +515,7 @@ mod tests {
             .expect("inserted manager should persist");
 
         assert_eq!(
-            manager_recruitment_preference(manager),
+            resolve_autonomous_recruitment_approach(manager),
             RecruitmentApproach::Advancement
         );
     }

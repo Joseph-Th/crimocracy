@@ -253,7 +253,7 @@ const SHOP_PREFIXES: &[&str] = &[
     "Crown",
 ];
 
-fn person_name(rng: &mut CityRng, _suffix: usize) -> String {
+fn person_name(rng: &mut CityRng) -> String {
     loop {
         let name = format!(
             "{} {}",
@@ -631,10 +631,10 @@ pub fn generate_city(
     }
 
     let mut detectives = Vec::new();
-    for (index, precinct) in police.iter().copied().enumerate() {
+    for precinct in police.iter().copied() {
         let detective = add_character(
             &mut state,
-            person_name(&mut rng, index),
+            person_name(&mut rng),
             Some(precinct),
             None,
             AutonomyLevel::Delegated,
@@ -643,7 +643,7 @@ pub fn generate_city(
         )?;
         add_character(
             &mut state,
-            person_name(&mut rng, 50 + index),
+            person_name(&mut rng),
             Some(precinct),
             Some(detective),
             AutonomyLevel::Guided,
@@ -654,7 +654,7 @@ pub fn generate_city(
     }
     let lawyer = add_character(
         &mut state,
-        person_name(&mut rng, 100),
+        person_name(&mut rng),
         Some(legal_services),
         None,
         AutonomyLevel::Delegated,
@@ -668,7 +668,7 @@ pub fn generate_city(
     )?;
     add_character(
         &mut state,
-        person_name(&mut rng, 101),
+        person_name(&mut rng),
         Some(prosecutor),
         None,
         AutonomyLevel::Broad,
@@ -677,7 +677,7 @@ pub fn generate_city(
     )?;
     let councilor = add_character(
         &mut state,
-        person_name(&mut rng, 102),
+        person_name(&mut rng),
         Some(council),
         None,
         AutonomyLevel::Broad,
@@ -686,7 +686,7 @@ pub fn generate_city(
     )?;
     let union_delegate = add_character(
         &mut state,
-        person_name(&mut rng, 103),
+        person_name(&mut rng),
         Some(labor),
         None,
         AutonomyLevel::Broad,
@@ -695,7 +695,7 @@ pub fn generate_city(
     )?;
     let merchant = add_character(
         &mut state,
-        person_name(&mut rng, 104),
+        person_name(&mut rng),
         Some(commerce),
         None,
         AutonomyLevel::Broad,
@@ -705,7 +705,7 @@ pub fn generate_city(
 
     let boss = add_character(
         &mut state,
-        person_name(&mut rng, 200),
+        person_name(&mut rng),
         Some(player),
         None,
         AutonomyLevel::Tight,
@@ -714,7 +714,7 @@ pub fn generate_city(
     )?;
     let lieutenant = add_character(
         &mut state,
-        person_name(&mut rng, 201),
+        person_name(&mut rng),
         Some(player),
         Some(boss),
         AutonomyLevel::Delegated,
@@ -723,7 +723,7 @@ pub fn generate_city(
     )?;
     let enforcer = add_character(
         &mut state,
-        person_name(&mut rng, 202),
+        person_name(&mut rng),
         Some(player),
         Some(lieutenant),
         AutonomyLevel::Guided,
@@ -732,7 +732,7 @@ pub fn generate_city(
     )?;
     let burglar = add_character(
         &mut state,
-        person_name(&mut rng, 203),
+        person_name(&mut rng),
         Some(player),
         Some(lieutenant),
         AutonomyLevel::Guided,
@@ -741,7 +741,7 @@ pub fn generate_city(
     )?;
     let scout = add_character(
         &mut state,
-        person_name(&mut rng, 204),
+        person_name(&mut rng),
         Some(player),
         Some(lieutenant),
         AutonomyLevel::Guided,
@@ -750,7 +750,7 @@ pub fn generate_city(
     )?;
     add_character(
         &mut state,
-        person_name(&mut rng, 205),
+        person_name(&mut rng),
         Some(player),
         Some(lieutenant),
         AutonomyLevel::Guided,
@@ -779,7 +779,7 @@ pub fn generate_city(
     for (index, rival) in rivals.iter().copied().enumerate() {
         let leader = add_character(
             &mut state,
-            person_name(&mut rng, 250 + index),
+            person_name(&mut rng),
             Some(rival),
             None,
             AutonomyLevel::Broad,
@@ -788,7 +788,7 @@ pub fn generate_city(
         )?;
         add_character(
             &mut state,
-            person_name(&mut rng, 300 + index),
+            person_name(&mut rng),
             Some(rival),
             Some(leader),
             AutonomyLevel::Guided,
@@ -797,7 +797,7 @@ pub fn generate_city(
         )?;
         add_character(
             &mut state,
-            person_name(&mut rng, 350 + index),
+            person_name(&mut rng),
             Some(rival),
             Some(leader),
             AutonomyLevel::Guided,
@@ -855,7 +855,7 @@ pub fn generate_city(
     for index in 0..usize::from(config.districts) {
         let owner = add_character(
             &mut state,
-            person_name(&mut rng, 400 + index),
+            person_name(&mut rng),
             None,
             None,
             AutonomyLevel::Guided,
@@ -865,7 +865,7 @@ pub fn generate_city(
         civilians.push(owner);
         let prospect = add_character(
             &mut state,
-            person_name(&mut rng, 500 + index),
+            person_name(&mut rng),
             None,
             None,
             AutonomyLevel::Guided,

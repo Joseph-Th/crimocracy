@@ -51,7 +51,7 @@ pub(crate) fn resolve_committed_working_capital(
             enterprise.supporting_businesses().len(),
             observed_active_cases,
         )?;
-        reserve_working_capital(&mut reservations, enterprise.cash_account(), required)?;
+        reserve_working_capital(&mut reservations, enterprise.cash_account(), required);
     }
     Ok(reservations)
 }
@@ -117,7 +117,7 @@ pub(crate) fn reserve_working_capital(
     reservations: &mut BTreeMap<FinancialAccountId, Money>,
     account: FinancialAccountId,
     amount: Money,
-) -> Result<(), AutonomousEnterpriseError> {
+) {
     debug_assert!(
         amount >= Money::ZERO,
         "enterprise working-capital requirements must be nonnegative"
@@ -132,7 +132,6 @@ pub(crate) fn reserve_working_capital(
         .checked_add(amount)
         .unwrap_or(Money::from_cents(i64::MAX));
     reservations.insert(account, reserved);
-    Ok(())
 }
 
 pub(crate) fn available_working_capital(
@@ -163,10 +162,8 @@ mod tests {
     fn working_capital_projection_saturates_when_shared_claims_exceed_money_range() {
         let account = FinancialAccountId::from_raw(1);
         let mut reservations = BTreeMap::new();
-        reserve_working_capital(&mut reservations, account, Money::from_cents(i64::MAX - 5))
-            .expect("first representable reservation should succeed");
-        reserve_working_capital(&mut reservations, account, Money::from_cents(10))
-            .expect("projection overflow should saturate rather than fail autonomous planning");
+        reserve_working_capital(&mut reservations, account, Money::from_cents(i64::MAX - 5));
+        reserve_working_capital(&mut reservations, account, Money::from_cents(10));
         assert_eq!(
             reservations.get(&account).copied(),
             Some(Money::from_cents(i64::MAX))

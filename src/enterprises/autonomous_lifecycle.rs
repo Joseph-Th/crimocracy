@@ -202,7 +202,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             &mut reservations,
             candidate.cash_account,
             candidate.required_working_capital,
-        )?;
+        );
         resumed_mandates.insert(candidate.mandate);
         resumptions.push((candidate.enterprise, candidate.mandate, candidate.resume));
     }

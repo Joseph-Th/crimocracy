@@ -162,7 +162,7 @@ pub(super) fn plan_due_autonomous_expansions(
             &mut working_capital_reservations,
             cash_account,
             selected.plan.required_working_capital,
-        )?;
+        );
         let settlement = free_settlement_accounts
             .get_mut(&organization)
             .and_then(BTreeSet::pop_first)
