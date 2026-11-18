@@ -2,8 +2,8 @@
 //! derived views maintained only through `world_system` mutations.
 
 use super::{
-    BusinessKind, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord, CharacterRecord,
-    NeighborhoodRecord, OrganizationRecord, PolicySetting,
+    AutonomyLevel, BusinessKind, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord,
+    CharacterRecord, NeighborhoodRecord, OrganizationRecord, PolicySetting,
 };
 use crate::core::id::{
     BusinessId, BusinessOwnershipChangeId, CharacterId, IdKeyedBounds, NeighborhoodId,
@@ -595,6 +595,15 @@ impl WorldState {
         supervisor: Option<CharacterId>,
     ) {
         self.characters.reassign(id, organization, supervisor);
+    }
+    pub(super) fn set_character_autonomy(&mut self, id: CharacterId, autonomy: AutonomyLevel) {
+        let record = self
+            .characters
+            .records
+            .get_mut(&id)
+            .expect("validated character disappeared before autonomy commit");
+        record.membership.autonomy = autonomy;
+        record.runtime.version = advance_version_preflighted(record.runtime.version);
     }
     pub(crate) fn has_consistent_indexes(&self) -> bool {
         self.organizations

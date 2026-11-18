@@ -3,7 +3,7 @@
 //! Suspension is operational, not terminal history. Governed rivals therefore reconsider a
 //! suspended racket on day boundaries using the same information and runway constraints as new
 //! expansion. Temporary pressure leaves it suspended; revoked or re-scoped authority, lost
-//! required venue/support ownership, or immutable Tight/Guided manager autonomy cause autonomous
+//! required venue/support ownership, or Tight/Guided manager autonomy at the maintenance boundary cause autonomous
 //! rivals to abandon that stale frozen configuration so dead records cannot reserve a location
 //! forever.
 

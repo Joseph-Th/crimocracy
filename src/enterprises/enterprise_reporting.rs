@@ -4,8 +4,14 @@ use crate::core::attention::AttentionClass;
 use crate::core::id::{EnterpriseId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
+use crate::enterprises::autonomous_planning::resolve_observed_district_pressure;
+use crate::enterprises::enterprise_execution::{
+    resolve_enterprise_financial_projection, resolve_location_neighborhood,
+};
 use crate::enterprises::{EnterpriseKind, EnterpriseRecord};
 use crate::finance::Money;
+use crate::registry::Registry;
+use crate::world::CapabilityKind;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -37,6 +43,79 @@ pub enum EnterpriseReportingError {
     MissingOrganization(OrganizationId),
     #[error("enterprise financial aggregation overflowed")]
     ArithmeticOverflow,
+}
+
+/// Conditional operating estimate based only on the organization's own recent settlements.
+/// A missing observation is explicitly unknown, never evidence that the district is quiet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnterpriseOutlook {
+    pub baseline_net_cash: Money,
+    pub estimated_operating_cost: Money,
+    pub estimated_net_cash: Money,
+    pub observed_pressure: Option<(SimTime, u32)>,
+    pub shared_cash_balance: Money,
+    pub shared_spendable_cash: Money,
+}
+
+#[derive(Debug, Error)]
+pub enum EnterpriseOutlookError {
+    #[error("enterprise {0} is not owned by this organization")]
+    NotOwned(EnterpriseId),
+    #[error("enterprise {0} has incomplete operating records")]
+    MissingOperatingRecords(EnterpriseId),
+    #[error("enterprise projection could not be calculated: {0}")]
+    Projection(String),
+}
+
+pub fn resolve_enterprise_outlook(
+    registry: &Registry,
+    state: &AppState,
+    organization: OrganizationId,
+    enterprise: EnterpriseId,
+) -> Result<EnterpriseOutlook, EnterpriseOutlookError> {
+    let record = state
+        .enterprises()
+        .get_enterprise(enterprise)
+        .filter(|record| record.organization() == organization)
+        .ok_or(EnterpriseOutlookError::NotOwned(enterprise))?;
+    let manager = state
+        .world()
+        .get_character(record.manager())
+        .ok_or(EnterpriseOutlookError::MissingOperatingRecords(enterprise))?;
+    let account = state
+        .finance()
+        .get_account(record.cash_account())
+        .ok_or(EnterpriseOutlookError::MissingOperatingRecords(enterprise))?;
+    let district = resolve_location_neighborhood(state, record.location())
+        .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))?;
+    let observed = resolve_observed_district_pressure(registry, state)
+        .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))?;
+    let observation = observed.get(&(organization, district));
+    let project = |case_count| {
+        resolve_enterprise_financial_projection(
+            registry,
+            state,
+            record.kind(),
+            record.location(),
+            record.supporting_businesses().len(),
+            manager.capability(CapabilityKind::Management),
+            case_count,
+        )
+        .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))
+    };
+    let (baseline_cost, baseline_net_cash) = project(0)?;
+    let (estimated_operating_cost, estimated_net_cash) = match observation {
+        Some(observation) if observation.case_count != 0 => project(observation.case_count)?,
+        _ => (baseline_cost, baseline_net_cash),
+    };
+    Ok(EnterpriseOutlook {
+        baseline_net_cash,
+        estimated_operating_cost,
+        estimated_net_cash,
+        observed_pressure: observation.map(|value| (value.observed_at, value.case_count)),
+        shared_cash_balance: account.balance(),
+        shared_spendable_cash: account.spendable_balance(),
+    })
 }
 
 pub fn resolve_organization_enterprise_financial_summary(

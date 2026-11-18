@@ -13,7 +13,7 @@ use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::legal::ProsecutionCaseStatus;
 use crate::registry::Registry;
 use crate::world::{
-    BusinessDraft, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord,
+    AutonomyLevel, BusinessDraft, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord,
     CharacterCapabilities, CharacterDisposition, CharacterDraft, CharacterIdentity,
     CharacterMembership, CharacterRecord, CharacterRuntime, NeighborhoodDraft, NeighborhoodRecord,
     OrganizationDraft, OrganizationKind, OrganizationRecord, PolicySetting,
@@ -260,6 +260,91 @@ pub fn insert_character(
         runtime: CharacterRuntime { version: 1 },
     });
     Ok(id)
+}
+
+/// Executive-issued freedom of action is independent of membership and mandate scope.
+#[derive(Debug, Error)]
+pub enum CharacterAutonomyError {
+    #[error(transparent)]
+    World(#[from] WorldError),
+    #[error("character {character} is not a member of organization {organization}")]
+    NotMember {
+        character: CharacterId,
+        organization: OrganizationId,
+    },
+    #[error("character {character} already has autonomy {autonomy:?}")]
+    Unchanged {
+        character: CharacterId,
+        autonomy: AutonomyLevel,
+    },
+}
+
+#[derive(Debug)]
+pub struct ValidatedCharacterAutonomy {
+    organization: OrganizationId,
+    character: CharacterId,
+    autonomy: AutonomyLevel,
+    expected_version: u32,
+}
+
+impl ValidatedCharacterAutonomy {
+    pub fn commit(self, state: &mut AppState) -> Result<(), CharacterAutonomyError> {
+        let record = state
+            .world
+            .get_character(self.character)
+            .ok_or(WorldError::MissingCharacter(self.character))?;
+        if record.version() != self.expected_version {
+            return Err(WorldError::StaleCharacter {
+                character: self.character,
+                expected: self.expected_version,
+                found: record.version(),
+            }
+            .into());
+        }
+        validate_set_character_autonomy(state, self.organization, self.character, self.autonomy)?;
+        state
+            .world
+            .set_character_autonomy(self.character, self.autonomy);
+        Ok(())
+    }
+}
+
+pub fn validate_set_character_autonomy(
+    state: &AppState,
+    organization: OrganizationId,
+    character: CharacterId,
+    autonomy: AutonomyLevel,
+) -> Result<ValidatedCharacterAutonomy, CharacterAutonomyError> {
+    let record = state
+        .world
+        .get_character(character)
+        .ok_or(WorldError::MissingCharacter(character))?;
+    if record.organization() != Some(organization) {
+        return Err(CharacterAutonomyError::NotMember {
+            character,
+            organization,
+        });
+    }
+    if let Some(arrest) = state.legal.active_arrest_for_character(character) {
+        return Err(WorldError::ActiveArrestAssignment {
+            character,
+            arrest: arrest.id(),
+        }
+        .into());
+    }
+    if record.autonomy() == autonomy {
+        return Err(CharacterAutonomyError::Unchanged {
+            character,
+            autonomy,
+        });
+    }
+    ensure_version_can_advance(record.version(), "character").map_err(WorldError::from)?;
+    Ok(ValidatedCharacterAutonomy {
+        organization,
+        character,
+        autonomy,
+        expected_version: record.version(),
+    })
 }
 
 #[derive(Debug)]

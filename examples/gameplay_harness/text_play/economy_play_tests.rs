@@ -42,6 +42,141 @@ fn starting_cash(session: &Session<'_>) -> u32 {
 }
 
 #[test]
+fn racket_outlook_is_owned_read_only_and_distinguishes_unknown_from_observed_heat() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let id = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .next()
+        .unwrap()
+        .id();
+    let rival = session
+        .state
+        .world()
+        .public_business_directory()
+        .find_map(|(business, _, _, _)| {
+            session
+                .state
+                .enterprises()
+                .enterprises_at(EnterpriseLocation::Business(business))
+                .find(|e| e.organization() != session.player)
+        })
+        .unwrap()
+        .id();
+    let command = format!("racket-outlook {}", id.raw());
+    let before = snapshot(&registry, &session);
+    let first = session.execute(&command).unwrap().0;
+    assert!(first.contains("District pressure unknown"));
+    assert!(first.contains("spendable cash"));
+    assert!(
+        session
+            .execute(&format!("racket-outlook {}", rival.raw()))
+            .is_err()
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    session.execute("advance 1d").unwrap();
+    let after = snapshot(&registry, &session);
+    let second = session.execute(&command).unwrap().0;
+    assert!(
+        second.contains("Last observed district pressure"),
+        "{second}"
+    );
+    assert_eq!(after, snapshot(&registry, &session));
+}
+
+#[test]
+fn district_racket_uses_the_assigned_manager_and_not_the_general_mandate() {
+    use crimocracy::world::CapabilityKind;
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let manager = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|member| {
+            member
+                .capability(CapabilityKind::Surveillance)
+                .is_some_and(|rating| rating.value() == 91)
+        })
+        .unwrap()
+        .id();
+    let district = session.state.world().neighborhoods().last().unwrap().id();
+    session
+        .execute(&format!(
+            "delegate char-{} district-{}",
+            manager.raw(),
+            district.raw()
+        ))
+        .unwrap();
+    let location = EnterpriseLocation::Neighborhood(district);
+    let authority = session
+        .enterprise_authority(location, &BTreeSet::new())
+        .unwrap();
+    assert_eq!(authority.manager, manager);
+    assert_eq!(authority.scope, ResponsibilityScope::Neighborhood(district));
+    let outside = session
+        .state
+        .world()
+        .businesses_owned_by_organization(session.player)
+        .next()
+        .unwrap()
+        .id();
+    let general = session
+        .enterprise_authority(location, &BTreeSet::from([outside]))
+        .unwrap();
+    assert_eq!(
+        general.scope,
+        ResponsibilityScope::Function(ResponsibilityFunction::Enterprise)
+    );
+    let cash = starting_cash(&session);
+    let settlement = fresh_settlement(&mut session);
+    session
+        .execute(&format!(
+            "start-racket protection district-{} {} {}",
+            district.raw(),
+            cash,
+            settlement
+        ))
+        .unwrap();
+    let record = session
+        .state
+        .enterprises()
+        .enterprises_at(location)
+        .find(|enterprise| enterprise.organization() == session.player)
+        .unwrap();
+    assert_eq!(record.authority().manager, manager);
+}
+
+#[test]
+fn owned_storefront_observations_do_not_appear_as_business_leads() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let owned = session
+        .state
+        .world()
+        .businesses_owned_by_organization(session.player)
+        .next()
+        .unwrap()
+        .id();
+    session
+        .execute(&format!("scout business-{}", owned.raw()))
+        .unwrap();
+    session.execute("advance 3h").unwrap();
+    let view = session.execute("businesses").unwrap().0;
+    let leads = view.split("Known business leads:\n").nth(1).unwrap();
+    assert!(
+        !leads
+            .lines()
+            .any(|line| line.starts_with(&format!("{} ", owned.raw())))
+    );
+}
+
+#[test]
 fn text_play_owned_business_can_pause_and_resume_without_laundering_reset() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();

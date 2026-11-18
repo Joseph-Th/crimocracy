@@ -123,6 +123,91 @@ fn text_play_reconnaissance_directory_guards_unknown_world_and_admin_ids() {
 }
 
 #[test]
+fn text_play_local_watch_identifies_only_observed_rival_rackets_and_people() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let district = session.state.world().neighborhoods().nth(1).unwrap().id();
+    let (rival, manager, enterprise, venue) = session
+        .state
+        .world()
+        .public_business_directory()
+        .filter(|(_, _, _, ward)| *ward == district)
+        .find_map(|(business, _, _, _)| {
+            session
+                .state
+                .enterprises()
+                .enterprises_at(EnterpriseLocation::Business(business))
+                .next()
+                .map(|e| (e.organization(), e.manager(), e.id(), business))
+        })
+        .unwrap();
+    let start = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute(&format!("plan surveillance org-{}", rival.raw()))
+            .is_err()
+    );
+    assert!(
+        session
+            .execute(&format!("plan surveillance char-{}", manager.raw()))
+            .is_err()
+    );
+    assert_eq!(start, snapshot(&registry, &session));
+    session
+        .execute(&format!("plan surveillance district-{}", district.raw()))
+        .unwrap();
+    session.execute("advance 3h").unwrap();
+    assert!(session.known_enterprise_ids().contains(&enterprise));
+    assert!(session.known_organization_ids().contains(&rival));
+    assert!(session.known_character_ids().contains(&manager));
+    assert!(session.organization_information().any(|info| info.subject()
+        == EntityRef::Enterprise(enterprise)
+        && matches!(
+            info.signal(),
+            Some(InformationSignal::EnterpriseLocation(_))
+        )));
+    let learned = session.execute("known-targets").unwrap().0;
+    assert!(learned.contains(&format!("org-{} |", rival.raw())));
+    assert!(
+        session
+            .execute(&format!("preview surveillance char-{}", manager.raw()))
+            .is_ok()
+    );
+    for (business, _, _, ward) in session.state.world().public_business_directory() {
+        if ward == district {
+            continue;
+        }
+        for e in session
+            .state
+            .enterprises()
+            .enterprises_at(EnterpriseLocation::Business(business))
+        {
+            if e.organization() != session.player {
+                assert!(!session.known_enterprise_ids().contains(&e.id()));
+            }
+        }
+    }
+    session
+        .execute(&format!("scout business-{}", venue.raw()))
+        .unwrap();
+    session.execute("advance 3h").unwrap();
+    assert!(
+        session
+            .organization_information()
+            .filter(|info| info.subject() == EntityRef::Enterprise(enterprise))
+            .count()
+            >= 2
+    );
+    let save = build_save(&registry, &session.state).unwrap();
+    let restored = restore_save(&registry, save).unwrap();
+    assert_eq!(
+        snapshot(&registry, &session),
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn text_play_public_district_surveillance_generates_real_patrol_intelligence() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();

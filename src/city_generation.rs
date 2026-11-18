@@ -748,7 +748,7 @@ pub fn generate_city(
         &[(C::Surveillance, 91), (C::Stealth, 81)],
         &[TraitKind::Cautious],
     )?;
-    add_character(
+    let driver = add_character(
         &mut state,
         person_name(&mut rng),
         Some(player),
@@ -757,8 +757,12 @@ pub fn generate_city(
         &[(C::Driving, 91), (C::SocialAccess, 63)],
         &[],
     )?;
-    for member in [lieutenant, enforcer, burglar, scout] {
-        validate_set_relationship(&state, member, boss, relationship(70, 78, 58))?
+    validate_set_relationship(&state, lieutenant, boss, relationship(70, 78, 58))?
+        .commit(&mut state)?;
+    for member in [enforcer, burglar, scout, driver] {
+        validate_set_relationship(&state, member, lieutenant, relationship(70, 78, 58))?
+            .commit(&mut state)?;
+        validate_set_relationship(&state, member, boss, relationship(61, 72, 36))?
             .commit(&mut state)?;
     }
     validate_set_relationship(&state, boss, detectives[0], relationship(65, 62, 28))?
@@ -786,7 +790,7 @@ pub fn generate_city(
             &[(C::Management, 77), (C::Negotiation, 72)],
             &[TraitKind::Ambitious],
         )?;
-        add_character(
+        let soldier = add_character(
             &mut state,
             person_name(&mut rng),
             Some(rival),
@@ -795,7 +799,7 @@ pub fn generate_city(
             &[(C::Violence, 75), (C::Intimidation, 73)],
             &[],
         )?;
-        add_character(
+        let scout = add_character(
             &mut state,
             person_name(&mut rng),
             Some(rival),
@@ -804,6 +808,10 @@ pub fn generate_city(
             &[(C::Driving, 73), (C::Surveillance, 72)],
             &[],
         )?;
+        for member in [soldier, scout] {
+            validate_set_relationship(&state, member, leader, relationship(70, 75, 50))?
+                .commit(&mut state)?;
+        }
         validate_assign_mandate(
             &state,
             MandateDraft {
@@ -852,6 +860,7 @@ pub fn generate_city(
     // Civilian owner-occupiers and recruits exist independently of the criminal
     // crews; their underlying motives are not injected into the player's view.
     let mut civilians = Vec::new();
+    let mut prospects = Vec::new();
     for index in 0..usize::from(config.districts) {
         let owner = add_character(
             &mut state,
@@ -872,6 +881,7 @@ pub fn generate_city(
             &[(C::Burglary, 65), (C::Stealth, 63), (C::Driving, 59)],
             &[TraitKind::Greedy],
         )?;
+        prospects.push(prospect);
         if index < 2 {
             validate_set_relationship(&state, prospect, boss, relationship(78, 76, 62))?
                 .commit(&mut state)?;
@@ -1111,6 +1121,50 @@ pub fn generate_city(
             },
         )?
         .commit(&mut state)?;
+    }
+
+    // Local social circles extend beyond the executive's two opening contacts. A manager's
+    // acquaintances become actionable when personnel authority and autonomy are granted;
+    // recruits in turn bring existing connections that can support a later managerial career.
+    // Append after construction so adding social depth does not perturb the city's geography.
+    for (index, first_contact) in prospects.into_iter().enumerate() {
+        let (capabilities, trait_kind): (&[(C, u8)], TraitKind) = match index % 4 {
+            0 => (
+                &[(C::Management, 70), (C::Negotiation, 74)],
+                TraitKind::Ambitious,
+            ),
+            1 => (
+                &[(C::SocialAccess, 82), (C::Negotiation, 66)],
+                TraitKind::Charismatic,
+            ),
+            2 => (
+                &[(C::Driving, 83), (C::Surveillance, 65)],
+                TraitKind::Cautious,
+            ),
+            _ => (
+                &[(C::Intimidation, 73), (C::Violence, 69)],
+                TraitKind::Greedy,
+            ),
+        };
+        let local = add_character(
+            &mut state,
+            person_name(&mut rng),
+            None,
+            None,
+            AutonomyLevel::Guided,
+            capabilities,
+            &[trait_kind],
+        )?;
+        let player_contact = [lieutenant, scout, driver, burglar][index % 4];
+        validate_set_relationship(&state, local, player_contact, relationship(72, 72, 48))?
+            .commit(&mut state)?;
+        validate_set_relationship(&state, local, first_contact, relationship(76, 70, 60))?
+            .commit(&mut state)?;
+        if index >= 1 {
+            let rival = rival_leaders[(index - 1) % rival_leaders.len()];
+            validate_set_relationship(&state, local, rival, relationship(60, 62, 30))?
+                .commit(&mut state)?;
+        }
     }
 
     crate::core::invariants::validate_state(&state)?;

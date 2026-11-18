@@ -6,6 +6,7 @@
 
 use crate::core::id::{FinancialAccountId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
+use crate::core::time::SimTime;
 use crate::delegation::delegation_system::DelegationError;
 use crate::enterprises::EnterpriseLocation;
 use crate::enterprises::enterprise_execution::{
@@ -28,7 +29,14 @@ pub(crate) enum AutonomousEnterpriseError {
     Enterprise(#[from] EnterpriseError),
 }
 
-pub(crate) type ObservedDistrictPressure = BTreeMap<(OrganizationId, NeighborhoodId), u32>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DistrictPressureObservation {
+    pub(crate) observed_at: SimTime,
+    pub(crate) case_count: u32,
+}
+
+pub(crate) type ObservedDistrictPressure =
+    BTreeMap<(OrganizationId, NeighborhoodId), DistrictPressureObservation>;
 
 pub(crate) fn resolve_committed_working_capital(
     registry: &Registry,
@@ -96,7 +104,15 @@ pub(crate) fn resolve_observed_district_pressure(
     }
     Ok(latest_observations
         .into_iter()
-        .map(|(district, (_, count))| (district, count))
+        .map(|(district, ((observed_at, _), case_count))| {
+            (
+                district,
+                DistrictPressureObservation {
+                    observed_at,
+                    case_count,
+                },
+            )
+        })
         .collect())
 }
 
@@ -109,8 +125,7 @@ pub(crate) fn resolve_observed_district_case_count(
     let neighborhood = resolve_location_neighborhood(state, location)?;
     Ok(observed_district_pressure
         .get(&(organization, neighborhood))
-        .copied()
-        .unwrap_or(0))
+        .map_or(0, |observation| observation.case_count))
 }
 
 pub(crate) fn reserve_working_capital(

@@ -1,8 +1,11 @@
 //! Player governance: standing policies and delegated managerial authority.
-//! All writes use the production delegation validator, never direct policy or
-//! mandate state changes. Every query is restricted to the player's organization.
+//! All writes use the production delegation and world validators, never direct state changes. Every query is restricted to the player's organization.
 
 use super::*;
+use crimocracy::world::AutonomyLevel;
+use crimocracy::world::world_system::{
+    validate_set_character_autonomy, validate_set_character_supervisor,
+};
 
 fn parse_policy_setting(name: &str, choice: &str) -> Result<PolicySetting, String> {
     match (name, choice) {
@@ -118,6 +121,54 @@ impl Session<'_> {
                     .map_err(|error| error.to_string())?;
                 writeln!(out, "Organization policy updated: {setting:?}.").unwrap();
             }
+            "autonomy" | "supervise" => {
+                let raw = parse_number(words[1], "char")?;
+                let member = self
+                    .state
+                    .world()
+                    .characters_in_organization(self.player)
+                    .find(|member| member.id().raw() == raw)
+                    .ok_or("no current member with that ID")?;
+                let id = member.id();
+                if words[0] == "autonomy" {
+                    let autonomy = match words[2] {
+                        "tight" => AutonomyLevel::Tight,
+                        "guided" => AutonomyLevel::Guided,
+                        "delegated" => AutonomyLevel::Delegated,
+                        "broad" => AutonomyLevel::Broad,
+                        _ => {
+                            return Err(
+                                "autonomy <member-id> <tight|guided|delegated|broad>".to_owned()
+                            );
+                        }
+                    };
+                    validate_set_character_autonomy(&self.state, self.player, id, autonomy)
+                        .map_err(|error| error.to_string())?
+                        .commit(&mut self.state)
+                        .map_err(|error| error.to_string())?;
+                    writeln!(out, "char-{raw} autonomy: {autonomy:?}.").unwrap();
+                } else {
+                    if member.supervisor().is_none() {
+                        return Err(
+                            "cannot subordinate the organization's executive through this command"
+                                .to_owned(),
+                        );
+                    }
+                    let supervisor_raw = parse_number(words[2], "char")?;
+                    let supervisor = self
+                        .state
+                        .world()
+                        .characters_in_organization(self.player)
+                        .find(|member| member.id().raw() == supervisor_raw)
+                        .ok_or("supervisor must be a current member")?
+                        .id();
+                    validate_set_character_supervisor(&self.state, id, Some(supervisor))
+                        .map_err(|error| error.to_string())?
+                        .commit(&mut self.state)
+                        .map_err(|error| error.to_string())?;
+                    writeln!(out, "char-{raw} now reports to char-{supervisor_raw}.").unwrap();
+                }
+            }
             "mandates" => {
                 for member in self.state.world().characters_in_organization(self.player) {
                     if let Some(record) = self.state.delegation().active_for_manager(member.id()) {
@@ -132,11 +183,12 @@ impl Session<'_> {
                             .join(", ");
                         writeln!(
                             out,
-                            "{} {} (char-{}) | scopes: {}",
+                            "{} {} (char-{}) | scopes: {} | autonomy {:?}",
                             record.id().raw(),
                             member.name(),
                             member.id().raw(),
-                            scopes
+                            scopes,
+                            member.autonomy()
                         )
                         .unwrap();
                         if !record.standing_orders().is_empty() {

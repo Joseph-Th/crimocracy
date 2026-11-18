@@ -7,6 +7,55 @@ fn bytes(registry: &Registry, state: &AppState) -> Vec<u8> {
 }
 
 #[test]
+fn generated_organizations_have_real_reporting_relationships_and_manager_contacts() {
+    use crate::recruitment::recruitment_system::find_recruitment_candidates;
+    let registry = crate::build_registry();
+    let city = generate_city(&registry, CityScale::Small.config(12)).unwrap();
+    for org in std::iter::once(city.player).chain(city.rivals.iter().copied()) {
+        for member in city.state.world().characters_in_organization(org) {
+            if let Some(supervisor) = member.supervisor() {
+                assert!(
+                    city.state
+                        .social()
+                        .get_relationship(member.id(), supervisor)
+                        .is_some(),
+                    "generated member {} lacks a relationship to the actual supervisor",
+                    member.id()
+                );
+            }
+        }
+    }
+    assert_eq!(
+        find_recruitment_candidates(&registry, &city.state, city.player, city.boss)
+            .unwrap()
+            .len(),
+        2
+    );
+    let manager = city
+        .state
+        .world()
+        .characters_in_organization(city.player)
+        .find(|member| {
+            member
+                .capability(C::Surveillance)
+                .is_some_and(|rating| rating.value() == 91)
+        })
+        .unwrap()
+        .id();
+    let candidates =
+        find_recruitment_candidates(&registry, &city.state, city.player, manager).unwrap();
+    assert!(!candidates.is_empty());
+    assert!(candidates.iter().all(|id| {
+        city.state
+            .world()
+            .get_character(*id)
+            .unwrap()
+            .organization()
+            .is_none()
+    }));
+}
+
+#[test]
 fn generated_infrastructure_supports_specialized_enterprise_networks() {
     let registry = crate::build_registry();
     let city = generate_city(&registry, CityScale::Large.config(516708459)).unwrap();

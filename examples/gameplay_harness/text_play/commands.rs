@@ -1,6 +1,8 @@
 //! Player command dispatch through canonical production owners.
 
 use super::*;
+use crimocracy::intelligence::InformationTopic;
+use crimocracy::world::{AutonomyLevel, BusinessOwner};
 
 impl Session<'_> {
     pub(super) fn execute(&mut self, command: &str) -> Result<(String, bool), String> {
@@ -79,7 +81,8 @@ impl Session<'_> {
             "counsel" | "retain" | "end-counsel" => {
                 out = self.execute_legal(&words)?;
             }
-            "policies" | "policy" | "mandates" | "delegate" | "mandate" => {
+            "policies" | "policy" | "mandates" | "delegate" | "mandate" | "autonomy"
+            | "supervise" => {
                 out = self.execute_governance(&words)?;
             }
             "districts" => {
@@ -167,9 +170,6 @@ impl Session<'_> {
                     return Err("prospects takes no arguments".to_owned());
                 }
                 let prospects = self.player_prospects()?;
-                if prospects.is_empty() {
-                    out.push_str("No currently approachable contacts.");
-                }
                 for id in prospects {
                     if let Some(person) = state.world().get_character(id) {
                         writeln!(
@@ -180,6 +180,38 @@ impl Session<'_> {
                         )
                         .unwrap();
                     }
+                }
+                for (manager, candidates) in self.manager_prospects()? {
+                    let member = state
+                        .world()
+                        .get_character(manager)
+                        .ok_or("manager disappeared")?;
+                    let status = match member.autonomy() {
+                        AutonomyLevel::Delegated | AutonomyLevel::Broad => {
+                            "may act at the daily recruitment pass, subject to policy"
+                        }
+                        AutonomyLevel::Guided | AutonomyLevel::Tight => {
+                            "requires delegated or broad autonomy for independent recruitment"
+                        }
+                    };
+                    for candidate in candidates {
+                        let person = state
+                            .world()
+                            .get_character(candidate)
+                            .ok_or("prospect disappeared")?;
+                        writeln!(
+                            out,
+                            "{} {} | known to manager {} (char-{}); {status}",
+                            candidate.raw(),
+                            person.name(),
+                            member.name(),
+                            manager.raw()
+                        )
+                        .unwrap();
+                    }
+                }
+                if out.is_empty() {
+                    out.push_str("No currently approachable contacts.");
                 }
             }
             "recruit" => {
@@ -446,9 +478,13 @@ impl Session<'_> {
                 let mut seen = BTreeSet::new();
                 for information in self.organization_information() {
                     if let EntityRef::Business(id) = information.subject()
+                        && matches!(
+                            information.topic(),
+                            InformationTopic::TargetSecurity | InformationTopic::MarketAccess
+                        )
                         && seen.insert(id)
-                        && self.known_business(id.raw()).is_some()
                         && let Some(business) = state.world().get_business(id)
+                        && business.owner() != BusinessOwner::Organization(self.player)
                     {
                         writeln!(
                             out,
@@ -513,6 +549,68 @@ impl Session<'_> {
                 if out.is_empty() {
                     out.push_str("No enterprises owned.");
                 }
+            }
+            "racket-outlook" => {
+                let raw = parse_number(words[1], "enterprise")?;
+                let record = state
+                    .enterprises()
+                    .enterprises_for_organization(self.player)
+                    .find(|enterprise| enterprise.id().raw() == raw)
+                    .ok_or("no owned enterprise with that ID")?;
+                let outlook =
+                    crimocracy::enterprises::enterprise_reporting::resolve_enterprise_outlook(
+                        self.registry,
+                        state,
+                        self.player,
+                        record.id(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                writeln!(
+                    out,
+                    "Enterprise-{raw} {:?} | {:?}",
+                    record.kind(),
+                    record.status()
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "  Expected cycle net with no street-heat surcharge: {} cents",
+                    outlook.baseline_net_cash.cents()
+                )
+                .unwrap();
+                match outlook.observed_pressure {
+                    Some((at, cases)) => writeln!(out, "  Last observed district pressure: {cases} active-case equivalent(s) at {}", time_label(at.as_minutes())).unwrap(),
+                    None => writeln!(out, "  District pressure unknown: no recent owned racket settlement; estimate assumes no surcharge").unwrap(),
+                }
+                writeln!(
+                    out,
+                    "  Conditional operating cost: {} cents | net: {} cents (before variance)",
+                    outlook.estimated_operating_cost.cents(),
+                    outlook.estimated_net_cash.cents()
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "  Shared account balance: {} cents | spendable cash: {} cents",
+                    outlook.shared_cash_balance.cents(),
+                    outlook.shared_spendable_cash.cents()
+                )
+                .unwrap();
+                if outlook.shared_cash_balance < Money::ZERO {
+                    writeln!(
+                        out,
+                        "  Account has an operating deficit, not spendable funds."
+                    )
+                    .unwrap();
+                }
+                if outlook.shared_spendable_cash < outlook.estimated_operating_cost {
+                    writeln!(
+                        out,
+                        "  Shared balance is below one estimated cycle's operating cost."
+                    )
+                    .unwrap();
+                }
+                writeln!(out, "  Not a guarantee of current enforcement conditions or other rackets' cash needs.").unwrap();
             }
             "racket-kinds" => {
                 if words.len() != 1 {
@@ -593,7 +691,7 @@ impl Session<'_> {
                         return Err("support business was listed more than once".to_owned());
                     }
                 }
-                let authority = self.enterprise_authority(location)?;
+                let authority = self.enterprise_authority(location, &supporting_businesses)?;
                 let established = validate_establish_enterprise(
                     self.registry,
                     &self.state,

@@ -122,12 +122,14 @@ const HELP: &str = "Commands:
   districts              Public district names and IDs for delegated scopes
   mandates               Current manager scopes, standing orders, and budgets
   delegate <member-id> <scope>  Assign a manager with delegated authority
+  autonomy <member-id> <tight|guided|delegated|broad>  Set freedom to act independently
+  supervise <member-id> <supervisor-id>  Reassign a subordinate within your organization
   mandate <id> <add|remove> <scope>  Adjust an active mandate's scope
   mandate <id> order <recruitment|legal> <approve|delegate|case|automatic|inherit>
   mandate <id> budget <daily|weekly> <account-id> <cents>
   mandate <id> budget clear
   mandate <id> revoke    Revoke authority when no active racket depends on it
-  prospects              Contacts available for executive recruitment
+  prospects              Executive contacts and prospects known to personnel managers
   recruit <id> [offer|advancement|protection|appeal]
                          Approach a known prospect
   directory              Public business names, kinds, districts, and standard prices
@@ -146,6 +148,7 @@ const HELP: &str = "Commands:
   racket <id> <suspend|resume|retire>  Change your racket's lifecycle
   racket-cycles <enterprise-id> [count]
                          Historical racket earnings and enforcement attention
+  racket-outlook <enterprise-id>  Conditional earnings and shared working-cash estimate
   finances               Your actual organization accounts
   accounts               Inspect your organization account IDs and balances
   treasury [manual|daily]  Inspect or set daily earned-profit distribution before payroll
@@ -430,8 +433,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "ledger" => 1..=2,
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
-        | "save" | "transaction" | "cancel" | "debrief" | "intel" => 2..=2,
-        "policy" | "delegate" => 3..=3,
+        | "save" | "transaction" | "cancel" | "debrief" | "intel" | "racket-outlook" => 2..=2,
+        "policy" | "delegate" | "autonomy" | "supervise" => 3..=3,
         "mandate" => 3..=6,
         "plan" | "preview" => 3..=32,
         "connect" => 3..=3,
@@ -621,8 +624,39 @@ impl<'a> Session<'a> {
 
     fn player_prospects(&self) -> Result<Vec<CharacterId>, String> {
         let leader = self.executive_recruiter()?;
+        if self
+            .state
+            .legal()
+            .active_arrest_for_character(leader)
+            .is_some()
+        {
+            return Ok(Vec::new());
+        }
         find_recruitment_candidates(self.registry, &self.state, self.player, leader)
             .map_err(|e| e.to_string())
+    }
+
+    fn manager_prospects(&self) -> Result<Vec<(CharacterId, Vec<CharacterId>)>, String> {
+        self.state
+            .delegation()
+            .active_for_scope(ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            ))
+            .filter(|mandate| mandate.organization() == self.player)
+            .filter(|mandate| {
+                self.state
+                    .legal()
+                    .active_arrest_for_character(mandate.manager())
+                    .is_none()
+            })
+            .map(|mandate| {
+                let manager = mandate.manager();
+                let candidates =
+                    find_recruitment_candidates(self.registry, &self.state, self.player, manager)
+                        .map_err(|error| error.to_string())?;
+                Ok((manager, candidates))
+            })
+            .collect()
     }
 
     /// Choose a current mandate with authority over this location. The canonical
@@ -630,6 +664,7 @@ impl<'a> Session<'a> {
     fn enterprise_authority(
         &self,
         location: EnterpriseLocation,
+        supporting_businesses: &BTreeSet<BusinessId>,
     ) -> Result<MandateAuthority, String> {
         let (district, business) = match location {
             EnterpriseLocation::Business(business) => (
@@ -649,24 +684,45 @@ impl<'a> Session<'a> {
                 None,
             ),
         };
-        let mut scopes = vec![
-            ResponsibilityScope::Function(ResponsibilityFunction::Enterprise),
-            ResponsibilityScope::Neighborhood(district),
-        ];
-        if let Some(business) = business {
+        // Prefer a specific venue or geographic assignment over a general remit,
+        // but never select a scope that cannot cover the entire supporting network.
+        let mut scopes = Vec::new();
+        if let Some(business) = business
+            && supporting_businesses
+                .iter()
+                .all(|support| *support == business)
+        {
             scopes.push(ResponsibilityScope::Business(business));
         }
+        if supporting_businesses.iter().all(|support| {
+            self.state
+                .world()
+                .get_business(*support)
+                .is_some_and(|record| record.neighborhood() == district)
+        }) {
+            scopes.push(ResponsibilityScope::Neighborhood(district));
+        }
+        scopes.push(ResponsibilityScope::Function(
+            ResponsibilityFunction::Enterprise,
+        ));
         scopes
             .into_iter()
             .find_map(|scope| {
                 self.state
                     .delegation()
                     .active_for_scope(scope)
-                    .find(|record| record.organization() == self.player)
+                    .filter(|record| record.organization() == self.player)
                     .map(|record| MandateAuthority {
                         mandate: record.id(),
                         manager: record.manager(),
                         scope,
+                    })
+                    .find(|authority| {
+                        crimocracy::delegation::delegation_system::resolve_mandate_authority(
+                            &self.state,
+                            *authority,
+                        )
+                        .is_ok()
                     })
             })
             .ok_or_else(|| {
@@ -719,6 +775,11 @@ impl<'a> Session<'a> {
         // must also be eligible for observation before the boss recruits them.
         if let Ok(prospects) = self.player_prospects() {
             known.extend(prospects);
+        }
+        if let Ok(managers) = self.manager_prospects() {
+            for (_, prospects) in managers {
+                known.extend(prospects);
+            }
         }
         for info in self.organization_information() {
             if let EntityRef::Character(id) = info.subject() {

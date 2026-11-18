@@ -31,7 +31,7 @@ use crate::operations::{
 };
 use crate::registry::Registry;
 use crate::world::{BusinessFunction, OrganizationKind, Rating};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -113,6 +113,7 @@ enum SurveillanceTargetSnapshot {
         id: NeighborhoodId,
         name: String,
         patrol: PatrolPatternSnapshot,
+        local_enterprises: Vec<EnterpriseSnapshot>,
     },
     Business {
         id: BusinessId,
@@ -121,6 +122,7 @@ enum SurveillanceTargetSnapshot {
         neighborhood: NeighborhoodId,
         neighborhood_name: String,
         patrol: PatrolPatternSnapshot,
+        local_enterprises: Vec<EnterpriseSnapshot>,
     },
     Character {
         id: CharacterId,
@@ -368,6 +370,12 @@ fn resolve_target_snapshot(
                 id,
                 name: neighborhood.name().to_owned(),
                 patrol: resolve_patrol_pattern(state, id, at, off_window_patrol_presence_percent),
+                local_enterprises: local_enterprise_snapshots(
+                    state,
+                    EnterpriseLocation::Neighborhood(id),
+                    surveiller,
+                    at,
+                ),
             })
         }
         EntityRef::Business(id) => {
@@ -390,6 +398,12 @@ fn resolve_target_snapshot(
                     business.neighborhood(),
                     at,
                     off_window_patrol_presence_percent,
+                ),
+                local_enterprises: local_enterprise_snapshots(
+                    state,
+                    EnterpriseLocation::Business(id),
+                    surveiller,
+                    at,
                 ),
             })
         }
@@ -551,6 +565,47 @@ fn resolve_target_snapshot(
     }
 }
 
+// A local watch reveals a bounded sample of visible foreign operations, never the
+// entire city's hidden holdings. District-level rackets take priority over individual venues.
+fn local_enterprise_snapshots(
+    state: &AppState,
+    target: EnterpriseLocation,
+    surveiller: OrganizationId,
+    at: SimTime,
+) -> Vec<EnterpriseSnapshot> {
+    let visible = |enterprise: &&crate::enterprises::EnterpriseRecord| {
+        enterprise.organization() != surveiller && enterprise.status() == EnterpriseStatus::Active
+    };
+    let mut district = Vec::new();
+    let mut venues = Vec::new();
+    match target {
+        EnterpriseLocation::Neighborhood(id) => {
+            district.extend(state.enterprises.enterprises_at(target).filter(visible));
+            for business in state.world.businesses_in_neighborhood(id) {
+                venues.extend(
+                    state
+                        .enterprises
+                        .enterprises_at(EnterpriseLocation::Business(business.id()))
+                        .filter(visible),
+                );
+            }
+        }
+        EnterpriseLocation::Business(_) => {
+            venues.extend(state.enterprises.enterprises_at(target).filter(visible));
+        }
+    }
+    district.sort_by_key(|enterprise| enterprise.id());
+    venues.sort_by_key(|enterprise| enterprise.id());
+    rotate_observation_candidates(&mut district, at);
+    rotate_observation_candidates(&mut venues, at);
+    district
+        .into_iter()
+        .chain(venues)
+        .take(3)
+        .map(|enterprise| resolve_enterprise_snapshot(state, enterprise))
+        .collect()
+}
+
 fn rotate_observation_candidates<T>(candidates: &mut [T], at: SimTime) {
     let len = candidates.len();
     if len <= 1 {
@@ -635,8 +690,13 @@ fn build_observations(
         return Vec::new();
     };
     match snapshot {
-        SurveillanceTargetSnapshot::Neighborhood { id, name, patrol } => {
-            vec![SurveillanceObservation {
+        SurveillanceTargetSnapshot::Neighborhood {
+            id,
+            name,
+            patrol,
+            local_enterprises,
+        } => {
+            let mut observations = vec![SurveillanceObservation {
                 topic: InformationTopic::PoliceActivity,
                 subject: EntityRef::Neighborhood(*id),
                 reliability,
@@ -644,7 +704,16 @@ fn build_observations(
                 signal: patrol_pattern_signal(patrol, outcome, patrol_bucket_minutes),
                 summary: patrol_summary(name, patrol, outcome, observed_at, patrol_bucket_minutes),
                 finding: format!("police activity around {name}"),
-            }]
+            }];
+            if outcome == OperationObjectiveOutcome::Achieved {
+                append_local_enterprise_observations(
+                    &mut observations,
+                    local_enterprises,
+                    reliability,
+                    specificity,
+                );
+            }
+            observations
         }
         SurveillanceTargetSnapshot::Business {
             id,
@@ -653,6 +722,7 @@ fn build_observations(
             neighborhood,
             neighborhood_name,
             patrol,
+            local_enterprises,
         } => {
             let mut observations = vec![SurveillanceObservation {
                 topic: InformationTopic::PoliceActivity,
@@ -679,6 +749,12 @@ fn build_observations(
                     summary: business_access_summary(name, functions),
                     finding: format!("access intelligence at {name}"),
                 });
+                append_local_enterprise_observations(
+                    &mut observations,
+                    local_enterprises,
+                    reliability,
+                    specificity,
+                );
             }
             observations
         }
@@ -787,6 +863,41 @@ fn build_observations(
             ),
             finding: format!("activity linked to {organization_name}"),
         }],
+    }
+}
+
+fn append_local_enterprise_observations(
+    observations: &mut Vec<SurveillanceObservation>,
+    enterprises: &[EnterpriseSnapshot],
+    reliability: Reliability,
+    specificity: Specificity,
+) {
+    let mut affiliations = BTreeMap::<_, (&str, BTreeMap<_, _>)>::new();
+    for enterprise in enterprises {
+        observations.push(enterprise_observation(enterprise, reliability, specificity));
+        affiliations
+            .entry(enterprise.organization)
+            .or_insert_with(|| (enterprise.organization_name.as_str(), BTreeMap::new()))
+            .1
+            .insert(enterprise.manager, enterprise.manager_name.as_str());
+    }
+    // The manager and outfit already appear in the observed racket narrative; make those
+    // identities actionable through the same typed personnel channel as an organization watch.
+    for (organization, (name, managers)) in affiliations {
+        observations.push(SurveillanceObservation {
+            topic: InformationTopic::Personnel,
+            subject: EntityRef::Organization(organization),
+            reliability,
+            specificity,
+            signal: Some(InformationSignal::PersonnelPresence {
+                characters: managers.keys().copied().collect(),
+            }),
+            summary: format!(
+                "Local racket activity associated {} with {name}.",
+                managers.values().copied().collect::<Vec<_>>().join(", ")
+            ),
+            finding: format!("personnel around {name}"),
+        });
     }
 }
 

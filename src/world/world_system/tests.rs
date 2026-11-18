@@ -38,6 +38,56 @@ fn make_test_character(
     .expect("test character should validate")
 }
 
+#[test]
+fn autonomy_change_rejects_stale_and_foreign_orders_and_survives_restore() {
+    let registry = build_registry();
+    let mut state = AppState::new(12);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Autonomy Test".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let outsider = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Other Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let leader = make_test_character(&mut state, "Leader", organization, None);
+    let member = make_test_character(&mut state, "Member", organization, Some(leader));
+    let stale = validate_set_character_autonomy(&state, organization, member, AutonomyLevel::Broad)
+        .unwrap();
+    validate_set_character_autonomy(&state, organization, member, AutonomyLevel::Delegated)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let before = bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap();
+    assert!(stale.commit(&mut state).is_err());
+    assert!(
+        validate_set_character_autonomy(&state, outsider, member, AutonomyLevel::Tight).is_err()
+    );
+    assert!(
+        validate_set_character_autonomy(&state, organization, member, AutonomyLevel::Delegated)
+            .is_err()
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap()
+    );
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    let record = restored.world().get_character(member).unwrap();
+    assert_eq!(record.autonomy(), AutonomyLevel::Delegated);
+    assert_eq!(record.supervisor(), Some(leader));
+    assert_eq!(record.organization(), Some(organization));
+}
+
 fn replace_serialized_organization(
     envelope: SaveEnvelope,
     original: &OrganizationRecord,

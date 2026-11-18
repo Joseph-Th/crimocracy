@@ -7,6 +7,117 @@ fn snapshot(registry: &Registry, session: &Session<'_>) -> Vec<u8> {
 }
 
 #[test]
+fn generated_manager_can_develop_contacts_and_request_recruitment() {
+    use crimocracy::world::{AutonomyLevel, CapabilityKind};
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let manager = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|member| {
+            member
+                .capability(CapabilityKind::Surveillance)
+                .is_some_and(|rating| rating.value() == 91)
+        })
+        .unwrap()
+        .id();
+    let member = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|member| {
+            member.id() != manager
+                && member
+                    .capability(CapabilityKind::Driving)
+                    .is_some_and(|rating| rating.value() == 91)
+        })
+        .unwrap()
+        .id();
+    session
+        .execute(&format!("delegate char-{} personnel", manager.raw()))
+        .unwrap();
+    let candidates = session
+        .manager_prospects()
+        .unwrap()
+        .into_iter()
+        .find(|(id, _)| *id == manager)
+        .unwrap()
+        .1;
+    assert!(!candidates.is_empty());
+    assert!(
+        session
+            .execute("prospects")
+            .unwrap()
+            .0
+            .contains("requires delegated or broad autonomy")
+    );
+    session
+        .execute(&format!("autonomy char-{} delegated", manager.raw()))
+        .unwrap();
+    assert!(
+        session
+            .execute("prospects")
+            .unwrap()
+            .0
+            .contains("may act at the daily recruitment pass")
+    );
+    session
+        .execute(&format!(
+            "supervise char-{} char-{}",
+            member.raw(),
+            manager.raw()
+        ))
+        .unwrap();
+    assert_eq!(
+        session
+            .state
+            .world()
+            .get_character(member)
+            .unwrap()
+            .supervisor(),
+        Some(manager)
+    );
+    let before = snapshot(&registry, &session);
+    assert!(session.execute("autonomy char-999 broad").is_err());
+    assert!(
+        session
+            .execute(&format!("autonomy char-{} delegated", manager.raw()))
+            .is_err()
+    );
+    assert!(
+        session
+            .execute(&format!(
+                "supervise char-{} char-{}",
+                member.raw(),
+                member.raw()
+            ))
+            .is_err()
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        restored.world().get_character(manager).unwrap().autonomy(),
+        AutonomyLevel::Delegated
+    );
+    assert_eq!(
+        restored.world().get_character(member).unwrap().supervisor(),
+        Some(manager)
+    );
+    session.execute("advance 1d").unwrap();
+    assert!(
+        session
+            .execute("decisions")
+            .unwrap()
+            .0
+            .to_lowercase()
+            .contains("recruit"),
+        "manager should raise a recruitment approval"
+    );
+}
+
+#[test]
 fn text_play_governance_policy_and_mandate_changes_are_canonical() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
