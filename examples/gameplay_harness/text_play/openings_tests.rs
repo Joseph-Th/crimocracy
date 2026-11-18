@@ -29,7 +29,12 @@ fn text_play_alternate_openings_are_saved_campaigns_with_distinct_crews() {
             .characters_in_organization(session.player)
             .find(|member| member.id().raw() == 4)
             .unwrap();
-        strength.push(member.capability(CapabilityKind::Burglary).unwrap().value());
+        strength.push(
+            member
+                .capability(crimocracy::world::CapabilityKind::Burglary)
+                .unwrap()
+                .value(),
+        );
         session.execute("advance 1m").unwrap();
         assert_eq!(session.state.now().as_minutes(), 1);
     }

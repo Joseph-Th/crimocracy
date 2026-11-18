@@ -361,6 +361,34 @@ fn validate_funding_accounts(
     Ok(())
 }
 
+/// Public offer for an independently owned property that can be transferred to this buyer.
+/// This deliberately discloses only listed infrastructure and price, never a rival's owner,
+/// ledger, enterprise dependencies, or operating performance. Funds are checked at purchase.
+pub fn acquisition_offer<'state>(
+    registry: &Registry,
+    state: &'state AppState,
+    organization: OrganizationId,
+    business: BusinessId,
+) -> Option<(Money, &'state BTreeSet<crate::world::BusinessFunction>)> {
+    let record = state.world.get_business(business)?;
+    if record.owner() != BusinessOwner::Independent {
+        return None;
+    }
+    validate_transfer_business_ownership(
+        state,
+        business,
+        BusinessOwner::Organization(organization),
+    )
+    .ok()?;
+    Some((
+        registry
+            .get_business(record.kind())
+            .economics()
+            .acquisition_cost(),
+        record.functions(),
+    ))
+}
+
 pub fn validate_acquire_business(
     registry: &Registry,
     state: &AppState,

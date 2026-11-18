@@ -8,6 +8,49 @@ fn snapshot(registry: &Registry, session: &Session<'_>) -> Vec<u8> {
 }
 
 #[test]
+fn preview_exposes_usable_coverage_without_authorizing_and_respects_scheduled_freshness() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let before = snapshot(&registry, &session);
+    let fresh = session
+        .execute("PREVIEW documenttheft business-1")
+        .unwrap()
+        .0;
+    assert!(fresh.contains("Preview only"));
+    assert!(fresh.contains("Planning intelligence: 1/"), "{fresh}");
+    assert!(fresh.contains("TargetSecurity: information-"));
+    assert!(fresh.contains("Personnel: missing usable information"));
+    assert_eq!(before, snapshot(&registry, &session));
+    let stale = session
+        .execute("preview documenttheft business-1 delay=7d")
+        .unwrap()
+        .0;
+    assert!(
+        stale.contains("TargetSecurity: missing usable information"),
+        "{stale}"
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    let authorized = session
+        .execute("plan documenttheft business-1 delay=7d")
+        .unwrap()
+        .0;
+    assert!(authorized.contains("Planning intelligence: 0/"));
+    let op = session
+        .state
+        .operations()
+        .operations_for_organization(session.player)
+        .next()
+        .unwrap();
+    assert!(op.intelligence().is_empty());
+    let saved = snapshot(&registry, &session);
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn text_play_plan_controls_are_strict_and_never_mutate_on_rejection() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();

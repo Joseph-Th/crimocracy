@@ -21,6 +21,42 @@ fn precinct(session: &Session<'_>) -> OrganizationId {
 }
 
 #[test]
+fn market_and_intelligence_browsing_preserve_knowledge_boundaries() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new_generated(
+        &registry,
+        EvaluationSeeds::new(516708459, 516708459),
+        CityScale::Small,
+    )
+    .unwrap();
+    let before = snapshot(&registry, &session);
+    let market = session.execute("market").unwrap().0;
+    for (id, _, _, _) in session.state.world().public_business_directory() {
+        let record = session.state.world().get_business(id).unwrap();
+        if record.owner() == crimocracy::world::BusinessOwner::Independent {
+            assert!(market.contains(&format!("business-{} ", id.raw())));
+        } else {
+            assert!(!market.contains(&format!("business-{} ", id.raw())));
+        }
+    }
+    assert!(market.contains("VehicleFleet"));
+    let first = session.execute("intelligence 1 1").unwrap().0;
+    let second = session.execute("intelligence 1 2").unwrap().0;
+    assert_ne!(first.lines().nth(1), second.lines().nth(1));
+    assert!(
+        session
+            .execute("intelligence 10 1 business-1")
+            .unwrap()
+            .0
+            .contains("TargetSecurity")
+    );
+    assert!(session.execute("intelligence 1 0").is_err());
+    assert!(session.execute("intelligence 101").is_err());
+    assert!(session.execute("intelligence 10 1 org-999").is_err());
+    assert_eq!(before, snapshot(&registry, &session));
+}
+
+#[test]
 fn text_play_reconnaissance_directory_guards_unknown_world_and_admin_ids() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();

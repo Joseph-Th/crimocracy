@@ -489,6 +489,80 @@ impl<'registry> ValidatedOperation<'registry> {
     }
 }
 
+/// Project the same participant booking rules used by authorization, for crew selection.
+/// This is not authorization: callers must still validate the completed draft.
+pub fn participant_available_for_plan(
+    registry: &Registry,
+    state: &AppState,
+    character: CharacterId,
+    kind: OperationKind,
+    scheduled_for: SimTime,
+    constraints: &[crate::operations::OperationConstraint],
+) -> bool {
+    state.world.get_character(character).is_some()
+        && state.legal.active_arrest_for_character(character).is_none()
+        && scheduled_for > state.now()
+        && find_busy_participant(
+            registry,
+            state,
+            &BTreeSet::from([character]),
+            kind,
+            scheduled_for,
+            constraints,
+        )
+        .is_none()
+}
+
+/// Select the strongest currently usable organization-held source per relevant topic.
+/// Ranking uses the same subject and freshness rules as authorization and execution.
+/// Uncovered topics are intentionally absent; no hidden observations are consulted.
+pub fn planning_information(
+    registry: &Registry,
+    state: &AppState,
+    organization: OrganizationId,
+    kind: OperationKind,
+    objective: &crate::operations::OperationObjective,
+    planning_at: SimTime,
+) -> BTreeMap<crate::intelligence::InformationTopic, (InformationId, u8)> {
+    let execution = registry.get_operation(kind).execution();
+    let max_age = u64::from(execution.max_intelligence_age().as_minutes());
+    let mut best = BTreeMap::new();
+    for info in objective_validation::relevant_information_subjects(state, objective)
+        .into_iter()
+        .flat_map(|subject| {
+            state.intelligence.information_for_holder_subject(
+                KnowledgeHolder::Organization(organization),
+                subject,
+            )
+        })
+    {
+        if info.observed_at() > planning_at
+            || !execution
+                .relevant_intelligence_topics()
+                .contains(&info.topic())
+        {
+            continue;
+        }
+        let score = crate::operations::operation_intelligence::resolve_information_score(
+            registry.information_quality(),
+            info,
+            planning_at,
+            max_age,
+        );
+        if score > 0 {
+            let candidate = (info.id(), score);
+            best.entry(info.topic())
+                .and_modify(|current: &mut (InformationId, u8)| {
+                    if (score, info.id()) > (current.1, current.0) {
+                        *current = candidate;
+                    }
+                })
+                .or_insert(candidate);
+        }
+    }
+    best
+}
+
 pub fn validate_authorize_operation<'registry>(
     registry: &'registry Registry,
     state: &AppState,

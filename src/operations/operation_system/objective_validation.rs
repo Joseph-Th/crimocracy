@@ -18,29 +18,31 @@ pub(crate) fn is_information_subject_relevant(
     objective: &OperationObjective,
     subject: EntityRef,
 ) -> bool {
-    let referenced = objective.referenced_entities();
-    if referenced.contains(&subject) {
-        return true;
-    }
-    let EntityRef::Neighborhood(subject_neighborhood) = subject else {
-        return false;
-    };
-    referenced.into_iter().any(|entity| match entity {
-        EntityRef::Business(business) => state
-            .world
-            .get_business(business)
-            .is_some_and(|record| record.neighborhood() == subject_neighborhood),
-        EntityRef::Neighborhood(neighborhood) => neighborhood == subject_neighborhood,
-        EntityRef::Organization(_)
-        | EntityRef::Character(_)
-        | EntityRef::Operation(_)
-        | EntityRef::Investigation(_)
-        | EntityRef::Evidence(_)
-        | EntityRef::FinancialAccount(_)
-        | EntityRef::DecisionRequest(_)
-        | EntityRef::Mandate(_)
-        | EntityRef::Enterprise(_) => false,
-    })
+    relevant_information_subjects(state, objective).contains(&subject)
+}
+
+/// Indexed planning reads and authorization share the same target geography.
+pub(super) fn relevant_information_subjects(
+    state: &AppState,
+    objective: &OperationObjective,
+) -> Vec<EntityRef> {
+    let mut subjects = objective.referenced_entities();
+    let neighborhoods = subjects
+        .iter()
+        .filter_map(|entity| {
+            let EntityRef::Business(business) = entity else {
+                return None;
+            };
+            state
+                .world
+                .get_business(*business)
+                .map(|record| EntityRef::Neighborhood(record.neighborhood()))
+        })
+        .collect::<Vec<_>>();
+    subjects.extend(neighborhoods);
+    subjects.sort_unstable();
+    subjects.dedup();
+    subjects
 }
 
 /// Whether the objective's target has a shape the objective could ever act on, independent of

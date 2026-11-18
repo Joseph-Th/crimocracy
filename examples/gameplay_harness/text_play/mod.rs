@@ -31,7 +31,8 @@ use crimocracy::delegation::delegation_system::{
 use crimocracy::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};
 use crimocracy::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crimocracy::economy::business_acquisition::{
-    BusinessAcquisitionDraft, BusinessAcquisitionError, validate_acquire_business,
+    BusinessAcquisitionDraft, BusinessAcquisitionError, acquisition_offer,
+    validate_acquire_business,
 };
 use crimocracy::economy::business_economy_system::{
     BusinessProfitSweepDraft, validate_sweep_business_profits,
@@ -66,7 +67,8 @@ use crimocracy::legal::{
     LegalRepresentationDraft, LegalRepresentationEndReason, LegalRepresentationOrigin,
 };
 use crimocracy::operations::operation_system::{
-    OperationTransition, apply_transition, validate_authorize_operation,
+    OperationTransition, apply_transition, participant_available_for_plan, planning_information,
+    validate_authorize_operation,
 };
 use crimocracy::operations::property_disposition::{
     CashDispositionDraft, PropertyDispositionDraft, validate_deposit_operation_cash,
@@ -87,8 +89,8 @@ use crimocracy::recruitment::recruitment_system::{
 use crimocracy::recruitment::{RecruitmentApproach, RecruitmentDraft};
 use crimocracy::registry::Registry;
 use crimocracy::world::{
-    ALL_CAPABILITY_KINDS, ALL_POLICY_KINDS, ApprovalPolicy, CapabilityKind, LegalSupportPolicy,
-    PolicyKind, PolicySetting,
+    ALL_CAPABILITY_KINDS, ALL_POLICY_KINDS, ApprovalPolicy, LegalSupportPolicy, PolicyKind,
+    PolicySetting,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,7 +130,8 @@ const HELP: &str = "Commands:
   prospects              Contacts available for executive recruitment
   recruit <id> [offer|advancement|protection|appeal]
                          Approach a known prospect
-  directory              Public city business names, kinds, and standard prices
+  directory              Public business names, kinds, districts, and standard prices
+  market                 Purchasable businesses with advertised infrastructure and prices
   businesses             Owned storefronts and known leads
   business <business-id> <suspend|resume>
                          Pause or restart a player-owned legitimate storefront
@@ -152,7 +155,8 @@ const HELP: &str = "Commands:
                          Open an empty account in the organization's own books
   move <source-id> <dest-id> <cents>
                          Transfer between same-kind organization accounts
-  intelligence           Information held by your organization
+  intelligence [count] [page] [target-id]
+                         Browse held observations, newest observed first (default 20 per page)
   intel <information-id> Inspect one held observation, typed finding and provenance
   debriefs               Your members and counts of unreported personal observations
   debrief <member-id>    Transfer one new member observation to organization knowledge
@@ -162,6 +166,8 @@ const HELP: &str = "Commands:
                          Authorize with optional crew, contingency, schedule and knowledge gates.
                          Surveillance/infiltration also target
                          known org-, char-, district-, operation-, investigation-, enterprise-IDs
+  preview <kind> <target-id> [same options as plan]
+                         Validate and show crew and usable planning intelligence without authorizing
   opportunities          Known burglary leads and their deadlines
   discover <business-id> File a burglary lead from observed intelligence
   operations             Your authorized and completed operations
@@ -408,8 +414,8 @@ fn parse_account_kind(raw: &str) -> Result<AccountKind, String> {
 fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
     let range = match command {
         "help" | "quit" | "exit" | "brief" | "people" | "known-people" | "prospects"
-        | "directory" | "businesses" | "enterprises" | "racket-kinds" | "finances" | "accounts"
-        | "intelligence" | "opportunities" | "operations" | "decisions" | "connections"
+        | "directory" | "market" | "businesses" | "enterprises" | "racket-kinds" | "finances"
+        | "accounts" | "opportunities" | "operations" | "decisions" | "connections"
         | "contacts" | "counsel" | "policies" | "mandates" | "operation-kinds" | "districts"
         | "known-targets" | "debriefs" => 1..=1,
         "recruit" | "scout" => 2..=3,
@@ -419,6 +425,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "move" | "deposit" => 4..=4,
         "dispose" => 5..=5,
         "reports" | "treasury" => 1..=2,
+        "intelligence" => 1..=4,
         "attention" => 1..=3,
         "ledger" => 1..=2,
         "business-cycles" | "racket-cycles" => 2..=3,
@@ -426,7 +433,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         | "save" | "transaction" | "cancel" | "debrief" | "intel" => 2..=2,
         "policy" | "delegate" => 3..=3,
         "mandate" => 3..=6,
-        "plan" => 3..=32,
+        "plan" | "preview" => 3..=32,
         "connect" => 3..=3,
         "contact" => 1..=3,
         "retain" => 4..=4,
@@ -592,45 +599,15 @@ impl<'a> Session<'a> {
             .information_for_holder(KnowledgeHolder::Organization(self.player))
     }
 
-    /// Select from current organizational members, not fixture-held characters whose
-    /// membership may have changed. The fallback prefers publicly known staff skills,
-    /// with stable character-id ties; the player can always name an explicit member.
-    fn member_for_role(
-        &self,
-        requested: Option<&str>,
-        skill: CapabilityKind,
-        prefer_supervised: bool,
-    ) -> Result<CharacterId, String> {
-        let members: Vec<_> = self
-            .state
+    /// Resolve a player-specified member; the canonical planner validates availability.
+    fn requested_member(&self, raw: &str) -> Result<CharacterId, String> {
+        let id = parse_number(raw, "char")?;
+        self.state
             .world()
             .characters_in_organization(self.player)
-            .collect();
-        if let Some(raw) = requested {
-            let id = parse_number(raw, "char")?;
-            return members
-                .iter()
-                .find(|member| member.id().raw() == id)
-                .map(|member| member.id())
-                .ok_or_else(|| {
-                    format!("character {id} is not a current member of your organization")
-                });
-        }
-        let best = |require_supervision: bool| {
-            members
-                .iter()
-                .filter(|person| !require_supervision || person.supervisor().is_some())
-                .max_by_key(|person| {
-                    (
-                        person.capability(skill).map_or(0, |rating| rating.value()),
-                        std::cmp::Reverse(person.id().raw()),
-                    )
-                })
-                .map(|person| person.id())
-        };
-        best(prefer_supervised)
-            .or_else(|| best(false))
-            .ok_or_else(|| "your organization has no current members".to_owned())
+            .find(|member| member.id().raw() == id)
+            .map(|member| member.id())
+            .ok_or_else(|| format!("character {id} is not a current member of your organization"))
     }
 
     fn executive_recruiter(&self) -> Result<CharacterId, String> {

@@ -182,10 +182,24 @@ fn text_play_planner_respects_knowledge_and_scarce_crew_skills() {
     );
     let before = snapshot(&registry, &session);
     assert!(
-        session.execute("plan intimidation 1").is_err(),
-        "overlapping plans should not double-book the same participants"
+        session
+            .execute("plan intimidation 1 coordinator=char-3")
+            .is_err(),
+        "explicit overlapping assignments must still reject"
     );
     assert_eq!(before, snapshot(&registry, &session));
+    session.execute("plan intimidation 1").unwrap();
+    let crews = session
+        .state
+        .operations()
+        .operations_for_organization(session.player)
+        .map(|op| op.participants())
+        .collect::<Vec<_>>();
+    assert_eq!(crews.len(), 2);
+    assert!(
+        crews[0].is_disjoint(&crews[1]),
+        "automatic staffing must use available trained crew"
+    );
 }
 
 #[test]

@@ -152,16 +152,28 @@ impl Session<'_> {
     /// Match the whole crew for maximum trained capability and a modest
     /// subordinate preference. Never appoint an untrained member silently;
     /// the player must explicitly accept that risk with a role assignment.
-    fn select_operation_roles(
+    pub(super) fn select_operation_roles(
         &self,
         kind: OperationKind,
         explicit: &BTreeMap<RoleKind, CharacterId>,
+        at: crimocracy::core::time::SimTime,
+        constraints: &[OperationConstraint],
     ) -> Result<BTreeMap<RoleKind, CharacterId>, String> {
         let definition = self.registry.get_operation(kind);
         let roster: Vec<_> = self
             .state
             .world()
             .characters_in_organization(self.player)
+            .filter(|person| {
+                participant_available_for_plan(
+                    self.registry,
+                    &self.state,
+                    person.id(),
+                    kind,
+                    at,
+                    constraints,
+                )
+            })
             .collect();
         let used: BTreeSet<_> = explicit.values().copied().collect();
         if used.len() != explicit.len() {
@@ -209,7 +221,7 @@ impl Session<'_> {
             });
             if let Some((role, skill)) = untrained {
                 format!(
-                    "no unassigned member has trained {skill:?} for {role:?}; use {role:?}=char-N to choose an untrained member explicitly, or recruit a specialist"
+                    "no available unassigned member has trained {skill:?} for {role:?}; use {role:?}=char-N to choose an untrained member explicitly, reschedule, or recruit a specialist"
                 )
             } else {
                 "not enough distinct trained people to cover all roles; explicitly choose a member for a role or recruit specialists".to_owned()
@@ -242,7 +254,7 @@ impl Session<'_> {
             kind,
             OperationKind::Surveillance | OperationKind::Infiltration
         );
-        let (target, name, location) = if person_target {
+        let (target, name, _) = if person_target {
             if !words[2].starts_with("char-") {
                 return Err(
                     "legal-person operations require an identified char-N from 'known-people'"
@@ -399,34 +411,6 @@ impl Session<'_> {
                 return Err(format!("role {role:?} was assigned more than once"));
             }
         }
-        let roles = self.select_operation_roles(kind, &explicit)?;
-        let leader = requested_leader
-            .or_else(|| roles.get(&RoleKind::Coordinator).copied())
-            .or_else(|| {
-                let skill = definition.execution().leader_capability();
-                self.state
-                    .world()
-                    .characters_in_organization(self.player)
-                    .max_by_key(|person| {
-                        (
-                            person.capability(skill).map_or(0, |rating| rating.value()),
-                            std::cmp::Reverse(person.id().raw()),
-                        )
-                    })
-                    .map(|person| person.id())
-            })
-            .ok_or("your organization has no available operation leader")?;
-        let relevant = definition.execution().relevant_intelligence_topics();
-        let information: BTreeSet<_> = self
-            .organization_information()
-            .filter(|info| relevant.contains(&info.topic()))
-            .filter(|info| {
-                info.subject() == target
-                    || location
-                        .is_some_and(|district| info.subject() == EntityRef::Neighborhood(district))
-            })
-            .map(|info| info.id())
-            .collect();
         let at = self
             .state
             .now()
@@ -461,7 +445,94 @@ impl Session<'_> {
         let objective = kind
             .objective_for_target(target)
             .ok_or("this operation requires a different target type")?;
-        let operation = validate_authorize_operation(
+        let roles = self.select_operation_roles(kind, &explicit, at, &constraints)?;
+        let leader = requested_leader
+            .or_else(|| roles.get(&RoleKind::Coordinator).copied())
+            .or_else(|| {
+                let skill = definition.execution().leader_capability();
+                self.state
+                    .world()
+                    .characters_in_organization(self.player)
+                    .filter(|person| {
+                        participant_available_for_plan(
+                            self.registry,
+                            &self.state,
+                            person.id(),
+                            kind,
+                            at,
+                            &constraints,
+                        )
+                    })
+                    .max_by_key(|person| {
+                        (
+                            person.capability(skill).map_or(0, |rating| rating.value()),
+                            roles.values().any(|id| *id == person.id()),
+                            std::cmp::Reverse(person.id().raw()),
+                        )
+                    })
+                    .map(|person| person.id())
+            })
+            .ok_or("your organization has no available operation leader")?;
+        let coverage = planning_information(
+            self.registry,
+            &self.state,
+            self.player,
+            kind,
+            &objective,
+            at,
+        );
+        let information = coverage.values().map(|(id, _)| *id).collect();
+        let mut detail = format!(
+            "{kind:?} at {name} | {approach:?} | starts {}\n",
+            time_label(at.as_minutes())
+        );
+        let leader_name = self
+            .state
+            .world()
+            .get_character(leader)
+            .ok_or("leader disappeared")?
+            .name();
+        writeln!(detail, "  Leader: {leader_name} (char-{})", leader.raw()).unwrap();
+        for (role, id) in &roles {
+            let member = self
+                .state
+                .world()
+                .get_character(*id)
+                .ok_or("participant disappeared")?;
+            let skill = definition
+                .execution()
+                .capability_for_role(*role)
+                .ok_or("missing role capability")?;
+            let rating = member.capability(skill).map_or(0, |rating| rating.value());
+            writeln!(
+                detail,
+                "  {role:?}: {} (char-{}) | {skill:?} {rating}",
+                member.name(),
+                id.raw()
+            )
+            .unwrap();
+        }
+        let relevant = definition.execution().relevant_intelligence_topics();
+        writeln!(
+            detail,
+            "  Planning intelligence: {}/{} usable topics at scheduled start",
+            coverage.len(),
+            relevant.len()
+        )
+        .unwrap();
+        for topic in relevant {
+            if let Some((id, score)) = coverage.get(topic) {
+                writeln!(
+                    detail,
+                    "    {topic:?}: information-{} (quality {score}/100)",
+                    id.raw()
+                )
+                .unwrap();
+            } else {
+                writeln!(detail, "    {topic:?}: missing usable information").unwrap();
+            }
+        }
+        let validated = validate_authorize_operation(
             self.registry,
             &self.state,
             OperationDraft {
@@ -478,11 +549,15 @@ impl Session<'_> {
                 scheduled_for: at,
             },
         )
-        .map_err(|error| error.to_string())?
-        .commit(&mut self.state)
         .map_err(|error| error.to_string())?;
+        if words[0].eq_ignore_ascii_case("preview") {
+            return Ok(format!("Preview only; no operation authorized.\n{detail}"));
+        }
+        let operation = validated
+            .commit(&mut self.state)
+            .map_err(|error| error.to_string())?;
         Ok(format!(
-            "Authorized {kind:?} operation {} against {name}. See 'operation {}' for crew and planning details.",
+            "Authorized {kind:?} operation {} against {name}. See 'operation {}' for crew and planning details.\n{detail}",
             operation.raw(),
             operation.raw()
         ))

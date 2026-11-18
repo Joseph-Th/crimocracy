@@ -93,7 +93,7 @@ impl Session<'_> {
                     .unwrap();
                 }
             }
-            "operation-kinds" | "known-targets" | "plan" => {
+            "operation-kinds" | "known-targets" | "plan" | "preview" => {
                 out = self.execute_planning(&words)?;
             }
             "people" => {
@@ -299,6 +299,23 @@ impl Session<'_> {
                 writeln!(out, "Acquired business {} for {} accounted cents; initialized operating economy: {}.",
                     acquired.business.raw(), acquired.price.cents(), acquired.established_economy).unwrap();
             }
+            "market" => {
+                for (id, name, kind, district) in state.world().public_business_directory() {
+                    let Some((price, functions)) =
+                        acquisition_offer(self.registry, state, self.player, id)
+                    else {
+                        continue;
+                    };
+                    let ward = state
+                        .world()
+                        .get_neighborhood(district)
+                        .map_or("unknown district", |ward| ward.name());
+                    writeln!(out, "business-{} {name} | {kind:?} | district-{} {ward} | {} cents | functions {functions:?}", id.raw(), district.raw(), price.cents()).unwrap();
+                }
+                if out.is_empty() {
+                    out.push_str("No properties currently available for direct purchase.");
+                }
+            }
             "business" => {
                 let raw = parse_number(words[1], "business")?;
                 let id = state
@@ -402,6 +419,7 @@ impl Session<'_> {
                         business.kind()
                     )
                     .unwrap();
+                    writeln!(out, "  Infrastructure: {:?}", business.functions()).unwrap();
                     if let Some(economy) = state.economy().get_business_economy(business.id()) {
                         let till = state
                             .finance()
@@ -480,7 +498,7 @@ impl Session<'_> {
                         .finance()
                         .get_account(enterprise.cash_account())
                         .ok_or("enterprise cash account is missing")?;
-                    writeln!(out, "  Book cash: {} cents", book.balance().cents()).unwrap();
+                    writeln!(out, "  Shared cash account balance: {} cents (not an individual racket reserve)", book.balance().cents()).unwrap();
                     if let Some(cycle) = state.enterprises().latest_cycle(enterprise.id()) {
                         writeln!(
                             out,
@@ -766,7 +784,36 @@ impl Session<'_> {
                 out.push_str("Clearing/settlement balances are excluded; their ledger entries are not spendable reserves.");
             }
             "intelligence" => {
-                for info in self.organization_information() {
+                let count = words.get(1).map_or(Ok(20_usize), |value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "intelligence needs a positive count")
+                })?;
+                if !(1..=100).contains(&count) {
+                    return Err("intelligence count must be 1 to 100".to_owned());
+                }
+                let page = words.get(2).map_or(Ok(1_usize), |value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "intelligence needs a positive page number")
+                })?;
+                let offset = page
+                    .checked_sub(1)
+                    .and_then(|n| n.checked_mul(count))
+                    .ok_or("invalid intelligence page")?;
+                let target = words
+                    .get(3)
+                    .map(|raw| self.reconnaissance_target(raw).map(|(entity, _, _)| entity))
+                    .transpose()?;
+                let mut records = self
+                    .organization_information()
+                    .filter(|info| target.is_none_or(|entity| info.subject() == entity))
+                    .collect::<Vec<_>>();
+                records.sort_unstable_by_key(|info| {
+                    std::cmp::Reverse((info.observed_at(), info.id()))
+                });
+                writeln!(out,"Page {page} | showing {} of {} organization-held observations, newest observed first.", count.min(records.len().saturating_sub(offset)), records.len()).unwrap();
+                for info in records.into_iter().skip(offset).take(count) {
                     writeln!(
                         out,
                         "{} {:?} on {:?} | observed {} | {:?}/{:?}: {}",
@@ -1183,15 +1230,17 @@ impl Session<'_> {
                 let business = self
                     .known_business(id)
                     .ok_or("no known business with that ID")?;
-                let scout = self.member_for_role(
-                    words.get(2).copied(),
-                    CapabilityKind::Surveillance,
-                    false,
-                )?;
                 let at = state
                     .now()
                     .checked_add(SimDuration::ONE_MINUTE)
                     .ok_or("simulation clock exhausted")?;
+                let mut explicit = BTreeMap::new();
+                if let Some(raw) = words.get(2) {
+                    explicit.insert(RoleKind::Surveillance, self.requested_member(raw)?);
+                }
+                let roles =
+                    self.select_operation_roles(OperationKind::Surveillance, &explicit, at, &[])?;
+                let scout = roles[&RoleKind::Surveillance];
                 let name = state
                     .world()
                     .get_business(business)
@@ -1210,7 +1259,7 @@ impl Session<'_> {
                             target: EntityRef::Business(business),
                         },
                         approach: OperationApproach::Covert,
-                        roles: BTreeMap::from([(RoleKind::Surveillance, scout)]),
+                        roles,
                         intelligence: BTreeSet::new(),
                         constraints: Vec::new(),
                         contingencies: Vec::new(),
@@ -1248,10 +1297,6 @@ impl Session<'_> {
                 if params.len() > 2 {
                     return Err("burgle <lead-id> [entry-character-id] [coordinator-character-id] [abort|press]".to_owned());
                 }
-                let entry_specialist =
-                    self.member_for_role(params.first().copied(), CapabilityKind::Burglary, false)?;
-                let coordinator =
-                    self.member_for_role(params.get(1).copied(), CapabilityKind::Management, true)?;
                 let lead = self
                     .known_opportunities()
                     .into_iter()
@@ -1271,28 +1316,6 @@ impl Session<'_> {
                     .ok_or("lead target disappeared")?
                     .name()
                     .to_owned();
-                let neighborhood = state
-                    .world()
-                    .get_business(target)
-                    .ok_or("lead target disappeared")?
-                    .neighborhood();
-                let relevant = self
-                    .registry
-                    .get_operation(OperationKind::Burglary)
-                    .execution()
-                    .relevant_intelligence_topics();
-                let intelligence: BTreeSet<_> = self
-                    .organization_information()
-                    .filter(|info| {
-                        relevant.contains(&info.topic())
-                            && (matches!(info.subject(),
-                        EntityRef::Business(id) if id == target)
-                                || matches!(info.subject(),
-                        EntityRef::Neighborhood(id) if id == neighborhood))
-                    })
-                    .map(|info| info.id())
-                    .collect();
-                let information_count = intelligence.len();
                 let at = state
                     .now()
                     .checked_add(SimDuration::ONE_MINUTE)
@@ -1300,6 +1323,29 @@ impl Session<'_> {
                 if lead.valid_until().is_some_and(|deadline| at >= deadline) {
                     return Err("lead expires before the proposed operation can begin".to_owned());
                 }
+                let mut explicit = BTreeMap::new();
+                for (raw, role) in params
+                    .iter()
+                    .zip([RoleKind::EntrySpecialist, RoleKind::Coordinator])
+                {
+                    explicit.insert(role, self.requested_member(raw)?);
+                }
+                let roles =
+                    self.select_operation_roles(OperationKind::Burglary, &explicit, at, &[])?;
+                let coordinator = roles[&RoleKind::Coordinator];
+                let objective = OperationObjective::AcquireProperty {
+                    target: EntityRef::Business(target),
+                };
+                let coverage = planning_information(
+                    self.registry,
+                    &self.state,
+                    self.player,
+                    OperationKind::Burglary,
+                    &objective,
+                    at,
+                );
+                let information_count = coverage.len();
+                let intelligence = coverage.values().map(|(id, _)| *id).collect();
                 let contingencies = if press {
                     vec![OperationContingency::RequestDecisionOnPoliceArrival]
                 } else {
@@ -1316,14 +1362,9 @@ impl Session<'_> {
                         kind: OperationKind::Burglary,
                         responsible_organization: self.player,
                         leader: coordinator,
-                        objective: OperationObjective::AcquireProperty {
-                            target: EntityRef::Business(target),
-                        },
+                        objective,
                         approach: OperationApproach::Covert,
-                        roles: BTreeMap::from([
-                            (RoleKind::Coordinator, coordinator),
-                            (RoleKind::EntrySpecialist, entry_specialist),
-                        ]),
+                        roles,
                         intelligence,
                         constraints: Vec::new(),
                         contingencies,

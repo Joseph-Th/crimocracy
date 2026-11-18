@@ -99,9 +99,11 @@ save campaign_01
 ```
 
 Organizational expansion and economic decisions use the same player interface:
-`directory` lists public establishments, `buy` spends accounted funds on
+`directory` lists public establishments; `market` lists currently purchasable
+independent establishments with their prices and advertised business functions,
+without exposing rival ownership or private books. `buy` spends accounted funds on
 independent businesses, `launder` converts street cash within an owned front's
-real capacity, `businesses` shows earned owner-withdrawal headroom, `treasury daily` authorizes daily profit distributions before payroll (protected working capital stays in the storefront), `treasury manual` restores explicit withdrawals, and
+real capacity, `businesses` shows owned infrastructure and earned owner-withdrawal headroom, `treasury daily` authorizes daily profit distributions before payroll (protected working capital stays in the storefront), `treasury manual` restores explicit withdrawals, and
 `racket-kinds` lists enterprise requirements. `open-account`, `move`,
 and `start-racket` let leadership fund and establish more enterprises with
 actual mandates and existing books. Ordinary `move` transfers only between
@@ -150,8 +152,11 @@ the crew continues under any response penalties. `police=ask` requests a
 leadership decision; `police=abort` adds a pre-entry escape when the operation
 has an actual authored entry stage, then asks leadership on later arrivals.
 `need` requires usable organization-held intelligence of an applicable topic
-before authorization. The production owner validates every constraint and crew
-booking. Automatic staffing solves the whole crew assignment to maximize
+before authorization. `preview` accepts the same options as `plan` and validates
+the same order without committing it; it lists the crew, planned start, and
+best usable observation per applicable topic at that start, including missing topics.
+The production owner validates every constraint and crew
+booking. Automatic staffing excludes detained and overlapping participants and solves the whole crew assignment to maximize
 trained capability, with stable ID-based tie-breaking and no duplicate
 participants; explicit `Role=char-N` permits knowingly untrained people.
 `cancel operation-N` withdraws an authorized or running operation through
@@ -174,6 +179,9 @@ Personal field observations do not automatically become organization knowledge.
 members. `debrief char-N` transfers the member's next new observation through
 the production intelligence owner, retaining its original observation time,
 typed facts, source, and lineage; repeat to receive additional notes.
+`intelligence [count] [page] [target-id]` browses held observations by descending
+observation time, rather than disclosure time. The default page is 20 observations;
+page size is 1–100 and an optional public or identified target filters the list.
 `intel information-N` inspects a specific organization-held observation,
 including its typed signal and provenance, but cannot read an outside contact's
 or member's still-private source just by guessing an ID.

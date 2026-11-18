@@ -7,6 +7,80 @@ fn bytes(registry: &Registry, state: &AppState) -> Vec<u8> {
 }
 
 #[test]
+fn generated_infrastructure_supports_specialized_enterprise_networks() {
+    let registry = crate::build_registry();
+    let city = generate_city(&registry, CityScale::Large.config(516708459)).unwrap();
+    let world = city.state.world();
+    for (kind, required) in [
+        (K::Automotive, vec![F::VehicleWorkshop, F::ResaleMarket]),
+        (
+            K::Construction,
+            vec![F::UnionAccess, F::VehicleFleet, F::Warehousing],
+        ),
+        (K::GarmentFactory, vec![F::UnionAccess]),
+        (
+            K::Stevedoring,
+            vec![
+                F::DockAccess,
+                F::Warehousing,
+                F::UnionAccess,
+                F::DistributionInfrastructure,
+            ],
+        ),
+        (
+            K::CoinMachineDistribution,
+            vec![
+                F::VehicleFleet,
+                F::CashIntensive,
+                F::CustomerAccess,
+                F::DistributionInfrastructure,
+            ],
+        ),
+        (
+            K::Lodging,
+            vec![
+                F::Lodging,
+                F::CashIntensive,
+                F::CustomerAccess,
+                F::MeetingSpace,
+            ],
+        ),
+        (
+            K::AthleticClub,
+            vec![F::SportingVenue, F::MeetingSpace, F::CustomerAccess],
+        ),
+        (K::Nightclub, vec![F::Nightlife, F::CustomerAccess]),
+        (
+            K::Wholesale,
+            vec![
+                F::CustomerAccess,
+                F::Warehousing,
+                F::DistributionInfrastructure,
+            ],
+        ),
+    ] {
+        let records = world
+            .public_business_directory()
+            .filter(|(_, _, actual, _)| *actual == kind)
+            .collect::<Vec<_>>();
+        assert!(!records.is_empty(), "missing generated {kind:?}");
+        for (id, _, _, _) in records {
+            let record = world.get_business(id).unwrap();
+            assert!(
+                required
+                    .iter()
+                    .all(|function| record.has_function(*function)),
+                "{} lacks its expected {kind:?} infrastructure",
+                record.name()
+            );
+        }
+    }
+    let saved = bytes(&registry, &city.state);
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(saved, bytes(&registry, &restored));
+}
+
+#[test]
 fn generated_small_city_has_real_owners_economies_policing_and_playable_leads() {
     let registry = crate::build_registry();
     let generated = generate_city(&registry, CityScale::Small.config(12)).unwrap();

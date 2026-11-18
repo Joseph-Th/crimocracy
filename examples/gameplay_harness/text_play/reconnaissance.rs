@@ -36,6 +36,28 @@ impl Session<'_> {
                 }
             }
         }
+        let mut enterprise_observations = BTreeMap::new();
+        for info in self.organization_information() {
+            if let EntityRef::Enterprise(id) = info.subject()
+                && matches!(
+                    info.signal(),
+                    Some(InformationSignal::EnterpriseLocation(_))
+                )
+            {
+                enterprise_observations
+                    .entry(id)
+                    .and_modify(
+                        |current: &mut &crimocracy::intelligence::InformationRecord| {
+                            if (info.observed_at(), info.id())
+                                > (current.observed_at(), current.id())
+                            {
+                                *current = info;
+                            }
+                        },
+                    )
+                    .or_insert(info);
+            }
+        }
         for id in self.known_enterprise_ids() {
             if let Some(record) = self.state.enterprises().get_enterprise(id) {
                 if record.organization() == self.player {
@@ -48,7 +70,16 @@ impl Session<'_> {
                     )
                     .unwrap();
                 } else {
-                    writeln!(out, "enterprise-{} | learned enterprise", id.raw()).unwrap();
+                    if let Some(info) = enterprise_observations.get(&id) {
+                        writeln!(out, "enterprise-{} | learned enterprise | observed {} | {} (information-{})", id.raw(), time_label(info.observed_at().as_minutes()), info.summary(), info.id().raw()).unwrap();
+                    } else {
+                        writeln!(
+                            out,
+                            "enterprise-{} | learned enterprise; location unverified",
+                            id.raw()
+                        )
+                        .unwrap();
+                    }
                 }
             }
         }
