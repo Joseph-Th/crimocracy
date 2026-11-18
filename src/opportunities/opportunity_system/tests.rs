@@ -1587,6 +1587,132 @@ fn dismissal_token_held_across_a_minute_returns_typed_staleness_without_mutation
 }
 
 #[test]
+fn spent_openings_require_new_observations_even_after_restore() {
+    for convert in [false, true] {
+        let mut fixture = make_fixture();
+        let deadline = SimTime::from_minutes(if convert { 120 } else { 1 });
+        let original = opportunity_draft(&fixture, deadline);
+        let opportunity =
+            validate_discover_operation_opportunity(&fixture.registry, &fixture.state, original)
+                .unwrap()
+                .commit(&mut fixture.state)
+                .unwrap();
+        if convert {
+            let operation = authorize_matching_operation(&mut fixture);
+            validate_convert_opportunity(&fixture.state, opportunity, operation)
+                .unwrap()
+                .commit(&mut fixture.state)
+                .unwrap();
+        } else {
+            run_tick(&fixture.registry, &mut fixture.state);
+        }
+        assert_eq!(
+            fixture
+                .state
+                .opportunities()
+                .get_opportunity(opportunity)
+                .unwrap()
+                .status(),
+            if convert {
+                OpportunityStatus::Converted
+            } else {
+                OpportunityStatus::Expired
+            }
+        );
+        fixture.state = restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, &fixture.state).unwrap(),
+        )
+        .unwrap();
+        run_tick(&fixture.registry, &mut fixture.state);
+        let draft = opportunity_draft(&fixture, SimTime::from_minutes(120));
+        let before =
+            bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap();
+        assert_eq!(
+            validate_discover_operation_opportunity(
+                &fixture.registry,
+                &fixture.state,
+                draft.clone()
+            )
+            .err(),
+            Some(OpportunityError::SpentOpportunityBasis)
+        );
+        assert_eq!(
+            bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap(),
+            before
+        );
+
+        // Recording an old observation later is not renewed reconnaissance.
+        let old = validate_record_information(
+            &fixture.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(fixture.organization),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::TargetSecurity,
+                source_entity: None,
+                subject: EntityRef::Business(fixture.business),
+                observed_at: SimTime::ZERO,
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Specific,
+                summary: "A delayed report of the original opening.".to_owned(),
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        let mut draft = draft;
+        draft.source_information.insert(old);
+        assert_eq!(
+            validate_discover_operation_opportunity(
+                &fixture.registry,
+                &fixture.state,
+                draft.clone()
+            )
+            .err(),
+            Some(OpportunityError::SpentOpportunityBasis)
+        );
+
+        let fresh = validate_record_information(
+            &fixture.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(fixture.organization),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::TargetSecurity,
+                source_entity: None,
+                subject: EntityRef::Business(fixture.business),
+                observed_at: fixture.state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Specific,
+                summary: "A new inspection identifies another opening.".to_owned(),
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        draft.source_information.insert(fresh);
+        let replacement =
+            validate_discover_operation_opportunity(&fixture.registry, &fixture.state, draft)
+                .unwrap()
+                .commit(&mut fixture.state)
+                .unwrap();
+        let restored = restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, &fixture.state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored
+                .opportunities()
+                .get_opportunity(replacement)
+                .unwrap()
+                .status(),
+            OpportunityStatus::Open
+        );
+        validate_invariants(&restored);
+    }
+}
+
+#[test]
 fn duplicate_open_opportunity_is_rejected_but_dismissal_allows_later_rediscovery() {
     let mut fixture = make_fixture();
     let draft = opportunity_draft(&fixture, SimTime::from_minutes(120));
@@ -2200,14 +2326,25 @@ fn opportunity_expiry_runs_in_stable_tick_pipeline_and_releases_duplicate_key() 
     validate_state(&restored).expect("restored expired opportunity state should validate");
     validate_invariants(&restored);
 
-    validate_discover_operation_opportunity(
-        &fixture.registry,
-        &fixture.state,
-        opportunity_draft(&fixture, SimTime::from_minutes(120)),
-    )
-    .expect("expired opportunity should release its duplicate key")
-    .commit(&mut fixture.state)
-    .expect("replacement opportunity should commit");
+    assert!(
+        restored
+            .opportunities()
+            .find_open_operation_overlapping(
+                fixture.organization,
+                OperationKind::Burglary,
+                &BTreeSet::from([EntityRef::Business(fixture.business)]),
+            )
+            .is_none(),
+        "expired opportunity must release its open index entry"
+    );
+    assert!(matches!(
+        validate_discover_operation_opportunity(
+            &fixture.registry,
+            &fixture.state,
+            opportunity_draft(&fixture, SimTime::from_minutes(120)),
+        ),
+        Err(OpportunityError::SpentOpportunityBasis)
+    ));
     validate_state(&fixture.state).expect("expired opportunity state should validate");
     validate_invariants(&fixture.state);
 }

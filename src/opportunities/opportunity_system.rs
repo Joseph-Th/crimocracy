@@ -23,7 +23,7 @@ use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::OrganizationKind;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -62,6 +62,10 @@ pub enum OpportunityError {
     InvalidValidityWindow { now: SimTime, valid_until: SimTime },
     #[error("matching open opportunity {0} already exists")]
     ExistingOpenOpportunity(OpportunityId),
+    #[error(
+        "this opening was already spent or expired; obtain a new observation before rediscovering it"
+    )]
+    SpentOpportunityBasis,
     #[error(
         "opportunity discovery was validated at {expected:?}, but simulation time is now {found:?}"
     )]
@@ -296,7 +300,23 @@ fn validate_discovery_state(
     if draft.source_information.is_empty() {
         return Err(OpportunityError::MissingSourceInformation);
     }
+    let mut spent_by_target = BTreeMap::<EntityRef, SimTime>::new();
+    for previous in state
+        .opportunities
+        .opportunities_for_organization(draft.organization)
+    {
+        if previous.context().operation_kind() != draft.operation_kind {
+            continue;
+        }
+        if let Some(at) = previous.spent_at() {
+            for target in previous.context().targets().intersection(&draft.targets) {
+                let cutoff = spent_by_target.entry(*target).or_insert(at);
+                *cutoff = (*cutoff).max(at);
+            }
+        }
+    }
     let mut covered_targets = BTreeSet::new();
+    let mut fresh_targets = BTreeSet::new();
     for source in &draft.source_information {
         let information = state
             .intelligence
@@ -321,6 +341,12 @@ fn validate_discovery_state(
             discovered_at,
         ) {
             covered_targets.insert(information.subject());
+            if spent_by_target
+                .get(&information.subject())
+                .is_none_or(|at| information.observed_at() > *at)
+            {
+                fresh_targets.insert(information.subject());
+            }
         }
     }
     if let Some(uncovered) = draft
@@ -330,36 +356,54 @@ fn validate_discovery_state(
     {
         return Err(OpportunityError::UncoveredTarget(*uncovered));
     }
+    if fresh_targets != draft.targets {
+        return Err(OpportunityError::SpentOpportunityBasis);
+    }
     // Contextual entities need fresh organization-held coverage, but only the actual action
     // target must prove a sensitive legal basis. Hidden world state confirms whether a target is
     // actionable; typed information confirms that the organization legitimately knows why.
-    let has_supported_actionable_target = draft.targets.iter().any(|target| {
-        is_actionable_opportunity_target(
+    let mut has_supported_actionable_target = false;
+    let mut has_fresh_actionable_target = false;
+    for target in &draft.targets {
+        if !is_actionable_opportunity_target(
             registry,
             state,
             draft.organization,
             draft.operation_kind,
             *target,
-        ) && draft.source_information.iter().any(|source| {
-            state
-                .intelligence
-                .get_information(*source)
-                .is_some_and(|information| {
-                    information.subject() == *target
-                        && source_information_proves_actionable_basis(
-                            registry,
-                            state,
-                            draft.organization,
-                            draft.operation_kind,
-                            *target,
-                            information,
-                            discovered_at,
-                        )
-                })
-        })
-    });
+        ) {
+            continue;
+        }
+        let spent_at = spent_by_target.get(target);
+        for source in &draft.source_information {
+            if let Some(information) =
+                state
+                    .intelligence
+                    .get_information(*source)
+                    .filter(|information| {
+                        information.subject() == *target
+                            && source_information_proves_actionable_basis(
+                                registry,
+                                state,
+                                draft.organization,
+                                draft.operation_kind,
+                                *target,
+                                information,
+                                discovered_at,
+                            )
+                    })
+            {
+                has_supported_actionable_target = true;
+                has_fresh_actionable_target |=
+                    spent_at.is_none_or(|at| information.observed_at() > *at);
+            }
+        }
+    }
     if !has_supported_actionable_target {
         return Err(OpportunityError::NoActionableTarget(draft.operation_kind));
+    }
+    if !has_fresh_actionable_target {
+        return Err(OpportunityError::SpentOpportunityBasis);
     }
     if let Some(valid_until) = draft.valid_until
         && valid_until <= discovered_at

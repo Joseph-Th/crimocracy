@@ -278,7 +278,9 @@ custody, and deterministic continuation from a save between incidents.
 Script input is one command per line, with blank lines
 and lines beginning `#` ignored. Interactive command rejection prints a
 reason without ending the session; a rejected scripted command fails with its
-line number. Excess or malformed command arguments are rejected before any
+line number. Opportunity lifecycle tests reject replayed expired or converted
+openings and delayed old observations, then admit genuinely newer observations
+after restoring a save. Excess or malformed command arguments are rejected before any
 mutation. Procedural campaigns create real initial rosters, independent
 businesses, district profiles and patrol schedules from the world seed;
 authored scenario openings remain available to test fixed situations.

@@ -65,6 +65,9 @@ pub(super) fn validate_opportunities_against_registry(
     registry: &Registry,
     state: &AppState,
 ) -> Result<(), StateValidationError> {
+    // Opportunity IDs follow discovery order. Track spent openings while walking that
+    // history once, rather than rescanning prior opportunities for each saved record.
+    let mut spent_by_target = BTreeMap::new();
     for opportunity in state.opportunities.opportunities() {
         let context = opportunity.context();
         let kind = context.operation_kind();
@@ -117,6 +120,9 @@ pub(super) fn validate_opportunities_against_registry(
                     .get_information(*source)
                     .is_some_and(|information| {
                         information.subject() == *target
+                            && spent_by_target
+                                .get(&(opportunity.organization(), kind, *target))
+                                .is_none_or(|at| information.observed_at() > *at)
                             && source_information_is_usable_for_operation_basis(
                                 registry,
                                 kind,
@@ -133,6 +139,9 @@ pub(super) fn validate_opportunities_against_registry(
                     .get_information(*source)
                     .is_some_and(|information| {
                         information.subject() == *target
+                            && spent_by_target
+                                .get(&(opportunity.organization(), kind, *target))
+                                .is_none_or(|at| information.observed_at() > *at)
                             && source_information_proves_operation_basis(
                                 registry,
                                 state,
@@ -173,6 +182,14 @@ pub(super) fn validate_opportunities_against_registry(
                 )
             {
                 return Err(invalid_opportunity(opportunity));
+            }
+        }
+        if let Some(at) = opportunity.spent_at() {
+            for target in context.targets() {
+                let previous = spent_by_target
+                    .entry((opportunity.organization(), kind, *target))
+                    .or_insert(at);
+                *previous = (*previous).max(at);
             }
         }
     }

@@ -117,6 +117,17 @@ impl OpportunityRecord {
         self.resolution
     }
 
+    /// Dismissal is a reversible leadership choice; expiry and conversion consume the opening.
+    pub(crate) fn spent_at(&self) -> Option<SimTime> {
+        match self.resolution {
+            Some(
+                OpportunityResolution::Expired { at, .. }
+                | OpportunityResolution::Converted { at, .. },
+            ) => Some(at),
+            None | Some(OpportunityResolution::Dismissed { .. }) => None,
+        }
+    }
+
     pub fn status(&self) -> OpportunityStatus {
         match self.resolution {
             None => OpportunityStatus::Open,
