@@ -22,7 +22,7 @@ use crate::recruitment::{RecruitmentApproach, RecruitmentDraft};
 use crate::registry::{RecruitmentDefinition, Registry};
 use crate::world::{ApprovalPolicy, AutonomyLevel, PolicyKind, PolicySetting, TraitKind};
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 /// One autonomous pass's surfaced pitches and durable approval requests.
@@ -68,6 +68,11 @@ struct AutonomousRecruitmentPlan {
     id_budget: Vec<(IdKind, u32)>,
 }
 
+enum RecruitmentPlanningResult {
+    Ready(AutonomousRecruitmentPlan),
+    Contested(IdKind),
+}
+
 /// Applies the authored recruitment cadence for delegated personnel managers. Candidate choice
 /// is deterministic managerial judgment: strongest relationship support wins, with CharacterId
 /// used only as an exact-score tie-breaker. This avoids both creation-order strategy and a random
@@ -83,20 +88,57 @@ pub(crate) fn apply_due_autonomous_recruitment(
         return Ok(AutonomousRecruitmentOutcome::default());
     }
 
-    let plan = match plan_due_autonomous_recruitment(registry, state) {
+    let plan = match plan_viable_autonomous_recruitment(registry, state) {
         Ok(plan) => plan,
         Err(error) if autonomous_recruitment_is_terminally_blocked(&error) => {
             return Ok(AutonomousRecruitmentOutcome::default());
         }
         Err(error) => return Err(error),
     };
-    // The viable daily personnel pass is one fallible cohort. Permanently unallocatable
-    // individual actions were excluded during planning; all remaining actions still share
-    // one aggregate reservation so contested capacity cannot favor an ID-ordered prefix.
-    if state.ids.reserve_many(&plan.id_budget).is_err() {
-        return Ok(AutonomousRecruitmentOutcome::default());
-    }
+    // Individual terminally unallocatable routes were excluded during planning. The final
+    // cohort has already passed its complete aggregate ID reservation without mutation.
     Ok(plan.commit(state))
+}
+
+/// Shared ID scarcity cannot award a contested final artifact to an arbitrary manager, or
+/// suppress managers whose route needs no such artifact. Retry against the same immutable state
+/// with only the contested ID kinds excluded. Every retry releases provisional candidate claims,
+/// and each exclusion makes progress through the finite set of ID kinds.
+fn plan_viable_autonomous_recruitment(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<AutonomousRecruitmentPlan, AutonomousRecruitmentError> {
+    let mut contested = BTreeSet::new();
+    loop {
+        match plan_due_autonomous_recruitment(registry, state, &contested)? {
+            RecruitmentPlanningResult::Ready(plan) => {
+                if let Some(kind) = first_unavailable_cohort_id_kind(state, &plan.id_budget) {
+                    contested.insert(kind);
+                } else {
+                    return Ok(plan);
+                }
+            }
+            RecruitmentPlanningResult::Contested(kind) => {
+                contested.insert(kind);
+            }
+        }
+    }
+}
+
+/// The finance-style cohort reservation uses typed ID kinds, never error display text, to
+/// isolate a contested resource. Preserve the allocator's aggregate checked arithmetic.
+fn first_unavailable_cohort_id_kind(state: &AppState, budget: &[(IdKind, u32)]) -> Option<IdKind> {
+    let mut totals = BTreeMap::<IdKind, u32>::new();
+    for (kind, count) in budget {
+        let total = totals.entry(*kind).or_insert(0);
+        let Some(next) = total.checked_add(*count) else {
+            return Some(*kind);
+        };
+        *total = next;
+    }
+    totals
+        .into_iter()
+        .find_map(|(kind, total)| state.ids.reserve(kind, total).is_err().then_some(kind))
 }
 
 fn autonomous_recruitment_is_terminally_blocked(error: &AutonomousRecruitmentError) -> bool {
@@ -112,9 +154,13 @@ fn autonomous_recruitment_is_terminally_blocked(error: &AutonomousRecruitmentErr
 fn plan_due_autonomous_recruitment(
     registry: &Registry,
     state: &AppState,
-) -> Result<AutonomousRecruitmentPlan, AutonomousRecruitmentError> {
+    contested: &BTreeSet<IdKind>,
+) -> Result<RecruitmentPlanningResult, AutonomousRecruitmentError> {
     let personnel_scope = ResponsibilityScope::Function(ResponsibilityFunction::Personnel);
     let mut authorities = prepare_recruitment_authorities(registry, state, personnel_scope)?;
+    if contested.contains(&IdKind::DecisionRequest) {
+        authorities.retain(|authority| authority.policy == ApprovalPolicy::Delegated);
+    }
     let mut claimed_this_pass = BTreeSet::new();
     let mut actions = Vec::new();
     let mut id_budget = Vec::new();
@@ -162,13 +208,26 @@ fn plan_due_autonomous_recruitment(
                 // An action that cannot fit even on its own must not suppress unrelated
                 // managers. Shared scarcity between individually viable actions is still
                 // handled by the all-or-none cohort reservation after planning.
-                if state.ids.reserve_many(&action_budget).is_err() {
+                if state.ids.reserve_many(&action_budget).is_err()
+                    || action_budget
+                        .iter()
+                        .any(|(kind, _)| contested.contains(kind))
+                {
                     continue;
                 }
                 id_budget.extend(action_budget);
                 actions.push(PlannedAutonomousRecruitmentAction::Delegated(validated));
             }
             ApprovalPolicy::RequireApproval => {
+                // An NPC approval always records an information-bearing recruitment attempt.
+                // When either mandatory ID kind is contested it cannot be in this cohort, so
+                // skip it before claiming a decision slot or someone else's prospective recruit.
+                if state.player_organization() != Some(organization)
+                    && (contested.contains(&IdKind::RecruitmentAttempt)
+                        || contested.contains(&IdKind::Information))
+                {
+                    continue;
+                }
                 // Request validation does not allocate an ID. In particular, an exhausted
                 // decision allocator must not prevent an independent delegated attempt.
                 if state.ids.reserve(IdKind::DecisionRequest, 1).is_err() {
@@ -192,10 +251,17 @@ fn plan_due_autonomous_recruitment(
                     .expect("persisted mandate count must fit the u32 decision ID space");
                 // Besides proving this request count is representable, the check makes the
                 // predicted future decision ID below safe to derive without wrapping.
-                state
+                if state
                     .ids
                     .reserve(IdKind::DecisionRequest, decision_count)
-                    .map_err(DecisionError::from)?;
+                    .is_err()
+                {
+                    // The approval cohort cannot all acquire IDs. Do not admit a prefix;
+                    // delegated managers are reconsidered without these provisional claims.
+                    return Ok(RecruitmentPlanningResult::Contested(
+                        IdKind::DecisionRequest,
+                    ));
+                }
                 if state.player_organization() == Some(organization) {
                     let action_budget = request.id_budget();
                     id_budget.extend(action_budget);
@@ -215,7 +281,11 @@ fn plan_due_autonomous_recruitment(
                         predicted_decision,
                     )?;
                     let action_budget = prepared.id_budget();
-                    if state.ids.reserve_many(&action_budget).is_err() {
+                    if state.ids.reserve_many(&action_budget).is_err()
+                        || action_budget
+                            .iter()
+                            .any(|(kind, _)| contested.contains(kind))
+                    {
                         // The NPC's approved pitch requires more than the decision itself.
                         // If its own attempt artifacts are exhausted, no phantom approval
                         // should occupy the candidate or block another manager's pitch.
@@ -234,7 +304,9 @@ fn plan_due_autonomous_recruitment(
         // contention rule exactly without needing a speculative AppState clone.
         claimed_this_pass.insert(candidate);
     }
-    Ok(AutonomousRecruitmentPlan { actions, id_budget })
+    Ok(RecruitmentPlanningResult::Ready(
+        AutonomousRecruitmentPlan { actions, id_budget },
+    ))
 }
 
 impl AutonomousRecruitmentPlan {
