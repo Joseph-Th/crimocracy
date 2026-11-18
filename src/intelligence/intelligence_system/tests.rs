@@ -895,6 +895,116 @@ fn transfer_token_becomes_stale_after_character_membership_change() {
 }
 
 #[test]
+fn custody_blocks_internal_information_transfers_without_mutation() {
+    let (registry, mut state, organization, character) = make_transfer_fixture();
+    let colleague = add_information_courier(&mut state, organization, "Available Courier");
+    let outgoing = record_character_information(&mut state, character, organization);
+    let incoming = record_character_information(&mut state, colleague, organization);
+    let outgoing_draft = || InformationTransferDraft {
+        source: outgoing,
+        recipient: KnowledgeHolder::Organization(organization),
+    };
+    let incoming_draft = || InformationTransferDraft {
+        source: incoming,
+        recipient: KnowledgeHolder::Character(character),
+    };
+    let held_outgoing = validate_information_transfer(&state, outgoing_draft())
+        .expect("free member can brief their organization");
+    let held_incoming = validate_information_transfer(&state, incoming_draft())
+        .expect("free member can receive a colleague's information");
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Custody Test Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .unwrap();
+    let investigation = validate_open_investigation(
+        &state,
+        InvestigationDraft {
+            owner: police,
+            title: "Courier custody".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(character)]),
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let mut evidence = BTreeSet::new();
+    for (kind, strength) in [
+        (EvidenceKind::Document, EvidenceStrength::Strong),
+        (EvidenceKind::Fingerprint, EvidenceStrength::Corroborating),
+    ] {
+        evidence.insert(
+            validate_add_evidence(
+                &state,
+                EvidenceDraft {
+                    investigation,
+                    custodian: police,
+                    subject: EntityRef::Character(character),
+                    origin: None,
+                    kind,
+                    strength,
+                    reliability: EvidenceReliability::HighlyReliable,
+                    admissibility: Admissibility::Admissible,
+                    discovered_at: state.now(),
+                },
+            )
+            .unwrap()
+            .commit(&mut state)
+            .unwrap(),
+        );
+    }
+    let arrest = validate_arrest(
+        &registry,
+        &state,
+        ArrestDraft {
+            character,
+            investigation,
+            evidence,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let before = bincode::serialize(&state).unwrap();
+    let expected = IntelligenceError::DetainedTransferCharacter { character, arrest };
+    assert_eq!(
+        validate_information_transfer(&state, outgoing_draft()).err(),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        validate_information_transfer(&state, incoming_draft()).err(),
+        Some(expected.clone())
+    );
+    assert_eq!(held_outgoing.commit(&mut state), Err(expected.clone()));
+    assert_eq!(held_incoming.commit(&mut state), Err(expected.clone()));
+    assert_eq!(bincode::serialize(&state).unwrap(), before);
+    validate_invariants(&state);
+
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(
+        validate_information_transfer(&restored, outgoing_draft()).err(),
+        Some(expected)
+    );
+    crate::legal::arrest_system::validate_release_arrest(&restored, arrest)
+        .unwrap()
+        .commit(&mut restored)
+        .unwrap();
+    validate_information_transfer(&restored, outgoing_draft())
+        .unwrap()
+        .commit(&mut restored)
+        .unwrap();
+    validate_information_transfer(&restored, incoming_draft())
+        .unwrap()
+        .commit(&mut restored)
+        .unwrap();
+    validate_invariants(&restored);
+}
+
+#[test]
 fn internal_transfer_rejects_unrelated_organization() {
     let (registry, mut state, organization, character) = make_transfer_fixture();
     let other = insert_organization(

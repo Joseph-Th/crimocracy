@@ -163,8 +163,10 @@ only current roster members' pending sources and calls
 `intelligence_system::validate_information_transfer` for a single
 organization-directed handoff. The resulting `InternalReport` preserves
 the original observation, typed semantics, and source lineage. Existing
-duplicate-lineage checks prevent repeated reporting; the adapter blocks
-debriefs of detained members. `intel` queries only the organization's
+duplicate-lineage checks prevent repeated reporting; the intelligence owner
+rejects ordinary transfers to or from detained characters at validation and
+commit. The adapter displays custody-related unavailability. `intel` queries
+only the organization's
 holder index and cannot read a guessed personal or rival information ID.
 Case-witness information begins with the staffed investigator; an actual
 institutional contact disclosure conveys its episode-specific typed signal

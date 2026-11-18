@@ -79,6 +79,13 @@ pub enum IntelligenceError {
         recipient: KnowledgeHolder,
     },
     #[error(
+        "character {character} is unavailable for internal knowledge transfer while detained under arrest {arrest}"
+    )]
+    DetainedTransferCharacter {
+        character: CharacterId,
+        arrest: ArrestId,
+    },
+    #[error(
         "character {character} changed after transfer validation; expected version {expected}, found {found}"
     )]
     StaleTransferCharacter {
@@ -625,6 +632,14 @@ fn validate_transfer_relationship(
                 .world
                 .get_character(character)
                 .ok_or(IntelligenceError::MissingCharacter(character))?;
+            // Ordinary internal transfers require both human endpoints to be available.
+            // Custodial disclosures have their own legal owners.
+            if let Some(arrest) = state.legal.active_arrest_for_character(character) {
+                return Err(IntelligenceError::DetainedTransferCharacter {
+                    character,
+                    arrest: arrest.id(),
+                });
+            }
             versions.insert(character, record.version());
         }
     }
