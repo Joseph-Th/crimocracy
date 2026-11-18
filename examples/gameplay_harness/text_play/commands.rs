@@ -170,16 +170,24 @@ impl Session<'_> {
                     return Err("prospects takes no arguments".to_owned());
                 }
                 let prospects = self.player_prospects()?;
-                for id in prospects {
-                    if let Some(person) = state.world().get_character(id) {
-                        writeln!(
-                            out,
-                            "{} {} | established connection to leadership",
-                            id.raw(),
-                            person.name()
-                        )
-                        .unwrap();
-                    }
+                for (id, recruiter) in prospects {
+                    let person = state
+                        .world()
+                        .get_character(id)
+                        .ok_or("prospect disappeared")?;
+                    let leader = state
+                        .world()
+                        .get_character(recruiter)
+                        .ok_or("executive disappeared")?;
+                    writeln!(
+                        out,
+                        "{} {} | established connection to leadership via {} (char-{})",
+                        id.raw(),
+                        person.name(),
+                        leader.name(),
+                        recruiter.raw()
+                    )
+                    .unwrap();
                 }
                 for (manager, candidates) in self.manager_prospects()? {
                     let member = state
@@ -221,10 +229,10 @@ impl Session<'_> {
                     );
                 }
                 let raw = parse_number(words[1], "char")?;
-                let candidate = self
+                let (candidate, recruiter) = self
                     .player_prospects()?
                     .into_iter()
-                    .find(|id| id.raw() == raw)
+                    .find(|(id, _)| id.raw() == raw)
                     .ok_or("candidate is not a currently approachable contact")?;
                 let approach = match words.get(2).copied().unwrap_or("appeal") {
                     "offer" => RecruitmentApproach::FinancialOpportunity,
@@ -238,7 +246,6 @@ impl Session<'_> {
                         );
                     }
                 };
-                let recruiter = self.executive_recruiter()?;
                 let attempt = validate_recruitment_attempt(
                     self.registry,
                     &self.state,

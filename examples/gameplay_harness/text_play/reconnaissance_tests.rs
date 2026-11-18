@@ -259,7 +259,7 @@ fn text_play_scouts_known_person_and_watches_own_operations_and_rackets() {
     let prospect = session
         .player_prospects()
         .unwrap()
-        .into_iter()
+        .into_keys()
         .find(|id| {
             session
                 .state

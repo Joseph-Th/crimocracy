@@ -613,27 +613,31 @@ impl<'a> Session<'a> {
             .ok_or_else(|| format!("character {id} is not a current member of your organization"))
     }
 
-    fn executive_recruiter(&self) -> Result<CharacterId, String> {
-        self.state
-            .world()
-            .characters_in_organization(self.player)
-            .find(|person| person.supervisor().is_none())
-            .map(|person| person.id())
-            .ok_or_else(|| "your organization has no unsupervised leader".to_owned())
-    }
-
-    fn player_prospects(&self) -> Result<Vec<CharacterId>, String> {
-        let leader = self.executive_recruiter()?;
-        if self
-            .state
-            .legal()
-            .active_arrest_for_character(leader)
-            .is_some()
-        {
-            return Ok(Vec::new());
+    /// Share candidate-specific routes between discovery and execution. When several
+    /// available executives know a candidate, prefer the lowest character ID.
+    fn player_prospects(&self) -> Result<BTreeMap<CharacterId, CharacterId>, String> {
+        let mut routes = BTreeMap::new();
+        for leader in self.state.world().characters_in_organization(self.player) {
+            if leader.supervisor().is_some()
+                || self
+                    .state
+                    .legal()
+                    .active_arrest_for_character(leader.id())
+                    .is_some()
+            {
+                continue;
+            }
+            for candidate in
+                find_recruitment_candidates(self.registry, &self.state, self.player, leader.id())
+                    .map_err(|e| e.to_string())?
+            {
+                routes
+                    .entry(candidate)
+                    .and_modify(|current: &mut CharacterId| *current = (*current).min(leader.id()))
+                    .or_insert(leader.id());
+            }
         }
-        find_recruitment_candidates(self.registry, &self.state, self.player, leader)
-            .map_err(|e| e.to_string())
+        Ok(routes)
     }
 
     fn manager_prospects(&self) -> Result<Vec<(CharacterId, Vec<CharacterId>)>, String> {
@@ -774,7 +778,7 @@ impl<'a> Session<'a> {
         // relationship to every approach-ready prospect. Those individuals
         // must also be eligible for observation before the boss recruits them.
         if let Ok(prospects) = self.player_prospects() {
-            known.extend(prospects);
+            known.extend(prospects.into_keys());
         }
         if let Ok(managers) = self.manager_prospects() {
             for (_, prospects) in managers {

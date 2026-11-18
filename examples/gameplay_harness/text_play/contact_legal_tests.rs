@@ -6,6 +6,16 @@ fn snapshot(registry: &Registry, session: &Session<'_>) -> Vec<u8> {
     bincode::serialize(&build_save(registry, &session.state).unwrap()).unwrap()
 }
 
+fn boss_id(session: &Session<'_>) -> CharacterId {
+    session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|person| person.supervisor().is_none())
+        .expect("the authored opening has a boss")
+        .id()
+}
+
 fn lawyer_id(session: &Session<'_>) -> CharacterId {
     session
         .known_character_ids()
@@ -25,7 +35,7 @@ fn text_play_legal_contact_can_be_established_saved_and_terminated() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
     let lawyer = lawyer_id(&session);
-    let boss = session.executive_recruiter().unwrap();
+    let boss = boss_id(&session);
     assert!(
         session
             .execute("connections")
@@ -138,7 +148,7 @@ fn text_play_police_disclosure_and_new_legal_channel_remain_independent() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
     let lawyer = lawyer_id(&session);
-    let boss = session.executive_recruiter().unwrap();
+    let boss = boss_id(&session);
     session
         .execute(&format!("connect {} {}", boss.raw(), lawyer.raw()))
         .unwrap();

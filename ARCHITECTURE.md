@@ -154,8 +154,11 @@ execution windows, intelligence freshness and crew reservations. Manual
 authority-abort transition and never directly rewrites operation runtime.
 The client treats a current recruitment prospect as identified because the
 production recruitment owner already established a playable relationship to
-that person. Typed legal-person operation authorization remains stricter than
-being generally acquainted with a character.
+that person. Executive prospect discovery and recruitment share a candidate-to-
+recruiter map spanning every available unsupervised leader. Multiple eligible
+leaders for one candidate resolve to the lowest character ID. Typed legal-person
+operation authorization remains stricter than being generally acquainted with
+a character.
 
 Internal member observations stay with `KnowledgeHolder::Character` until
 leadership issues `debrief`. `text_play/debrief_play.rs` enumerates
@@ -166,8 +169,8 @@ the original observation, typed semantics, and source lineage. Existing
 duplicate-lineage checks prevent repeated reporting; the intelligence owner
 rejects ordinary transfers to or from detained characters at validation and
 commit. The adapter displays custody-related unavailability. `intel` queries
-only the organization's
-holder index and cannot read a guessed personal or rival information ID.
+only the organization's holder index and cannot read a guessed personal or
+rival information ID.
 Case-witness information begins with the staffed investigator; an actual
 institutional contact disclosure conveys its episode-specific typed signal
 to the organization, not mere surveillance of the whole authority.

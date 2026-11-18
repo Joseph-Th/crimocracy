@@ -304,7 +304,7 @@ fn text_play_prospects_and_recruitment_are_organization_scoped() {
         before,
         bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
     );
-    let candidate = prospects[0];
+    let candidate = *prospects.keys().next().unwrap();
     let reply = session
         .execute(&format!("recruit {} appeal", candidate.raw()))
         .unwrap()
@@ -321,6 +321,88 @@ fn text_play_prospects_and_recruitment_are_organization_scoped() {
         session
             .execute(&format!("recruit {} appeal", candidate.raw()))
             .is_err()
+    );
+}
+
+#[test]
+fn text_play_recruits_through_available_executive_connection() {
+    use crimocracy::social::{
+        RelationshipDimensions, relationship_system::validate_set_relationship,
+    };
+    use crimocracy::world::{AutonomyLevel, CharacterDraft, world_system::insert_character};
+
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let leader = insert_character(
+        &mut session.state,
+        CharacterDraft {
+            name: "Second Executive".to_owned(),
+            organization: Some(session.player),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let candidate = insert_character(
+        &mut session.state,
+        CharacterDraft {
+            name: "Executive Connection".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_set_relationship(
+        &session.state,
+        candidate,
+        leader,
+        RelationshipDimensions {
+            trust: crate::campaign::level(70),
+            respect: crate::campaign::level(60),
+            ..RelationshipDimensions::zero()
+        },
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+
+    assert!(
+        find_recruitment_candidates(&registry, &session.state, session.player, leader)
+            .unwrap()
+            .contains(&candidate)
+    );
+    assert!(
+        session
+            .execute("prospects")
+            .unwrap()
+            .0
+            .contains("Executive Connection")
+    );
+    assert!(
+        session
+            .execute("known-people")
+            .unwrap()
+            .0
+            .contains("Executive Connection")
+    );
+    session
+        .execute(&format!("recruit {} appeal", candidate.raw()))
+        .unwrap();
+    assert_eq!(
+        session
+            .state
+            .recruitment()
+            .latest_attempt_for(candidate, session.player)
+            .unwrap()
+            .recruiter(),
+        leader
     );
 }
 
