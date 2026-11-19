@@ -5,6 +5,114 @@ use crate::legal::investigation_system::{InvestigationError, apply_enterprise_ob
 use crate::legal::prosecution_system::member_prosecution_under_review;
 use crate::world::world_system::designate_player_organization;
 
+#[test]
+fn foreign_case_raises_discovery_risk_but_not_own_racket_cost() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let EnterpriseLocation::Neighborhood(district) = fixture.location else {
+        unreachable!()
+    };
+    let police = insert_district_police(&registry, &mut fixture, "Vice Bureau", district);
+    let rival = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Foreign Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let operative = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Foreign Scout".to_owned(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::Surveillance, rating(90))]),
+            drives: BTreeMap::new(),
+            traits: BTreeSet::new(),
+        },
+    )
+    .unwrap();
+    let threshold = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .enforcement_attention_basis_points_per_exposure_source();
+    // Same explicit roll: quiet district misses; a rival case adds one exposure source.
+    let mut quiet = fixture.state.clone();
+    quiet.advance_clock(DAY_DURATION);
+    let baseline = decide_enterprise_cycle(
+        &registry,
+        &quiet,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, threshold),
+    )
+    .unwrap();
+    assert!(baseline.enforcement_incident.is_none());
+    open_originated_pressure_case(
+        &registry,
+        &mut fixture,
+        police,
+        PressureCaseOrigin {
+            organization: rival,
+            manager: operative,
+        },
+        "Foreign surveillance exposure",
+        EntityRef::Neighborhood(district),
+    );
+    let mut foreign_only = fixture.state.clone();
+    foreign_only.advance_clock(DAY_DURATION);
+    let foreign = decide_enterprise_cycle(
+        &registry,
+        &foreign_only,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, threshold),
+    )
+    .unwrap();
+    assert!(foreign.enforcement_incident.is_some());
+    assert_eq!(
+        foreign.economics.operating_cost,
+        baseline.economics.operating_cost
+    );
+    assert_eq!(foreign.economics.investigation_heat, Money::ZERO);
+    // The same amount of direct casework is economically different.
+    let own = fixture.organization;
+    let own_manager = fixture.authority.manager;
+    open_originated_pressure_case(
+        &registry,
+        &mut fixture,
+        police,
+        PressureCaseOrigin {
+            organization: own,
+            manager: own_manager,
+        },
+        "Own surveillance exposure",
+        EntityRef::Neighborhood(district),
+    );
+    fixture.state.advance_clock(DAY_DURATION);
+    let attributable = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, threshold),
+    )
+    .unwrap();
+    assert_eq!(
+        attributable.economics.investigation_heat,
+        registry
+            .get_enterprise(EnterpriseKind::Protection)
+            .economics()
+            .heat_surcharge_per_active_case()
+    );
+    validate_enterprise_cycle_plan(&fixture.state, attributable)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+}
+
 fn advance_day(registry: &Registry, state: &mut AppState) -> crate::core::simulation::TickOutcome {
     let mut last = run_tick(registry, state);
     for _ in 1..DAY_DURATION.as_minutes() {

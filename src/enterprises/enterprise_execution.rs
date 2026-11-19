@@ -6,8 +6,10 @@ mod establishment;
 mod lifecycle;
 mod support;
 
+#[cfg(test)]
+use support::count_district_originated_cases;
 use support::{
-    build_cycle_report_summary, count_district_originated_cases, has_active_enterprise_inquiry,
+    build_cycle_report_summary, has_active_enterprise_inquiry, resolve_district_case_pressure,
     resolve_location_profile, snapshot_supporting_business_versions, validate_enterprise_accounts,
     validate_enterprise_business_dependencies, validate_enterprise_environment,
     validate_supporting_business_versions, validate_supporting_businesses,
@@ -222,6 +224,8 @@ pub enum EnterpriseError {
         enterprise: EnterpriseId,
         expected_active_district_cases: u32,
         found_active_district_cases: u32,
+        expected_direct_cases: u32,
+        found_direct_cases: u32,
         expected_active_inquiry: bool,
         found_active_inquiry: bool,
     },
@@ -280,10 +284,9 @@ struct EnterpriseCycleSnapshot {
     suspends_after_settlement: bool,
     supporting_business_versions: BTreeMap<BusinessId, u32>,
     host_business_version: Option<(BusinessId, u32)>,
-    /// Active district casework feeds both street-heat cost and enforcement probability. Pin the
-    /// count so a held plan cannot settle economics from a legal-pressure picture that no
-    /// longer exists.
+    /// Ambient vigilance governs discovery; only attributable cases impose street costs.
     active_district_cases: u32,
+    direct_cases: u32,
     /// An existing dedicated inquiry suppresses another racket inquiry. This is a separate
     /// dependency from district case count because a case can open or close without changing
     /// the total district pressure count.
@@ -402,15 +405,19 @@ fn validate_legal_pressure_context(
     snapshot: &EnterpriseCycleSnapshot,
 ) -> Result<(), EnterpriseError> {
     let district = resolve_location_neighborhood(state, record.location())?;
-    let active_district_cases = count_district_originated_cases(state, district);
+    let (active_district_cases, direct_cases) =
+        resolve_district_case_pressure(state, district, record.organization());
     let active_inquiry = has_active_enterprise_inquiry(state, record.id());
     if active_district_cases != snapshot.active_district_cases
+        || direct_cases != snapshot.direct_cases
         || active_inquiry != snapshot.had_active_enterprise_inquiry
     {
         return Err(EnterpriseError::StaleLegalPressureContext {
             enterprise: record.id(),
             expected_active_district_cases: snapshot.active_district_cases,
             found_active_district_cases: active_district_cases,
+            expected_direct_cases: snapshot.direct_cases,
+            found_direct_cases: direct_cases,
             expected_active_inquiry: snapshot.had_active_enterprise_inquiry,
             found_active_inquiry: active_inquiry,
         });

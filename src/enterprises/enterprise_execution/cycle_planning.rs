@@ -4,8 +4,8 @@ use super::economics::{
     resolve_basis_point_variance, resolve_gross_before_variance, resolve_operating_cost,
 };
 use super::support::{
-    build_enforcement_incident_draft, count_district_originated_cases,
-    has_active_enterprise_inquiry, resolve_location_neighborhood, resolve_location_profile,
+    build_enforcement_incident_draft, has_active_enterprise_inquiry,
+    resolve_district_case_pressure, resolve_location_neighborhood, resolve_location_profile,
     snapshot_supporting_business_versions, validate_enterprise_accounts,
     validate_enterprise_business_dependencies, validate_enterprise_environment,
 };
@@ -77,9 +77,9 @@ pub fn decide_enterprise_cycle(
 
     let neighborhood = resolve_location_profile(state, record.location())?;
     let district = resolve_location_neighborhood(state, record.location())?;
-    // Sustained originated casework in the racket's district is one shared pressure input for
-    // both street-heat cost and enforcement-attention probability.
-    let active_district_cases = count_district_originated_cases(state, district);
+    // Foreign casework raises local vigilance but does not charge this organization's books.
+    let (active_district_cases, direct_cases) =
+        resolve_district_case_pressure(state, district, record.organization());
     let manager = state
         .world
         .get_character(record.manager())
@@ -97,7 +97,7 @@ pub fn decide_enterprise_cycle(
         economics,
         neighborhood,
         record.supporting_businesses().len(),
-        active_district_cases,
+        direct_cases,
         enterprise,
     )?;
     let operating_cost = cost.total;
@@ -176,6 +176,7 @@ pub fn decide_enterprise_cycle(
             supporting_business_versions,
             host_business_version,
             active_district_cases,
+            direct_cases,
             had_active_enterprise_inquiry,
         },
         economics: EnterpriseCycleEconomics {

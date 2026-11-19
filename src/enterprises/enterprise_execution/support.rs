@@ -419,7 +419,7 @@ pub(super) fn build_cycle_report_summary(
     );
     let heat = if economics.investigation_heat > Money::ZERO {
         format!(
-            ", including a {} street surcharge while police work stays heavy in {}",
+            ", including a {} street surcharge while police work stays heavy around our operations in {}",
             crate::finance::helpers::format_money_cents(economics.investigation_heat.cents()),
             resolve_enterprise_district_name(state, record),
         )
@@ -428,7 +428,7 @@ pub(super) fn build_cycle_report_summary(
         .is_some_and(|previous| previous > Money::ZERO)
     {
         format!(
-            ", with the prior street surcharge cleared as police work eased in {}",
+            ", with the prior street surcharge cleared as police work eased around our operations in {}",
             resolve_enterprise_district_name(state, record),
         )
     } else {
@@ -474,19 +474,16 @@ fn resolve_enterprise_district_name(
         .to_owned()
 }
 
-/// Active law-enforcement originated cases (operation exposure or enterprise enforcement attention)
-/// targeting this neighborhood: the shared pressure signal behind street-heat surcharges and vice
-/// attention. Case pressure follows the live case, not today's intake-priority winner; otherwise a
-/// jurisdiction handoff would make an old bureau's still-active investigation disappear from the
-/// street overnight.
-pub(super) fn count_district_originated_cases(
+/// Ambient police attention is shared by the entire district. Direct costs follow the
+/// organization's own investigated activity, not every police file near its storefronts.
+fn district_originated_cases(
     state: &crate::core::state::AppState,
     neighborhood: crate::core::id::NeighborhoodId,
-) -> u32 {
-    let count = state
+) -> impl Iterator<Item = &crate::legal::InvestigationRecord> {
+    state
         .legal
         .active_investigations()
-        .filter(|investigation| {
+        .filter(move |investigation| {
             state
                 .world
                 .get_organization(investigation.owner())
@@ -506,11 +503,61 @@ pub(super) fn count_district_originated_cases(
             )
             .contains(&neighborhood)
         })
-        .count();
-    // The authored probability saturates at 10_000 bp and monetary multiplication is checked, so
-    // a pathological campaign with more live cases than u32 can represent should saturate this
-    // bounded pressure count rather than wrap it back toward zero.
-    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// Case pressure follows its live institutional episode even after a jurisdiction handoff.
+/// A case containing the organization's own originating activity or identified subjects is
+/// direct pressure. A rival's anonymous operation nearby increases attention but not our
+/// operating expenses; merely owning the victim's premises does not imply responsibility.
+pub(super) fn resolve_district_case_pressure(
+    state: &crate::core::state::AppState,
+    neighborhood: crate::core::id::NeighborhoodId,
+    organization: OrganizationId,
+) -> (u32, u32) {
+    use crate::legal::investigation_system::case_origin_responsible_organization;
+    let mut ambient = 0_u32;
+    let mut direct = 0_u32;
+    let own_origin =
+        |entity| case_origin_responsible_organization(state, entity) == Some(organization);
+    for case in district_originated_cases(state, neighborhood) {
+        ambient = ambient.saturating_add(1);
+        let attributable = case.origin().is_some_and(own_origin)
+            || case.subjects().iter().any(|subject| match subject {
+                EntityRef::Organization(id) => *id == organization,
+                EntityRef::Character(id) => state
+                    .world
+                    .get_character(*id)
+                    .is_some_and(|person| person.organization() == Some(organization)),
+                EntityRef::Operation(_) | EntityRef::Enterprise(_) => own_origin(*subject),
+                EntityRef::Neighborhood(_)
+                | EntityRef::Business(_)
+                | EntityRef::Investigation(_)
+                | EntityRef::Evidence(_)
+                | EntityRef::FinancialAccount(_)
+                | EntityRef::DecisionRequest(_)
+                | EntityRef::Mandate(_) => false,
+            })
+            || case.evidence().iter().any(|id| {
+                state
+                    .legal
+                    .get_evidence(*id)
+                    .expect("case evidence exists")
+                    .origin()
+                    .is_some_and(own_origin)
+            });
+        if attributable {
+            direct = direct.saturating_add(1);
+        }
+    }
+    (ambient, direct)
+}
+
+#[cfg(test)]
+pub(super) fn count_district_originated_cases(
+    state: &crate::core::state::AppState,
+    neighborhood: crate::core::id::NeighborhoodId,
+) -> u32 {
+    u32::try_from(district_originated_cases(state, neighborhood).count()).unwrap_or(u32::MAX)
 }
 
 fn enterprise_inquiry_became_active_this_minute(

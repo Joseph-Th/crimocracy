@@ -69,7 +69,7 @@ fn racket_outlook_is_owned_read_only_and_distinguishes_unknown_from_observed_hea
     let command = format!("racket-outlook {}", id.raw());
     let before = snapshot(&registry, &session);
     let first = session.execute(&command).unwrap().0;
-    assert!(first.contains("District pressure unknown"));
+    assert!(first.contains("Own-operation pressure unknown"));
     assert!(first.contains("spendable cash"));
     assert!(
         session
@@ -81,7 +81,7 @@ fn racket_outlook_is_owned_read_only_and_distinguishes_unknown_from_observed_hea
     let after = snapshot(&registry, &session);
     let second = session.execute(&command).unwrap().0;
     assert!(
-        second.contains("Last observed district pressure"),
+        second.contains("Last observed own-operation pressure in district"),
         "{second}"
     );
     assert_eq!(after, snapshot(&registry, &session));

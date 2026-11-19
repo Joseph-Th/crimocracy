@@ -14,12 +14,12 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
     .unwrap();
     match outlook.nonpositive_at_cases {
         Some(0) => writeln!(out, "  Expected net is nonpositive even without case pressure.").unwrap(),
-        Some(cases) => writeln!(out, "  Expected net becomes nonpositive at {cases} active-case equivalent(s); each adds {} cents to cycle cost.", outlook.heat_surcharge_per_case.cents()).unwrap(),
+        Some(cases) => writeln!(out, "  Expected net becomes nonpositive at {cases} own-operation case equivalent(s); each adds {} cents to cycle cost.", outlook.heat_surcharge_per_case.cents()).unwrap(),
         None => writeln!(out, "  No authored per-case operating surcharge.").unwrap(),
     }
     match outlook.observed_pressure {
-        Some((at, cases)) => writeln!(out, "  Last observed district pressure: {cases} active-case equivalent(s) at {}", time_label(at.as_minutes())).unwrap(),
-        None => writeln!(out, "  District pressure unknown: no recent owned racket settlement; estimate assumes no surcharge").unwrap(),
+        Some((at, cases)) => writeln!(out, "  Last observed own-operation pressure in district: {cases} case equivalent(s) at {}", time_label(at.as_minutes())).unwrap(),
+        None => writeln!(out, "  Own-operation pressure unknown: no recent owned racket settlement; estimate assumes no surcharge").unwrap(),
     }
     writeln!(
         out,

@@ -4117,6 +4117,8 @@ fn cycle_plan_rejects_when_district_case_pressure_changes_before_settlement() {
             enterprise: stale_enterprise,
             expected_active_district_cases: 0,
             found_active_district_cases: 1,
+            expected_direct_cases: 0,
+            found_direct_cases: 1,
             expected_active_inquiry: false,
             found_active_inquiry: true,
         } if stale_enterprise == enterprise
@@ -6285,7 +6287,9 @@ fn same_minute_peer_racket_inquiry_does_not_retroactively_raise_cycle_heat() {
         ),
         "business-hosted settlements must name the venue rather than only its district: {summary}"
     );
-    assert!(summary.contains("street surcharge while police work stays heavy in Market Ward"));
+    assert!(summary.contains(
+        "street surcharge while police work stays heavy around our operations in Market Ward"
+    ));
 
     fixture
         .state
