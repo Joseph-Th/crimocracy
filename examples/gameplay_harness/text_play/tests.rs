@@ -445,6 +445,52 @@ fn text_play_recon_can_discover_new_leads_with_explicit_crew() {
 }
 
 #[test]
+fn burglary_police_modes_have_distinct_arrival_outcomes() {
+    let registry = crimocracy::build_registry();
+    for (mode, expected, status, pending) in [
+        (
+            "abort",
+            vec![
+                OperationContingency::AbortOnPoliceArrivalBeforeEntry,
+                OperationContingency::RequestDecisionOnPoliceArrival,
+            ],
+            OperationStatus::Aborted,
+            0,
+        ),
+        (
+            "ask",
+            vec![OperationContingency::RequestDecisionOnPoliceArrival],
+            OperationStatus::AwaitingDecision,
+            1,
+        ),
+        ("press", vec![], OperationStatus::InProgress, 0),
+    ] {
+        let mut session =
+            Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small)
+                .unwrap();
+        session.execute(&format!("burgle 1 {mode}")).unwrap();
+        session.execute("advance 10m").unwrap();
+        let operation = session
+            .state
+            .operations()
+            .operations_for_organization(session.player)
+            .find(|record| record.kind() == OperationKind::Burglary)
+            .unwrap();
+        assert_eq!(operation.contingencies(), expected, "{mode}");
+        assert_eq!(operation.status(), status, "{mode}");
+        assert_eq!(
+            session
+                .state
+                .decisions()
+                .pending_for_recipient(session.player)
+                .count(),
+            pending,
+            "{mode}"
+        );
+    }
+}
+
+#[test]
 fn text_play_laundering_and_purchase_use_canonical_finance() {
     use crimocracy::finance::finance_system::validate_record_transaction;
     use crimocracy::finance::{LedgerPosting, LedgerTransactionDraft};

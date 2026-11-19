@@ -8,7 +8,7 @@ Use each document for one job. [`AGENTS.md`](AGENTS.md) owns agent execution rul
 
 `content::build_registry()` builds immutable authored definitions. `AppState` owns serializable campaign state and deterministic runtime state. [`core::simulation::run_tick`](src/core/simulation.rs) advances exactly one simulated minute through the contractual phase order in [`ARCHITECTURE.md`](ARCHITECTURE.md), returning a typed error without mutation when the finite simulation clock has no successor minute.
 
-On each day boundary, non-player criminal owners distribute legitimate business earnings above each storefront's protected working-capital floor into accounted funds before payroll. The finance owner commits a single balanced, preflighted ledger batch, opening a destination account only when necessary. Player-owned storefronts require an explicit profit-sweep command; neither path treats laundering fees as earned business profit.
+On each day boundary, non-player criminal owners and players who enable daily treasury distributions sweep legitimate business earnings above each storefront's protected working-capital floor into accounted funds before payroll. The finance owner commits a single balanced, preflighted ledger batch, opening a destination account only when necessary. Players using manual treasury distributions can withdraw earned surplus explicitly; neither path treats laundering fees as earned business profit.
 
 Consequential mutation goes through the owning system's `validate_* → commit` or `decide_* → apply_*` path (some owners validate the decided plan before applying it). Tests, examples, adapters, and tools use those same production paths. Do not construct authoritative `*Record` values or patch owner-private state as a shortcut.
 
@@ -89,11 +89,13 @@ recruit 7 appeal
 scout 5 char-5
 advance 3h
 discover 5
-burgle 3 char-4 char-3 press
+burgle 3 char-4 char-3 ask
 operations
 accounts
 save campaign_01
 ```
+
+Burglary and general operation orders share police contingencies: `press` continues under exposure without requesting a decision, `ask` requests leadership intervention, and `abort` automatically withdraws before entry or requests a decision after entry. Burglary defaults to `abort`; general operation plans default to `press`.
 
 Organizational expansion and economic decisions use the same player interface:
 `directory` lists public establishments; `market` lists currently purchasable

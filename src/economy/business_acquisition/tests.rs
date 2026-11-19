@@ -401,7 +401,7 @@ fn rival_investment_competes_for_listings_without_disclosing_buyer() {
         },
     )
     .unwrap();
-    establish_existing_independent_economy(&mut fixture);
+    let (_, settlement) = establish_existing_independent_economy(&mut fixture);
     let reserve = fixture.registry.upkeep().per_member_daily().cents() * 7;
     let price = hospitality_price(&fixture).cents();
     fund_accounted_from_street(&mut fixture, price + reserve - 1);
@@ -413,7 +413,31 @@ fn rival_investment_competes_for_listings_without_disclosing_buyer() {
         acquisition_offer(&fixture.registry, &fixture.state, player, fixture.business).is_some()
     );
 
-    fund_accounted_from_street(&mut fixture, 1);
+    // Payroll spends street cash before clean funds. One spendable cent outside the
+    // accounted treasury is enough to close the one-cent wage-reserve shortfall,
+    // but must not contribute to the purchase price itself.
+    let credit = Money::from_cents(price + reserve);
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Rival street earnings".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: settlement,
+                    amount: credit.checked_neg().unwrap(),
+                },
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: credit,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
     let save = build_save(&fixture.registry, &fixture.state).unwrap();
     let mut restored = restore_save(&fixture.registry, save).unwrap();
     assert_eq!(
@@ -445,7 +469,17 @@ fn rival_investment_competes_for_listings_without_disclosing_buyer() {
             .unwrap()
             .balance()
             .cents(),
-        reserve
+        reserve - 1
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.street)
+            .unwrap()
+            .balance()
+            .cents(),
+        1
     );
     assert!(
         acquisition_offer(&fixture.registry, &fixture.state, player, fixture.business).is_none()

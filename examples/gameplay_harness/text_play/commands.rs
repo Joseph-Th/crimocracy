@@ -1,5 +1,6 @@
 //! Player command dispatch through canonical production owners.
 
+use super::planning::PoliceMode;
 use super::*;
 use crimocracy::enterprises::enterprise_reporting::EnterpriseOutlook;
 use crimocracy::intelligence::InformationTopic;
@@ -1549,24 +1550,20 @@ impl Session<'_> {
             }
             "burgle" => {
                 if words.len() > 5 {
-                    return Err("burgle <lead-id> [entry-character-id] [coordinator-character-id] [abort|press]".to_owned());
+                    return Err("burgle <lead-id> [entry-character-id] [coordinator-character-id] [abort|ask|press]".to_owned());
                 }
                 let raw =
                     parse_number(words.get(1).ok_or("burgle needs a lead ID")?, "opportunity")?;
                 let mut params = &words[2..];
-                let press = match params.last().copied() {
-                    Some("press") => {
+                let police_mode =
+                    if let Some(mode) = params.last().and_then(|raw| PoliceMode::parse(raw).ok()) {
                         params = &params[..params.len() - 1];
-                        true
-                    }
-                    Some("abort") => {
-                        params = &params[..params.len() - 1];
-                        false
-                    }
-                    _ => false,
-                };
+                        mode
+                    } else {
+                        PoliceMode::Abort
+                    };
                 if params.len() > 2 {
-                    return Err("burgle <lead-id> [entry-character-id] [coordinator-character-id] [abort|press]".to_owned());
+                    return Err("burgle <lead-id> [entry-character-id] [coordinator-character-id] [abort|ask|press]".to_owned());
                 }
                 let lead = self
                     .known_opportunities()
@@ -1617,14 +1614,7 @@ impl Session<'_> {
                 );
                 let information_count = coverage.len();
                 let intelligence = coverage.values().map(|(id, _)| *id).collect();
-                let contingencies = if press {
-                    vec![OperationContingency::RequestDecisionOnPoliceArrival]
-                } else {
-                    vec![
-                        OperationContingency::AbortOnPoliceArrivalBeforeEntry,
-                        OperationContingency::RequestDecisionOnPoliceArrival,
-                    ]
-                };
+                let contingencies = police_mode.contingencies();
                 let operation = validate_authorize_operation(
                     self.registry,
                     &self.state,
@@ -1651,11 +1641,11 @@ impl Session<'_> {
                     .map_err(|e| e.to_string())?;
                 writeln!(
                     out,
-                    "Burglary {} authorized with {} information item(s); lead {} converted. Contingency: {:?}.",
+                    "Burglary {} authorized with {} information item(s); lead {} converted. Contingency: {}.",
                     operation.raw(),
                     information_count,
                     lead_id.raw(),
-                    if press { "press" } else { "abort" }
+                    police_mode.label()
                 )
                 .unwrap();
             }

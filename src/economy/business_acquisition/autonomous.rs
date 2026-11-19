@@ -9,6 +9,7 @@ use crate::economy::business_economy_system::forecast_normal_business_net;
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
+use crate::world::payroll_execution::payroll_funding_balance;
 use std::collections::BTreeSet;
 
 const REVIEW_DAYS: u32 = 7;
@@ -16,7 +17,8 @@ const REVIEW_DAYS: u32 = 7;
 /// Every week, each free non-player criminal executive may make one investment in a
 /// neighborhood where the organization already owns property. Rank by estimated return
 /// per unit of capital and time, not seller-side private balances. Keep at least one
-/// week's payroll in accounted funds after purchase. Other organizations see only the
+/// week's payroll in spendable reserves after purchase, regardless of money state.
+/// Only accounted funds can pay the purchase price. Other organizations see only the
 /// remaining listings. The canonical purchase owns all transfer, ledger and report effects.
 pub(crate) fn apply_due_autonomous_acquisitions(
     registry: &Registry,
@@ -70,24 +72,29 @@ fn invest(
     let reserve = i128::from(registry.upkeep().per_member_daily().cents())
         * members.len() as i128
         * i128::from(REVIEW_DAYS);
-    let accounts: Vec<_> = state
+    let mut funding_accounts = BTreeSet::new();
+    let mut accounted = 0_i128;
+    let mut other_liquidity = 0_i128;
+    for account in state
         .finance
         .accounts_for(FinancialOwner::Organization(organization))
-        .filter(|account| {
-            account.kind() == AccountKind::AccountedFunds
-                && account.spendable_balance() > Money::ZERO
-                && account.version() < u32::MAX
-        })
-        .collect();
-    let available = accounts
-        .iter()
-        .map(|account| i128::from(account.spendable_balance().cents()))
-        .sum::<i128>();
-    let budget = available - reserve;
+    {
+        let spendable = payroll_funding_balance(account);
+        if spendable == Money::ZERO {
+            continue;
+        }
+        if account.kind() == AccountKind::AccountedFunds {
+            accounted += i128::from(spendable.cents());
+            funding_accounts.insert(account.id());
+        } else {
+            other_liquidity += i128::from(spendable.cents());
+        }
+    }
+    // Never count dirty cash toward the price; it only reduces the clean wage reserve.
+    let budget = accounted - (reserve - other_liquidity).max(0);
     if budget <= 0 {
         return None;
     }
-    let funding_accounts: BTreeSet<_> = accounts.iter().map(|account| account.id()).collect();
     let mut candidates = Vec::new();
     for district in districts {
         for business in state.world.businesses_in_neighborhood(district) {

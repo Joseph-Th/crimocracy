@@ -17,6 +17,43 @@ fn normalized(raw: &str) -> String {
         .collect()
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum PoliceMode {
+    Press,
+    Ask,
+    Abort,
+}
+
+impl PoliceMode {
+    pub(super) fn parse(raw: &str) -> Result<Self, String> {
+        match normalized(raw).as_str() {
+            "press" => Ok(Self::Press),
+            "ask" => Ok(Self::Ask),
+            "abort" => Ok(Self::Abort),
+            _ => Err("police must be press, ask, or abort".to_owned()),
+        }
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Press => "press",
+            Self::Ask => "ask",
+            Self::Abort => "abort",
+        }
+    }
+
+    pub(super) fn contingencies(self) -> Vec<OperationContingency> {
+        match self {
+            Self::Press => Vec::new(),
+            Self::Ask => vec![OperationContingency::RequestDecisionOnPoliceArrival],
+            Self::Abort => vec![
+                OperationContingency::AbortOnPoliceArrivalBeforeEntry,
+                OperationContingency::RequestDecisionOnPoliceArrival,
+            ],
+        }
+    }
+}
+
 fn parse_operation_kind(raw: &str) -> Result<OperationKind, String> {
     let key = normalized(raw);
     ALL_OPERATION_KINDS
@@ -342,12 +379,7 @@ impl Session<'_> {
                 continue;
             }
             if key == "police" {
-                let response = match normalized(value).as_str() {
-                    "press" => "press",
-                    "ask" => "ask",
-                    "abort" => "abort",
-                    _ => return Err("police must be press, ask, or abort".to_owned()),
-                };
+                let response = PoliceMode::parse(value)?;
                 if police_mode.replace(response).is_some() {
                     return Err("police response may only be specified once".to_owned());
                 }
@@ -433,15 +465,7 @@ impl Session<'_> {
                 .ok_or("deadline exceeds the simulation clock")?;
             constraints.push(OperationConstraint::CompleteBy(deadline));
         }
-        let contingencies = match police_mode.unwrap_or("press") {
-            "press" => Vec::new(),
-            "ask" => vec![OperationContingency::RequestDecisionOnPoliceArrival],
-            "abort" => vec![
-                OperationContingency::AbortOnPoliceArrivalBeforeEntry,
-                OperationContingency::RequestDecisionOnPoliceArrival,
-            ],
-            _ => unreachable!("command parser selected a supported police response"),
-        };
+        let contingencies = police_mode.unwrap_or(PoliceMode::Press).contingencies();
         let objective = kind
             .objective_for_target(target)
             .ok_or("this operation requires a different target type")?;

@@ -185,8 +185,9 @@ const HELP: &str = "Commands:
   reports [count]        Most recent organization reports (default 8)
   report <id>            Read a complete organization report
   scout <business-id> [scout-id]  Assign a member to observe a known business
-  burgle <lead-id> [entry-id] [coordinator-id] [abort|press]
-                         Authorize a burglary with your chosen crew
+  burgle <lead-id> [entry-id] [coordinator-id] [abort|ask|press]
+                         Authorize a burglary (default: abort before entry)
+                         Police modes: abort before entry, ask leadership, or press on
   dismiss <lead-id>      Reject a lead through its canonical lifecycle
   decide <id> <continue|abort|approve|reject>
                          Resolve a pending decision

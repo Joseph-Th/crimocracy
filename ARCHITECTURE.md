@@ -270,9 +270,11 @@ determinism and client contracts.
 18  apply_due_autonomous_business_lifecycle
                                                 suspended non-player books reopen only when current zero-variance economics recover
 19  run_enterprise_cycle_phase             per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
-20  apply_due_autonomous_profit_sweeps     earned NPC business surplus → accounted reserves, retaining working capital
+20  apply_due_autonomous_profit_sweeps     earned NPC and opt-in player business surplus → accounted reserves, retaining working capital
 21  apply_daily_payroll  →  apply_reputation_phase
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence
+    ──► apply_due_autonomous_acquisitions
+          weekly rival purchases after payroll and recruitment; new infrastructure available for expansion
     ──► apply_due_autonomous_enterprise_lifecycle
           suspended NPC rackets: viable reopen; stale frozen authority/assets retire
     ──► apply_due_autonomous_enterprises_excluding
