@@ -1,14 +1,15 @@
 //! Read-only financial aggregation over enterprise cycle history; ledger-backed cycle records remain the source of truth.
 
 use crate::core::attention::AttentionClass;
-use crate::core::id::{EnterpriseId, OrganizationId};
+use crate::core::id::{CharacterId, EnterpriseId, FinancialAccountId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::enterprises::autonomous_planning::resolve_observed_district_pressure;
 use crate::enterprises::enterprise_execution::{
-    resolve_enterprise_financial_projection, resolve_location_neighborhood,
+    EnterpriseError, resolve_enterprise_financial_projection, resolve_location_neighborhood,
+    validate_establish_enterprise,
 };
-use crate::enterprises::{EnterpriseKind, EnterpriseRecord};
+use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseRecord};
 use crate::finance::Money;
 use crate::registry::Registry;
 use crate::world::CapabilityKind;
@@ -50,6 +51,10 @@ pub enum EnterpriseReportingError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnterpriseOutlook {
     pub baseline_net_cash: Money,
+    pub heat_surcharge_per_case: Money,
+    /// First number of case equivalents at which expected net is nonpositive.
+    /// None means no finite threshold under the authored surcharge.
+    pub nonpositive_at_cases: Option<u64>,
     pub estimated_operating_cost: Money,
     pub estimated_net_cash: Money,
     pub observed_pressure: Option<(SimTime, u32)>,
@@ -61,8 +66,12 @@ pub struct EnterpriseOutlook {
 pub enum EnterpriseOutlookError {
     #[error("enterprise {0} is not owned by this organization")]
     NotOwned(EnterpriseId),
-    #[error("enterprise {0} has incomplete operating records")]
-    MissingOperatingRecords(EnterpriseId),
+    #[error("enterprise manager {0} does not exist")]
+    MissingManager(CharacterId),
+    #[error("enterprise cash account {0} does not exist")]
+    MissingCashAccount(FinancialAccountId),
+    #[error(transparent)]
+    Enterprise(#[from] EnterpriseError),
     #[error("enterprise projection could not be calculated: {0}")]
     Projection(String),
 }
@@ -78,26 +87,73 @@ pub fn resolve_enterprise_outlook(
         .get_enterprise(enterprise)
         .filter(|record| record.organization() == organization)
         .ok_or(EnterpriseOutlookError::NotOwned(enterprise))?;
-    let manager = state
-        .world()
-        .get_character(record.manager())
-        .ok_or(EnterpriseOutlookError::MissingOperatingRecords(enterprise))?;
-    let account = state
-        .finance()
-        .get_account(record.cash_account())
-        .ok_or(EnterpriseOutlookError::MissingOperatingRecords(enterprise))?;
-    let district = resolve_location_neighborhood(state, record.location())
-        .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))?;
+    resolve_configuration_outlook(
+        registry,
+        state,
+        OutlookConfiguration {
+            organization,
+            kind: record.kind(),
+            location: record.location(),
+            support_count: record.supporting_businesses().len(),
+            manager: record.manager(),
+            cash: record.cash_account(),
+        },
+    )
+}
+
+/// Validate an investment using the same owner that establishes it. The preview neither
+/// reserves IDs nor consumes randomness and cannot read live investigation pressure.
+pub fn preview_enterprise_establishment(
+    registry: &Registry,
+    state: &AppState,
+    draft: &EnterpriseDraft,
+) -> Result<EnterpriseOutlook, EnterpriseOutlookError> {
+    validate_establish_enterprise(registry, state, draft.clone())?;
+    resolve_configuration_outlook(
+        registry,
+        state,
+        OutlookConfiguration {
+            organization: draft.organization,
+            kind: draft.kind,
+            location: draft.location,
+            support_count: draft.supporting_businesses.len(),
+            manager: draft.authority.manager,
+            cash: draft.cash_account,
+        },
+    )
+}
+
+struct OutlookConfiguration {
+    organization: OrganizationId,
+    kind: EnterpriseKind,
+    location: EnterpriseLocation,
+    support_count: usize,
+    manager: CharacterId,
+    cash: FinancialAccountId,
+}
+
+fn resolve_configuration_outlook(
+    registry: &Registry,
+    state: &AppState,
+    configuration: OutlookConfiguration,
+) -> Result<EnterpriseOutlook, EnterpriseOutlookError> {
+    let manager = state.world().get_character(configuration.manager).ok_or(
+        EnterpriseOutlookError::MissingManager(configuration.manager),
+    )?;
+    let account = state.finance().get_account(configuration.cash).ok_or(
+        EnterpriseOutlookError::MissingCashAccount(configuration.cash),
+    )?;
+    let district = resolve_location_neighborhood(state, configuration.location)?;
     let observed = resolve_observed_district_pressure(registry, state)
         .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))?;
-    let observation = observed.get(&(organization, district));
+    let observation = observed.get(&(configuration.organization, district));
     let project = |case_count| {
         resolve_enterprise_financial_projection(
             registry,
             state,
-            record.kind(),
-            record.location(),
-            record.supporting_businesses().len(),
+            configuration.kind,
+            configuration.location,
+            configuration.support_count,
             manager.capability(CapabilityKind::Management),
             case_count,
         )
@@ -108,14 +164,34 @@ pub fn resolve_enterprise_outlook(
         Some(observation) if observation.case_count != 0 => project(observation.case_count)?,
         _ => (baseline_cost, baseline_net_cash),
     };
+    let heat_surcharge_per_case = registry
+        .get_enterprise(configuration.kind)
+        .economics()
+        .heat_surcharge_per_active_case();
+    let nonpositive_at_cases =
+        nonpositive_case_threshold(baseline_net_cash, heat_surcharge_per_case);
     Ok(EnterpriseOutlook {
         baseline_net_cash,
+        heat_surcharge_per_case,
+        nonpositive_at_cases,
         estimated_operating_cost,
         estimated_net_cash,
         observed_pressure: observation.map(|value| (value.observed_at, value.case_count)),
         shared_cash_balance: account.balance(),
         shared_spendable_cash: account.spendable_balance(),
     })
+}
+
+fn nonpositive_case_threshold(net: Money, surcharge: Money) -> Option<u64> {
+    let net = net.cents();
+    let surcharge = surcharge.cents();
+    if net <= 0 {
+        Some(0)
+    } else if surcharge > 0 {
+        Some((net as u64).div_ceil(surcharge as u64))
+    } else {
+        None
+    }
 }
 
 pub fn resolve_organization_enterprise_financial_summary(
@@ -268,6 +344,19 @@ mod tests {
 
     fn rating(value: u8) -> Rating {
         Rating::try_new(value).expect("fixture rating must be valid")
+    }
+
+    #[test]
+    fn pressure_threshold_handles_exact_break_even_and_zero_surcharge() {
+        let threshold = |net, surcharge| {
+            nonpositive_case_threshold(Money::from_cents(net), Money::from_cents(surcharge))
+        };
+        assert_eq!(threshold(24_000, 12_000), Some(2));
+        assert_eq!(threshold(24_001, 12_000), Some(3));
+        assert_eq!(threshold(0, 0), Some(0));
+        assert_eq!(threshold(-1, 12_000), Some(0));
+        assert_eq!(threshold(1, 0), None);
+        assert_eq!(threshold(i64::MAX, 1), Some(i64::MAX as u64));
     }
 
     #[test]

@@ -114,7 +114,7 @@ fn district_racket_uses_the_assigned_manager_and_not_the_general_mandate() {
         .unwrap();
     let location = EnterpriseLocation::Neighborhood(district);
     let authority = session
-        .enterprise_authority(location, &BTreeSet::new())
+        .enterprise_authority(location, &BTreeSet::new(), None)
         .unwrap();
     assert_eq!(authority.manager, manager);
     assert_eq!(authority.scope, ResponsibilityScope::Neighborhood(district));
@@ -126,7 +126,7 @@ fn district_racket_uses_the_assigned_manager_and_not_the_general_mandate() {
         .unwrap()
         .id();
     let general = session
-        .enterprise_authority(location, &BTreeSet::from([outside]))
+        .enterprise_authority(location, &BTreeSet::from([outside]), None)
         .unwrap();
     assert_eq!(
         general.scope,
@@ -149,6 +149,124 @@ fn district_racket_uses_the_assigned_manager_and_not_the_general_mandate() {
         .find(|enterprise| enterprise.organization() == session.player)
         .unwrap();
     assert_eq!(record.authority().manager, manager);
+}
+
+#[test]
+fn enterprise_preview_and_explicit_manager_share_establishment_validation() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let manager = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|person| {
+            person
+                .capability(crimocracy::world::CapabilityKind::Surveillance)
+                .is_some_and(|rating| rating.value() == 91)
+        })
+        .unwrap()
+        .id();
+    let district = session.state.world().neighborhoods().last().unwrap().id();
+    session
+        .execute(&format!(
+            "delegate char-{} district-{}",
+            manager.raw(),
+            district.raw()
+        ))
+        .unwrap();
+    let cash = starting_cash(&session);
+    let settlement = fresh_settlement(&mut session);
+    let support = session
+        .state
+        .world()
+        .businesses_owned_by_organization(session.player)
+        .next()
+        .unwrap()
+        .id();
+    let bookkeeper = insert_business(
+        &registry,
+        &mut session.state,
+        BusinessDraft {
+            name: "District Accounting".to_owned(),
+            kind: BusinessKind::ProfessionalServices,
+            functions: BTreeSet::from([BusinessFunction::ProfessionalRecords]),
+            neighborhood: district,
+            owner: BusinessOwner::Organization(session.player),
+        },
+    )
+    .unwrap();
+    let args = format!(
+        "numbersracket district-{} {cash} {settlement} business-{} business-{} manager=char-{}",
+        district.raw(),
+        support.raw(),
+        bookkeeper.raw(),
+        manager.raw()
+    );
+    let before = snapshot(&registry, &session);
+    for verb in ["preview-racket", "start-racket"] {
+        assert!(
+            session
+                .execute(&format!("{verb} {args}"))
+                .unwrap_err()
+                .contains("entire supporting network")
+        );
+        assert_eq!(before, snapshot(&registry, &session));
+    }
+    let mandate = session
+        .state
+        .delegation()
+        .active_for_manager(manager)
+        .unwrap()
+        .id();
+    session
+        .execute(&format!("mandate {} add enterprise", mandate.raw()))
+        .unwrap();
+    let before = snapshot(&registry, &session);
+    let preview = session
+        .execute(&format!("preview-racket {args}"))
+        .unwrap()
+        .0;
+    assert!(preview.contains("Preview only"));
+    assert!(preview.contains(&format!("char-{}", manager.raw())));
+    assert!(preview.contains("Conditional operating cost"));
+    assert_eq!(before, snapshot(&registry, &session));
+    for suffix in [
+        format!("manager=char-{}", manager.raw()),
+        "manager=char-999999".to_owned(),
+    ] {
+        assert!(
+            session
+                .execute(&format!("start-racket {args} {suffix}"))
+                .is_err()
+        );
+        assert_eq!(before, snapshot(&registry, &session));
+    }
+    let started = session.execute(&format!("start-racket {args}")).unwrap().0;
+    assert!(started.contains(&format!("char-{}", manager.raw())));
+    let record = session
+        .state
+        .enterprises()
+        .enterprises_at(EnterpriseLocation::Neighborhood(district))
+        .find(|record| {
+            record.organization() == session.player
+                && record.kind() == EnterpriseKind::NumbersRacket
+        })
+        .unwrap();
+    assert_eq!(record.manager(), manager);
+    assert_eq!(
+        record.authority().scope,
+        ResponsibilityScope::Function(ResponsibilityFunction::Enterprise)
+    );
+    let outlook = session
+        .execute(&format!("racket-outlook {}", record.id().raw()))
+        .unwrap()
+        .0;
+    for line in preview.lines().filter(|line| {
+        line.contains("Conditional operating cost") || line.contains("Expected cycle net")
+    }) {
+        assert!(outlook.contains(line), "{outlook}");
+    }
 }
 
 #[test]

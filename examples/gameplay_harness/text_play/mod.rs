@@ -140,8 +140,10 @@ const HELP: &str = "Commands:
   launder <business-id> <cents>  Convert street cash via an owned front
   enterprises            Your rackets and their operating status
   racket-kinds           Available racket kinds and venue requirements
-  start-racket <kind> <business-id|district-id> <cash-id> <settlement-id> [support-business-id...]
+  start-racket <kind> <business-id|district-id> <cash-id> <settlement-id> [support-business-id...] [manager=char-N]
                          Establish a delegated racket backed by owned infrastructure
+  preview-racket <same arguments as start-racket>
+                         Validate an investment and estimate earnings without establishing it
   racket <id> <suspend|resume|retire>  Change your racket's lifecycle
   racket-cycles <enterprise-id> [count]
                          Historical racket earnings and enforcement attention
@@ -155,6 +157,7 @@ const HELP: &str = "Commands:
                          Open an empty account in the organization's own books
   move <source-id> <dest-id> <cents>
                          Transfer between same-kind organization accounts
+  case-brief             Recently disclosed case activity, with dates and provenance IDs
   intelligence [count] [page] [target-id]
                          Browse held observations, newest observed first (default 20 per page)
   intel <information-id> Inspect one held observation, typed finding and provenance
@@ -417,9 +420,9 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         | "directory" | "market" | "businesses" | "enterprises" | "racket-kinds" | "finances"
         | "accounts" | "opportunities" | "operations" | "decisions" | "connections"
         | "contacts" | "counsel" | "policies" | "mandates" | "operation-kinds" | "districts"
-        | "known-targets" | "debriefs" => 1..=1,
+        | "known-targets" | "debriefs" | "case-brief" => 1..=1,
         "recruit" | "scout" => 2..=3,
-        "start-racket" => 5..=usize::MAX,
+        "start-racket" | "preview-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
         "racket" | "launder" | "sweep" | "decide" | "business" => 3..=3,
         "move" | "deposit" => 4..=4,
@@ -640,6 +643,7 @@ impl<'a> Session<'a> {
         &self,
         location: EnterpriseLocation,
         supporting_businesses: &BTreeSet<BusinessId>,
+        requested_manager: Option<CharacterId>,
     ) -> Result<MandateAuthority, String> {
         let (district, business) = match location {
             EnterpriseLocation::Business(business) => (
@@ -686,7 +690,10 @@ impl<'a> Session<'a> {
                 self.state
                     .delegation()
                     .active_for_scope(scope)
-                    .filter(|record| record.organization() == self.player)
+                    .filter(|record| {
+                        record.organization() == self.player
+                            && requested_manager.is_none_or(|manager| record.manager() == manager)
+                    })
                     .map(|record| MandateAuthority {
                         mandate: record.id(),
                         manager: record.manager(),
@@ -701,7 +708,11 @@ impl<'a> Session<'a> {
                     })
             })
             .ok_or_else(|| {
-                "no active organization mandate covers enterprise work at that location".to_owned()
+                if requested_manager.is_some() {
+                    "selected manager has no active mandate covering the host and entire supporting network; assign enterprise scope for cross-district support".to_owned()
+                } else {
+                    "no active organization mandate covers the host and entire supporting network; cross-district support requires enterprise scope".to_owned()
+                }
             })
     }
 

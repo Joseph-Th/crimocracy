@@ -26,8 +26,8 @@ Usage:
   cargo text-play --script <file>    Read commands from a file instead of a terminal
   cargo text-play --load <slot>      Resume a saved campaign
 
-For longer procedurally generated campaigns, use an optimized build:
-  cargo run --locked --release --example gameplay_harness -- --generate --seed 12
+Text play uses an optimized, overflow-checked build by default.
+  cargo text-play-debug             Enable full per-minute debug invariant checks
 
 Inside a session, `help` lists player commands and `brief` states the situation.
 ";

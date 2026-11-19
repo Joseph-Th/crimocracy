@@ -12,7 +12,7 @@ cockpit routing is in [`AGENTS.md`](AGENTS.md).
 | Syntax / types | `cargo check-fast` (no linking) | `.\scripts\verify.cmd -Check` (adds fmt) |
 | One library behavior | `cargo test-focused <filter>` | `.\scripts\verify.cmd -Fast -Filter <filter>` |
 | Library implementation | `cargo check-fast` or focused test | `.\scripts\verify.cmd -Fast` |
-| Text play client | `cargo test-harness text_play` and `cargo text-play --seed 12` | `.\scripts\verify.cmd -Harness` plus a real text-play session |
+| Text play client | `cargo test-harness text_play` and `cargo text-play --seed 12` (use `cargo text-play-debug` for per-minute debug invariant checks) | `.\scripts\verify.cmd -Harness` plus a real text-play session |
 | Persistence, invariants, or cross-domain | Owning module's focused test plus a save/restore round-trip | `.\scripts\verify.cmd` (broad gate) |
 | Mixed-state stress | `cargo soak` (always explicit, never part of a gate) | same command |
 

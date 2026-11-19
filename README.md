@@ -72,13 +72,10 @@ python scripts/generated_city_browser_smoke.py
 Open `target/agent-output/city_preview/index.html` to inspect generated
 district streets, lots and registered business locations. The map remains a
 read-only visualization. Road geometry and travel routes are not yet a
-simulation-backed transport or movement network. Debug-mode long advances
-may be slow because every simulated minute validates all state invariants;
-use an optimized release build for longer generated-city sessions:
-
-```powershell
-cargo run --locked --release --example gameplay_harness -- --generate --seed 12 --city-size medium
-```
+simulation-backed transport or movement network. `cargo text-play` uses an
+optimized, overflow-checked play profile. Use `cargo text-play-debug` when
+investigating full per-minute debug invariant checks; both use the same
+canonical tick and validated save format.
 
 Without `--generate`, the historical authored opening remains the default.
 The authored city has public storefronts, several owned businesses,
@@ -116,7 +113,11 @@ production reports and ledger transactions.
 number of distinct owned support-business IDs after the two account IDs;
 distributed numbers and slot-machine rackets need multiple actual business
 functions across that network. `racket-kinds` lists the required
-functions. `business business-N suspend` pauses a player-owned storefront
+functions. Add `manager=char-N` to choose an eligible manager explicitly; a
+cross-district network requires an organization-wide enterprise scope.
+`preview-racket` takes the same arguments, validates without establishing the
+racket, and shows the chosen manager, conditional costs and earnings, and the
+case-pressure threshold for nonpositive expected earnings. `business business-N suspend` pauses a player-owned storefront
 only after its active racket dependencies are suspended;
 `business business-N resume` restarts its real operating cycle without resetting the
 current laundering window. Rackets must be resumed separately.
@@ -141,7 +142,8 @@ or identified `char-N`, `org-N`, `operation-N`, `investigation-N`,
 and `enterprise-N` records. `known-targets` lists identified institutional and
 administrative targets; it never searches hidden case or rival rosters.
 `known-people` includes current crew, observed people, contacts, and recruitment
-prospects. `plan` also accepts `char-N` for witness pressure and extraction
+prospects. The `prospects` view identifies familiar vocational skills without
+revealing private motives or acceptance odds. `plan` also accepts `char-N` for witness pressure and extraction
 when the organization has learned typed, episode-specific legal status.
 
 All `plan` orders accept optional `approach=...`, `leader=char-N`,
@@ -184,7 +186,9 @@ observation time, rather than disclosure time. The default page is 20 observatio
 page size is 1–100 and an optional public or identified target filters the list.
 `intel information-N` inspects a specific organization-held observation,
 including its typed signal and provenance, but cannot read an outside contact's
-or member's still-private source just by guessing an ID.
+or member's still-private source just by guessing an ID. `case-brief` collects
+up to 20 recent organization-held case-activity observations with original dates,
+reliability and provenance IDs; it is not a live census of investigations.
 
 A working police contact may disclose an investigator's actual case-witness
 registration following a criminal incident. After that disclosure,
@@ -200,7 +204,7 @@ hires counsel through a live legal contact and the production ledger.
 representation only when its legal constraints allow it. Alternatively,
 `policy legal automatic` enables automatic retention when a legal contact
 and funding exist. `advance` interrupts on arrests and releases of members
-so manual counsel decisions are not skipped. It also pauses on newly suspended own businesses or rackets and payroll shortfalls by default. Use `attention exception off` for uninterrupted routine management; actual pending decisions and own custody changes still interrupt. `brief` displays current daily payroll coverage alongside withdrawable earned surplus.
+so manual counsel decisions are not skipped. It also pauses on newly suspended own businesses or rackets, the first losing cycle in an own racket's losing streak, and payroll shortfalls by default. Use `attention exception off` for uninterrupted routine management; actual pending decisions and own custody changes still interrupt. `brief` displays current daily payroll coverage alongside withdrawable earned surplus.
 
 Games may use seeded procedural cities through `--generate` or one of the
 original authored test openings. The `--opening` option chooses among `night-trap`,

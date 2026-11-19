@@ -108,6 +108,19 @@ impl Session<'_> {
                             && racket.status() == EnterpriseStatus::Suspended
                     })
             });
+            // A first loss is an actionable change, not a routine daily settlement. Do not
+            // repeatedly interrupt an acknowledged losing streak or reveal rival results.
+            let own_new_racket_loss = tick.enterprise_cycles.iter().any(|id| {
+                let enterprises = self.state.enterprises();
+                let cycle = enterprises.get_cycle(*id).expect("settled cycle");
+                cycle.net_cash() < Money::ZERO
+                    && enterprises
+                        .get_enterprise(cycle.enterprise())
+                        .is_some_and(|racket| racket.organization() == self.player)
+                    && enterprises
+                        .prior_cycle(cycle.enterprise(), *id)
+                        .is_none_or(|prior| prior.net_cash() >= Money::ZERO)
+            });
             let pause_exceptions = self
                 .state
                 .attention_settings()
@@ -132,6 +145,10 @@ impl Session<'_> {
                 );
             } else if pause_exceptions && own_racket_suspended {
                 reason = Some("your racket has suspended operations; review 'enterprises'");
+            } else if pause_exceptions && own_new_racket_loss {
+                reason = Some(
+                    "your racket has entered a losing cycle; review 'enterprises' and 'racket-outlook'",
+                );
             } else if urgent {
                 reason = Some("high-priority report");
             } else if operation_ended {
@@ -244,6 +261,92 @@ mod tests {
         );
         assert!(!session.execute("advance 2d").unwrap().0.contains("Paused:"));
         assert_eq!(session.state.now().as_minutes(), 3 * DAY_MINUTES + 1);
+    }
+
+    #[test]
+    fn first_enterprise_loss_interrupts_but_repeat_losses_do_not() {
+        use crimocracy::world::world_system::insert_neighborhood;
+        use crimocracy::world::{
+            NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
+            NeighborhoodProfile, Rating,
+        };
+        let registry = crimocracy::build_registry();
+        let mut session =
+            Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small)
+                .unwrap();
+        let rating = |n| Rating::try_new(n).unwrap();
+        let district = insert_neighborhood(
+            &mut session.state,
+            NeighborhoodDraft {
+                name: "Unprofitable ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating(0),
+                        commercial_activity: rating(0),
+                        illicit_demand: rating(0),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating(100),
+                    },
+                },
+            },
+        )
+        .unwrap();
+        let manager = session
+            .state
+            .world()
+            .characters_in_organization(session.player)
+            .find(|p| {
+                p.capability(crimocracy::world::CapabilityKind::Management)
+                    .is_none()
+                    && p.supervisor().is_some()
+                    && session
+                        .state
+                        .delegation()
+                        .active_for_manager(p.id())
+                        .is_none()
+            })
+            .unwrap()
+            .id();
+        session
+            .execute(&format!(
+                "delegate {} district-{}",
+                manager.raw(),
+                district.raw()
+            ))
+            .unwrap();
+        let cash = session
+            .state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(session.player))
+            .filter(|account| account.kind() == AccountKind::StreetCash)
+            .max_by_key(|account| account.balance().cents())
+            .unwrap()
+            .id();
+        session.execute("open-account settlement").unwrap();
+        let settlement = session
+            .state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(session.player))
+            .filter(|account| account.kind() == AccountKind::Settlement)
+            .map(|account| account.id())
+            .max()
+            .unwrap();
+        session
+            .execute(&format!(
+                "start-racket protection district-{} {} {} manager=char-{}",
+                district.raw(),
+                cash.raw(),
+                settlement.raw(),
+                manager.raw()
+            ))
+            .unwrap();
+        let first = session.execute("advance 2d").unwrap().0;
+        assert!(first.contains("entered a losing cycle"), "{first}");
+        assert_eq!(session.state.now().as_minutes(), DAY_MINUTES);
+        let second = session.execute("advance 1d").unwrap().0;
+        assert!(!second.contains("entered a losing cycle"), "{second}");
+        assert_eq!(session.state.now().as_minutes(), 2 * DAY_MINUTES);
     }
 
     #[test]

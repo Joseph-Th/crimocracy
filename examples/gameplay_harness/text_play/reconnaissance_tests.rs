@@ -396,6 +396,13 @@ fn text_play_precinct_surveillance_discovers_casework_without_exposing_case_ids(
         })
         .expect("surveillance must reveal the case activity attributable to our actual operation");
     assert!(information.summary().contains("actively developing"));
+    let learned_summary = information.summary().to_owned();
+    let saved = snapshot(&registry, &session);
+    let brief = session.execute("case-brief").unwrap().0;
+    assert!(brief.contains(&learned_summary));
+    assert!(brief.contains("not a current case census"));
+    assert_eq!(saved, snapshot(&registry, &session));
+    assert!(session.execute("case-brief investigation-1").is_err());
     assert!(
         !session
             .execute("known-targets")

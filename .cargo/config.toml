@@ -33,7 +33,8 @@ soak = ["test", "--locked", "--lib", "--quiet", "soak", "--", "--nocapture"]
 # Interactive and scripted terminal play against the same canonical simulation.
 # Tests cover the client's typed command surface; there is no scripted evaluator.
 test-harness = ["test", "--locked", "--quiet", "--example", "gameplay_harness"]
-text-play = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--play"]
+text-play = ["run", "--locked", "--quiet", "--profile", "play", "--example", "gameplay_harness", "--", "--play"]
+text-play-debug = ["run", "--locked", "--quiet", "--example", "gameplay_harness", "--", "--play"]
 
 [term]
 quiet = false

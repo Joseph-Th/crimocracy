@@ -1,8 +1,74 @@
 //! Player command dispatch through canonical production owners.
 
 use super::*;
+use crimocracy::enterprises::enterprise_reporting::EnterpriseOutlook;
 use crimocracy::intelligence::InformationTopic;
-use crimocracy::world::{AutonomyLevel, BusinessOwner};
+
+fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
+    writeln!(
+        out,
+        "  Expected cycle net with no street-heat surcharge: {} cents",
+        outlook.baseline_net_cash.cents()
+    )
+    .unwrap();
+    match outlook.nonpositive_at_cases {
+        Some(0) => writeln!(out, "  Expected net is nonpositive even without case pressure.").unwrap(),
+        Some(cases) => writeln!(out, "  Expected net becomes nonpositive at {cases} active-case equivalent(s); each adds {} cents to cycle cost.", outlook.heat_surcharge_per_case.cents()).unwrap(),
+        None => writeln!(out, "  No authored per-case operating surcharge.").unwrap(),
+    }
+    match outlook.observed_pressure {
+        Some((at, cases)) => writeln!(out, "  Last observed district pressure: {cases} active-case equivalent(s) at {}", time_label(at.as_minutes())).unwrap(),
+        None => writeln!(out, "  District pressure unknown: no recent owned racket settlement; estimate assumes no surcharge").unwrap(),
+    }
+    writeln!(
+        out,
+        "  Conditional operating cost: {} cents | net: {} cents (before variance)",
+        outlook.estimated_operating_cost.cents(),
+        outlook.estimated_net_cash.cents()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  Shared account balance: {} cents | spendable cash: {} cents",
+        outlook.shared_cash_balance.cents(),
+        outlook.shared_spendable_cash.cents()
+    )
+    .unwrap();
+    if outlook.shared_cash_balance < Money::ZERO {
+        writeln!(
+            out,
+            "  Account has an operating deficit, not spendable funds."
+        )
+        .unwrap();
+    }
+    if outlook.shared_spendable_cash < outlook.estimated_operating_cost {
+        writeln!(
+            out,
+            "  Shared balance is below one estimated cycle's operating cost."
+        )
+        .unwrap();
+    }
+    writeln!(
+        out,
+        "  Not a guarantee of current enforcement conditions or other rackets' cash needs."
+    )
+    .unwrap();
+}
+
+use crimocracy::world::{AutonomyLevel, BusinessOwner, CharacterRecord};
+
+/// The recruitment owner has established an existing personal acquaintance. Show
+/// its vocational profile, not private motives, numeric relationship scores or
+/// anticipated acceptance odds.
+fn write_prospect_skills(out: &mut String, person: &CharacterRecord) {
+    let skills = ALL_CAPABILITY_KINDS
+        .into_iter()
+        .filter_map(|kind| person.capability(kind).map(|_| format!("{kind:?}")))
+        .collect::<Vec<_>>();
+    if !skills.is_empty() {
+        writeln!(out, "  Familiar skills: {}", skills.join(", ")).unwrap();
+    }
+}
 
 impl Session<'_> {
     pub(super) fn execute(&mut self, command: &str) -> Result<(String, bool), String> {
@@ -188,6 +254,7 @@ impl Session<'_> {
                         recruiter.raw()
                     )
                     .unwrap();
+                    write_prospect_skills(&mut out, person);
                 }
                 for (manager, candidates) in self.manager_prospects()? {
                     let member = state
@@ -233,6 +300,7 @@ impl Session<'_> {
                             manager.raw()
                         )
                         .unwrap();
+                        write_prospect_skills(&mut out, person);
                     }
                 }
                 if out.is_empty() {
@@ -604,45 +672,7 @@ impl Session<'_> {
                     record.status()
                 )
                 .unwrap();
-                writeln!(
-                    out,
-                    "  Expected cycle net with no street-heat surcharge: {} cents",
-                    outlook.baseline_net_cash.cents()
-                )
-                .unwrap();
-                match outlook.observed_pressure {
-                    Some((at, cases)) => writeln!(out, "  Last observed district pressure: {cases} active-case equivalent(s) at {}", time_label(at.as_minutes())).unwrap(),
-                    None => writeln!(out, "  District pressure unknown: no recent owned racket settlement; estimate assumes no surcharge").unwrap(),
-                }
-                writeln!(
-                    out,
-                    "  Conditional operating cost: {} cents | net: {} cents (before variance)",
-                    outlook.estimated_operating_cost.cents(),
-                    outlook.estimated_net_cash.cents()
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "  Shared account balance: {} cents | spendable cash: {} cents",
-                    outlook.shared_cash_balance.cents(),
-                    outlook.shared_spendable_cash.cents()
-                )
-                .unwrap();
-                if outlook.shared_cash_balance < Money::ZERO {
-                    writeln!(
-                        out,
-                        "  Account has an operating deficit, not spendable funds."
-                    )
-                    .unwrap();
-                }
-                if outlook.shared_spendable_cash < outlook.estimated_operating_cost {
-                    writeln!(
-                        out,
-                        "  Shared balance is below one estimated cycle's operating cost."
-                    )
-                    .unwrap();
-                }
-                writeln!(out, "  Not a guarantee of current enforcement conditions or other rackets' cash needs.").unwrap();
+                write_enterprise_outlook(&mut out, outlook);
             }
             "racket-kinds" => {
                 if words.len() != 1 {
@@ -664,7 +694,7 @@ impl Session<'_> {
                     .unwrap();
                 }
             }
-            "start-racket" => {
+            "start-racket" | "preview-racket" => {
                 let kind = parse_enterprise_kind(words[1])?;
                 let location = if words[2].starts_with("district-") {
                     if !self
@@ -711,7 +741,15 @@ impl Session<'_> {
                     .ok_or("settlement account is not owned by your organization")?
                     .id();
                 let mut supporting_businesses = BTreeSet::new();
+                let mut requested_manager = None;
                 for raw in &words[5..] {
+                    if let Some(raw_manager) = raw.strip_prefix("manager=") {
+                        if requested_manager.is_some() {
+                            return Err("manager was specified more than once".to_owned());
+                        }
+                        requested_manager = Some(self.requested_member(raw_manager)?);
+                        continue;
+                    }
                     let support = parse_number(raw, "business")?;
                     let business = state
                         .world()
@@ -723,31 +761,56 @@ impl Session<'_> {
                         return Err("support business was listed more than once".to_owned());
                     }
                 }
-                let authority = self.enterprise_authority(location, &supporting_businesses)?;
-                let established = validate_establish_enterprise(
-                    self.registry,
-                    &self.state,
-                    EnterpriseDraft {
-                        kind,
-                        organization: self.player,
-                        authority,
-                        location,
-                        supporting_businesses,
-                        cash_account,
-                        settlement_account,
-                    },
-                )
-                .map_err(|error| error.to_string())?
-                .commit(&mut self.state)
-                .map_err(|error| error.to_string())?;
-                writeln!(
-                    out,
-                    "Established {kind:?} enterprise {} at {}, using {} supporting business(es).",
-                    established.raw(),
-                    self.enterprise_location_label(location),
-                    words.len() - 5,
-                )
-                .unwrap();
+                let authority =
+                    self.enterprise_authority(location, &supporting_businesses, requested_manager)?;
+                let manager_label = state
+                    .world()
+                    .get_character(authority.manager)
+                    .ok_or("manager disappeared")?
+                    .name()
+                    .to_owned();
+                let support_count = supporting_businesses.len();
+                let draft = EnterpriseDraft {
+                    kind,
+                    organization: self.player,
+                    authority,
+                    location,
+                    supporting_businesses,
+                    cash_account,
+                    settlement_account,
+                };
+                if verb.eq_ignore_ascii_case("preview-racket") {
+                    let outlook = crimocracy::enterprises::enterprise_reporting::preview_enterprise_establishment(
+                        self.registry, state, &draft,
+                    ).map_err(|error| error.to_string())?;
+                    writeln!(
+                        out,
+                        "Preview only: {kind:?} at {}.",
+                        self.enterprise_location_label(location)
+                    )
+                    .unwrap();
+                    writeln!(
+                        out,
+                        "  Manager: {manager_label} (char-{}) | scope {:?}",
+                        authority.manager.raw(),
+                        authority.scope
+                    )
+                    .unwrap();
+                    write_enterprise_outlook(&mut out, outlook);
+                } else {
+                    let established = validate_establish_enterprise(self.registry, state, draft)
+                        .map_err(|error| error.to_string())?
+                        .commit(&mut self.state)
+                        .map_err(|error| error.to_string())?;
+                    writeln!(
+                        out,
+                        "Established {kind:?} enterprise {} at {}, using {support_count} supporting business(es). Manager: {manager_label} (char-{}).",
+                        established.raw(),
+                        self.enterprise_location_label(location),
+                        authority.manager.raw(),
+                    )
+                    .unwrap();
+                }
             }
             "racket" => {
                 if words.len() != 3 {
@@ -912,6 +975,51 @@ impl Session<'_> {
                     .unwrap();
                 }
                 out.push_str("Clearing/settlement balances are excluded; their ledger entries are not spendable reserves.");
+            }
+            "case-brief" => {
+                let mut records = self
+                    .organization_information()
+                    .filter(|info| {
+                        matches!(
+                            info.signal(),
+                            Some(crimocracy::intelligence::InformationSignal::CaseActivity(_))
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                records.sort_unstable_by_key(|info| {
+                    std::cmp::Reverse((info.observed_at(), info.id()))
+                });
+                writeln!(
+                    out,
+                    "Learned case activity (historical observations, not a current case census):"
+                )
+                .unwrap();
+                if records.is_empty() {
+                    writeln!(
+                        out,
+                        "  No disclosed case activity. Ask police contacts or gather intelligence."
+                    )
+                    .unwrap();
+                }
+                for info in records.iter().take(20) {
+                    writeln!(
+                        out,
+                        "  intel {} | {} | {:?} | {}",
+                        info.id().raw(),
+                        time_label(info.observed_at().as_minutes()),
+                        info.reliability(),
+                        info.summary()
+                    )
+                    .unwrap();
+                }
+                if records.len() > 20 {
+                    writeln!(
+                        out,
+                        "  {} older observations omitted; use intelligence for history.",
+                        records.len() - 20
+                    )
+                    .unwrap();
+                }
             }
             "intelligence" => {
                 let count = words.get(1).map_or(Ok(20_usize), |value| {

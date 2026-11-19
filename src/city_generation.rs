@@ -872,14 +872,32 @@ pub fn generate_city(
             &[],
         )?;
         civilians.push(owner);
+        // The executive's two opening acquaintances must offer different reasons to hire
+        // them. Rotate complementary profiles by seed without consuming the geography RNG.
+        let (skills, trait_kind): (&[(C, u8)], TraitKind) =
+            match (index + (config.seed % 4) as usize) % 4 {
+                0 => (&[(C::Burglary, 73), (C::Stealth, 68)], TraitKind::Greedy),
+                1 => (
+                    &[(C::Driving, 80), (C::Surveillance, 64)],
+                    TraitKind::Cautious,
+                ),
+                2 => (
+                    &[(C::Negotiation, 76), (C::SocialAccess, 72)],
+                    TraitKind::Charismatic,
+                ),
+                _ => (
+                    &[(C::Management, 72), (C::Intimidation, 63)],
+                    TraitKind::Ambitious,
+                ),
+            };
         let prospect = add_character(
             &mut state,
             person_name(&mut rng),
             None,
             None,
             AutonomyLevel::Guided,
-            &[(C::Burglary, 65), (C::Stealth, 63), (C::Driving, 59)],
-            &[TraitKind::Greedy],
+            skills,
+            &[trait_kind],
         )?;
         prospects.push(prospect);
         if index < 2 {
@@ -1117,7 +1135,9 @@ pub fn generate_city(
                 targets: BTreeSet::from([EntityRef::Business(target)]),
                 source_information: BTreeSet::from([fact]),
                 summary: format!("Investigate after-hours access to {name}."),
-                valid_until: (index == 0).then_some(SimTime::from_minutes(720)),
+                // The second tip is less urgent, not permanent. A missed opening
+                // must be investigated again instead of remaining actionable indefinitely.
+                valid_until: Some(SimTime::from_minutes(if index == 0 { 720 } else { 4_320 })),
             },
         )?
         .commit(&mut state)?;

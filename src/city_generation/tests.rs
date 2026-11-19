@@ -56,6 +56,30 @@ fn generated_organizations_have_real_reporting_relationships_and_manager_contact
 }
 
 #[test]
+fn generated_executive_prospects_offer_complementary_roles() {
+    use crate::recruitment::recruitment_system::find_recruitment_candidates;
+    let registry = crate::build_registry();
+    for seed in [12, 13, 14, 15, 1381089804] {
+        let city = generate_city(&registry, CityScale::Small.config(seed)).unwrap();
+        let candidates =
+            find_recruitment_candidates(&registry, &city.state, city.player, city.boss).unwrap();
+        assert_eq!(candidates.len(), 2);
+        let skill_sets = candidates
+            .iter()
+            .map(|id| {
+                let person = city.state.world().get_character(*id).unwrap();
+                crate::world::ALL_CAPABILITY_KINDS
+                    .into_iter()
+                    .filter(|kind| person.capability(*kind).is_some())
+                    .collect::<BTreeSet<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(!skill_sets[0].is_empty() && !skill_sets[1].is_empty());
+        assert_ne!(skill_sets[0], skill_sets[1]);
+    }
+}
+
+#[test]
 fn generated_infrastructure_supports_specialized_enterprise_networks() {
     let registry = crate::build_registry();
     let city = generate_city(&registry, CityScale::Large.config(516708459)).unwrap();

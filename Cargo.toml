@@ -35,6 +35,13 @@ debug = false
 [profile.dev.package."*"]
 opt-level = 3
 
+# Player sessions use the optimized production tick with checked arithmetic.
+# Debug/test lanes retain full per-minute invariant checks.
+[profile.play]
+inherits = "release"
+overflow-checks = true
+incremental = true
+
 [lints.rust]
 unsafe_code = "forbid"
 
