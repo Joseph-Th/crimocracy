@@ -271,6 +271,7 @@ determinism and client contracts.
 18  apply_due_autonomous_business_lifecycle
                                                 suspended non-player books reopen only when current zero-variance economics recover
 19  run_enterprise_cycle_phase             per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
+    ──► apply_enterprise_observations      staffed vice file observes actual later cycle (RNG: investigation stream); personal evidence enters next minute's custody decision
 20  apply_due_autonomous_profit_sweeps     earned NPC and opt-in player business surplus → accounted reserves, retaining working capital
 21  apply_daily_payroll  →  apply_reputation_phase
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence

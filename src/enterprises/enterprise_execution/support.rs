@@ -563,7 +563,7 @@ pub(super) fn has_active_enterprise_inquiry(
 /// shelf whose original case origin names some other overlapping incident, so the investigation's
 /// `origin` alone is not reliable provenance for later racket-cycle behavior. The intake evidence is:
 /// every enforcement event adds one enterprise-specific surveillance item even when it reuses a shelf.
-fn is_enterprise_inquiry_evidence(
+pub(crate) fn is_enterprise_inquiry_evidence(
     state: &crate::core::state::AppState,
     investigation: &crate::legal::InvestigationRecord,
     evidence: &crate::legal::EvidenceRecord,

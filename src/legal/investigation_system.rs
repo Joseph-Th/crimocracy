@@ -2,7 +2,12 @@
 
 mod autonomous_staffing;
 mod cold_case_decay;
+mod enterprise_observations;
 mod incident_intake;
+
+pub(crate) use enterprise_observations::{
+    apply_enterprise_observations, enterprise_observation_origin,
+};
 
 pub(crate) use autonomous_staffing::apply_autonomous_investigator_staffing;
 pub use autonomous_staffing::{ValidatedInvestigatorAssignment, validate_assign_investigator};
@@ -95,6 +100,10 @@ pub enum InvestigationError {
         expected: u32,
         found: u32,
     },
+    #[error(
+        "personal surveillance of enterprise {0} requires a distinct staffed observation of its settled activity"
+    )]
+    InvalidEnterpriseObservation(crate::core::id::EnterpriseId),
     #[error("evidence discovery time cannot be in the future")]
     DiscoveryInFuture,
     #[error("evidence custodian {custodian} does not own investigation {investigation}")]
@@ -713,6 +722,7 @@ fn validate_evidence_draft(
     if draft.discovered_at > state.now() {
         return Err(InvestigationError::DiscoveryInFuture);
     }
+    enterprise_observations::validate_observation_draft(state, investigation, draft)?;
     ensure_evidence_prosecution_recusal_capacity(
         state,
         draft.investigation,

@@ -746,6 +746,9 @@ pub(super) fn validate_evidence_records(
     named_witness_evidence: &BTreeSet<EvidenceId>,
     informant_evidence: &BTreeSet<EvidenceId>,
 ) -> Result<(), StateValidationError> {
+    use crate::legal::investigation_system::enterprise_observation_origin;
+    let mut observations = BTreeSet::new();
+    let mut available_cycles = None;
     for evidence in state.legal.all_evidence() {
         validate_evidence_record(
             state,
@@ -754,6 +757,42 @@ pub(super) fn validate_evidence_records(
             named_witness_evidence,
             informant_evidence,
         )?;
+        if let Some(enterprise) =
+            enterprise_observation_origin(evidence.kind(), evidence.subject(), evidence.origin())
+        {
+            let cycle_events = available_cycles.get_or_insert_with(|| {
+                state
+                    .enterprises
+                    .cycles()
+                    .filter(|cycle| !cycle.drew_enforcement_attention())
+                    .map(|cycle| (cycle.enterprise(), cycle.occurred_at()))
+                    .collect::<BTreeSet<_>>()
+            });
+            let event = (enterprise, evidence.discovered_at());
+            let record = state
+                .enterprises
+                .get_enterprise(enterprise)
+                .ok_or_else(|| invalid_evidence_provenance(evidence))?;
+            let case = state
+                .legal
+                .get_investigation(evidence.investigation())
+                .ok_or_else(|| invalid_evidence_provenance(evidence))?;
+            if !cycle_events.contains(&event)
+                || !observations.insert(event)
+                || evidence.subject() != EntityRef::Character(record.manager())
+                || evidence.strength() != crate::legal::EvidenceStrength::Strong
+                || evidence.reliability() != crate::legal::EvidenceReliability::Credible
+                || evidence.admissibility() != Admissibility::Admissible
+                || !case.evidence().iter().any(|id| {
+                    *id < evidence.id() && state.legal.get_evidence(*id).is_some_and(|intake| {
+                        intake.discovered_at() < evidence.discovered_at()
+                            && crate::enterprises::enterprise_execution::is_enterprise_inquiry_evidence(state, case, intake, enterprise)
+                    })
+                })
+            {
+                return Err(invalid_evidence_provenance(evidence));
+            }
+        }
     }
 
     Ok(())

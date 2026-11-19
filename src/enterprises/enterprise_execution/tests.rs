@@ -63,6 +63,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod autonomous_expansion;
 mod cycle_boundaries;
+mod vice_observations;
 
 fn apply_due_autonomous_enterprises(
     registry: &Registry,

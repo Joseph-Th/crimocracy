@@ -443,6 +443,11 @@ fn validate_incident_intake_dependencies(
         // Incident intake inserts evidence with `source: None`; work-derived kinds and
         // informant statements may only exist through their canonical production paths.
         validate_evidence_kind_allowed(evidence.kind)?;
+        if let Some(enterprise) =
+            super::enterprise_observation_origin(evidence.kind, evidence.subject, evidence.origin)
+        {
+            return Err(InvestigationError::InvalidEnterpriseObservation(enterprise));
+        }
         if !is_entity_present(state, evidence.subject) {
             return Err(InvestigationError::MissingEntity(evidence.subject));
         }

@@ -14,7 +14,7 @@ use support::{
 };
 pub(crate) use support::{
     business_is_available_for_enterprise, can_authority_cover_location,
-    redundant_supporting_business, resolve_location_neighborhood,
+    is_enterprise_inquiry_evidence, redundant_supporting_business, resolve_location_neighborhood,
 };
 
 pub use cycle_planning::decide_enterprise_cycle;

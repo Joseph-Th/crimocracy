@@ -63,6 +63,7 @@ pub struct TickOutcome {
     pub business_cycles: Vec<BusinessCycleId>,
     pub resumed_businesses: Vec<crate::core::id::BusinessId>,
     pub enterprise_cycles: Vec<EnterpriseCycleId>,
+    pub enterprise_observations: Vec<crate::core::id::EvidenceId>,
     /// Balanced ledger distribution of authorized owners' business earnings, never retained capital.
     pub autonomous_profit_sweeps: Option<crate::core::id::LedgerTransactionId>,
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
@@ -190,6 +191,14 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         .expect("valid state should maintain suspended non-player business economies");
     let enterprise_cycles = run_enterprise_cycle_phase(registry, state)
         .expect("valid due enterprise cycles must settle through the preflighted sequential phase");
+    // Staffed vice inquiries can observe the actual settled trading event. First exposure
+    // is only the weak intake; any resulting personal evidence enters the next minute's arrests.
+    let enterprise_observations = if enterprise_cycles.is_empty() {
+        Vec::new()
+    } else {
+        crate::legal::investigation_system::apply_enterprise_observations(state, &enterprise_cycles)
+            .expect("valid staffed vice inquiries should observe eligible trading events")
+    };
     // NPC owners and players who explicitly enable daily distributions withdraw legitimate
     // surplus after both settlement phases, before payroll. Retained capital stays protected.
     let autonomous_profit_sweeps =
@@ -270,6 +279,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         business_cycles,
         resumed_businesses,
         enterprise_cycles,
+        enterprise_observations,
         autonomous_profit_sweeps,
         payrolls,
         reputation_changes,
