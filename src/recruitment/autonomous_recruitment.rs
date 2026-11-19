@@ -18,7 +18,9 @@ use crate::recruitment::recruitment_system::{
     recruitment_approval_is_deferred, validate_delegated_recruitment_attempt,
 };
 use crate::recruitment::scoring::recruitment_relationship_support;
-use crate::recruitment::{RecruitmentApproach, RecruitmentDraft};
+use crate::recruitment::{
+    ALL_RECRUITMENT_APPROACHES, RecruitmentApproach, RecruitmentDraft, RecruitmentOutcome,
+};
 use crate::registry::{RecruitmentDefinition, Registry};
 use crate::world::{ApprovalPolicy, AutonomyLevel, PolicyKind, PolicySetting, TraitKind};
 use std::cmp::Reverse;
@@ -46,6 +48,7 @@ pub(crate) enum AutonomousRecruitmentError {
 struct RankedRecruitmentCandidate {
     character: CharacterId,
     relationship_support: u8,
+    approach: RecruitmentApproach,
 }
 
 #[derive(Clone, Debug)]
@@ -173,7 +176,7 @@ fn plan_due_autonomous_recruitment(
     let mut id_budget = Vec::new();
     let mut decision_count = 0_u32;
 
-    while let Some((authority_index, candidate)) =
+    while let Some((authority_index, candidate, approach)) =
         select_next_recruitment_action(&authorities, &claimed_this_pass)
     {
         let prepared = &authorities[authority_index];
@@ -183,11 +186,6 @@ fn plan_due_autonomous_recruitment(
             prepared.manager,
             prepared.policy,
         );
-        let manager_record = state
-            .world()
-            .get_character(manager)
-            .ok_or(RecruitmentError::MissingRecruiter(manager))?;
-        let approach = resolve_autonomous_recruitment_approach(manager_record);
         let authority = MandateAuthority {
             mandate,
             manager,
@@ -361,8 +359,13 @@ fn prepare_recruitment_authorities(
                 !recruitment_approval_is_deferred(registry, state, organization, *candidate)
             });
         }
-        let candidates =
-            rank_candidates_by_relationship(registry.recruitment(), state, manager, candidates);
+        let candidates = rank_candidates_by_relationship(
+            registry.recruitment(),
+            state,
+            organization,
+            manager_record,
+            candidates,
+        );
         if candidates.is_empty() {
             continue;
         }
@@ -386,7 +389,7 @@ fn prepare_recruitment_authorities(
 fn select_next_recruitment_action(
     authorities: &[PreparedRecruitmentAuthority],
     claimed_this_pass: &BTreeSet<CharacterId>,
-) -> Option<(usize, CharacterId)> {
+) -> Option<(usize, CharacterId, RecruitmentApproach)> {
     authorities
         .iter()
         .enumerate()
@@ -407,16 +410,18 @@ fn select_next_recruitment_action(
                 ),
                 index,
                 candidate.character,
+                candidate.approach,
             ))
         })
-        .max_by_key(|(priority, _, _)| *priority)
-        .map(|(_, index, candidate)| (index, candidate))
+        .max_by_key(|(priority, _, _, _)| *priority)
+        .map(|(_, index, candidate, approach)| (index, candidate, approach))
 }
 
 fn rank_candidates_by_relationship(
     definition: &RecruitmentDefinition,
     state: &AppState,
-    recruiter: CharacterId,
+    organization: OrganizationId,
+    recruiter: &crate::world::CharacterRecord,
     candidates: Vec<CharacterId>,
 ) -> Vec<RankedRecruitmentCandidate> {
     // Snapshot each relationship score exactly once for this read-only daily preparation pass.
@@ -424,11 +429,19 @@ fn rank_candidates_by_relationship(
     // to rank that day's pitches.
     let mut ranked: Vec<_> = candidates
         .into_iter()
-        .map(|candidate| RankedRecruitmentCandidate {
-            character: candidate,
-            relationship_support: candidate_relationship_support(
-                definition, state, recruiter, candidate,
-            ),
+        .filter_map(|candidate| {
+            let approach =
+                resolve_prospect_pitch(definition, state, organization, recruiter, candidate)?;
+            Some(RankedRecruitmentCandidate {
+                character: candidate,
+                relationship_support: candidate_relationship_support(
+                    definition,
+                    state,
+                    recruiter.id(),
+                    candidate,
+                ),
+                approach,
+            })
         })
         .collect();
     ranked.sort_unstable_by_key(|candidate| {
@@ -469,6 +482,56 @@ fn approval_request_summary(
     format!(
         "{recruiter_name} seeks approval to approach {candidate_name} with a {approach:?} recruitment pitch."
     )
+}
+
+/// A refusal is actionable feedback, not an excuse to ask the executive to authorize
+/// the same deterministic pitch every week. Reconsider unused approaches within a bounded
+/// retry window. If all four were refused under the same relationship, let the prospect
+/// rest until an old refusal ages out or the relationship changes. Only own attempt history
+/// and the existing relationship are consulted, never the candidate's latent willingness.
+fn resolve_prospect_pitch(
+    definition: &RecruitmentDefinition,
+    state: &AppState,
+    organization: OrganizationId,
+    manager: &crate::world::CharacterRecord,
+    candidate: CharacterId,
+) -> Option<RecruitmentApproach> {
+    let preferred = resolve_autonomous_recruitment_approach(manager);
+    let relationship = state
+        .social()
+        .get_relationship(candidate, manager.id())
+        .expect("ranked prospect must have a relationship");
+    let retry_window = u64::from(definition.cooldown().as_minutes())
+        * (ALL_RECRUITMENT_APPROACHES.len() as u64 * 2);
+    let mut refused = BTreeSet::new();
+    for attempt in state
+        .recruitment()
+        .attempts_for_prospect(candidate, organization)
+    {
+        if state
+            .now()
+            .as_minutes()
+            .saturating_sub(attempt.occurred_at().as_minutes())
+            >= retry_window
+        {
+            break;
+        }
+        if attempt.recruiter() != manager.id() {
+            continue;
+        }
+        if attempt.outcome() == RecruitmentOutcome::Accepted
+            || attempt.recruiter_relationship().version() != Some(relationship.version())
+        {
+            break;
+        }
+        refused.insert(attempt.approach());
+        if refused.len() == ALL_RECRUITMENT_APPROACHES.len() {
+            return None;
+        }
+    }
+    std::iter::once(preferred)
+        .chain(ALL_RECRUITMENT_APPROACHES)
+        .find(|approach| !refused.contains(approach))
 }
 
 fn resolve_autonomous_recruitment_approach(

@@ -219,14 +219,39 @@ impl Session<'_> {
                         if let Some(InformationSignal::LegalPersonStatus(status)) =
                             information.signal()
                         {
-                            let role = match status {
+                            let description = match status {
                                 LegalPersonStatusSignal::CaseWitness { .. } => {
-                                    "reported case witness"
+                                    "reported case witness; current legal status is not confirmed"
+                                        .to_owned()
                                 }
-                                LegalPersonStatusSignal::Detained { .. } => "reported detention",
+                                LegalPersonStatusSignal::Detained { arrest }
+                                    if person.organization() == Some(self.player) =>
+                                {
+                                    let ending = state
+                                        .legal()
+                                        .get_arrest(*arrest)
+                                        .and_then(|episode| episode.released_at())
+                                        .map(|at| {
+                                            format!("released {}", time_label(at.as_minutes()))
+                                        })
+                                        .unwrap_or_else(|| "custody ongoing".to_owned());
+                                    format!(
+                                        "reported detention (arrest-{}; {ending})",
+                                        arrest.raw()
+                                    )
+                                }
+                                LegalPersonStatusSignal::Detained { .. } => {
+                                    "reported detention; current legal status is not confirmed"
+                                        .to_owned()
+                                }
                             };
-                            writeln!(out, "  Learned {role} via information {} (observed {}); current legal status is not confirmed",
-                                information.id().raw(), time_label(information.observed_at().as_minutes())).unwrap();
+                            writeln!(
+                                out,
+                                "  Learned {description} via information {} (observed {})",
+                                information.id().raw(),
+                                time_label(information.observed_at().as_minutes())
+                            )
+                            .unwrap();
                         }
                     }
                 }
@@ -384,10 +409,7 @@ impl Session<'_> {
                     .unwrap();
                 }
             }
-            "buy" => {
-                if words.len() != 2 {
-                    return Err("buy <business-id>".to_owned());
-                }
+            "buy" | "offer" => {
                 let raw = parse_number(words[1], "business")?;
                 let business = self
                     .known_business(raw)
@@ -398,15 +420,26 @@ impl Session<'_> {
                     .filter(|account| account.kind() == AccountKind::AccountedFunds)
                     .map(|account| account.id())
                     .collect();
-                let validated = validate_acquire_business(
-                    self.registry,
-                    &self.state,
-                    BusinessAcquisitionDraft {
-                        organization: self.player,
-                        business,
-                        funding_accounts,
-                    },
-                )
+                let draft = BusinessAcquisitionDraft {
+                    organization: self.player,
+                    business,
+                    funding_accounts,
+                };
+                let validated = if verb.eq_ignore_ascii_case("offer") {
+                    let cents = words[2]
+                        .parse::<i64>()
+                        .ok()
+                        .filter(|cents| *cents > 0)
+                        .ok_or("offer needs a positive amount in cents")?;
+                    validate_offer_business(
+                        self.registry,
+                        &self.state,
+                        draft,
+                        Money::from_cents(cents),
+                    )
+                } else {
+                    validate_acquire_business(self.registry, &self.state, draft)
+                }
                 .map_err(|error| {
                     if matches!(
                         &error,
@@ -445,7 +478,7 @@ impl Session<'_> {
                     writeln!(out, "business-{} {name} | {kind:?} | district-{} {ward} | {} cents | functions {functions:?}", id.raw(), district.raw(), price.cents()).unwrap();
                 }
                 if out.is_empty() {
-                    out.push_str("No properties currently available for direct purchase.");
+                    out.push_str("No properties currently available for direct purchase. Use directory to identify properties and offer <business-id> <cents> to negotiate with an existing organization owner.");
                 }
             }
             "business" => {
@@ -1671,6 +1704,18 @@ impl Session<'_> {
                 .commit(&mut self.state)
                 .map_err(|e| e.to_string())?;
                 writeln!(out, "Decision {raw} resolved: {response:?}.").unwrap();
+                if let Some(attempt) = self
+                    .state
+                    .recruitment()
+                    .get_attempt_for_approval_decision(decision)
+                {
+                    let information = self
+                        .state
+                        .intelligence()
+                        .get_information(attempt.outcome_information())
+                        .expect("resolved recruitment attempt must have outcome information");
+                    writeln!(out, "  {}", information.summary()).unwrap();
+                }
             }
             "sweep" => {
                 let raw =

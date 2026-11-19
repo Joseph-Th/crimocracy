@@ -24,8 +24,8 @@ use crate::delegation::{
 use crate::history::history_system::{HistoryError, ValidatedHistoryEvent};
 use crate::intelligence::intelligence_system::{IntelligenceError, ValidatedInformation};
 use crate::recruitment::artifacts::{
-    validate_recruitment_history_event, validate_recruitment_member_report,
-    validate_recruitment_outcome_information,
+    validate_recruiting_player_report, validate_recruitment_history_event,
+    validate_recruitment_member_report, validate_recruitment_outcome_information,
 };
 use crate::recruitment::{
     RecruitmentAuthority, RecruitmentDraft, RecruitmentFactors, RecruitmentOutcome,
@@ -33,7 +33,8 @@ use crate::recruitment::{
     RecruitmentRecordResolutionParts, RecruitmentRelationshipSnapshot, build_recruitment_record,
 };
 use crate::registry::{RecruitmentDefinition, Registry};
-use crate::reports::report_system::{ReportError, ValidatedReport};
+use crate::reports::ReportDraft;
+use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::world::world_system::{
     ValidatedCharacterReassignment, WorldError, validate_reassign_character,
     validate_reassign_character_for_recruitment_approval,
@@ -586,6 +587,7 @@ fn validate_recruitment_plan_with_authority(
     let history = validate_recruitment_history_event(state, &plan)?;
     let outcome_information = validate_recruitment_outcome_information(state, &plan)?;
     let member_report = validate_recruitment_member_report(state, &plan)?;
+    let recruiting_report = validate_recruiting_player_report(state, &plan)?;
     Ok(ValidatedRecruitmentAttempt {
         plan,
         authority,
@@ -594,6 +596,7 @@ fn validate_recruitment_plan_with_authority(
         history,
         outcome_information,
         member_report,
+        recruiting_report,
     })
 }
 
@@ -607,6 +610,7 @@ pub struct ValidatedRecruitmentAttempt {
     /// Player-facing report to the candidate's organization: the departure notice on an
     /// accepted defection, or the refused-approach loyalty report when membership holds.
     member_report: Option<ValidatedReport>,
+    recruiting_report: Option<ReportDraft>,
 }
 
 impl ValidatedRecruitmentAttempt {
@@ -617,6 +621,9 @@ impl ValidatedRecruitmentAttempt {
         }
         budget.push((IdKind::Information, 1));
         if self.member_report.is_some() {
+            budget.push((IdKind::Report, 1));
+        }
+        if self.recruiting_report.is_some() {
             budget.push((IdKind::Report, 1));
         }
         budget.push((IdKind::RecruitmentAttempt, 1));
@@ -696,6 +703,15 @@ impl ValidatedRecruitmentAttempt {
             .outcome_information
             .commit(state)
             .expect("recruitment information ID was preflighted before mutation");
+        if let Some(mut report) = self.recruiting_report {
+            // The only new dependency is the just-committed, organization-held outcome.
+            // Report contents/entities and allocator capacity were preflighted together.
+            report.entries[0].sources.push(outcome_information);
+            validate_record_report(state, report)
+                .expect("prevalidated recruiting report must accept its own outcome source")
+                .commit(state)
+                .expect("recruiting report ID was preflighted before mutation");
+        }
         let member_report = self.member_report.map(|report| {
             report
                 .commit(state)

@@ -213,6 +213,7 @@ impl ReportState {
     }
 }
 
+#[derive(Clone)]
 pub struct ReportDraft {
     pub recipient: OrganizationId,
     pub kind: ReportKind,

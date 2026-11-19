@@ -357,6 +357,20 @@ impl RecruitmentState {
             })
     }
 
+    /// Newest-first attempts by this organization at a specific prospect, without scanning
+    /// unrelated recruitment history.
+    pub(crate) fn attempts_for_prospect(
+        &self,
+        candidate: CharacterId,
+        organization: OrganizationId,
+    ) -> impl Iterator<Item = &RecruitmentAttemptRecord> {
+        self.by_candidate_organization
+            .get(&(candidate, organization))
+            .into_iter()
+            .flat_map(|ids| ids.iter().rev())
+            .map(|id| self.records.get(id).expect("indexed recruitment attempt"))
+    }
+
     pub fn get_attempt_for_approval_decision(
         &self,
         decision: DecisionRequestId,

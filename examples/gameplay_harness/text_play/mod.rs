@@ -29,7 +29,7 @@ use crimocracy::delegation::{BudgetAuthority, BudgetPeriod, MandateDraft};
 use crimocracy::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crimocracy::economy::business_acquisition::{
     BusinessAcquisitionDraft, BusinessAcquisitionError, acquisition_offer,
-    validate_acquire_business,
+    validate_acquire_business, validate_offer_business,
 };
 use crimocracy::economy::business_economy_system::{
     BusinessProfitSweepDraft, validate_sweep_business_profits,
@@ -136,7 +136,8 @@ const HELP: &str = "Commands:
                          Pause or restart a player-owned legitimate storefront
   business-cycles <business-id> [count]
                          Settled revenue and costs under your ownership
-  buy <business-id>      Acquire a business at its standard price using clean funds
+  buy <business-id>      Acquire a listed business at its standard price using clean funds
+  offer <business-id> <cents>  Make a binding offer for an organization-owned business
   launder <business-id> <cents>  Convert street cash via an owned front
   enterprises            Your rackets and their operating status
   racket-kinds           Available racket kinds and venue requirements
@@ -434,7 +435,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
         | "save" | "transaction" | "cancel" | "debrief" | "intel" | "racket-outlook" => 2..=2,
-        "policy" | "delegate" | "autonomy" | "supervise" => 3..=3,
+        "policy" | "delegate" | "autonomy" | "supervise" | "offer" => 3..=3,
         "mandate" => 3..=6,
         "plan" | "preview" => 3..=32,
         "connect" => 3..=3,

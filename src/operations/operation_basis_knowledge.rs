@@ -111,6 +111,10 @@ pub(crate) fn known_detention_arrest(
     character: CharacterId,
 ) -> Option<ArrestId> {
     let target = EntityRef::Character(character);
+    let own_member = state
+        .world
+        .get_character(character)
+        .is_some_and(|member| member.organization() == Some(organization));
     state
         .intelligence
         .information_for_holder_subject(KnowledgeHolder::Organization(organization), target)
@@ -131,6 +135,17 @@ pub(crate) fn known_detention_arrest(
             else {
                 return None;
             };
+            // A crew knows the custody status of its own roster (the counsel view and
+            // release alerts already expose it). Historical intelligence is not a new
+            // extraction opportunity, even if the arrest report is still fresh.
+            if own_member
+                && state
+                    .legal
+                    .get_arrest(*arrest)
+                    .is_some_and(|episode| episode.released_at().is_some())
+            {
+                return None;
+            }
             Some((
                 information.observed_at(),
                 information.recorded_at(),

@@ -99,7 +99,12 @@ Organizational expansion and economic decisions use the same player interface:
 `directory` lists public establishments; `market` lists currently purchasable
 independent establishments with their prices and advertised business functions,
 without exposing rival ownership or private books. `buy` spends accounted funds on
-independent businesses, `launder` converts street cash within an owned front's
+independent businesses. When the listings are exhausted, `offer <business-id> <cents>`
+submits a binding negotiated purchase offer to another organization's owner. An
+owner may refuse; sufficient consideration must compensate its asset value and
+foregone operating income, and it will not sell infrastructure used by active or
+suspended rackets. Accepted offers pay the actual seller, transfer the existing
+books, and restart the acquired operating cycle. `launder` converts street cash within an owned front's
 real capacity, `businesses` shows owned infrastructure and earned owner-withdrawal headroom, `treasury daily` authorizes daily profit distributions before payroll (protected working capital stays in the storefront), `treasury manual` restores explicit withdrawals, and
 `racket-kinds` lists enterprise requirements. `open-account`, `move`,
 and `start-racket` let leadership fund and establish more enterprises with
@@ -143,8 +148,13 @@ and `enterprise-N` records. `known-targets` lists identified institutional and
 administrative targets; it never searches hidden case or rival rosters.
 `known-people` includes current crew, observed people, contacts, and recruitment
 prospects. The `prospects` view identifies familiar vocational skills without
-revealing private motives or acceptance odds. `plan` also accepts `char-N` for witness pressure and extraction
-when the organization has learned typed, episode-specific legal status.
+revealing private motives or acceptance odds. Managers adapt their approaches after
+refusals rather than repeating an unchanged pitch every cooldown. A recruiting
+player organization's outcomes generate sourced reports; approving a pitch displays
+the actual acceptance or refusal, not merely the approval resolution. `plan` also accepts `char-N` for witness pressure and extraction
+when the organization has learned typed, episode-specific legal status. Own-member
+release is visible in `known-people` and prevents authorizing another rescue against
+that concluded custody episode.
 
 All `plan` orders accept optional `approach=...`, `leader=char-N`,
 `Role=char-N`, `police=press|ask|abort`, `delay=2h`, `deadline=6h`,

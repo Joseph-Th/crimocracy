@@ -4962,6 +4962,33 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
         "successful extraction must release the detainee through canonical custody"
     );
     assert!(released.released_at().is_some());
+    let before = bincode::serialize(&state).unwrap();
+    let repeat = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Redundant rescue".to_owned(),
+            kind: OperationKind::Extraction,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::FreeDetainee { target: detainee },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Coordinator, leader), (RoleKind::Driver, driver)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .expect_err("the crew already knows its member is free");
+    assert_eq!(
+        repeat,
+        OperationError::TargetLegalBasisUnknown {
+            kind: OperationKind::Extraction,
+            character: detainee,
+        }
+    );
+    assert_eq!(bincode::serialize(&state).unwrap(), before);
     assert_eq!(
         state.operations().operations().count(),
         operation_count,

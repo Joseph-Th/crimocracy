@@ -203,6 +203,54 @@ pub(super) fn validate_recruitment_outcome_information(
     )?)
 }
 
+/// A recruiting executive needs the outcome as a report, not just an archive entry.
+/// Prepare the complete report shape before the attempt mutates anything. The actual
+/// information ID must be attached only when the cohort commits: several same-minute
+/// recruitment attempts can be planned against the same allocator snapshot.
+pub(super) fn validate_recruiting_player_report(
+    state: &AppState,
+    plan: &RecruitmentPlan,
+) -> Result<Option<ReportDraft>, RecruitmentError> {
+    if state.player_organization() != Some(plan.draft.target_organization) {
+        return Ok(None);
+    }
+    let candidate = state
+        .world
+        .get_character(plan.draft.candidate)
+        .expect("validated candidate");
+    let recruiter = state
+        .world
+        .get_character(plan.draft.recruiter)
+        .expect("validated recruiter");
+    let organization = state
+        .world
+        .get_organization(plan.draft.target_organization)
+        .expect("validated organization");
+    let draft = ReportDraft {
+        recipient: plan.draft.target_organization,
+        kind: ReportKind::AfterAction,
+        title: "Recruitment outcome".to_owned(),
+        entries: vec![ReportEntry {
+            attention: AttentionClass::Notable,
+            summary: recruitment_outcome_summary(
+                candidate.name(),
+                recruiter.name(),
+                organization.name(),
+                plan.context.outcome,
+            ),
+            sources: Vec::new(),
+            entities: BTreeSet::from([
+                EntityRef::Character(plan.draft.candidate),
+                EntityRef::Character(plan.draft.recruiter),
+                EntityRef::Organization(plan.draft.target_organization),
+            ]),
+            decision: None,
+        }],
+    };
+    validate_record_report(state, draft.clone())?;
+    Ok(Some(draft))
+}
+
 /// Player-facing report to the candidate's incumbent organization: a departure notice after an
 /// accepted defection, or a loyalty report naming the outside approach after a refusal.
 pub(super) fn validate_recruitment_member_report(

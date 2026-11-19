@@ -3042,6 +3042,138 @@ fn later_reassignment_does_not_rewrite_refused_recruitment_history() {
 }
 
 #[test]
+fn player_manager_updates_pitch_after_refusal_and_reports_each_outcome() {
+    let mut fixture = fixture();
+    validate_reassign_character(
+        &fixture.state,
+        fixture.candidate,
+        Some(fixture.target),
+        Some(fixture.recruiter),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    fixture.candidate = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Committed Associate".to_owned(),
+            organization: Some(fixture.source),
+            supervisor: Some(fixture.incumbent),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut fixture.state, fixture.target).unwrap();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.incumbent,
+        relationship(100, 100, 0, 100, 100, 0, 0),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(10, 20, 30, 5, 0, 0, 0),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let cadence = fixture
+        .registry
+        .recruitment()
+        .autonomous_attempt_cadence()
+        .as_minutes();
+    let cooldown = fixture.registry.recruitment().cooldown().as_minutes();
+    let step = cooldown.div_ceil(cadence) * cadence;
+    let mut approaches = BTreeSet::new();
+    for index in 0..4 {
+        fixture.state.advance_clock(SimDuration::from_minutes(step));
+        let pass = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+        assert_eq!(pass.attempts.len(), 1);
+        let attempt = fixture
+            .state
+            .recruitment()
+            .get_attempt(pass.attempts[0])
+            .unwrap();
+        assert_eq!(attempt.outcome(), RecruitmentOutcome::Refused);
+        assert!(
+            approaches.insert(attempt.approach()),
+            "an unchanged refusal should not repeat a pitch"
+        );
+        if index == 0 {
+            assert_eq!(attempt.approach(), RecruitmentApproach::PersonalAppeal);
+        }
+        let report = fixture
+            .state
+            .reports()
+            .reports_for(fixture.target)
+            .next_back()
+            .unwrap();
+        assert_eq!(report.title(), "Recruitment outcome");
+        assert_eq!(
+            report.entries()[0].sources,
+            vec![attempt.outcome_information()]
+        );
+        assert!(
+            report.entries()[0]
+                .summary
+                .contains("refused Rival Recruiter's recruitment approach")
+        );
+        assert_eq!(report.entries()[0].attention, AttentionClass::Notable);
+        // The manager's retry judgment survives save/load without serialized private memory.
+        fixture.state = restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, &fixture.state).unwrap(),
+        )
+        .unwrap();
+    }
+    fixture.state.advance_clock(SimDuration::from_minutes(step));
+    let pass = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+    assert!(
+        pass.attempts.is_empty(),
+        "all four recently refused pitches need a rest"
+    );
+    assert_eq!(
+        fixture.state.reports().reports_for(fixture.target).count(),
+        4
+    );
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(11, 20, 30, 5, 0, 0, 0),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let pass = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+    assert_eq!(
+        pass.attempts.len(),
+        1,
+        "a changed relationship enables reconsideration"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .get_attempt(pass.attempts[0])
+            .unwrap()
+            .approach(),
+        RecruitmentApproach::PersonalAppeal
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state).unwrap();
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn refused_poaching_approach_is_reported_to_the_candidates_organization() {
     let mut fixture = fixture();
     validate_set_relationship(

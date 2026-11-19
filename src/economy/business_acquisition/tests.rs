@@ -175,6 +175,183 @@ fn establish_existing_independent_economy(
 }
 
 #[test]
+fn negotiated_purchase_reopens_sold_inventory_and_pays_seller_without_touching_operating_cash() {
+    use crate::core::invariants::validate_state_against_registry;
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::world::world_system::designate_player_organization;
+
+    let mut fixture = make_independent_fixture();
+    let seller = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Rival Holdings".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut fixture.state, fixture.organization).unwrap();
+    let (operating, settlement) = establish_existing_independent_economy(&mut fixture);
+    validate_transfer_business_ownership(
+        &fixture.state,
+        fixture.business,
+        BusinessOwner::Organization(seller),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let base = hospitality_price(&fixture);
+    let expected_net = business_economy_system::forecast_normal_business_net(
+        &fixture.registry,
+        &fixture.state,
+        fixture.business,
+    )
+    .unwrap();
+    assert!(expected_net > Money::ZERO);
+    let price = base
+        .checked_add(Money::from_cents(expected_net.cents() * 90))
+        .unwrap();
+    fund_accounted_from_street(&mut fixture, price.cents());
+    assert!(
+        acquisition_offer(
+            &fixture.registry,
+            &fixture.state,
+            fixture.organization,
+            fixture.business
+        )
+        .is_none()
+    );
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert!(matches!(
+        validate_offer_business(
+            &fixture.registry,
+            &fixture.state,
+            acquisition_draft(&fixture),
+            Money::from_cents(price.cents() - 1)
+        ),
+        Err(BusinessAcquisitionError::OfferDeclined)
+    ));
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    // A rival cannot consent on behalf of a later owner, even if the asset returns
+    // to the original seller before the buyer commits their held token.
+    let stale = validate_offer_business(
+        &fixture.registry,
+        &fixture.state,
+        acquisition_draft(&fixture),
+        price,
+    )
+    .unwrap();
+    let mut changed = fixture.state.clone();
+    for owner in [
+        BusinessOwner::Independent,
+        BusinessOwner::Organization(seller),
+    ] {
+        validate_transfer_business_ownership(&changed, fixture.business, owner)
+            .unwrap()
+            .commit(&mut changed)
+            .unwrap();
+    }
+    let before = bincode::serialize(&changed).unwrap();
+    assert_eq!(
+        stale.commit(&fixture.registry, &mut changed).unwrap_err(),
+        BusinessAcquisitionError::OfferDeclined
+    );
+    assert_eq!(bincode::serialize(&changed).unwrap(), before);
+    // The seller has no clean account yet. Opening one and paying it must be atomic.
+    let acquired = validate_offer_business(
+        &fixture.registry,
+        &fixture.state,
+        acquisition_draft(&fixture),
+        price,
+    )
+    .unwrap()
+    .commit(&fixture.registry, &mut fixture.state)
+    .unwrap();
+    assert_eq!(acquired.price, price);
+    assert!(!acquired.established_economy);
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_business(fixture.business)
+            .unwrap()
+            .owner(),
+        BusinessOwner::Organization(fixture.organization)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.accounted)
+            .unwrap()
+            .balance(),
+        Money::ZERO
+    );
+    let seller_accounts: Vec<_> = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(seller))
+        .collect();
+    assert_eq!(seller_accounts.len(), 1);
+    assert_eq!(seller_accounts[0].kind(), AccountKind::AccountedFunds);
+    assert_eq!(seller_accounts[0].balance(), price);
+    for account in [operating, settlement] {
+        assert_eq!(
+            fixture
+                .state
+                .finance()
+                .get_account(account)
+                .unwrap()
+                .balance(),
+            Money::ZERO
+        );
+    }
+    assert_eq!(
+        fixture
+            .state
+            .reports()
+            .reports_for(seller)
+            .next_back()
+            .unwrap()
+            .title(),
+        "Business sale"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .reports()
+            .reports_for(fixture.organization)
+            .next_back()
+            .unwrap()
+            .title(),
+        "Business acquisition"
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state).unwrap();
+    validate_invariants(&fixture.state);
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .world()
+            .get_business(fixture.business)
+            .unwrap()
+            .owner(),
+        BusinessOwner::Organization(fixture.organization)
+    );
+    assert_eq!(
+        restored
+            .finance()
+            .get_account(seller_accounts[0].id())
+            .unwrap()
+            .balance(),
+        price
+    );
+}
+
+#[test]
 fn rival_investment_competes_for_listings_without_disclosing_buyer() {
     use crate::core::persistence::{build_save, restore_save};
     use crate::world::world_system::{designate_player_organization, insert_character};
