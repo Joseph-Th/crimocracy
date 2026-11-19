@@ -204,7 +204,12 @@ hires counsel through a live legal contact and the production ledger.
 representation only when its legal constraints allow it. Alternatively,
 `policy legal automatic` enables automatic retention when a legal contact
 and funding exist. `advance` interrupts on arrests and releases of members
-so manual counsel decisions are not skipped. It also pauses on newly suspended own businesses or rackets, the first losing cycle in an own racket's losing streak, and payroll shortfalls by default. Use `attention exception off` for uninterrupted routine management; actual pending decisions and own custody changes still interrupt. `brief` displays current daily payroll coverage alongside withdrawable earned surplus.
+so manual counsel decisions are not skipped. It also pauses on newly suspended
+own businesses or rackets, the first losing cycle in an own racket's current
+losing streak (including after reopening), and payroll shortfalls by default.
+Use `attention exception off` for uninterrupted routine management; actual
+pending decisions and own custody changes still interrupt. `brief` displays
+current daily payroll coverage alongside withdrawable earned surplus.
 
 Games may use seeded procedural cities through `--generate` or one of the
 original authored test openings. The `--opening` option chooses among `night-trap`,

@@ -113,13 +113,10 @@ impl Session<'_> {
             let own_new_racket_loss = tick.enterprise_cycles.iter().any(|id| {
                 let enterprises = self.state.enterprises();
                 let cycle = enterprises.get_cycle(*id).expect("settled cycle");
-                cycle.net_cash() < Money::ZERO
-                    && enterprises
-                        .get_enterprise(cycle.enterprise())
-                        .is_some_and(|racket| racket.organization() == self.player)
-                    && enterprises
-                        .prior_cycle(cycle.enterprise(), *id)
-                        .is_none_or(|prior| prior.net_cash() >= Money::ZERO)
+                enterprises
+                    .get_enterprise(cycle.enterprise())
+                    .is_some_and(|racket| racket.organization() == self.player)
+                    && enterprises.cycle_starts_current_loss_streak(*id)
             });
             let pause_exceptions = self
                 .state
@@ -347,6 +344,36 @@ mod tests {
         let second = session.execute("advance 1d").unwrap().0;
         assert!(!second.contains("entered a losing cycle"), "{second}");
         assert_eq!(session.state.now().as_minutes(), 2 * DAY_MINUTES);
+
+        let racket = session
+            .state
+            .enterprises()
+            .enterprises_for_organization(session.player)
+            .find(|racket| racket.location() == EnterpriseLocation::Neighborhood(district))
+            .unwrap();
+        let id = racket.id();
+        if racket.status() == EnterpriseStatus::Active {
+            crimocracy::enterprises::enterprise_execution::validate_suspend_enterprise(
+                &session.state,
+                id,
+            )
+            .unwrap()
+            .commit(&mut session.state)
+            .unwrap();
+        }
+        crimocracy::enterprises::enterprise_execution::validate_resume_enterprise(
+            &registry,
+            &session.state,
+            id,
+        )
+        .unwrap()
+        .commit(&mut session.state)
+        .unwrap();
+        session.state =
+            restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+        let reopened = session.execute("advance 2d").unwrap().0;
+        assert!(reopened.contains("entered a losing cycle"), "{reopened}");
+        assert_eq!(session.state.now().as_minutes(), 3 * DAY_MINUTES);
     }
 
     #[test]

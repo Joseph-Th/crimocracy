@@ -269,6 +269,118 @@ fn autonomous_expansion_shared_slot_prefers_district_leader_over_organization_id
 }
 
 #[test]
+fn autonomous_expansion_resolves_internal_preference_before_rival_competition() {
+    let registry = build_registry();
+    // The initial contender has management 80. The rival's explicit district
+    // manager has management 60, while its broad enterprise manager has 100.
+    // The rival should put forward its preferred district plan, not bypass its
+    // internal first choice merely because a different organization is ahead.
+    for broad_first in [false, true] {
+        let mut fixture = make_test_enterprise_fixture();
+        fund_enterprise_fixture_cash(&mut fixture, 100_000);
+        let rival = insert_organization(
+            &registry,
+            &mut fixture.state,
+            OrganizationDraft {
+                name: "Rival with two mandates".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .unwrap();
+        let district = fixture.authority.scope;
+        let broad = ResponsibilityScope::Function(ResponsibilityFunction::Enterprise);
+        let mut mandates = [(district, 60), (broad, 100)];
+        if broad_first {
+            mandates.reverse();
+        }
+        for (scope, management) in mandates {
+            let manager = insert_character(
+                &mut fixture.state,
+                CharacterDraft {
+                    name: format!("Rival manager {management}"),
+                    organization: Some(rival),
+                    supervisor: None,
+                    autonomy: AutonomyLevel::Delegated,
+                    capabilities: BTreeMap::from([(
+                        CapabilityKind::Management,
+                        rating(management),
+                    )]),
+                    traits: BTreeSet::new(),
+                    drives: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+            validate_assign_mandate(
+                &fixture.state,
+                MandateDraft {
+                    organization: rival,
+                    manager,
+                    scopes: BTreeSet::from([scope]),
+                    standing_orders: BTreeMap::new(),
+                    budget: None,
+                },
+            )
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+        }
+        let cash = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(rival),
+                kind: AccountKind::StreetCash,
+            },
+        )
+        .unwrap();
+        let settlement = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(rival),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .unwrap();
+        validate_record_transaction(
+            &fixture.state,
+            LedgerTransactionDraft {
+                occurred_at: fixture.state.now(),
+                memo: "Fund rival mandates".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: settlement,
+                        amount: Money::from_cents(-100_000),
+                    },
+                    LedgerPosting {
+                        account: cash,
+                        amount: Money::from_cents(100_000),
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(1_440));
+        apply_due_autonomous_enterprises(&registry, &mut fixture.state).unwrap();
+        let protection = fixture
+            .state
+            .enterprises()
+            .enterprises_at(fixture.location)
+            .find(|enterprise| enterprise.kind() == EnterpriseKind::Protection)
+            .expect("the contested protection slot should be claimed");
+        assert_eq!(
+            protection.organization(),
+            fixture.organization,
+            "internal mandate selection must precede rival competition (broad_first={broad_first})"
+        );
+        validate_invariants(&fixture.state);
+    }
+}
+
+#[test]
 fn autonomous_lifecycle_resumes_a_viable_suspended_rival_and_surfaces_the_tick_change() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();

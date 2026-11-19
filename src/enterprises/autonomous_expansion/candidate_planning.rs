@@ -5,7 +5,7 @@
 //! expansion context into deterministic candidate plans without mutating simulation state.
 
 use super::{AutonomousExpansionPlan, ExpansionEconomicsContext, NeighborhoodExpansionAuthority};
-use crate::core::id::{BusinessId, OrganizationId};
+use crate::core::id::BusinessId;
 use crate::delegation::ResponsibilityScope;
 use crate::enterprises::autonomous_planning::{
     AutonomousEnterpriseError, resolve_observed_district_case_count,
@@ -217,7 +217,16 @@ pub(super) fn compare_expansion_plans(
 ) -> std::cmp::Ordering {
     left.authority_rank
         .cmp(&right.authority_rank)
-        .then_with(|| right.expected_net_cash.cmp(&left.expected_net_cash))
+        .then_with(|| compare_expansion_economics(left, right))
+}
+
+fn compare_expansion_economics(
+    left: &AutonomousExpansionPlan,
+    right: &AutonomousExpansionPlan,
+) -> std::cmp::Ordering {
+    right
+        .expected_net_cash
+        .cmp(&left.expected_net_cash)
         .then(
             left.required_working_capital
                 .cmp(&right.required_working_capital),
@@ -227,30 +236,17 @@ pub(super) fn compare_expansion_plans(
         .then(left.supporting_businesses.cmp(&right.supporting_businesses))
 }
 
-/// Orders one candidate from each active mandate for the phase-wide competition. A mandate's
-/// authority rank is an internal governance preference: it decides which plan that manager brings
-/// forward, but cannot grant one organization priority over another in a shared district.
+/// Orders the preferred plan of each organization for the phase-wide competition.
+/// Internal mandate preferences have already been resolved and cannot grant a rival priority.
 pub(super) fn compare_phase_expansion_candidates(
-    left_organization: OrganizationId,
     left_leads_district: bool,
     left: &AutonomousExpansionPlan,
-    right_organization: OrganizationId,
     right_leads_district: bool,
     right: &AutonomousExpansionPlan,
 ) -> std::cmp::Ordering {
-    if left_organization == right_organization {
-        return compare_expansion_plans(left, right);
-    }
-    usize::from(!left_leads_district)
-        .cmp(&usize::from(!right_leads_district))
-        .then_with(|| right.expected_net_cash.cmp(&left.expected_net_cash))
-        .then(
-            left.required_working_capital
-                .cmp(&right.required_working_capital),
-        )
-        .then(left.kind.cmp(&right.kind))
-        .then(left.location.cmp(&right.location))
-        .then(left.supporting_businesses.cmp(&right.supporting_businesses))
+    right_leads_district
+        .cmp(&left_leads_district)
+        .then_with(|| compare_expansion_economics(left, right))
 }
 
 fn host_satisfies_business_requirements(

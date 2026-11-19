@@ -346,7 +346,10 @@ pacing. Do not reintroduce a scripted policy that selects the player's moves:
 that duplicates the game's rules in the harness and drifts from the shipped
 game. Player-behavior judgement comes from reading a real session and its
 reports. Text-play command tests are included in the `cargo test-harness`
-target.
+target. The time-advance contract in `text_play/time_play.rs` exercises the
+first loss, continuing losses, and the first loss after a canonical racket
+suspension/resumption and save restoration; the client must pause at the new
+loss without treating pre-resumption history as part of the current streak.
 
 ## Completion checklist
 

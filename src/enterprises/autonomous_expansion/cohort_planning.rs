@@ -5,7 +5,7 @@
 //! working-capital reservations, occupied racket slots, district influence, and settlement-account
 //! claims. That lets the parent preflight the exact persistent-ID budget for the whole cohort.
 
-use super::candidate_planning::compare_phase_expansion_candidates;
+use super::candidate_planning::{compare_expansion_plans, compare_phase_expansion_candidates};
 use super::{
     AutonomousExpansionPlan, ExpansionIterationContext, decide_autonomous_expansion,
     resolve_autonomous_cash_account, resolve_available_owned_businesses,
@@ -210,6 +210,9 @@ fn select_phase_expansion_candidate(
         let owned_venues = available_venues
             .get(organization)
             .expect("eligible expansion organization must have a venue snapshot");
+        // Resolve internal governance before comparing organizations. A mixed comparator
+        // would otherwise let mandate iteration order change the contested-slot winner.
+        let mut preferred: Option<PhaseExpansionCandidate> = None;
         for (mandate_index, mandate) in organization_mandates.iter().enumerate() {
             let Some(plan) = decide_autonomous_expansion(
                 iteration,
@@ -236,22 +239,30 @@ fn select_phase_expansion_candidate(
                 leads_district: district_leader == Some(*organization),
                 plan,
             };
-            let replace = winner.as_ref().is_none_or(|selected| {
-                compare_phase_expansion_candidates(
-                    candidate.organization,
-                    candidate.leads_district,
-                    &candidate.plan,
-                    selected.organization,
-                    selected.leads_district,
-                    &selected.plan,
-                )
-                .then(candidate.organization.cmp(&selected.organization))
-                .then(candidate.mandate.cmp(&selected.mandate))
-                .is_lt()
+            let replace = preferred.as_ref().is_none_or(|selected| {
+                compare_expansion_plans(&candidate.plan, &selected.plan)
+                    .then(candidate.mandate.cmp(&selected.mandate))
+                    .is_lt()
             });
             if replace {
-                winner = Some(candidate);
+                preferred = Some(candidate);
             }
+        }
+        let Some(candidate) = preferred else {
+            continue;
+        };
+        let replace = winner.as_ref().is_none_or(|selected| {
+            compare_phase_expansion_candidates(
+                candidate.leads_district,
+                &candidate.plan,
+                selected.leads_district,
+                &selected.plan,
+            )
+            .then(candidate.organization.cmp(&selected.organization))
+            .is_lt()
+        });
+        if replace {
+            winner = Some(candidate);
         }
     }
     Ok(winner)

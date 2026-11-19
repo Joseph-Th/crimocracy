@@ -7,6 +7,7 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::core::version::advance_version_preflighted;
+use crate::finance::Money;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -256,8 +257,8 @@ impl EnterpriseState {
 
     /// The settled cycle immediately preceding `cycle` for its enterprise, in O(log n).
     /// Sequential-ID settlement order makes the highest ID below `cycle` the prior cycle;
-    /// this is what per-cycle reportability comparisons need without walking the history.
-    pub fn prior_cycle(
+    /// This supports lifecycle validation and loss-streak queries without walking history.
+    pub(crate) fn prior_cycle(
         &self,
         enterprise: EnterpriseId,
         cycle: EnterpriseCycleId,
@@ -271,6 +272,27 @@ impl EnterpriseState {
                     .get(id)
                     .expect("enterprise cycle index must reference a cycle")
             })
+    }
+
+    /// Whether this settlement begins a losing streak in the current operating run.
+    /// A resumed racket starts a new run: losses at or before the lifecycle anchor
+    /// belong to history, not the current streak.
+    pub fn cycle_starts_current_loss_streak(&self, id: EnterpriseCycleId) -> bool {
+        let Some(cycle) = self.get_cycle(id) else {
+            return false;
+        };
+        let Some(enterprise) = self.get_enterprise(cycle.enterprise()) else {
+            return false;
+        };
+        let anchor = enterprise.loss_streak_anchor();
+        cycle.net_cash() < Money::ZERO
+            && anchor.is_none_or(|at| cycle.occurred_at() > at)
+            && self
+                .prior_cycle(cycle.enterprise(), id)
+                .is_none_or(|prior| {
+                    prior.net_cash() >= Money::ZERO
+                        || anchor.is_some_and(|at| prior.occurred_at() <= at)
+                })
     }
 
     pub fn active_for_mandate(
