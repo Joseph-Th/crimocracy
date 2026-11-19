@@ -1,22 +1,11 @@
-//! Opening campaign for text play: authored vocabulary, seed channels, and the
-//! canonical scenario built from them.
+//! Authored opening variation, timing, and seed-derived content.
 //!
-//! This module owns only what a play session needs to start and resume: the
-//! world/policy seed channels, the authored opening profiles, the scenario
-//! timeline, and the fixture constructed through production operations. It does
-//! not select commands, score runs, or render reports.
+//! Scenario construction belongs in `scenario.rs`.
 
-use crimocracy::core::id::{
-    BusinessId, CharacterId, EnterpriseId, FinancialAccountId, InformationId, MandateId,
-    NeighborhoodId, OrganizationId,
-};
-use crimocracy::core::state::AppState;
 use crimocracy::core::time::{DAY_MINUTES, SimTime};
 use crimocracy::intelligence::{Reliability, Specificity};
-use crimocracy::operations::{ALL_OPERATION_KINDS, OperationKind};
+use crimocracy::operations::OperationKind;
 use crimocracy::registry::Registry;
-
-pub use crate::scenario::build_scenario;
 
 /// Explicit seed channels for a campaign. `world` determines fixture variation
 /// and the simulation RNG streams; `policy` determines authored timing variation.
@@ -249,7 +238,7 @@ impl ScenarioProfile {
         match self {
             // LatePatrol is a residual-risk control: ordinary policing can still catch an
             // immediate move in the most exposed district, while learned timing and planning
-            // information should keep RECON below dispatch pressure.
+            // information can reduce dispatch pressure.
             Self::LatePatrol => match variation {
                 FixtureVariation::Clockwork => 28,
                 FixtureVariation::Crowded => 43,
@@ -311,143 +300,25 @@ impl ScenarioProfile {
     }
 }
 
-/// Authored opening timing. These values anchor the fixture to runtime content
-/// rather than to rule constants owned by the simulation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ScenarioTimeline {
-    pub initial_burglary_at: SimTime,
-    pub initial_opportunity_valid_until: SimTime,
-    pub second_opportunity_discovery_at: SimTime,
-    pub second_opportunity_valid_until: SimTime,
-    pub rush_second_act_at: SimTime,
-    pub recon_second_act_surveillance_at: SimTime,
-}
-
-impl ScenarioTimeline {
-    pub fn for_profile(registry: &Registry, policy_seed: u64, profile: ScenarioProfile) -> Self {
-        let campaign_day_minutes = DAY_MINUTES;
-        let burglary_duration = u64::from(
-            registry
-                .get_operation(OperationKind::Burglary)
-                .execution()
-                .duration()
-                .as_minutes(),
-        );
-        let policy_variant = (policy_seed / 3) % 5;
-        let (initial_burglary_at, initial_opportunity_window) =
-            if profile == ScenarioProfile::FleetingWindow {
-                // A genuinely time-sensitive score: acting policy has only enough time to move
-                // now. Full casing consumes the window, so information has a visible opportunity
-                // cost instead of being a dominant free precondition to every job.
-                let start = 10 + 5 * (policy_seed % 3);
-                (
-                    start,
-                    start.saturating_add(burglary_duration).saturating_add(15),
-                )
-            } else {
-                (
-                    120 + 10 * (policy_seed % 5),
-                    (campaign_day_minutes / 2).max(burglary_duration.saturating_add(60)),
-                )
-            };
-        let second_opportunity_discovery_at = campaign_day_minutes
-            .saturating_add(10)
-            .saturating_add(policy_variant * 10);
-        let second_opportunity_window =
-            (campaign_day_minutes / 2).max(burglary_duration.saturating_add(60));
-        let second_opportunity_valid_until =
-            second_opportunity_discovery_at.saturating_add(second_opportunity_window);
-        let rush_second_act_at = second_opportunity_discovery_at
-            .saturating_add(campaign_day_minutes * 3 / 8)
-            .saturating_add(policy_variant * 10);
-        let recon_second_act_surveillance_at = second_opportunity_discovery_at
-            .saturating_add(50)
-            .saturating_add(policy_variant * 5);
-
-        Self {
-            initial_burglary_at: SimTime::from_minutes(initial_burglary_at),
-            initial_opportunity_valid_until: SimTime::from_minutes(initial_opportunity_window),
-            second_opportunity_discovery_at: SimTime::from_minutes(second_opportunity_discovery_at),
-            second_opportunity_valid_until: SimTime::from_minutes(second_opportunity_valid_until),
-            rush_second_act_at: SimTime::from_minutes(rush_second_act_at),
-            recon_second_act_surveillance_at: SimTime::from_minutes(
-                recon_second_act_surveillance_at,
-            ),
-        }
-    }
-}
-
-/// The authored opening: canonical state plus the identities the fixture
-/// establishes. A play session reads the target, opportunity, timeline, and
-/// variation; the remaining identities describe the authored situation and are
-/// available to sessions and tests that need to inspect or continue it.
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct Scenario<'registry> {
-    pub registry: &'registry Registry,
-    pub state: AppState,
-    pub player: OrganizationId,
-    pub target: BusinessId,
-    pub rival: OrganizationId,
-    pub second_rival: OrganizationId,
-    pub police: OrganizationId,
-    pub neighborhood: NeighborhoodId,
-    pub front: BusinessId,
-    pub resale_venue: BusinessId,
-    pub liquidation_cash: FinancialAccountId,
-    pub liquidation_settlement: FinancialAccountId,
-    /// Organization accounted funds: the clean-money side of laundering.
-    pub accounted_funds: FinancialAccountId,
-    pub boss: CharacterId,
-    pub lieutenant: CharacterId,
-    pub burglar: CharacterId,
-    pub scout: CharacterId,
-    pub target_owner: CharacterId,
-    pub danny_ferro: CharacterId,
-    pub detective: CharacterId,
-    pub police_contact: crimocracy::core::id::ContactId,
-    pub enterprise: EnterpriseId,
-    pub expansion_neighborhood: NeighborhoodId,
-    pub expansion_front: BusinessId,
-    pub expansion_cash: FinancialAccountId,
-    pub expansion_settlement: FinancialAccountId,
-    pub loan_cash: FinancialAccountId,
-    pub loan_settlement: FinancialAccountId,
-    pub wire_front: BusinessId,
-    pub bookmaking_cash: FinancialAccountId,
-    pub bookmaking_settlement: FinancialAccountId,
-    pub rival_venue: BusinessId,
-    pub rival_cash: FinancialAccountId,
-    pub rival_settlement: FinancialAccountId,
-    pub lieutenant_mandate: MandateId,
-    pub investigation: Option<crimocracy::core::id::InvestigationId>,
-    pub alternate_target: BusinessId,
-    pub opportunity_information: InformationId,
-    pub alternate_opportunity_information: InformationId,
-    pub variation: FixtureVariation,
-    pub timeline: ScenarioTimeline,
-    /// Explicit seed channels, preserved so a session can report how it started.
-    pub seeds: EvaluationSeeds,
-    /// Registry-derived slack for the terminal-wait guard: the longest authored
-    /// operation duration, so the guard tracks content instead of a constant.
-    pub wait_slack_minutes: u32,
-}
-
-/// Longest authored operation duration, used as content-derived slack by the
-/// terminal-wait guard so adding a longer operation cannot silently make a
-/// session time out before production can resolve it.
-pub fn operation_wait_slack_minutes(registry: &Registry) -> u32 {
-    ALL_OPERATION_KINDS
-        .iter()
-        .map(|kind| {
-            registry
-                .get_operation(*kind)
-                .execution()
-                .duration()
-                .as_minutes()
-        })
-        .max()
-        .unwrap_or_default()
+/// Deadline for the initial burglary opportunity.
+pub fn initial_opportunity_deadline(
+    registry: &Registry,
+    policy_seed: u64,
+    profile: ScenarioProfile,
+) -> SimTime {
+    let duration = u64::from(
+        registry
+            .get_operation(OperationKind::Burglary)
+            .execution()
+            .duration()
+            .as_minutes(),
+    );
+    let minutes = if profile == ScenarioProfile::FleetingWindow {
+        10 + 5 * (policy_seed % 3) + duration + 15
+    } else {
+        (DAY_MINUTES / 2).max(duration + 60)
+    };
+    SimTime::from_minutes(minutes)
 }
 
 /// Shared opening street-treasury seed. The financial view excludes this from
@@ -470,16 +341,6 @@ pub fn jitter_rating_u8(base: u8, jitter: i16) -> u8 {
 pub fn level(value: u8) -> crimocracy::social::RelationshipLevel {
     crimocracy::social::RelationshipLevel::try_new(value)
         .expect("authored campaign relationship levels are written within 0..=100")
-}
-
-/// Confirm the opening satisfies the production state invariants before play.
-pub fn validate_campaign_state(
-    registry: &Registry,
-    state: &AppState,
-) -> Result<(), Box<dyn std::error::Error>> {
-    crimocracy::core::invariants::validate_state(state)?;
-    crimocracy::core::invariants::validate_state_against_registry(registry, state)?;
-    Ok(())
 }
 
 /// Parse a seed flag value, accepting `0x[hex]` or all-decimal digits. Anything

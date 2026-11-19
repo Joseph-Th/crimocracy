@@ -36,6 +36,14 @@ fn police_contact_disclosure_provides_typed_witness_basis_for_player_operation()
         })
         .expect("the police detective's actual case must register a first-hand witness fact");
     let private_source = private.id();
+    let Some(InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+        investigation,
+    })) = private.signal()
+    else {
+        panic!("expected a typed witness observation");
+    };
+    let case_target = format!("investigation-{}", investigation.raw());
+    let investigation = *investigation;
     let witness = match private.subject() {
         EntityRef::Character(id) => id,
         _ => panic!("a typed witness source must name a character"),
@@ -56,6 +64,12 @@ fn police_contact_disclosure_provides_typed_witness_basis_for_player_operation()
             .is_err()
     );
     let before = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute(&format!("preview surveillance {case_target}"))
+            .is_err()
+    );
+    assert_eq!(before, snapshot(&registry, &session));
     let learned = session.execute("contact").unwrap().0;
     assert!(learned.contains("Case witness identified"), "{learned}");
     assert_ne!(before, snapshot(&registry, &session));
@@ -87,6 +101,27 @@ fn police_contact_disclosure_provides_typed_witness_basis_for_player_operation()
             .0
             .contains("reported case witness")
     );
+    assert!(
+        session
+            .execute("known-targets")
+            .unwrap()
+            .0
+            .contains(&case_target)
+    );
+    assert!(
+        session
+            .organization_information()
+            .all(|fact| { fact.subject() != EntityRef::Investigation(investigation) }),
+        "the witness disclosure alone should identify the case"
+    );
+    let before_preview = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute(&format!("preview surveillance {case_target}"))
+            .is_ok(),
+        "a disclosed typed case identity must permit reconnaissance"
+    );
+    assert_eq!(before_preview, snapshot(&registry, &session));
     let pressure = session
         .execute(&format!("plan witnesspressure char-{}", witness.raw()))
         .unwrap()

@@ -123,6 +123,33 @@ fn text_play_reconnaissance_directory_guards_unknown_world_and_admin_ids() {
 }
 
 #[test]
+fn text_play_can_target_an_identified_information_source() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let source = session
+        .organization_information()
+        .find_map(|info| match info.source_entity() {
+            Some(EntityRef::Character(id)) if info.summary().contains("Lena Orr") => Some(id),
+            _ => None,
+        })
+        .expect("opening intelligence names its source");
+    let before = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute("known-people")
+            .unwrap()
+            .0
+            .contains("Lena Orr")
+    );
+    assert!(
+        session
+            .execute(&format!("preview surveillance char-{}", source.raw()))
+            .is_ok()
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+}
+
+#[test]
 fn text_play_local_watch_identifies_only_observed_rival_rackets_and_people() {
     let registry = crimocracy::build_registry();
     let mut session =

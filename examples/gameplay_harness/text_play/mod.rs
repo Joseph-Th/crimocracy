@@ -1,13 +1,10 @@
-//! Line-oriented player client. The scripted evaluator is not involved in command selection.
+//! Line-oriented player client over production operations and minute ticks.
 //!
-//! Campaigns can begin in a generated city or an authored opening. All subsequent
-//! actions run through the same production validation, commit and minute-tick owners
-//! as the evaluation harness. Views contain only the player's staff, books, reports,
-//! and organization-held intelligence; scenario diagnostics never enter this client.
+//! Campaigns begin in a generated city or a complete authored opening.
+//! Views contain only the player's staff, books, reports, and held intelligence.
 
-use crate::campaign::{
-    EvaluationSeeds, FixtureVariation, ScenarioProfile, build_scenario, parse_seed_value,
-};
+use crate::campaign::{EvaluationSeeds, FixtureVariation, ScenarioProfile, parse_seed_value};
+use crate::scenario::build_scenario;
 use crimocracy::city_generation::{CityScale, generate_city};
 use crimocracy::contacts::contact_system::{
     InstitutionalContactDraft, find_pending_disclosure_sources, validate_contact_disclosure,
@@ -471,44 +468,18 @@ impl<'a> Session<'a> {
         seeds: EvaluationSeeds,
         opening: ScenarioProfile,
     ) -> Result<Self, String> {
-        let mut scenario = build_scenario(registry, seeds, opening).map_err(|e| e.to_string())?;
-        for (target, source, summary, deadline) in [
-            (
-                scenario.target,
-                scenario.opportunity_information,
-                scenario.variation.opportunity_summary(),
-                Some(scenario.timeline.initial_opportunity_valid_until),
-            ),
-            (
-                scenario.alternate_target,
-                scenario.alternate_opportunity_information,
-                "A second shop has an independently observed opening. This lead has no known expiry.",
-                None,
-            ),
-        ] {
-            validate_discover_operation_opportunity(
-                registry,
-                &scenario.state,
-                OperationOpportunityDraft {
-                    organization: scenario.player,
-                    operation_kind: OperationKind::Burglary,
-                    targets: BTreeSet::from([EntityRef::Business(target)]),
-                    source_information: BTreeSet::from([source]),
-                    summary: summary.to_owned(),
-                    valid_until: deadline,
-                },
-            )
-            .map_err(|e| e.to_string())?
-            .commit(&mut scenario.state)
-            .map_err(|e| e.to_string())?;
-        }
+        let state = build_scenario(registry, seeds, opening).map_err(|e| e.to_string())?;
+        let player = state
+            .player_organization()
+            .ok_or("authored opening has no player organization")?;
+        let variation = FixtureVariation::from_seed(seeds.world);
         Ok(Self {
             registry,
-            state: scenario.state,
-            player: scenario.player,
+            state,
+            player,
             seeds,
-            district: scenario.variation.neighborhood_name().to_owned(),
-            district_variant: scenario.variation.label(),
+            district: variation.neighborhood_name().to_owned(),
+            district_variant: variation.label(),
         })
     }
 
@@ -786,8 +757,13 @@ impl<'a> Session<'a> {
             }
         }
         for info in self.organization_information() {
-            if let EntityRef::Character(id) = info.subject() {
-                known.insert(id);
+            for entity in [Some(info.subject()), info.source_entity()]
+                .into_iter()
+                .flatten()
+            {
+                if let EntityRef::Character(id) = entity {
+                    known.insert(id);
+                }
             }
             if let Some(InformationSignal::PersonnelPresence { characters }) = info.signal() {
                 known.extend(characters.iter().copied());

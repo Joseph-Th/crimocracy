@@ -5,8 +5,6 @@
 //! start from a known, reproducible situation; it never selects commands or
 //! interprets outcomes.
 
-//! Scenario authoring: fixture construction, operation authorization helpers, and authored timeline derivation.
-
 use crimocracy::contacts::contact_system::{InstitutionalContactDraft, validate_establish_contact};
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::state::AppState;
@@ -32,6 +30,9 @@ use crimocracy::intelligence::{
 use crimocracy::legal::jurisdiction_system::validate_set_jurisdiction;
 use crimocracy::legal::patrol_system::validate_establish_patrol_deployment;
 use crimocracy::legal::{DayMinute, JurisdictionDraft, PatrolDeploymentDraft, PatrolWindow};
+use crimocracy::operations::OperationKind;
+use crimocracy::opportunities::OperationOpportunityDraft;
+use crimocracy::opportunities::opportunity_system::validate_discover_operation_opportunity;
 use crimocracy::registry::Registry;
 use crimocracy::social::RelationshipDimensions;
 use crimocracy::social::relationship_system::validate_set_relationship;
@@ -48,16 +49,18 @@ use crimocracy::world::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
-use crate::campaign::*;
+use crate::campaign::{
+    EvaluationSeeds, FixtureVariation, STARTING_TREASURY_CENTS, ScenarioProfile,
+    initial_opportunity_deadline, jitter_rating_u8, level, rating,
+};
 
 pub fn build_scenario(
     registry: &Registry,
     seeds: EvaluationSeeds,
     profile: ScenarioProfile,
-) -> Result<Scenario<'_>, Box<dyn Error>> {
+) -> Result<AppState, Box<dyn Error>> {
     let mut state = AppState::new(seeds.world);
     let variation = FixtureVariation::from_seed(seeds.world);
-    let timeline = ScenarioTimeline::for_profile(registry, seeds.policy, profile);
 
     let player = insert_organization(
         registry,
@@ -223,7 +226,7 @@ pub fn build_scenario(
             drives: BTreeMap::from([(DriveKind::Safety, rating(88))]),
         },
     )?;
-    let scout = insert_character(
+    insert_character(
         &mut state,
         CharacterDraft {
             name: "Mara Vale".to_owned(),
@@ -253,10 +256,7 @@ pub fn build_scenario(
             drives: BTreeMap::new(),
         },
     )?;
-    // Danny Ferro is the act-2 replacement candidate: an independent the organization would need
-    // to court through the canonical executive recruitment path after losing a crew member. The
-    // authored candidate and pitch are fixed fixture policy rather than selected by inspecting his
-    // latent drives or traits; those private characteristics remain production scoring inputs.
+    // An independent candidate with burglary skills and private recruitment motives.
     let danny_ferro = insert_character(
         &mut state,
         CharacterDraft {
@@ -332,8 +332,7 @@ pub fn build_scenario(
     // The burglar also carries an older personal bond to the boss himself. Its strength varies
     // across authored worlds: sometimes that history is enough to win him back, and in the
     // crowded fixture it has cooled enough that leadership must live with a refusal and rebuild.
-    // Act-1 rival poaching never reads this edge (its factors use only candidate-to-recruiter and
-    // candidate-to-incumbent), so the variation changes recovery rather than causing the exit.
+    // Rival recruitment uses the candidate's relationship with the recruiter and incumbent.
     let boss_burglar_relationship = match variation {
         FixtureVariation::Crowded => RelationshipDimensions {
             trust: level(60),
@@ -357,10 +356,8 @@ pub fn build_scenario(
     validate_set_relationship(&state, burglar, boss, boss_burglar_relationship)?
         .commit(&mut state)?;
 
-    // Danny's pitch has a long-standing personal relationship to Marrow to stand on, so the
-    // relationship edge runs from candidate to recruiter and executive recruitment stays
-    // canonical. Production scoring still considers Danny's own private motives after the
-    // fixture-selected pitch is submitted; harness policy does not inspect them to choose it.
+    // Danny's relationship to Marrow makes him a plausible executive recruitment prospect.
+    // Production scoring considers his private motives when the player makes an offer.
     validate_set_relationship(
         &state,
         danny_ferro,
@@ -378,8 +375,7 @@ pub fn build_scenario(
     .commit(&mut state)?;
 
     // The boss keeps an old friendship with the precinct's lead detective: the organization's
-    // standing Police-channel institutional contact. It is world state every branch can use;
-    // only the arcs that have a reason to ask actually do.
+    // standing Police-channel institutional contact, available to the player.
     validate_set_relationship(
         &state,
         boss,
@@ -496,7 +492,7 @@ pub fn build_scenario(
             owner: BusinessOwner::Organization(player),
         },
     )?;
-    let resale_venue = insert_business(
+    insert_business(
         registry,
         &mut state,
         BusinessDraft {
@@ -515,7 +511,7 @@ pub fn build_scenario(
 
     // Rival-held venue in the home district: the Rosetti organization's delegated expansion
     // pass can host venue rackets here once its daily cadence comes due.
-    let rival_venue = insert_business(
+    insert_business(
         registry,
         &mut state,
         BusinessDraft {
@@ -532,7 +528,7 @@ pub fn build_scenario(
     )?;
     // Second rival's home-district venue: Victor D'Amato's organization now has a
     // competing claim in the same district so both rivals can expand and poach.
-    let _damato_venue = insert_business(
+    insert_business(
         registry,
         &mut state,
         BusinessDraft {
@@ -548,13 +544,8 @@ pub fn build_scenario(
         },
     )?;
 
-    // Second-district expansion fixture: a quiet harbor neighborhood outside Central Precinct's
-    // jurisdiction, with an independently owned social club able to host a second gambling
-    // enterprise. No jurisdiction is authored here on purpose: with no case-intake authority
-    // there is no district heat, which is exactly the diversification lesson the PRESS arc
-    // proves. The club starts independent on purpose too: hosting a racket requires owning the
-    // venue, so diversification must run through the canonical acquisition path (clean money
-    // buys the club) before the delegated expansion can establish anything there.
+    // A harbor district outside Central Precinct's jurisdiction offers diversification.
+    // Its independent social club must be acquired before hosting an enterprise.
     let expansion_neighborhood = insert_neighborhood(
         &mut state,
         NeighborhoodDraft {
@@ -571,7 +562,7 @@ pub fn build_scenario(
             },
         },
     )?;
-    let expansion_front = insert_business(
+    insert_business(
         registry,
         &mut state,
         BusinessDraft {
@@ -586,12 +577,9 @@ pub fn build_scenario(
             owner: BusinessOwner::Independent,
         },
     )?;
-    // Empire-ladder fixture: an independent racing-wire office in the home district. Owning
-    // it is the only way the organization can ever run a bookmaking book - the wire is a
-    // network dependency no amount of cash at the club substitutes for - so buying it is a
-    // capability unlock, not just one more venue. Starts independent so the empire beat pays
-    // the authored price through the same canonical acquisition path as the harbor club.
-    let wire_front = insert_business(
+    // The independent racing-wire office provides a network dependency for bookmaking.
+    // Acquiring it unlocks that capability through the normal business acquisition path.
+    insert_business(
         registry,
         &mut state,
         BusinessDraft {
@@ -605,48 +593,44 @@ pub fn build_scenario(
             owner: BusinessOwner::Independent,
         },
     )?;
-    let expansion_cash = insert_account(
+    insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::StreetCash,
         },
     )?;
-    let expansion_settlement = insert_account(
+    insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::Settlement,
         },
     )?;
-    // Idle-cash lending book: a street-cash till and settlement counterparty for the
-    // second home-district racket the PRESS stand-down opens once the file cools. The
-    // accounts exist in every branch's fixture (like the expansion pair) so IDs stay
-    // comparable across matched branches; only the stand-down policy ever uses them.
-    let loan_cash = insert_account(
+    // Additional street-cash and settlement accounts for a lending enterprise.
+    insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::StreetCash,
         },
     )?;
-    let loan_settlement = insert_account(
+    insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::Settlement,
         },
     )?;
-    // Bookmaking book (empire ladder): the wire-service purchase's paired racket account.
-    // The book runs at the club, but its money is its own street-cash till.
-    let bookmaking_cash = insert_account(
+    // Separate operating and settlement accounts for a prospective bookmaking enterprise.
+    insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
             kind: AccountKind::StreetCash,
         },
     )?;
-    let bookmaking_settlement = insert_account(
+    insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
@@ -713,7 +697,7 @@ pub fn build_scenario(
     )?;
     // Clean-money destination: laundering routes street cash into the organization's
     // accounted funds through an owned cash-intensive front's canonical finance path.
-    let accounted_funds = insert_account(
+    insert_account(
         &mut state,
         FinancialAccountDraft {
             owner: FinancialOwner::Organization(player),
@@ -830,7 +814,7 @@ pub fn build_scenario(
         },
     )?
     .commit(&mut state)?;
-    let police_contact = validate_establish_contact(
+    validate_establish_contact(
         &state,
         InstitutionalContactDraft {
             sponsor: player,
@@ -839,7 +823,7 @@ pub fn build_scenario(
         },
     )?
     .commit(&mut state)?;
-    let enterprise = validate_establish_enterprise(
+    validate_establish_enterprise(
         registry,
         &state,
         EnterpriseDraft {
@@ -977,51 +961,40 @@ pub fn build_scenario(
     )?
     .commit(&mut state)?;
 
-    let scenario = Scenario {
-        registry,
-        state,
-        player,
-        rival,
-        second_rival,
-        police,
-        neighborhood,
-        target,
-        alternate_target,
-        front,
-        resale_venue,
-        liquidation_cash,
-        liquidation_settlement,
-        accounted_funds,
-        boss,
-        lieutenant,
-        burglar,
-        scout,
-        target_owner,
-        danny_ferro,
-        detective,
-        police_contact,
-        opportunity_information,
-        alternate_opportunity_information,
-        enterprise,
-        expansion_neighborhood,
-        expansion_front,
-        expansion_cash,
-        expansion_settlement,
-        loan_cash,
-        loan_settlement,
-        wire_front,
-        bookmaking_cash,
-        bookmaking_settlement,
-        rival_venue,
-        rival_cash,
-        rival_settlement,
-        lieutenant_mandate: mandate,
-        investigation: None,
-        variation,
-        timeline,
-        seeds,
-        wait_slack_minutes: operation_wait_slack_minutes(registry),
-    };
-    validate_campaign_state(scenario.registry, &scenario.state)?;
-    Ok(scenario)
+    // Finish the authored opening with both playable leads, not just their source notes.
+    for (business, source, summary, deadline) in [
+        (
+            target,
+            opportunity_information,
+            variation.opportunity_summary(),
+            Some(initial_opportunity_deadline(
+                registry,
+                seeds.policy,
+                profile,
+            )),
+        ),
+        (
+            alternate_target,
+            alternate_opportunity_information,
+            "A second shop has an independently observed opening. This lead has no known expiry.",
+            None,
+        ),
+    ] {
+        validate_discover_operation_opportunity(
+            registry,
+            &state,
+            OperationOpportunityDraft {
+                organization: player,
+                operation_kind: OperationKind::Burglary,
+                targets: BTreeSet::from([EntityRef::Business(business)]),
+                source_information: BTreeSet::from([source]),
+                summary: summary.to_owned(),
+                valid_until: deadline,
+            },
+        )?
+        .commit(&mut state)?;
+    }
+    crimocracy::core::invariants::validate_state(&state)?;
+    crimocracy::core::invariants::validate_state_against_registry(registry, &state)?;
+    Ok(state)
 }

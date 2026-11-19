@@ -16,7 +16,25 @@ fn text_play_alternate_openings_are_saved_campaigns_with_distinct_crews() {
         ScenarioProfile::GreenScout,
     ] {
         let mut session = Session::new_with_opening(&registry, seeds, opening).unwrap();
-        assert_eq!(session.known_opportunities().len(), 2);
+        let leads = session.known_opportunities();
+        assert_eq!(leads.len(), 2);
+        let burglary_duration = u64::from(
+            registry
+                .get_operation(OperationKind::Burglary)
+                .execution()
+                .duration()
+                .as_minutes(),
+        );
+        let expected_deadline = if opening == ScenarioProfile::FleetingWindow {
+            burglary_duration + 25
+        } else {
+            (DAY_MINUTES / 2).max(burglary_duration + 60)
+        };
+        assert_eq!(
+            leads[0].valid_until().map(|at| at.as_minutes()),
+            Some(expected_deadline),
+        );
+        assert_eq!(leads[1].valid_until(), None);
         let saved = build_save(&registry, &session.state).unwrap();
         let restored = restore_save(&registry, saved.clone()).unwrap();
         assert_eq!(

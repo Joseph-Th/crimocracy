@@ -5,7 +5,9 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, OperationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::enterprises::EnterpriseStatus;
-use crate::intelligence::KnowledgeHolder;
+use crate::intelligence::{
+    InformationSignal, InformationTopic, KnowledgeHolder, LegalPersonStatusSignal,
+};
 use crate::operations::{
     ACTIVE_ASSIGNMENT_STATUSES, OperationBusinessTargetOwnership, OperationKind,
     OperationObjective, OperationObjectiveKind,
@@ -353,17 +355,35 @@ fn validate_surveillance_target_knowledge(
         | EntityRef::DecisionRequest(_)
         | EntityRef::Mandate(_) => return Ok(()),
     };
+    let holder = KnowledgeHolder::Organization(organization);
     if intrinsically_known
         || state
             .intelligence
-            .information_for_holder_subject(KnowledgeHolder::Organization(organization), target)
+            .information_for_holder_subject(holder, target)
             .next()
             .is_some()
     {
-        Ok(())
-    } else {
-        Err(OperationError::MissingEntity(target))
+        return Ok(());
     }
+    // A witness disclosure explicitly identifies its case even though its primary subject
+    // is the witness. Use only the acting organization's legal intelligence, never the
+    // investigator's private notes or the case's current activity.
+    if let EntityRef::Investigation(investigation) = target
+        && state
+            .intelligence
+            .information_for_holder_by_topic(holder, InformationTopic::LegalActivity)
+            .any(|information| {
+                matches!(
+                    information.signal(),
+                    Some(InformationSignal::LegalPersonStatus(
+                        LegalPersonStatusSignal::CaseWitness { investigation: learned }
+                    )) if *learned == investigation
+                )
+            })
+    {
+        return Ok(());
+    }
+    Err(OperationError::MissingEntity(target))
 }
 
 /// Smallest non-terminal operation whose objective extracts the given detainee, if any.

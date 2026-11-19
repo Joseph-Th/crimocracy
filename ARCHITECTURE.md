@@ -111,7 +111,9 @@ truth or persistent metadata. Preset sizes produce 4/8/16 districts with
 The first generated neighborhood is the home label for a saved campaign, while
 the persistent world and all simulation state are restored directly from the
 normal `SaveEnvelope`. Authored openings continue to build through
-`examples/gameplay_harness/scenario.rs` for fixed-situation tests.
+`examples/gameplay_harness/scenario.rs` for fixed-situation tests. The builder
+returns complete validated `AppState`, including both opening opportunities;
+the player adapter does not finish campaign construction.
 The read-only `city_view::CityScene` projects existing streets, lots and
 modeled business geometry deterministically from the generated `WorldState`;
 road strips are visual topology and do not create persisted transport routes,
@@ -138,7 +140,9 @@ identities without further discovery. Organizations, people and administrative
 records require a known ID from player membership, contact institutions,
 recruitment candidate discovery, own operations/enterprises, or explicit
 organization-held information; case-witness signals identify the specific
-investigation without revealing its live state. The adapter uses generic labels
+investigation without revealing its live state. The production reconnaissance
+validator accepts that typed case reference as well as direct case subjects.
+The adapter uses generic labels
 for learned rival records, never reads hidden titles or current status to
 populate the targeting directory, and defers objective viability to the
 operation owner. Surveillance and infiltration observe the target through
