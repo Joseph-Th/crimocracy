@@ -18,7 +18,9 @@
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{BusinessId, FinancialAccountId, IdExhaustionError, IdKind, OrganizationId};
+use crate::core::id::{
+    BusinessId, FinancialAccountId, IdExhaustionError, IdKind, OpportunityId, OrganizationId,
+};
 use crate::core::state::AppState;
 use crate::economy::{BusinessEconomyDraft, business_economy_system};
 use crate::finance::finance_system::{
@@ -30,14 +32,27 @@ use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
+use crate::intelligence::intelligence_system::{
+    IntelligenceError, ValidatedInformation, validate_record_information,
+};
+use crate::intelligence::{
+    InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+    Specificity,
+};
+use crate::operations::OperationBusinessTargetOwnership;
+use crate::opportunities::OpportunityStatus;
+use crate::opportunities::opportunity_system::{OpportunityError, validate_dismiss_opportunity};
 use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::BusinessOwner;
 use crate::world::world_system::WorldError;
 use crate::world::world_system::validate_transfer_business_ownership;
+use crate::world::{BusinessFunction, BusinessOwner, OrganizationKind};
 use std::collections::BTreeSet;
 use thiserror::Error;
+
+mod autonomous;
+pub(crate) use autonomous::apply_due_autonomous_acquisitions;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum BusinessAcquisitionError {
@@ -79,6 +94,10 @@ pub enum BusinessAcquisitionError {
     #[error(transparent)]
     Report(#[from] ReportError),
     #[error(transparent)]
+    Opportunity(#[from] OpportunityError),
+    #[error(transparent)]
+    Intelligence(#[from] IntelligenceError),
+    #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
 }
 
@@ -100,6 +119,8 @@ pub struct AcquiredBusiness {
     pub price: Money,
     /// True when commit also opened the acquired business's first operating economy.
     pub established_economy: bool,
+    /// Open foreign-only leads rendered moot by the buyer's new ownership.
+    pub dismissed_opportunities: Vec<OpportunityId>,
 }
 
 #[derive(Debug)]
@@ -116,6 +137,7 @@ pub struct ValidatedBusinessAcquisition {
 impl ValidatedBusinessAcquisition {
     pub fn commit(
         self,
+        registry: &Registry,
         state: &mut AppState,
     ) -> Result<AcquiredBusiness, BusinessAcquisitionError> {
         // ---- Phase 1: re-validate every fallible condition against live state. --------
@@ -216,6 +238,35 @@ impl ValidatedBusinessAcquisition {
         } else {
             None
         };
+        // Only the buyer learns that its own foreign-target leads have become redundant.
+        // Keep multi-target leads open when an alternative target may still be actionable.
+        // Prepare the current set at commit, not when the purchase was first validated.
+        let dismissals = state
+            .opportunities()
+            .opportunities_for_organization(self.organization)
+            .filter(|record| {
+                record.status() == OpportunityStatus::Open
+                    && record
+                        .valid_until()
+                        .is_none_or(|deadline| state.now() < deadline)
+                    && record
+                        .context()
+                        .operation_kind()
+                        .business_target_ownership()
+                        == Some(OperationBusinessTargetOwnership::Foreign)
+                    && record.context().targets().len() == 1
+                    && record
+                        .context()
+                        .targets()
+                        .contains(&EntityRef::Business(self.business))
+            })
+            .map(|record| {
+                Ok((
+                    record.id(),
+                    validate_dismiss_opportunity(registry, state, record.id())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, OpportunityError>>()?;
         let announcement = validate_record_report(
             state,
             ReportDraft {
@@ -238,11 +289,54 @@ impl ValidatedBusinessAcquisition {
             },
         )?;
 
+        // Listing availability is public, but buyers, balances and private enterprise
+        // dependencies are not. Notify the player that a listed property has left the market
+        // without identifying the purchaser or its financing.
+        let market_notice = state
+            .player_organization()
+            .filter(|player| *player != self.organization)
+            .map(|recipient| {
+                validate_record_report(
+                    state,
+                    ReportDraft {
+                        recipient,
+                        kind: ReportKind::Financial,
+                        title: "Property market".to_owned(),
+                        entries: vec![ReportEntry {
+                            attention: AttentionClass::Notable,
+                            summary: format!(
+                                "{} has been sold and is no longer available for direct purchase.",
+                                self.business_name
+                            ),
+                            sources: Vec::new(),
+                            entities: BTreeSet::from([EntityRef::Business(self.business)]),
+                            decision: None,
+                        }],
+                    },
+                )
+            })
+            .transpose()?;
+
+        // Property transfers are institutional business: commercial registers track the new
+        // owner, political staff see title changes, and labor officials see union-access
+        // establishments change hands. Only those institutions hold the evidence; contacts
+        // must still disclose it through their normal relationship-gated channel.
+        let institutional_notices =
+            plan_institutional_sale_observations(state, self.organization, self.business)?;
+
         // ---- Phase 3: reserve the complete persistent-ID budget, then commit. --------
         // No mutation occurs before this aggregate preflight. From this point onward each
         // fallible canonical commit is guarded by dependencies that this function alone controls.
         let mut id_budget = payment.id_budget();
         id_budget.extend([(IdKind::BusinessOwnershipChange, 1), (IdKind::Report, 1)]);
+        id_budget.extend(std::iter::repeat_n((IdKind::Report, 1), dismissals.len()));
+        if market_notice.is_some() {
+            id_budget.push((IdKind::Report, 1));
+        }
+        id_budget.extend(std::iter::repeat_n(
+            (IdKind::Information, 1),
+            institutional_notices.len(),
+        ));
         state.ids.reserve_many(&id_budget)?;
         transfer
             .commit(state)
@@ -260,12 +354,107 @@ impl ValidatedBusinessAcquisition {
         announcement
             .commit(state)
             .expect("a validated acquisition report about live entities must commit");
+        if let Some(notice) = market_notice {
+            notice
+                .commit(state)
+                .expect("prevalidated public market notice must remain current");
+        }
+        for notice in institutional_notices {
+            notice
+                .commit(state)
+                .expect("prevalidated sale observation must remain current");
+        }
+        let dismissed_opportunities = dismissals
+            .into_iter()
+            .map(|(id, dismissal)| {
+                dismissal
+                    .commit(state)
+                    .expect("prevalidated acquisition dismissal must remain current");
+                id
+            })
+            .collect();
         Ok(AcquiredBusiness {
             business: self.business,
             price: self.price,
             established_economy: establish_now,
+            dismissed_opportunities,
         })
     }
+}
+
+fn plan_institutional_sale_observations(
+    state: &AppState,
+    buyer: OrganizationId,
+    property: BusinessId,
+) -> Result<Vec<ValidatedInformation>, IntelligenceError> {
+    let business = state
+        .world
+        .get_business(property)
+        .expect("validated property");
+    let buyer_name = state
+        .world
+        .get_organization(buyer)
+        .expect("validated buyer")
+        .name();
+    let mut observations = Vec::new();
+    for institution in state.world.organizations() {
+        let (topic, description) = match institution.kind() {
+            OrganizationKind::Political => {
+                (InformationTopic::MarketAccess, "Property registration")
+            }
+            OrganizationKind::Commercial => (
+                InformationTopic::FinancialPerformance,
+                "Commercial ownership update",
+            ),
+            OrganizationKind::Labor
+                if business
+                    .functions()
+                    .contains(&BusinessFunction::UnionAccess) =>
+            {
+                (
+                    InformationTopic::FinancialPerformance,
+                    "Union workplace ownership update",
+                )
+            }
+            OrganizationKind::Criminal
+            | OrganizationKind::LawEnforcement
+            | OrganizationKind::LegalAuthority
+            | OrganizationKind::LegalServices
+            | OrganizationKind::Prosecutor
+            | OrganizationKind::Labor
+            | OrganizationKind::Civic => continue,
+        };
+        for official in state
+            .world
+            .characters_in_organization(institution.id())
+            .filter(|official| {
+                state
+                    .legal()
+                    .active_arrest_for_character(official.id())
+                    .is_none()
+            })
+        {
+            observations.push(validate_record_information(
+                state,
+                InformationDraft {
+                    holder: KnowledgeHolder::Character(official.id()),
+                    source_kind: InformationSourceKind::DirectObservation,
+                    topic,
+                    source_entity: Some(EntityRef::Organization(institution.id())),
+                    subject: EntityRef::Organization(buyer),
+                    observed_at: state.now(),
+                    reliability: Reliability::DirectAccess,
+                    specificity: Specificity::Precise,
+                    summary: format!(
+                        "{description}: {} acquired {}.",
+                        buyer_name,
+                        business.name()
+                    ),
+                },
+            )?);
+        }
+    }
+    Ok(observations)
 }
 
 fn acquisition_payment_draft(

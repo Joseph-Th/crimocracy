@@ -15,7 +15,7 @@ use crate::delegation::delegation_system::{DelegationError, resolve_policy_for_m
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::recruitment::recruitment_system::{
     RecruitmentError, ValidatedRecruitmentAttempt, find_recruitment_candidates,
-    validate_delegated_recruitment_attempt,
+    recruitment_approval_is_deferred, validate_delegated_recruitment_attempt,
 };
 use crate::recruitment::scoring::recruitment_relationship_support;
 use crate::recruitment::{RecruitmentApproach, RecruitmentDraft};
@@ -355,7 +355,12 @@ fn prepare_recruitment_authorities(
         // The shared recruitment query already filters pending organization-candidate approvals
         // through the world's canonical reassignment guard. Do not maintain a second, subtly
         // different availability policy here.
-        let candidates = find_recruitment_candidates(registry, state, organization, manager)?;
+        let mut candidates = find_recruitment_candidates(registry, state, organization, manager)?;
+        if policy == ApprovalPolicy::RequireApproval {
+            candidates.retain(|candidate| {
+                !recruitment_approval_is_deferred(registry, state, organization, *candidate)
+            });
+        }
         let candidates =
             rank_candidates_by_relationship(registry.recruitment(), state, manager, candidates);
         if candidates.is_empty() {

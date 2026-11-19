@@ -175,6 +175,206 @@ fn establish_existing_independent_economy(
 }
 
 #[test]
+fn rival_investment_competes_for_listings_without_disclosing_buyer() {
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::world::world_system::{designate_player_organization, insert_character};
+    use crate::world::{AutonomyLevel, CharacterDraft};
+    use std::collections::BTreeMap;
+
+    let mut fixture = make_independent_fixture();
+    let rival = fixture.organization;
+    let player = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Player Holdings".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut fixture.state, player).unwrap();
+    insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Rival Executive".to_owned(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let neighborhood = fixture
+        .state
+        .world
+        .get_business(fixture.business)
+        .unwrap()
+        .neighborhood();
+    insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Existing Rival Front".to_owned(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::new(),
+            neighborhood,
+            owner: BusinessOwner::Organization(rival),
+        },
+    )
+    .unwrap();
+    establish_existing_independent_economy(&mut fixture);
+    let reserve = fixture.registry.upkeep().per_member_daily().cents() * 7;
+    let price = hospitality_price(&fixture).cents();
+    fund_accounted_from_street(&mut fixture, price + reserve - 1);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(7 * 1440));
+    assert!(apply_due_autonomous_acquisitions(&fixture.registry, &mut fixture.state).is_empty());
+    assert!(
+        acquisition_offer(&fixture.registry, &fixture.state, player, fixture.business).is_some()
+    );
+
+    fund_accounted_from_street(&mut fixture, 1);
+    let save = build_save(&fixture.registry, &fixture.state).unwrap();
+    let mut restored = restore_save(&fixture.registry, save).unwrap();
+    assert_eq!(
+        apply_due_autonomous_acquisitions(&fixture.registry, &mut fixture.state),
+        vec![fixture.business]
+    );
+    assert_eq!(
+        apply_due_autonomous_acquisitions(&fixture.registry, &mut restored),
+        vec![fixture.business]
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world
+            .get_business(fixture.business)
+            .unwrap()
+            .owner(),
+        BusinessOwner::Organization(rival)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance
+            .get_account(fixture.accounted)
+            .unwrap()
+            .balance()
+            .cents(),
+        reserve
+    );
+    assert!(
+        acquisition_offer(&fixture.registry, &fixture.state, player, fixture.business).is_none()
+    );
+    let notice = fixture
+        .state
+        .reports()
+        .latest_for_recipient(player)
+        .unwrap();
+    let entry = &notice.entries()[0];
+    assert!(entry.summary.contains("no longer available"));
+    assert!(!entry.summary.contains("Marlowe Holdings"));
+    assert_eq!(
+        entry.entities,
+        BTreeSet::from([EntityRef::Business(fixture.business)])
+    );
+    validate_state(&fixture.state).unwrap();
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn acquisition_dismisses_own_foreign_target_lead_atomically() {
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::intelligence::intelligence_system::validate_record_information;
+    use crate::intelligence::{
+        InformationDraft, InformationSourceKind, InformationTopic, KnowledgeHolder, Reliability,
+        Specificity,
+    };
+    use crate::operations::OperationKind;
+    use crate::opportunities::OperationOpportunityDraft;
+    use crate::opportunities::opportunity_system::validate_discover_operation_opportunity;
+
+    let mut fixture = make_independent_fixture();
+    let price = hospitality_price(&fixture);
+    fund_accounted_from_street(&mut fixture, price.cents());
+    let source = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::TargetSecurity,
+            source_entity: None,
+            subject: EntityRef::Business(fixture.business),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "An observed opening at the storefront.".into(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let token = validate_acquire_business(
+        &fixture.registry,
+        &fixture.state,
+        acquisition_draft(&fixture),
+    )
+    .unwrap();
+    let lead = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            organization: fixture.organization,
+            operation_kind: OperationKind::Burglary,
+            targets: BTreeSet::from([EntityRef::Business(fixture.business)]),
+            source_information: BTreeSet::from([source]),
+            summary: "A possible burglary before purchase.".into(),
+            valid_until: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    // A lead discovered after purchase validation must be included in the live commit plan.
+    let save = build_save(&fixture.registry, &fixture.state).unwrap();
+    let mut scarce = restore_save(&fixture.registry, save).unwrap();
+    scarce
+        .ids
+        .set_next_raw_for_test(IdKind::Report, u32::MAX - 1);
+    let before = bincode::serialize(&scarce).unwrap();
+    let error = validate_acquire_business(&fixture.registry, &scarce, acquisition_draft(&fixture))
+        .unwrap()
+        .commit(&fixture.registry, &mut scarce)
+        .unwrap_err();
+    assert!(matches!(error, BusinessAcquisitionError::IdExhaustion(_)));
+    assert_eq!(bincode::serialize(&scarce).unwrap(), before);
+
+    let result = token.commit(&fixture.registry, &mut fixture.state).unwrap();
+    assert_eq!(result.dismissed_opportunities, vec![lead]);
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .opportunities()
+            .get_opportunity(lead)
+            .unwrap()
+            .status(),
+        OpportunityStatus::Dismissed
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
 fn acquisition_buys_an_independent_business_without_returning_price_to_operating_cash() {
     let mut fixture = make_independent_fixture();
     let price = hospitality_price(&fixture);
@@ -186,7 +386,7 @@ fn acquisition_buys_an_independent_business_without_returning_price_to_operating
         acquisition_draft(&fixture),
     )
     .expect("a funded independent acquisition must validate")
-    .commit(&mut fixture.state)
+    .commit(&fixture.registry, &mut fixture.state)
     .expect("a validated acquisition must commit");
 
     assert_eq!(acquired.business, fixture.business);
@@ -292,7 +492,7 @@ fn acquisition_reanchors_an_active_sellers_cycle_to_the_purchase_time() {
         acquisition_draft(&fixture),
     )
     .expect("active independent business should remain purchasable")
-    .commit(&mut fixture.state)
+    .commit(&fixture.registry, &mut fixture.state)
     .expect("active-business acquisition should commit");
 
     let economy = fixture
@@ -387,7 +587,7 @@ fn acquisition_aggregates_accounted_funds_across_multiple_accounts() {
         },
     )
     .expect("aggregate accounted funds should cover the acquisition")
-    .commit(&mut fixture.state)
+    .commit(&fixture.registry, &mut fixture.state)
     .expect("aggregate-funded acquisition should commit");
 
     assert_eq!(acquired.price, price);
@@ -475,7 +675,7 @@ fn acquisition_debits_largest_accounted_reserve_first() {
         },
     )
     .expect("aggregate accounted funds should cover the acquisition")
-    .commit(&mut fixture.state)
+    .commit(&fixture.registry, &mut fixture.state)
     .expect("ordered acquisition should commit");
 
     assert_eq!(
@@ -520,7 +720,7 @@ fn acquisition_id_preflight_rejects_without_opening_books_or_consuming_account_i
         .ids
         .set_next_raw_for_test(IdKind::Report, u32::MAX);
     let error = token
-        .commit(&mut fixture.state)
+        .commit(&fixture.registry, &mut fixture.state)
         .expect_err("exhausted report ids must reject before any acquisition mutation");
     assert!(matches!(
         error,
@@ -632,7 +832,7 @@ fn stale_token_rejects_when_funding_drains_before_commit() {
     let _ = drain;
 
     let error = token
-        .commit(&mut fixture.state)
+        .commit(&fixture.registry, &mut fixture.state)
         .expect_err("a stale token whose funding drained must reject at commit");
     assert_eq!(
         error,
@@ -815,7 +1015,7 @@ fn acquisition_buys_suspended_books_and_reopens_them_under_new_ownership() {
         acquisition_draft(&fixture),
     )
     .expect("a funded acquisition of suspended books must validate")
-    .commit(&mut fixture.state)
+    .commit(&fixture.registry, &mut fixture.state)
     .expect("the acquisition must commit");
 
     assert!(

@@ -72,6 +72,7 @@ pub struct TickOutcome {
     pub resumed_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub retired_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub autonomous_enterprises: Vec<crate::core::id::EnterpriseId>,
+    pub autonomous_business_acquisitions: Vec<crate::core::id::BusinessId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
     pub executive_brief: Option<ReportId>,
@@ -200,6 +201,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         .expect("valid state should resolve every due autonomous recruitment action");
     let recruitment_attempts = recruitment.attempts;
     decision_requests.extend(recruitment.approval_requests);
+    // Weekly rival investment follows payroll and recruitment, so the reserve covers
+    // the current roster. New commercial infrastructure can support subsequent racket expansion.
+    let autonomous_business_acquisitions =
+        crate::economy::business_acquisition::apply_due_autonomous_acquisitions(registry, state);
     // Suspended rival rackets are reconsidered before new growth. This gives chronic-loss
     // suspension a recoverable lifecycle without allowing an organization to spend one cash pool
     // on both a reopened racket and a fresh establishment. A racket suspended by a cycle earlier
@@ -256,6 +261,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         resumed_enterprises,
         retired_enterprises,
         autonomous_enterprises,
+        autonomous_business_acquisitions,
         expired_opportunities,
         cold_case_suspensions: cold_case_decay,
         executive_brief,
@@ -434,6 +440,9 @@ fn synthesize_executive_brief(registry: &Registry, state: &mut AppState) -> Opti
             .then(|| {
                 let plan = decide_executive_brief(registry, state, recipient)
                     .expect("due player executive brief must produce a valid synthesis plan");
+                if !plan.warrants_publication(registry, state) {
+                    return None;
+                }
                 let validated = validate_executive_brief_plan(state, plan)
                     .expect("fresh executive brief plan must validate");
                 match validated.commit(state) {

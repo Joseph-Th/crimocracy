@@ -18,6 +18,32 @@ pub(crate) use cycle_planning::{
 mod lifecycle;
 mod profit_sweep;
 
+/// Estimate a normal operating cycle using the same economics as settlement. No private
+/// seller accounts, historic profits or pending disruption state enter this market forecast.
+pub(crate) fn forecast_normal_business_net(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+) -> Result<Money, BusinessEconomyError> {
+    let record = state
+        .world
+        .get_business(business)
+        .ok_or(BusinessEconomyError::MissingBusiness(business))?;
+    let neighborhood = state
+        .world
+        .get_neighborhood(record.neighborhood())
+        .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(business))?;
+    let (_, _, net) = resolve_cycle_financials(
+        business,
+        registry.get_business(record.kind()).economics(),
+        neighborhood.profile(),
+        registry.business_disruption().gross_basis_points(),
+        false,
+        0,
+    )?;
+    Ok(net)
+}
+
 pub(crate) use autonomous_lifecycle::apply_due_autonomous_business_lifecycle;
 pub(crate) use autonomous_profit_sweep::apply_due_autonomous_profit_sweeps;
 pub(crate) use lifecycle::validate_acquisition_restart;

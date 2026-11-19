@@ -768,7 +768,7 @@ fn acquisition_restarts_laundering_window_without_prior_ownership_provenance() {
         },
     )
     .expect("independent front should be purchasable")
-    .commit(&mut fixture.state)
+    .commit(&registry, &mut fixture.state)
     .expect("acquisition should restart existing books");
     let record = fixture
         .state
@@ -919,7 +919,7 @@ fn acquisition_rebases_operating_capital_floor_to_inherited_cash() {
         },
     )
     .expect("independent business should be purchasable")
-    .commit(&mut fixture.state)
+    .commit(&registry, &mut fixture.state)
     .expect("acquisition should restart existing books");
 
     let record = fixture

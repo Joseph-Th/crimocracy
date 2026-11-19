@@ -97,6 +97,56 @@ fn test_rating(value: u8) -> Rating {
 }
 
 #[test]
+fn quiet_briefs_consolidate_but_notable_events_publish_at_next_cadence() {
+    use crate::reports::report_system::validate_record_report;
+    use crate::reports::{ReportDraft, ReportEntry, ReportKind};
+    let registry = build_registry();
+    let mut state = AppState::new(231);
+    let player = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Quiet Brief Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut state, player).unwrap();
+    let cadence = registry.executive_brief().cadence();
+    state.advance_clock(cadence);
+    assert!(synthesize_executive_brief(&registry, &mut state).is_some());
+    for _ in 0..6 {
+        state.advance_clock(cadence);
+        assert!(synthesize_executive_brief(&registry, &mut state).is_none());
+    }
+    state.advance_clock(cadence);
+    assert!(synthesize_executive_brief(&registry, &mut state).is_some());
+    validate_record_report(
+        &state,
+        ReportDraft {
+            recipient: player,
+            kind: ReportKind::Financial,
+            title: "Test market event".to_owned(),
+            entries: vec![ReportEntry {
+                attention: crate::core::attention::AttentionClass::Notable,
+                summary: "A listing sold.".to_owned(),
+                sources: Vec::new(),
+                entities: BTreeSet::new(),
+                decision: None,
+            }],
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    state.advance_clock(cadence);
+    assert!(synthesize_executive_brief(&registry, &mut state).is_some());
+    state.advance_clock(cadence);
+    assert!(synthesize_executive_brief(&registry, &mut state).is_none());
+    validate_invariants(&state);
+}
+
+#[test]
 fn executive_brief_report_exhaustion_is_terminal_noop() {
     let registry = build_registry();
     let mut state = AppState::new(0xB12E_FFFF);

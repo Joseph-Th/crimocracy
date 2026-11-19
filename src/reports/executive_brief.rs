@@ -63,6 +63,30 @@ pub struct ExecutiveBriefPlan {
     entries: Vec<ReportEntry>,
 }
 
+impl ExecutiveBriefPlan {
+    /// Publish actionable synthesis at the authored cadence, but consolidate quiet
+    /// periods into a weekly heartbeat. Explicit brief planning remains available.
+    pub(crate) fn warrants_publication(&self, registry: &Registry, state: &AppState) -> bool {
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.attention > AttentionClass::Routine || entry.decision.is_some())
+        {
+            return true;
+        }
+        let interval = u64::from(registry.executive_brief().cadence().as_minutes()) * 7;
+        state
+            .reports()
+            .latest_for_kind(self.recipient, ReportKind::ExecutiveBrief)
+            .is_none_or(|previous| {
+                self.generated_at
+                    .as_minutes()
+                    .saturating_sub(previous.generated_at().as_minutes())
+                    >= interval
+            })
+    }
+}
+
 pub fn is_executive_brief_due(registry: &Registry, at: SimTime) -> bool {
     is_recurring_boundary(at, registry.executive_brief().cadence())
 }

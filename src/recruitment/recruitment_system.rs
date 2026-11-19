@@ -275,6 +275,35 @@ struct RecruitmentPlanDependencies {
     reputation_baseline: u8,
 }
 
+/// Leadership's refusal defers further approval-seeking for this organization and prospect,
+/// without pretending the candidate received (or rejected) an actual pitch. A deliberate
+/// executive approach or a newly delegated recruitment policy remains an explicit override.
+/// The durable resolved decision is the authority; no parallel cooldown record is persisted.
+pub fn recruitment_approval_is_deferred(
+    registry: &Registry,
+    state: &AppState,
+    organization: OrganizationId,
+    candidate: CharacterId,
+) -> bool {
+    use crate::decisions::{DecisionContext, DecisionResponse};
+
+    let cooldown = u64::from(registry.recruitment().cooldown().as_minutes());
+    state.decisions().decisions().any(|decision| {
+        matches!(
+            decision.context(),
+            DecisionContext::RecruitmentApproval(context)
+                if context.target_organization() == organization && context.candidate() == candidate
+        ) && decision.resolution().is_some_and(|resolution| {
+            resolution.response() == DecisionResponse::Reject
+                && state
+                    .now()
+                    .as_minutes()
+                    .saturating_sub(resolution.resolved_at().as_minutes())
+                    < cooldown
+        })
+    })
+}
+
 pub fn find_recruitment_candidates(
     registry: &Registry,
     state: &AppState,

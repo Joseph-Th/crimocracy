@@ -44,6 +44,169 @@ fn resentment_only_relationship() -> RelationshipDimensions {
 }
 
 #[test]
+fn real_property_sale_reaches_relevant_institutional_contacts() {
+    use crate::economy::business_acquisition::{
+        BusinessAcquisitionDraft, validate_acquire_business,
+    };
+    use crate::finance::finance_system::{insert_account, validate_record_transaction};
+    use crate::finance::{
+        AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+    };
+    use crate::world::world_system::{insert_business, insert_neighborhood};
+    use crate::world::{
+        BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, NeighborhoodDraft,
+        NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile, Rating,
+    };
+
+    for (kind, union_access, expected) in [
+        (OrganizationKind::Political, false, true),
+        (OrganizationKind::Commercial, false, true),
+        (OrganizationKind::Labor, true, true),
+        (OrganizationKind::Labor, false, false),
+        (OrganizationKind::LawEnforcement, true, false),
+    ] {
+        let mut fixture = make_fixture(kind);
+        let contact = establish(&mut fixture);
+        let buyer = insert_organization(
+            &fixture.registry,
+            &mut fixture.state,
+            OrganizationDraft {
+                name: "Rival Buyer".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .unwrap();
+        let neighborhood = insert_neighborhood(
+            &mut fixture.state,
+            NeighborhoodDraft {
+                name: "Industrial Ward".to_owned(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: Rating::try_new(50).unwrap(),
+                        commercial_activity: Rating::try_new(50).unwrap(),
+                        illicit_demand: Rating::try_new(50).unwrap(),
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: Rating::try_new(30).unwrap(),
+                    },
+                },
+            },
+        )
+        .unwrap();
+        let business = insert_business(
+            &fixture.registry,
+            &mut fixture.state,
+            BusinessDraft {
+                name: "Transfer Works".to_owned(),
+                kind: BusinessKind::Hospitality,
+                functions: if union_access {
+                    BTreeSet::from([BusinessFunction::UnionAccess])
+                } else {
+                    BTreeSet::new()
+                },
+                neighborhood,
+                owner: BusinessOwner::Independent,
+            },
+        )
+        .unwrap();
+        let price = fixture
+            .registry
+            .get_business(BusinessKind::Hospitality)
+            .economics()
+            .acquisition_cost();
+        let accounted = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(buyer),
+                kind: AccountKind::AccountedFunds,
+            },
+        )
+        .unwrap();
+        let street = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(buyer),
+                kind: AccountKind::StreetCash,
+            },
+        )
+        .unwrap();
+        validate_record_transaction(
+            &fixture.state,
+            LedgerTransactionDraft {
+                occurred_at: fixture.state.now(),
+                memo: "Fixture capitalization".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: street,
+                        amount: price.checked_neg().unwrap(),
+                    },
+                    LedgerPosting {
+                        account: accounted,
+                        amount: price,
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        validate_acquire_business(
+            &fixture.registry,
+            &fixture.state,
+            BusinessAcquisitionDraft {
+                organization: buyer,
+                business,
+                funding_accounts: BTreeSet::from([accounted]),
+            },
+        )
+        .unwrap()
+        .commit(&fixture.registry, &mut fixture.state)
+        .unwrap();
+        assert_eq!(
+            fixture
+                .state
+                .intelligence()
+                .information_for_holder(KnowledgeHolder::Organization(fixture.sponsor))
+                .count(),
+            0
+        );
+        let pending = find_pending_disclosure_sources(&fixture.state, contact);
+        assert_eq!(
+            pending.len(),
+            usize::from(expected),
+            "{kind:?} union={union_access}"
+        );
+        if let Some(source) = pending.first() {
+            validate_contact_disclosure(&fixture.state, contact, *source)
+                .unwrap()
+                .commit(&mut fixture.state)
+                .unwrap();
+            let disclosed = fixture
+                .state
+                .intelligence()
+                .information_for_holder(KnowledgeHolder::Organization(fixture.sponsor))
+                .next()
+                .unwrap();
+            assert_eq!(disclosed.subject(), EntityRef::Organization(buyer));
+            assert!(
+                disclosed
+                    .summary()
+                    .contains("Rival Buyer acquired Transfer Works")
+            );
+            assert!(find_pending_disclosure_sources(&fixture.state, contact).is_empty());
+        }
+        validate_state(&fixture.state).unwrap();
+        validate_invariants(&fixture.state);
+        restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, &fixture.state).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn resentment_alone_does_not_create_an_institutional_contact_channel() {
     let mut fixture = make_fixture(OrganizationKind::LawEnforcement);
     validate_set_relationship(

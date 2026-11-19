@@ -1880,6 +1880,52 @@ fn rejected_recruitment_approval_records_no_attempt() {
 }
 
 #[test]
+fn autonomous_recruitment_respects_rejected_approval_until_cooldown_expires() {
+    let mut fixture = fixture();
+    designate_player_organization(&mut fixture.state, fixture.target).unwrap();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+    let cadence = fixture.registry.recruitment().autonomous_attempt_cadence();
+    let cooldown = fixture.registry.recruitment().cooldown();
+    fixture.state.advance_clock(cadence);
+    let first = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+    let request = first.approval_requests[0].decision;
+    validate_resolve_decision(
+        &fixture.registry,
+        &fixture.state,
+        request,
+        fixture.target,
+        DecisionResponse::Reject,
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let rejected_at = fixture.state.now();
+    fixture.state = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    fixture.state.advance_clock(cadence);
+    let quiet = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+    assert!(
+        quiet.approval_requests.is_empty(),
+        "a rejected pitch must not return the next morning"
+    );
+    assert!(quiet.attempts.is_empty());
+    assert_eq!(fixture.state.recruitment().attempts().count(), 0);
+    fixture.state.set_now_for_test(rejected_at + cooldown);
+    let retry = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+    assert_eq!(
+        retry.approval_requests.len(),
+        1,
+        "the manager can reconsider after the full cooldown"
+    );
+    assert!(retry.attempts.is_empty());
+    validate_state(&fixture.state).unwrap();
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn resolved_organization_sourced_approval_remains_valid_history_after_policy_aba() {
     let registry = build_registry();
     let mut fixture = fixture();

@@ -202,7 +202,24 @@ impl Session<'_> {
                             "requires delegated or broad autonomy for independent recruitment"
                         }
                     };
+                    let policy =
+                        crimocracy::delegation::delegation_system::resolve_policy_for_manager(
+                            state,
+                            manager,
+                            crimocracy::world::PolicyKind::IndependentRecruitment,
+                        )
+                        .map_err(|error| error.to_string())?;
                     for candidate in candidates {
+                        let status = if policy.independent_recruitment_approval()
+                            == crimocracy::world::ApprovalPolicy::RequireApproval
+                            && crimocracy::recruitment::recruitment_system::recruitment_approval_is_deferred(
+                                self.registry, state, self.player, candidate,
+                            )
+                        {
+                            "leadership declined the approach; manager will reconsider after recruitment cooldown"
+                        } else {
+                            status
+                        };
                         let person = state
                             .world()
                             .get_character(candidate)
@@ -333,10 +350,18 @@ impl Session<'_> {
                     }
                 })?;
                 let acquired = validated
-                    .commit(&mut self.state)
+                    .commit(self.registry, &mut self.state)
                     .map_err(|e| e.to_string())?;
                 writeln!(out, "Acquired business {} for {} accounted cents; initialized operating economy: {}.",
                     acquired.business.raw(), acquired.price.cents(), acquired.established_economy).unwrap();
+                for opportunity in acquired.dismissed_opportunities {
+                    writeln!(
+                        out,
+                        "Lead {} dismissed: you now own its target.",
+                        opportunity.raw()
+                    )
+                    .unwrap();
+                }
             }
             "market" => {
                 for (id, name, kind, district) in state.world().public_business_directory() {
