@@ -3,6 +3,9 @@
 
 mod autonomous;
 mod custody;
+mod enterprise_suspensions;
+
+use enterprise_suspensions::CustodyEnterpriseSuspensions;
 
 pub use autonomous::apply_autonomous_evidence_arrests;
 pub use custody::{ValidatedRelease, validate_release_arrest};
@@ -154,6 +157,8 @@ pub enum ArrestError {
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]
+    Report(#[from] crate::reports::report_system::ReportError),
+    #[error(transparent)]
     VersionCapacity(#[from] VersionCapacityError),
 }
 
@@ -191,6 +196,7 @@ pub struct ValidatedArrest {
     prosecution_release: ValidatedProsecutorDetentionRelease,
     counsel_representation_ends: ValidatedCounselDetentionEnds,
     operation_preemptions: Vec<ValidatedCustodyOperationPreemption>,
+    enterprise_suspensions: CustodyEnterpriseSuspensions,
 }
 
 impl ValidatedArrest {
@@ -205,6 +211,7 @@ impl ValidatedArrest {
             }
         }
         budget.extend(self.counsel_representation_ends.id_budget());
+        budget.push(self.enterprise_suspensions.id_budget());
         budget
     }
 
@@ -276,6 +283,7 @@ impl ValidatedArrest {
         )?;
         self.prosecution_release.ensure_current(state)?;
         self.counsel_representation_ends.ensure_current(state)?;
+        self.enterprise_suspensions.ensure_current(state)?;
         for preemption in &self.operation_preemptions {
             if let Some(decision) = &preemption.decision_cancellation {
                 decision.ensure_current(state)?;
@@ -320,6 +328,7 @@ impl ValidatedArrest {
         }
         self.prosecution_release.commit_preflighted(state);
         self.counsel_representation_ends.commit_preflighted(state);
+        self.enterprise_suspensions.commit(state);
         Ok(id)
     }
 }
@@ -368,6 +377,7 @@ pub fn validate_arrest(
             decision_cancellation,
         });
     }
+    let enterprise_suspensions = CustodyEnterpriseSuspensions::prepare(state, draft.character)?;
     Ok(ValidatedArrest {
         draft,
         authority,
@@ -380,6 +390,7 @@ pub fn validate_arrest(
         prosecution_release,
         counsel_representation_ends,
         operation_preemptions,
+        enterprise_suspensions,
     })
 }
 

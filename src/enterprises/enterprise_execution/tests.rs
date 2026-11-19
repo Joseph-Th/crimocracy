@@ -4161,9 +4161,14 @@ fn settle_cycle_inner(
 }
 
 #[test]
-fn detained_enterprise_manager_pauses_due_cycles_until_release() {
+fn detained_enterprise_manager_suspends_cycles_until_owner_resumes() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
+    crate::world::world_system::designate_player_organization(
+        &mut fixture.state,
+        fixture.organization,
+    )
+    .expect("player manages reopening");
     let enterprise = establish_protection(&registry, &mut fixture);
     let manager = fixture.authority.manager;
     let police = insert_organization(
@@ -4251,14 +4256,8 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
         Err(error) => error,
         Ok(_) => panic!("arrest must stale a cycle planned while the manager was free"),
     };
-    assert_eq!(
-        stale_error,
-        EnterpriseError::Delegation(
-            crate::delegation::delegation_system::DelegationError::DetainedManager {
-                manager,
-                arrest,
-            },
-        )
+    assert!(
+        matches!(stale_error, EnterpriseError::StaleEnterprise { enterprise: id, .. } if id == enterprise)
     );
     assert_eq!(
         decide_enterprise_cycle(
@@ -4270,14 +4269,15 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
                 EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
             ),
         )
-        .expect_err("a detained manager cannot settle through the direct enterprise API"),
-        EnterpriseError::Delegation(
-            crate::delegation::delegation_system::DelegationError::DetainedManager {
-                manager,
-                arrest,
-            },
-        )
+        .expect_err("a suspended enterprise cannot settle"),
+        EnterpriseError::EnterpriseNotActive(enterprise)
     );
+    assert!(matches!(
+        validate_resume_enterprise(&registry, &fixture.state, enterprise),
+        Err(EnterpriseError::Delegation(
+            crate::delegation::delegation_system::DelegationError::DetainedManager { .. }
+        ))
+    ));
 
     assert!(find_due_enterprises(&fixture.state).is_empty());
     let detained_tick = run_tick(&registry, &mut fixture.state);
@@ -4289,10 +4289,18 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
             .get_enterprise(enterprise)
             .expect("enterprise should persist")
             .next_cycle_at(),
-        Some(SimTime::from_minutes(1_440))
+        None
     );
-    // Stay one minute short of the authored custody maximum: the overdue cycle must remain
-    // paused while its manager is still actually detained.
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(enterprise)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Suspended
+    );
+    // Stay one minute short of the authored custody maximum: the suspended enterprise must remain closed.
     fixture.state.advance_clock(SimDuration::from_minutes(
         registry.legal().maximum_detention().as_minutes() - 3,
     ));
@@ -4302,20 +4310,24 @@ fn detained_enterprise_manager_pauses_due_cycles_until_release() {
     validate_state(&fixture.state).expect("paused enterprise detention state should validate");
     validate_invariants(&fixture.state);
 
-    // The next canonical minute reaches the custody cap. Release runs before economy settlement,
-    // so the manager becomes available and the single overdue enterprise cycle settles immediately.
+    // Release removes the custody blocker, but does not reopen player operations or accrue
+    // an overdue payout. Recovery is an explicit governance decision.
     let released_tick = run_tick(&registry, &mut fixture.state);
     assert_eq!(released_tick.custody_releases, vec![arrest]);
-    assert_eq!(released_tick.enterprise_cycles.len(), 1);
+    assert!(released_tick.enterprise_cycles.is_empty());
     assert_eq!(
         fixture
             .state
             .enterprises()
-            .get_cycle(released_tick.enterprise_cycles[0])
-            .expect("released manager should produce the overdue enterprise cycle")
-            .enterprise(),
-        enterprise
+            .get_enterprise(enterprise)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Suspended
     );
+    validate_resume_enterprise(&registry, &fixture.state, enterprise)
+        .expect("free manager can reopen")
+        .commit(&mut fixture.state)
+        .expect("explicit reopening should commit");
     let next_cycle_at = fixture
         .state
         .enterprises()

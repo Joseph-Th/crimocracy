@@ -41,6 +41,10 @@ the edit. A useful diagnostic changes where you read, what you test, or what you
 
 None of these replaces `.\scripts\verify.cmd` or a focused behavioral proof. Mutation execution stays in its isolated copy; do not use `--in-place` on a dirty/concurrent repository to bypass scratch-copy problems, and do not reuse another run's output directory.
 
+## Adversarial pressure checks
+
+`operations::operation_system::autonomous::tests` exercises mandate and police-fear constraints, a real rival reconnaissance that acquires usable knowledge, deterministic continuation through save/restore, then a canonical strike and disrupted player-owned business settlement. `detained_enterprise_manager_suspends_cycles_until_owner_resumes` verifies custody invalidates previously planned cycles and closes the detainee's enterprise until lawful recovery; release alone does not settle missed cycles. Neither proof establishes late-game balance by itself.
+
 ## Test rules
 
 Tests prove observable production behavior: calculations, transitions, transactions,

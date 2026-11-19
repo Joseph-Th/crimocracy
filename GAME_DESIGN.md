@@ -1572,6 +1572,48 @@ The player may control substantial criminal markets but face:
 
 Late-game strategy concerns what kind of organization the player wants to become.
 
+## 47.1 Adversarial progression
+
+Pressure must arise from the organization's actual reach, exposure and competitors,
+not a hidden day counter or the player's account balance. Rival organizations
+need incentives to retain strategically important holdings, recognize contested
+markets, acquire intelligence, choose realistic goals, commit personnel and
+money, and actually benefit from a competitor's losses. They should cooperate
+or fight with one another under the same rules that govern conflict with the
+player. A rival must also be capable of declining a costly conflict or changing
+its strategy after enforcement, operational losses or negotiations.
+
+Police should progress from incidents to linked evidentiary cases, and from
+individual custody to prosecutorial review and lawful organizational disruption.
+Evidence, jurisdiction, independent corroboration, institutional capacity,
+defense and admissibility must govern each escalation. Arrest is neither a
+conviction nor a license to confiscate legitimate wealth. A diversified
+organization should be resilient, but vulnerable to proven dependencies:
+the loss of a critical manager, interruption of an illicit income stream,
+a lawful seizure or the collapse of a business network.
+
+The player must have meaningful responses beyond paying routine fees:
+appointing successors, protecting or abandoning threatened assets,
+investigating possible attackers, negotiating with competitors, reducing
+exposure, challenging evidence and reorganizing under changing legal conditions.
+Do not disclose hidden adversary plans or impose an arbitrary escalating penalty.
+
+Acceptance criteria for late-game balance:
+
+- Replay an expansion-oriented campaign and a low-profile legitimate
+  campaign on the same fixed seeds. Compare ownership concentration,
+  sustainable income, active rivals, prosecution outcomes and recovery
+  time, without requiring either strategy to lose by fiat.
+- A rival's successful operation changes something that advances its own
+  objective; attack frequency alone is not evidence of strategic competition.
+- Repeated criminal operations can lead to lasting consequences when the
+  evidence warrants them; an uneventful or weakly evidenced case can remain cold.
+- A large treasury cannot directly undo every loss of managerial authority,
+  ownership, institutional influence or liberty.
+- The player can identify what happened through credible information and
+  choose materially different responses; repeated mandatory confirmation
+  and cleanup commands are not strategic difficulty.
+
 ---
 
 # 48. Dynamic Historical Pressure

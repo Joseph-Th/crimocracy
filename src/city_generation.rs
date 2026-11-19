@@ -777,8 +777,8 @@ pub fn generate_city(
     }
 
     // Rival outfits have real personnel, treasury, and independent leadership.
-    // Their neighborhood mandates let the autonomous recruitment/enterprise
-    // passes compete with the player after time starts moving.
+    // Their mandates let recruitment, enterprise expansion, and operational planning
+    // compete with the player after time starts moving.
     let mut rival_leaders = Vec::new();
     for (index, rival) in rivals.iter().copied().enumerate() {
         let leader = add_character(
@@ -805,7 +805,7 @@ pub fn generate_city(
             Some(rival),
             Some(leader),
             AutonomyLevel::Guided,
-            &[(C::Driving, 73), (C::Surveillance, 72)],
+            &[(C::Driving, 73), (C::Surveillance, 72), (C::Burglary, 74)],
             &[],
         )?;
         for member in [soldier, scout] {
@@ -820,6 +820,7 @@ pub fn generate_city(
                 scopes: BTreeSet::from([
                     ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
                     ResponsibilityScope::Function(ResponsibilityFunction::Enterprise),
+                    ResponsibilityScope::Function(ResponsibilityFunction::Operations),
                     ResponsibilityScope::Neighborhood(districts[index + 1]),
                 ]),
                 standing_orders: BTreeMap::from([(

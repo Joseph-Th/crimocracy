@@ -258,7 +258,7 @@ determinism and client contracts.
  8  apply_autonomous_investigator_staffing single-seat staffing, lead-investigator knowledge
  9  apply_investigation_work_scheduling    one active-case scan; evidence review first, otherwise witness interview
 10  run_investigation_work_phase           resolve due work (RNG: investigation stream)
-11  apply_autonomous_evidence_arrests      active LawEnforcement cases: authored independent-evidence threshold → custody + responsibility preemption
+11  apply_autonomous_evidence_arrests      active LawEnforcement cases: independent-evidence threshold → custody + responsibility preemption + managed enterprise suspension
 12  apply_autonomous_prosecution_staffing  refill prosecution seats released by custody
 13  apply_automatic_legal_support          conclude only after custody and every open prosecution review end;
                                                 retain for custody or open post-release prosecution,
@@ -279,6 +279,7 @@ determinism and client contracts.
           suspended NPC rackets: viable reopen; stale frozen authority/assets retire
     ──► apply_due_autonomous_enterprises_excluding
           new growth; mandates that reopened a racket already spent this daily action
+    ──► apply_due_rival_operations        daily mandate-backed commercial reconnaissance/strikes, after economic decisions and reputation
     ──► synthesize_executive_brief        sees every report/decision made this minute, last
     ──► validate_invariants               structural + registry re-derivation
 ```

@@ -73,6 +73,7 @@ pub struct TickOutcome {
     pub retired_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub autonomous_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub autonomous_business_acquisitions: Vec<crate::core::id::BusinessId>,
+    pub autonomous_operations: Vec<OperationId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
     pub executive_brief: Option<ReportId>,
@@ -228,6 +229,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
             &enterprise_lifecycle.resumed_mandates,
         )
         .expect("valid state should resolve every due autonomous enterprise expansion");
+    // Rival operational planning follows economic decisions and reputation updates so current
+    // commercial stakes, lawful staffing, and enforcement risk govern the next day's action.
+    let autonomous_operations =
+        crate::operations::operation_system::apply_due_rival_operations(registry, state);
     // Executive synthesis runs last so a due brief sees every report and decision created by
     // operational, investigative, financial, and delegated personnel work that resolved in the
     // same simulation minute.
@@ -262,6 +267,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         retired_enterprises,
         autonomous_enterprises,
         autonomous_business_acquisitions,
+        autonomous_operations,
         expired_opportunities,
         cold_case_suspensions: cold_case_decay,
         executive_brief,

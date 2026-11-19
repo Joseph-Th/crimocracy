@@ -1,6 +1,7 @@
 //! Operation authorization and lifecycle mutation; read-only timing/booking policy lives in `operation_scheduling`, while objective actionability lives in the child validator.
 
 mod authorization_validation;
+mod autonomous;
 mod objective_validation;
 mod start;
 
@@ -11,6 +12,7 @@ use authorization_validation::{
     validate_extraction_basis_current, validate_extraction_custody_window,
     validate_representable_operation_window,
 };
+pub(crate) use autonomous::apply_due_rival_operations;
 use objective_validation::validate_operation_objective;
 pub(crate) use objective_validation::{
     is_actionable_opportunity_target, is_information_subject_relevant, is_valid_operation_objective,
