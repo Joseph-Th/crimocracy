@@ -43,7 +43,7 @@ None of these replaces `.\scripts\verify.cmd` or a focused behavioral proof. Mut
 
 ## Adversarial pressure checks
 
-`operations::operation_system::autonomous::tests` exercises mandate and police-fear constraints, a real rival reconnaissance that acquires usable knowledge, deterministic continuation through save/restore, then a canonical strike and disrupted player-owned business settlement. `detained_enterprise_manager_suspends_cycles_until_owner_resumes` verifies custody invalidates previously planned cycles and closes the detainee's enterprise until lawful recovery; release alone does not settle missed cycles. Neither proof establishes late-game balance by itself.
+`operations::operation_system::autonomous::tests` exercises mandate and police-fear constraints, a real rival reconnaissance that acquires usable knowledge, deterministic continuation through save/restore, then a canonical strike and disrupted player-owned business settlement. `detained_enterprise_manager_suspends_cycles_until_owner_resumes` verifies custody invalidates previously planned cycles and closes the detainee's enterprise until lawful recovery; release alone does not settle missed cycles. The rival pressure test compares matched business RNG branches to prove a successful strike improves the attacker’s own realized earnings while harming the target. Held cycle tokens reject stale local market capacity without mutation. `autonomous_prosecution_*` tests cover bounded intake, defendant-specific supplements, own-member notifications, release with live review, screening, and save/restore continuation. These proofs establish concrete pressure mechanisms, not late-game balance.
 
 ## Test rules
 

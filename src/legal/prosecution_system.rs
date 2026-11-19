@@ -1,7 +1,11 @@
 //! Explicit police-to-prosecutor evidence referral and prosecution-case intake.
 
 mod artifacts;
+mod autonomous;
 mod staffing;
+
+pub(crate) use autonomous::apply_due_prosecution_referrals;
+pub use autonomous::member_prosecution_under_review;
 
 use artifacts::{
     ReferralArtifactContext, validate_referral_artifacts, validate_resolution_artifacts,

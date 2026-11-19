@@ -249,6 +249,33 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
                 && info.source_kind() == InformationSourceKind::Surveillance)
     );
 
+    let mut control = state.clone();
+    let manager = control
+        .world()
+        .characters_in_organization(rival)
+        .find(|person| {
+            control
+                .delegation()
+                .active_for_manager(person.id())
+                .is_some()
+        })
+        .unwrap()
+        .id();
+    let mandate = control
+        .delegation()
+        .active_for_manager(manager)
+        .unwrap()
+        .id();
+    crate::delegation::delegation_system::validate_revoke_mandate(&control, mandate)
+        .unwrap()
+        .commit(&mut control)
+        .unwrap();
+    let rival_shop = state
+        .world()
+        .businesses_owned_by_organization(rival)
+        .next()
+        .unwrap()
+        .id();
     let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
     let tick = next_day(&registry, &mut state);
     let replay = next_day(&registry, &mut restored);
@@ -272,6 +299,35 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
             .is_disrupted(state.now())
     );
     let settlement = next_day(&registry, &mut state);
+    next_day(&registry, &mut control);
+    next_day(&registry, &mut control);
+    let rival_cycle = state.economy().latest_cycle(rival_shop).unwrap();
+    let control_cycle = control.economy().latest_cycle(rival_shop).unwrap();
+    assert_eq!(rival_cycle.occurred_at(), control_cycle.occurred_at());
+    assert_eq!(
+        rival_cycle.variance_basis_points(),
+        control_cycle.variance_basis_points()
+    );
+    assert!(
+        rival_cycle.gross_revenue() > control_cycle.gross_revenue(),
+        "successful pressure must improve the attacker's own operating revenue"
+    );
+    assert!(
+        rival_cycle.market_gross_basis_points(&registry)
+            > control_cycle.market_gross_basis_points(&registry)
+    );
+    assert!(
+        state
+            .economy()
+            .latest_cycle(competitor)
+            .unwrap()
+            .gross_revenue()
+            < control
+                .economy()
+                .latest_cycle(competitor)
+                .unwrap()
+                .gross_revenue()
+    );
     assert!(settlement.business_cycles.iter().any(|cycle| {
         let cycle = state.economy().get_cycle(*cycle).unwrap();
         cycle.business() == competitor
@@ -279,6 +335,59 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
             && cycle.attention() == crate::core::attention::AttentionClass::Notable
     }));
     crate::core::invariants::validate_state(&state).unwrap();
+    restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+}
+
+#[test]
+fn held_business_settlement_stales_when_local_competitor_is_damaged() {
+    use crate::economy::business_economy_system::{
+        BusinessEconomyError, decide_business_cycle, validate_business_cycle_plan,
+        validate_disrupt_business_economy,
+    };
+    let Fixture {
+        registry,
+        mut state,
+        rival,
+        competitor,
+        ..
+    } = fixture();
+    let shop = state
+        .world()
+        .businesses_owned_by_organization(rival)
+        .next()
+        .unwrap()
+        .id();
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(DAY_MINUTES).unwrap(),
+    ));
+    let plan = decide_business_cycle(&registry, &state, shop, 0).unwrap();
+    let token = validate_business_cycle_plan(&state, plan.clone()).unwrap();
+    validate_disrupt_business_economy(&registry, &state, competitor)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let before = bincode::serialize(&state).unwrap();
+    assert!(
+        matches!(validate_business_cycle_plan(&state, plan), Err(BusinessEconomyError::StaleMarket(id)) if id == shop)
+    );
+    assert_eq!(
+        token.commit(&mut state),
+        Err(BusinessEconomyError::StaleMarket(shop))
+    );
+    assert_eq!(before, bincode::serialize(&state).unwrap());
+    let plan = decide_business_cycle(&registry, &state, shop, 0).unwrap();
+    let id = validate_business_cycle_plan(&state, plan)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    assert!(
+        state
+            .economy()
+            .get_cycle(id)
+            .unwrap()
+            .market_gross_basis_points(&registry)
+            > 9_000
+    );
     restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
 }
 

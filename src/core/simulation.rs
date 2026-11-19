@@ -49,6 +49,9 @@ pub struct TickOutcome {
     pub resolved_investigation_work: Vec<InvestigationWorkId>,
     pub evidence_arrests: Vec<crate::core::id::ArrestId>,
     pub staffed_prosecution_cases: Vec<(ProsecutionCaseId, CharacterId)>,
+    pub opened_prosecution_cases: Vec<ProsecutionCaseId>,
+    pub prosecution_supplements: Vec<crate::core::id::ProsecutionReferralId>,
+    pub declined_prosecution_cases: Vec<ProsecutionCaseId>,
     pub informant_recruitments: Vec<crate::core::id::InformantId>,
     pub informant_disclosures: Vec<crate::core::id::InformantDisclosureId>,
     pub custody_releases: Vec<crate::core::id::ArrestId>,
@@ -146,6 +149,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     let staffed_prosecution_cases =
         crate::legal::prosecution_system::apply_autonomous_prosecution_staffing(state)
             .expect("valid state should staff available prosecutors onto open reviews");
+    // Institutional intake runs after staffing so pending reviews can receive new evidence, and
+    // before legal-support governance so defense follows the current legal matter.
+    let prosecution =
+        crate::legal::prosecution_system::apply_due_prosecution_referrals(registry, state)
+            .expect("valid custody evidence should support prosecution referrals");
     // Legal-support governance runs before the detainee's one-time informant decision. This lets
     // promised counsel materially affect custodial cooperation risk instead of retaining counsel
     // only after the irreversible decision. It sees every new arrest above and any open
@@ -251,6 +259,9 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         resolved_investigation_work,
         evidence_arrests,
         staffed_prosecution_cases,
+        opened_prosecution_cases: prosecution.opened,
+        prosecution_supplements: prosecution.supplemented,
+        declined_prosecution_cases: prosecution.declined,
         informant_recruitments,
         informant_disclosures,
         custody_releases,

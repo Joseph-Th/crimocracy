@@ -66,7 +66,10 @@ agent routing is in [`AGENTS.md`](AGENTS.md).
 
 ## Adversarial pressure
 
+- Legitimate storefronts have a shared local market within each district and business kind: 80% of potential is venue-specific and 20% is contested, divided by effective active competitor capacity. Damage reduces a venue's capacity; healthy competitors recover a share of its lost custom, up to their normal gross. Ownership does not affect the formula. Actual settlement and live laundering use this market context; acquisition forecasts assume all directory peers operate normally and do not reveal private books. NPC recovery admits at most one reopening per local sector per daily boundary. Cycle history freezes the market snapshot, and held single-cycle plans stale when market capacity changes. Physical operation take potential remains a distinct venue-scale abstraction.
+
 - Generated criminal rivals have Operations mandates and trained scouts. Once per day, an eligible NPC outfit can authorize at most one commercial-pressure operation against a foreign storefront in a sector and district where it operates an active storefront. Target selection uses the public directory and its own holdings, not hidden opponent finances or ownership. It scouts first and can sabotage only with usable organization-held reconnaissance; failed attempts have a retry cooldown, and capable, available crew and acceptable police fear are required. These operations use normal execution, police response, evidence, and business-disruption settlement. The player receives observable business consequences, not automatic attribution to a rival. Civilian competitors are eligible targets too. Existing generated saves do not retroactively receive new capabilities or mandates.
+- On daily boundaries, available prosecutors autonomously take one intake, supplement, or screening action each. Existing reviews receive new defendant-specific evidence first; arrests with no prior prosecution episode queue by current detention and age. The same police file and defendant do not gain duplicate parallel autonomous reviews. Own-member notices persist knowledge of the actual detention episode and allow counsel to continue after release. When police casework is inactive and custody has ended, a fully supplemented review with insufficient admissible independent evidence is declined; sufficient files remain open pending the not-yet-modeled adjudication phase. Review never creates a sentence, forfeiture, or extended custody.
 - Evidence-backed arrest atomically suspends every active enterprise managed by the detainee and reports the resulting shutdown to its owner. Other managers' enterprises are unaffected. A suspended racket earns no overdue payout at release; player recovery requires explicit resumption, and NPC recovery follows the existing daily authority, economic and working-capital checks. Arrest is not conviction, and ordinary legitimate storefront ownership is not confiscated.
 
 ## Cross-cutting guarantees
@@ -84,7 +87,7 @@ agent routing is in [`AGENTS.md`](AGENTS.md).
 
 The foundation does not model:
 
-- detailed city geography, transport topology, population simulation, broad institution networks, supply chains, inventory quantities, negotiated or dynamic acquisition pricing, market competition, or dynamic citywide supply and demand;
+- detailed city geography, transport topology, population simulation, broad institution networks, supply chains, inventory quantities, negotiated or dynamic acquisition pricing, detailed product-level market competition, or dynamic citywide supply and demand;
 - broader employment, wages, family ties, secrets, injuries, general character needs, specialist affiliations, or universal autonomous behavior;
 - general delegated role staffing, broad resource competition beyond overlapping character assignments, diplomacy, territory strategy, multi-step rival planning beyond the bounded commercial reconnaissance/strike loop, or general campaign-pressure generation;
 - durable receivable/payable obligations for unpaid AI-organization payroll: a shortfall models its consequence through crew resentment (and, for the player organization, a shortfall report), not as carried debt;
@@ -101,7 +104,7 @@ mismatched saves are rejected. Keep them in sync with the owners.
 
 The current authored content revision is 64.
 
-The current in-memory state schema version is 115.
+The current in-memory state schema version is 116.
 
 Compiled character capabilities, traits, and drives are limited to values consumed by current gameplay systems; design-document examples without a live mechanic are not persisted as inert character attributes. The compiled operation vocabulary likewise contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes. Legal-support policy has only the two executable states: case-by-case/manual handling and automatic retention. Unsupported tactical, governance, or policy axes are not represented as inert plan fields.
 

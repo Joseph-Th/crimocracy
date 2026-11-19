@@ -1155,6 +1155,7 @@ struct BusinessCycleFinancialsWire {
     net_cash: Money,
     variance_basis_points: i16,
     disrupted: bool,
+    market: crate::economy::MarketSnapshot,
 }
 
 #[derive(Clone, Serialize)]
@@ -1187,6 +1188,7 @@ fn business_cycle_wire(record: &crate::economy::BusinessCycleRecord) -> Business
             net_cash: record.net_cash(),
             variance_basis_points: record.variance_basis_points(),
             disrupted: record.disrupted(),
+            market: record.market(),
         },
         artifacts: BusinessCycleArtifactsWire {
             attention: record.attention(),

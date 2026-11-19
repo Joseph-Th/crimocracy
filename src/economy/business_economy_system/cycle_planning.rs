@@ -3,6 +3,7 @@
 //! Establishment, lifecycle, laundering capacity, and disruption stay in the parent economy owner.
 //! This child owns the complete decide -> validate -> commit cycle transaction behind that facade.
 
+use super::market::{resolve_market_snapshot, validate_historical_market};
 use super::{BusinessEconomyError, validate_accounts, validate_business};
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
@@ -10,7 +11,7 @@ use crate::core::id::{BusinessCycleId, BusinessId, EnterpriseId, FinancialAccoun
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::ensure_version_can_advance;
-use crate::economy::{BusinessCycleRecord, BusinessOperatingStatus};
+use crate::economy::{BusinessCycleRecord, BusinessOperatingStatus, MarketSnapshot};
 use crate::enterprises::enterprise_execution::{
     EnterpriseError, ValidatedEnterpriseStatusChange, validate_suspend_enterprise,
 };
@@ -55,6 +56,7 @@ pub(super) struct BusinessCycleEconomics {
     pub(super) net_cash: Money,
     pub(super) variance_basis_points: i16,
     pub(super) disrupted: bool,
+    pub(super) market: MarketSnapshot,
     pub(super) attention: AttentionClass,
 }
 
@@ -108,12 +110,14 @@ pub fn decide_business_cycle(
     // Freeze the disruption fact into this cycle. The economy retains only the current horizon,
     // so historical cycle validation must never infer past disruption from a later sabotage hit.
     let disrupted = economy.is_disrupted(state.now());
+    let market = resolve_market_snapshot(state, business)?;
     let (gross_revenue, operating_cost, net_cash) = resolve_cycle_financials(
         business,
         economics,
         profile,
         registry.business_disruption().gross_basis_points(),
         disrupted,
+        market,
         variance_basis_points,
     )?;
     // A losing cycle or a sabotage-degraded gross is always accountant-worthy: chronic
@@ -170,6 +174,7 @@ pub fn decide_business_cycle(
             net_cash,
             variance_basis_points,
             disrupted,
+            market,
             attention,
         },
         accounts: BusinessCycleAccounts {
@@ -300,6 +305,13 @@ impl ValidatedBusinessCycle {
                 self.plan.snapshot.business,
             ));
         }
+        if resolve_market_snapshot(state, self.plan.snapshot.business)?
+            != self.plan.economics.market
+        {
+            return Err(BusinessEconomyError::StaleMarket(
+                self.plan.snapshot.business,
+            ));
+        }
         validate_business_cycle_enterprise_dependency(state, &self.plan.snapshot)?;
         crate::core::time::ensure_time_current(state.now(), self.plan.snapshot.occurred_at)
             .map_err(|(expected, found)| BusinessEconomyError::StaleCycleTime {
@@ -351,6 +363,7 @@ impl ValidatedBusinessCycle {
                     net_cash: self.plan.economics.net_cash,
                     variance_basis_points: self.plan.economics.variance_basis_points,
                     disrupted: self.plan.economics.disrupted,
+                    market: self.plan.economics.market,
                 },
                 artifacts: crate::economy::BusinessCycleArtifacts {
                     attention: self.plan.economics.attention,
@@ -395,6 +408,9 @@ pub fn validate_business_cycle_plan(
         return Err(BusinessEconomyError::EconomyNotActive(
             plan.snapshot.business,
         ));
+    }
+    if resolve_market_snapshot(state, plan.snapshot.business)? != plan.economics.market {
+        return Err(BusinessEconomyError::StaleMarket(plan.snapshot.business));
     }
     validate_business_cycle_enterprise_dependency(state, &plan.snapshot)?;
     crate::core::time::ensure_time_current(state.now(), plan.snapshot.occurred_at)
@@ -549,7 +565,25 @@ pub(crate) fn resolve_business_current_gross(
         .get_business_economy(business)
         .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?
         .is_disrupted(state.now());
-    resolve_business_gross_at_disruption(registry, state, business, disrupted)
+    let market = resolve_market_snapshot(state, business)?;
+    let normal = resolve_business_gross_potential(registry, state, business)?;
+    let gross = resolve_disrupted_gross(
+        business,
+        normal,
+        market.gross_basis_points(
+            disrupted,
+            registry.business_disruption().gross_basis_points(),
+        ),
+    )?;
+    if disrupted {
+        resolve_disrupted_gross(
+            business,
+            gross,
+            registry.business_disruption().gross_basis_points(),
+        )
+    } else {
+        Ok(gross)
+    }
 }
 
 /// Re-derive business gross with an explicit historical disruption fact. A completed take
@@ -610,6 +644,7 @@ pub(super) fn resolve_cycle_financials(
     profile: NeighborhoodProfile,
     disruption_gross_basis_points: u32,
     disrupted: bool,
+    market: MarketSnapshot,
     variance_basis_points: i16,
 ) -> Result<(Money, Money, Money), BusinessEconomyError> {
     let variance_limit = economics.gross_variance_basis_points();
@@ -620,6 +655,11 @@ pub(super) fn resolve_cycle_financials(
         });
     }
     let normal_gross = resolve_gross_before_variance(business, economics, profile)?;
+    let normal_gross = resolve_disrupted_gross(
+        business,
+        normal_gross,
+        market.gross_basis_points(disrupted, disruption_gross_basis_points),
+    )?;
     let gross_before_variance = if disrupted {
         resolve_disrupted_gross(business, normal_gross, disruption_gross_basis_points)?
     } else {
@@ -656,12 +696,14 @@ pub(crate) fn resolve_historical_business_cycle_financials(
         .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(
             cycle.business(),
         ))?;
+    validate_historical_market(state, business, cycle.market(), cycle.occurred_at())?;
     resolve_cycle_financials(
         cycle.business(),
         registry.get_business(business.kind()).economics(),
         neighborhood.profile(),
         registry.business_disruption().gross_basis_points(),
         cycle.disrupted(),
+        cycle.market(),
         cycle.variance_basis_points(),
     )
 }

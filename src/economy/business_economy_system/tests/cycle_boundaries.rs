@@ -49,7 +49,21 @@ fn saturated_business_till_does_not_freeze_independent_due_books() {
     .expect("balanced capitalization should commit");
     establish_business_economy(&registry, &mut fixture);
 
-    // Give the same owner an independent storefront with separate operating books.
+    // A separate district isolates the other storefront's books and market.
+    let profile = fixture
+        .state
+        .world()
+        .get_neighborhood(neighborhood)
+        .expect("fixture neighborhood exists")
+        .profile();
+    let neighborhood = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Independent Market Ward".to_owned(),
+            profile,
+        },
+    )
+    .expect("independent neighborhood should validate");
     let other_business = insert_business(
         &registry,
         &mut fixture.state,

@@ -4,6 +4,7 @@
 mod autonomous_lifecycle;
 mod autonomous_profit_sweep;
 mod cycle_planning;
+mod market;
 
 #[cfg(test)]
 use cycle_planning::resolve_gross_before_variance;
@@ -39,6 +40,7 @@ pub(crate) fn forecast_normal_business_net(
         neighborhood.profile(),
         registry.business_disruption().gross_basis_points(),
         false,
+        market::forecast_market_snapshot(state, record),
         0,
     )?;
     Ok(net)
@@ -127,6 +129,10 @@ pub enum BusinessEconomyError {
         business: BusinessId,
         due_at: SimTime,
     },
+    #[error("business {0} has an invalid historical market snapshot")]
+    InvalidMarketSnapshot(BusinessId),
+    #[error("business {0} local market changed after cycle planning")]
+    StaleMarket(BusinessId),
     #[error("business cycle variance {basis_points} basis points exceeds authored limit {limit}")]
     VarianceOutOfRange { basis_points: i16, limit: u16 },
     #[error("business economics overflowed while resolving business {0}")]

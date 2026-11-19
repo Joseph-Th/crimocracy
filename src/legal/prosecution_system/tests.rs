@@ -477,6 +477,29 @@ fn detain_character(fixture: &mut Fixture, character: CharacterId, label: &str) 
 }
 
 fn fixture() -> Fixture {
+    fixture_with_admissibility(Admissibility::Admissible)
+}
+
+fn fixture_with_admissibility(admissibility: Admissibility) -> Fixture {
+    let add_evidence = |state: &mut AppState, police, investigation, defendant, kind| {
+        validate_add_evidence(
+            state,
+            EvidenceDraft {
+                investigation,
+                custodian: police,
+                subject: EntityRef::Character(defendant),
+                origin: None,
+                kind,
+                strength: EvidenceStrength::Strong,
+                reliability: EvidenceReliability::HighlyReliable,
+                admissibility,
+                discovered_at: state.now(),
+            },
+        )
+        .unwrap()
+        .commit(state)
+        .unwrap()
+    };
     let registry = build_registry();
     let mut state = AppState::new(0xCA5E_1931);
     let criminal = insert_organization(
@@ -598,6 +621,236 @@ fn opening_draft(fixture: &Fixture) -> ProsecutionCaseDraft {
         prosecutor: fixture.lead,
         evidence: arrest_evidence_set(fixture),
     }
+}
+
+#[test]
+fn autonomous_prosecution_intake_supplements_after_release_and_restore() {
+    use crate::core::simulation::run_test_tick;
+    use crate::core::time::{DAY_DURATION, SimDuration};
+    use crate::intelligence::{InformationSignal, LegalPersonStatusSignal};
+    let mut fixture = fixture();
+    let sponsor = fixture
+        .state
+        .world()
+        .get_character(fixture.defendant)
+        .unwrap()
+        .organization()
+        .unwrap();
+    let unrelated = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Unrelated Suspect".to_owned(),
+            organization: Some(sponsor),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let unrelated_evidence = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        unrelated,
+        EvidenceKind::KnownAssociation,
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_DURATION.as_minutes() - 1));
+    let tick = run_test_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(tick.opened_prosecution_cases.len(), 1);
+    let id = tick.opened_prosecution_cases[0];
+    let record = fixture.state.legal().get_prosecution_case(id).unwrap();
+    assert_eq!(record.arrest(), fixture.arrest);
+    assert!(record.evidence().contains(&fixture.supplemental_evidence));
+    assert!(!record.evidence().contains(&unrelated_evidence));
+    assert!(member_prosecution_under_review(
+        &fixture.state,
+        sponsor,
+        fixture.arrest
+    ));
+    assert!(!member_prosecution_under_review(
+        &fixture.state,
+        fixture.police,
+        fixture.arrest
+    ));
+    assert!(
+        fixture
+            .state
+            .intelligence()
+            .information_for_holder_subject(
+                KnowledgeHolder::Organization(sponsor),
+                EntityRef::Character(fixture.defendant)
+            )
+            .any(|info| info.signal()
+                == Some(&InformationSignal::LegalPersonStatus(
+                    LegalPersonStatusSignal::Detained {
+                        arrest: fixture.arrest
+                    }
+                )))
+    );
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert!(member_prosecution_under_review(
+        &fixture.state,
+        sponsor,
+        fixture.arrest
+    ));
+    let new_evidence = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.defendant,
+        EvidenceKind::Fingerprint,
+    );
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        state.advance_clock(SimDuration::from_minutes(DAY_DURATION.as_minutes() - 1));
+    }
+    let a = run_test_tick(&fixture.registry, &mut fixture.state);
+    let b = run_test_tick(&fixture.registry, &mut restored);
+    assert_eq!(a, b);
+    assert!(a.opened_prosecution_cases.is_empty());
+    assert_eq!(a.prosecution_supplements.len(), 1);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(id)
+            .unwrap()
+            .evidence()
+            .contains(&new_evidence)
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    build_save(&fixture.registry, &fixture.state).unwrap();
+}
+
+#[test]
+fn autonomous_prosecution_screens_inactive_files_without_fabricating_convictions() {
+    use crate::core::simulation::run_test_tick;
+    use crate::core::time::{DAY_DURATION, SimDuration};
+    use crate::legal::investigation_system::{
+        InvestigationTransition, validate_transition_investigation,
+    };
+    for (admissibility, should_decline) in [
+        (Admissibility::Unknown, true),
+        (Admissibility::Admissible, false),
+    ] {
+        let mut fixture = fixture_with_admissibility(admissibility);
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(DAY_DURATION.as_minutes() - 1));
+        let first = run_test_tick(&fixture.registry, &mut fixture.state);
+        let case = first.opened_prosecution_cases[0];
+        validate_release_arrest(&fixture.state, fixture.arrest)
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+        validate_transition_investigation(
+            &fixture.state,
+            fixture.investigation,
+            InvestigationTransition::Suspend,
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(DAY_DURATION.as_minutes() - 1));
+        let review = run_test_tick(&fixture.registry, &mut fixture.state);
+        assert_eq!(
+            review.declined_prosecution_cases.contains(&case),
+            should_decline
+        );
+        assert_eq!(
+            fixture
+                .state
+                .legal()
+                .get_prosecution_case(case)
+                .unwrap()
+                .status(),
+            if should_decline {
+                ProsecutionCaseStatus::Declined
+            } else {
+                ProsecutionCaseStatus::Reviewing
+            }
+        );
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(DAY_DURATION.as_minutes() - 1));
+        assert!(
+            run_test_tick(&fixture.registry, &mut fixture.state)
+                .opened_prosecution_cases
+                .is_empty()
+        );
+        build_save(&fixture.registry, &fixture.state).unwrap();
+    }
+}
+
+#[test]
+fn autonomous_prosecution_uses_one_daily_intake_slot_per_prosecutor() {
+    use crate::core::simulation::run_test_tick;
+    use crate::core::time::{DAY_DURATION, SimDuration};
+    let mut fixture = fixture();
+    let sponsor = fixture
+        .state
+        .world()
+        .get_character(fixture.defendant)
+        .unwrap()
+        .organization()
+        .unwrap();
+    let second = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Defendant".to_owned(),
+            organization: Some(sponsor),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let second_arrest = detain_character(&mut fixture, second, "Second");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_DURATION.as_minutes() - 1));
+    let first = run_test_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(first.opened_prosecution_cases.len(), 1);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .prosecution_cases_for_arrest(second_arrest)
+            .next()
+            .is_none()
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_DURATION.as_minutes() - 1));
+    let second = run_test_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(second.opened_prosecution_cases.len(), 1);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .prosecution_cases_for_arrest(second_arrest)
+            .next()
+            .is_some()
+    );
+    build_save(&fixture.registry, &fixture.state).unwrap();
 }
 
 fn open_case(fixture: &mut Fixture) -> ProsecutionCaseId {

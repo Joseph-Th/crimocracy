@@ -230,6 +230,8 @@ fn business_cycle_is_locally_blocked(
         | BusinessEconomyError::ActiveEnterpriseDependency { .. }
         | BusinessEconomyError::StaleEnterpriseDependency { .. }
         | BusinessEconomyError::CycleNotDue { .. }
+        | BusinessEconomyError::InvalidMarketSnapshot(_)
+        | BusinessEconomyError::StaleMarket(_)
         | BusinessEconomyError::VarianceOutOfRange { .. }
         | BusinessEconomyError::ArithmeticOverflow(_)
         | BusinessEconomyError::SimulationTimeOverflow

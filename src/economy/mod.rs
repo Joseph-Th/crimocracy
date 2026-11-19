@@ -122,6 +122,12 @@ pub(super) struct BusinessCycleContext {
     occurred_at: SimTime,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MarketSnapshot {
+    healthy_competitors: u32,
+    damaged_competitors: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct BusinessCycleFinancials {
     gross_revenue: Money,
@@ -131,6 +137,7 @@ pub(super) struct BusinessCycleFinancials {
     /// Whether sabotage damage actually applied to this settlement. Persisted on the cycle so
     /// later disruptions cannot rewrite historical economics during invariant validation.
     disrupted: bool,
+    market: MarketSnapshot,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -178,6 +185,16 @@ impl BusinessCycleRecord {
     }
     pub fn disrupted(&self) -> bool {
         self.financials.disrupted
+    }
+    pub(crate) fn market(&self) -> MarketSnapshot {
+        self.financials.market
+    }
+    /// Own realized market pressure, excluding variance and direct damage.
+    pub fn market_gross_basis_points(&self, registry: &crate::registry::Registry) -> u32 {
+        self.market().gross_basis_points(
+            self.disrupted(),
+            registry.business_disruption().gross_basis_points(),
+        )
     }
     pub fn attention(&self) -> AttentionClass {
         self.artifacts.attention

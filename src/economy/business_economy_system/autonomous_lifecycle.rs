@@ -33,6 +33,9 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
         .map(|economy| economy.business())
         .collect();
     let mut planned: Vec<(BusinessId, ValidatedBusinessEconomyStatusChange)> = Vec::new();
+    // Two simultaneous entrants would each forecast a market without the other.
+    // Admit at most one reopening per local sector per boundary.
+    let mut reopening_sectors = std::collections::BTreeSet::new();
 
     for business_id in suspended {
         let economy = state
@@ -54,6 +57,10 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
         ) {
             continue;
         }
+        let sector = (business.neighborhood(), business.kind());
+        if reopening_sectors.contains(&sector) {
+            continue;
+        }
         let neighborhood = state
             .world()
             .get_neighborhood(business.neighborhood())
@@ -66,6 +73,7 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
             neighborhood.profile(),
             registry.business_disruption().gross_basis_points(),
             economy.is_disrupted(state.now()),
+            super::market::resolve_market_snapshot(state, business_id)?,
             0,
         )?;
         if expected_net_cash <= Money::ZERO {
@@ -73,7 +81,10 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
         }
 
         match validate_resume_business_economy(registry, state, business_id) {
-            Ok(resume) => planned.push((business_id, resume)),
+            Ok(resume) => {
+                reopening_sectors.insert(sector);
+                planned.push((business_id, resume));
+            }
             // Finite version or clock capacity is a valid terminal rail. The business remains
             // suspended rather than turning routine autonomous maintenance into a campaign
             // failure merely because no future recurring cycle can be represented.

@@ -46,13 +46,14 @@ impl Session<'_> {
                 }
                 for cycle in cycles {
                     writeln!(out,
-                        "  business-cycle-{} | {} | gross {} cents | cost {} cents | net {:+} cents | disrupted: {}",
+                        "  business-cycle-{} | {} | gross {} cents | cost {} cents | net {:+} cents | disrupted: {} | market: {:.1}% of normal potential",
                         cycle.id().raw(),
                         time_label(cycle.occurred_at().as_minutes()),
                         cycle.gross_revenue().cents(),
                         cycle.operating_cost().cents(),
                         cycle.net_cash().cents(),
                         cycle.disrupted(),
+                        f64::from(cycle.market_gross_basis_points(self.registry)) / 100.0,
                     ).unwrap();
                 }
             }

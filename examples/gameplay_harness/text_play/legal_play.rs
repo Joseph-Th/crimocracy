@@ -62,6 +62,13 @@ impl Session<'_> {
                         time_label(record.arrested_at().as_minutes())
                     )
                     .unwrap();
+                    if crimocracy::legal::prosecution_system::member_prosecution_under_review(
+                        &self.state,
+                        self.player,
+                        id,
+                    ) {
+                        out.push_str("  Prosecutorial review remains open; release does not end the legal matter.\n");
+                    }
                     if let Some(representation) =
                         self.state.legal().active_representation_for_arrest(id)
                     {
