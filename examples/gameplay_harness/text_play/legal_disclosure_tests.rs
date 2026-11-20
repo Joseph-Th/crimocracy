@@ -11,13 +11,14 @@ fn snapshot(registry: &Registry, session: &Session<'_>) -> Vec<u8> {
 fn police_contact_disclosure_provides_typed_witness_basis_for_player_operation() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
-    let detective = session
+    let police_contact = session
         .state
         .contacts()
         .contacts_for_sponsor(session.player)
         .find(|contact| contact.kind() == ContactKind::Police)
-        .unwrap()
-        .contact();
+        .unwrap();
+    let detective = police_contact.contact();
+    let contact_id = police_contact.id();
     session
         .execute("plan robbery business-1 approach=violent muscle=char-3 coordinator=char-2")
         .unwrap();
@@ -70,7 +71,12 @@ fn police_contact_disclosure_provides_typed_witness_basis_for_player_operation()
             .is_err()
     );
     assert_eq!(before, snapshot(&registry, &session));
-    let learned = session.execute("contact").unwrap().0;
+    assert!(session.execute("contact").is_err());
+    assert_eq!(before, snapshot(&registry, &session));
+    let learned = session
+        .execute(&format!("contact {} ask", contact_id.raw()))
+        .unwrap()
+        .0;
     assert!(learned.contains("Case witness identified"), "{learned}");
     assert_ne!(before, snapshot(&registry, &session));
     let disclosed = session

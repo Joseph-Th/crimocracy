@@ -213,6 +213,34 @@ impl ValidatedOpportunityDiscovery<'_> {
     }
 }
 
+/// Select the most recent relevant, usable observation held by the organization for a target.
+/// This is source selection only; discovery still validates actionability and spent openings.
+pub fn latest_usable_opportunity_information<'state>(
+    registry: &Registry,
+    state: &'state AppState,
+    organization: OrganizationId,
+    kind: OperationKind,
+    target: EntityRef,
+) -> Option<&'state crate::intelligence::InformationRecord> {
+    let definition = registry.get_operation(kind);
+    let relevant = definition.execution().relevant_intelligence_topics();
+    state
+        .intelligence
+        .information_for_holder_subject(KnowledgeHolder::Organization(organization), target)
+        .filter(|information| {
+            relevant.contains(&information.topic())
+                && source_information_proves_operation_basis(
+                    registry,
+                    state,
+                    kind,
+                    target,
+                    information,
+                    state.now(),
+                )
+        })
+        .max_by_key(|information| (information.observed_at(), information.id()))
+}
+
 pub fn validate_discover_operation_opportunity<'registry>(
     registry: &'registry Registry,
     state: &AppState,

@@ -179,16 +179,19 @@ trained capability, with stable ID-based tie-breaking and no duplicate
 participants; explicit `Role=char-N` permits knowingly untrained people.
 `cancel operation-N` withdraws an authorized or running operation through
 the canonical abort path, files its report, and releases personnel; pending
-leadership decisions must instead be resolved with `decide`. Burglary still uses
+leadership decisions must instead be resolved with `decide`. Burglary uses
 `burgle` to consume actual leads through their conversion lifecycle.
+`discover business-N` selects the newest usable, operation-relevant
+organization-held observation for that business, then validates the opening.
 
 Institutional relationships and legal defense are player-managed.
 `connections` lists known outside acquaintances and eligible handlers;
 `connect <handler-id> <known-person-id>` establishes a real institutional
 channel only when the modeled social relationship supports it. `contacts`
 lists established channels and outstanding disclosures;
-`contact [contact-id] [ask|ask-all|end]` requests one or up to 64 available disclosures, or terminates a channel. Disclosures carry their original observation minutes. The
-no-argument `contact` command continues to consult the police contact.
+`contact <contact-id> [ask|ask-all|end]` requests one or up to 64 available
+disclosures from the explicitly selected channel, or terminates it. Disclosures
+carry their original observation minutes. Use `contacts` to identify the channel.
 The authored city includes a known lawyer at Cedar Street Legal, but players
 must form that connection.
 
@@ -235,6 +238,7 @@ Each unseeded start chooses a fresh replayable world seed;
 the opening banner prints it. Saves use production `build_save` / `restore_save`
 inside `target/text-play/<slot>.sav`. Scripts are ordinary command-per-line
 transcripts and reject invalid actions rather than silently correcting them.
+Command verbs are ASCII case-insensitive; arguments retain their own syntax.
 Loading reads the saved campaign directly, without rebuilding the procedural
 city or authored fixture. The text client shows the player's records, available public
 directory fields, and organization-held intelligence, not hidden law-enforcement

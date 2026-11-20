@@ -158,9 +158,11 @@ fixture, but never runs an automated player strategy or reconstructs either
 world during save restoration. Its
 `mod.rs` owns session creation, current-version saves, options, and the
 player-scoped read-only selection rules; `commands.rs` dispatches interactive
-player choices, `governance.rs` delegates policy/mandate mutation to the
-production delegation owner, and `planning.rs` composes registry-directed
-operation drafts. `contact_play.rs` owns the player contact interface and
+player choices to focused command families. `business_play.rs`,
+`racket_play.rs`, and `treasury_play.rs` adapt commercial, enterprise, and
+financial commands respectively. `governance.rs` delegates policy/mandate
+mutation to the production delegation owner, and `planning.rs` composes
+registry-directed operation drafts. `contact_play.rs` owns the player contact interface and
 `legal_play.rs` direct-counsel commands; both use the existing canonical
 contact and legal systems. `tests.rs`, `governance_tests.rs`, `openings_tests.rs`,
 `legal_planning_tests.rs`, and `contact_legal_tests.rs` prove real tick

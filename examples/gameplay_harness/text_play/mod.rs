@@ -107,7 +107,7 @@ const HELP: &str = "Commands:
   connections            Known institutional acquaintances with an existing staff relationship
   contacts               Your established institutional channels and their pending disclosures
   connect <handler-id> <known-person-id>  Establish a contact using a real relationship
-  contact [contact-id] [ask|ask-all|end]  Ask for one or up to 64 disclosures, or terminate a channel
+  contact <contact-id> [ask|ask-all|end]  Ask for one or up to 64 disclosures, or terminate a channel
   counsel                Known arrests of current staff and their retained lawyers
   retain <arrest-id> <legal-contact-id> <fee-cents>
                          Retain legal counsel for a current member's known case
@@ -440,7 +440,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "mandate" => 3..=6,
         "plan" | "preview" => 3..=32,
         "connect" => 3..=3,
-        "contact" => 1..=3,
+        "contact" => 2..=3,
         "retain" => 4..=4,
         "end-counsel" => 3..=3,
         _ => return Ok(()),
@@ -970,6 +970,7 @@ impl<'a> Session<'a> {
     }
 }
 
+mod business_play;
 #[cfg(test)]
 mod cancellation_tests;
 mod commands;
@@ -986,12 +987,14 @@ mod legal_play;
 mod planning;
 #[cfg(test)]
 mod planning_options_tests;
+mod racket_play;
 mod reconnaissance;
 #[cfg(test)]
 mod reconnaissance_tests;
 #[cfg(test)]
 mod staff_matching_tests;
 mod time_play;
+mod treasury_play;
 
 pub fn run(registry: &Registry, args: &[String]) -> Result<(), String> {
     let stdin = std::io::stdin();

@@ -159,28 +159,15 @@ impl Session<'_> {
                 .unwrap();
             }
             "contact" => {
-                let (id, action) = if words.len() == 1 {
-                    let contact = self
-                        .state
-                        .contacts()
-                        .contacts_for_sponsor(self.player)
-                        .find(|record| {
-                            record.kind() == ContactKind::Police
-                                && record.status() == ContactStatus::Active
-                        })
-                        .ok_or("your organization has no active police contact; use 'contacts'")?;
-                    (contact.id(), "ask")
-                } else {
-                    let raw = parse_number(words[1], "contact")?;
-                    let id = self
-                        .state
-                        .contacts()
-                        .contacts_for_sponsor(self.player)
-                        .find(|contact| contact.id().raw() == raw)
-                        .ok_or("contact does not belong to your organization")?
-                        .id();
-                    (id, words.get(2).copied().unwrap_or("ask"))
-                };
+                let raw = parse_number(words[1], "contact")?;
+                let id = self
+                    .state
+                    .contacts()
+                    .contacts_for_sponsor(self.player)
+                    .find(|contact| contact.id().raw() == raw)
+                    .ok_or("contact does not belong to your organization")?
+                    .id();
+                let action = words.get(2).copied().unwrap_or("ask");
                 match action {
                     "ask" | "ask-all" => {
                         let active = self
@@ -251,7 +238,7 @@ impl Session<'_> {
                             .map_err(|e| e.to_string())?;
                         writeln!(out, "Contact {} terminated.", id.raw()).unwrap();
                     }
-                    _ => return Err("contact [contact-id] [ask|ask-all|end]".to_owned()),
+                    _ => return Err("contact <contact-id> [ask|ask-all|end]".to_owned()),
                 }
             }
             _ => return Err("unknown contact command".to_owned()),

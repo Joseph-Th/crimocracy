@@ -3,6 +3,141 @@
 use super::*;
 
 #[test]
+fn command_verbs_are_case_insensitive_across_handlers() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    for command in [
+        "help",
+        "ledger",
+        "policies",
+        "contacts",
+        "counsel",
+        "debriefs",
+        "known-targets",
+    ] {
+        let expected = session.execute(command).unwrap();
+        assert_eq!(
+            session.execute(&command.to_ascii_uppercase()).unwrap(),
+            expected,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn discovery_uses_older_usable_information_when_newer_observation_is_too_weak() {
+    use crimocracy::intelligence::{
+        InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
+        intelligence_system::validate_record_information,
+    };
+    use crimocracy::world::world_system::{
+        designate_player_organization, insert_business, insert_neighborhood, insert_organization,
+    };
+    use crimocracy::world::{
+        BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, NeighborhoodDraft,
+        NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
+        OrganizationDraft, OrganizationKind, Rating,
+    };
+
+    let registry = crimocracy::build_registry();
+    let mut state = AppState::new(12);
+    let player = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Test crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut state, player).unwrap();
+    let rating = Rating::try_new(70).unwrap();
+    let district = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Test ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating,
+                    commercial_activity: rating,
+                    illicit_demand: rating,
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating,
+                },
+            },
+        },
+    )
+    .unwrap();
+    let target = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Test shop".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood: district,
+            owner: BusinessOwner::Independent,
+        },
+    )
+    .unwrap();
+    let record = |state: &mut AppState, reliability, specificity| {
+        validate_record_information(
+            state,
+            InformationDraft {
+                holder: KnowledgeHolder::Organization(player),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::TargetSecurity,
+                source_entity: None,
+                subject: EntityRef::Business(target),
+                observed_at: state.now(),
+                reliability,
+                specificity,
+                summary: "Observed shop security.".to_owned(),
+            },
+        )
+        .unwrap()
+        .commit(state)
+        .unwrap()
+    };
+    let usable = record(&mut state, Reliability::DirectAccess, Specificity::Precise);
+    run_tick(&registry, &mut state).unwrap();
+    let weak = record(&mut state, Reliability::Unreliable, Specificity::Vague);
+    let age = u64::from(
+        registry
+            .get_operation(OperationKind::Burglary)
+            .execution()
+            .max_intelligence_age()
+            .as_minutes(),
+    );
+    while state.now().as_minutes() < age * 97 / 100 {
+        run_tick(&registry, &mut state).unwrap();
+    }
+    let mut session = Session {
+        registry: &registry,
+        state,
+        player,
+        seeds: EvaluationSeeds::new(12, 12),
+        district: "Test ward".to_owned(),
+        district_variant: "TEST",
+    };
+    session
+        .execute(&format!("discover {}", target.raw()))
+        .unwrap();
+    let lead = session
+        .state
+        .opportunities()
+        .opportunities_for_organization(player)
+        .next()
+        .unwrap();
+    assert_eq!(lead.source_information(), &BTreeSet::from([usable]));
+    assert!(!lead.source_information().contains(&weak));
+}
+
+#[test]
 fn retired_rackets_are_history_not_current_leadership_assets() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
