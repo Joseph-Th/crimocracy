@@ -323,7 +323,7 @@ impl Session<'_> {
                 .unwrap();
             }
             "directory" | "buy" | "offer" | "market" | "business" | "launder" | "businesses"
-            | "sweep" => {
+            | "sweep" | "business-outlook" => {
                 out = self.execute_business_commands(&words)?;
             }
             "enterprises" | "racket-outlook" | "racket-kinds" | "start-racket"

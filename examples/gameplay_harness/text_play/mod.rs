@@ -131,6 +131,7 @@ const HELP: &str = "Commands:
                          Approach a known prospect
   directory              Public business names, kinds, districts, and standard prices
   market                 Purchasable businesses with advertised infrastructure and prices
+  business-outlook <id>  Public competitive earnings and reference-offer estimate
   businesses             Owned storefronts and known leads
   business <business-id> <suspend|resume>
                          Pause or restart a player-owned legitimate storefront
@@ -436,7 +437,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "ledger" => 1..=2,
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
-        | "save" | "transaction" | "cancel" | "debrief" | "intel" | "racket-outlook" => 2..=2,
+        | "save" | "transaction" | "cancel" | "debrief" | "intel" | "racket-outlook"
+        | "business-outlook" => 2..=2,
         "policy" | "delegate" | "autonomy" | "supervise" | "offer" => 3..=3,
         "mandate" => 3..=6,
         "plan" | "preview" => 3..=32,

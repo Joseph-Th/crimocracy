@@ -91,6 +91,39 @@ impl Session<'_> {
                     .unwrap();
                 }
             }
+            "business-outlook" => {
+                let raw = parse_number(words[1], "business")?;
+                let business = self
+                    .known_business(raw)
+                    .ok_or("property is not in the public directory")?;
+                let appraisal = crimocracy::economy::business_acquisition::appraise_business(
+                    self.registry,
+                    state,
+                    business,
+                )
+                .map_err(|error| error.to_string())?;
+                writeln!(out, "Public appraisal for business-{raw} (all directory competitors operating normally):").unwrap();
+                writeln!(
+                    out,
+                    "  Standard acquisition price: {} cents",
+                    appraisal.standard_price.cents()
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "  Forecast net: {:+} cents per {} minutes",
+                    appraisal.expected_cycle_net.cents(),
+                    appraisal.cycle_minutes
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "  Negotiated reference offer: {} cents; seller consent is not guaranteed.",
+                    appraisal.reference_offer_cents
+                )
+                .unwrap();
+                out.push_str("  This estimate excludes actual books, disruptions, variance, owner obligations, and private seller commitments.");
+            }
             "market" => {
                 for (id, name, kind, district) in state.world().public_business_directory() {
                     let Some((price, functions)) =

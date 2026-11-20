@@ -16,6 +16,7 @@ use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, SimTime, is_day_boundary};
 use crate::delegation::delegation_system::resolve_mandate_authority;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
+use crate::economy::business_economy_system::forecast_competitor_disruption_gain;
 use crate::intelligence::{InformationSourceKind, InformationTopic, KnowledgeHolder};
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::{
@@ -28,10 +29,11 @@ use crate::world::{AutonomyLevel, BusinessKind, OrganizationKind};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A failed watch or strike is not retried immediately. Successful strikes can be followed
-/// up on the next day while the same observations are useful, so a concerted campaign can
-/// actually close a vulnerable storefront rather than merely perturb one settlement.
+/// A failed watch or strike is not retried immediately. Two successful strikes within
+/// this window constitute a concerted campaign; reassess other opportunities before
+/// repeatedly committing the same scarce crew to the same storefront.
 const UNSUCCESSFUL_RETRY_MINUTES: u64 = 3 * DAY_MINUTES;
+const CAMPAIGN_REVIEW_MINUTES: u64 = 7 * DAY_MINUTES;
 
 fn eligible_managers(state: &AppState) -> BTreeMap<OrganizationId, Vec<CharacterId>> {
     let scope = ResponsibilityScope::Function(ResponsibilityFunction::Operations);
@@ -143,7 +145,7 @@ fn choose_plan<'r>(
     }
     // This is self-knowledge plus public directory information. A business need not be
     // known to belong to a criminal competitor to compete for the same local customers.
-    let mut sectors = BTreeMap::<(_, BusinessKind), usize>::new();
+    let mut sectors = BTreeMap::<_, Vec<BusinessId>>::new();
     let mut owned = BTreeSet::new();
     for business in state.world().businesses_owned_by_organization(organization) {
         owned.insert(business.id());
@@ -154,9 +156,10 @@ fn choose_plan<'r>(
                 economy.status() == crate::economy::BusinessOperatingStatus::Active
             })
         {
-            *sectors
-                .entry((business.neighborhood(), business.kind()))
-                .or_default() += 1;
+            sectors
+                .entry(business.neighborhood())
+                .or_default()
+                .push(business.id());
         }
     }
     if sectors.is_empty() {
@@ -164,6 +167,7 @@ fn choose_plan<'r>(
     }
 
     let mut last = BTreeMap::<(BusinessId, OperationKind), _>::new();
+    let mut recent_strikes = BTreeMap::<BusinessId, usize>::new();
     for operation in state.operations().operations_for_organization(organization) {
         if ACTIVE_ASSIGNMENT_STATUSES.contains(&operation.status()) {
             return None; // one strategic operation at a time per outfit
@@ -187,6 +191,16 @@ fn choose_plan<'r>(
             .map(|resolution| resolution.resolved_at())
             .or_else(|| operation.abort_record().map(|abort| abort.aborted_at()))
             .expect("terminal operation must record its end instant");
+        if success
+            && operation.kind() == OperationKind::Sabotage
+            && state
+                .now()
+                .as_minutes()
+                .saturating_sub(ended_at.as_minutes())
+                < CAMPAIGN_REVIEW_MINUTES
+        {
+            *recent_strikes.entry(target).or_default() += 1;
+        }
         let entry = last
             .entry((target, operation.kind()))
             .or_insert((ended_at, success));
@@ -203,19 +217,27 @@ fn choose_plan<'r>(
             .as_minutes(),
     );
     let mut candidates = Vec::new();
+    let mut gains = BTreeMap::<(_, BusinessKind), i128>::new();
     for (id, name, kind, district) in state.world().public_business_directory() {
-        let Some(stake) = sectors.get(&(district, kind)) else {
+        let Some(stakes) = sectors.get(&district) else {
             continue;
         };
-        if owned.contains(&id)
-            || !is_actionable_opportunity_target(
-                registry,
-                state,
-                organization,
-                OperationKind::Sabotage,
-                EntityRef::Business(id),
-            )
-        {
+        if owned.contains(&id) || recent_strikes.get(&id).copied().unwrap_or(0) >= 2 {
+            continue;
+        }
+        let gain = *gains.entry((district, kind)).or_insert_with(|| {
+            forecast_competitor_disruption_gain(registry, state, id, stakes).unwrap_or(0)
+        });
+        if gain <= 0 {
+            continue;
+        }
+        if !is_actionable_opportunity_target(
+            registry,
+            state,
+            organization,
+            OperationKind::Sabotage,
+            EntityRef::Business(id),
+        ) {
             continue;
         }
         let observed = state
@@ -248,14 +270,15 @@ fn choose_plan<'r>(
         }) {
             continue;
         }
-        // A scouted target is the tactical priority. Prefer economic stakes, then a
-        // previously successful strike to maintain pressure, then stable public identity.
-        let follow_up = last
-            .get(&(id, OperationKind::Sabotage))
-            .is_some_and(|(time, success)| {
-                *success && state.now().as_minutes().saturating_sub(time.as_minutes()) <= age_limit
-            });
-        candidates.push((!observed, Reverse(*stake), !follow_up, id, name, kind));
+        // Compare the actual forecast benefit to our own businesses, not the count of
+        // properties or the target's ID. Finish a viable watch/strike sequence on equal
+        // stakes; after a two-strike campaign, other targets get their turn. The oldest
+        // attempt wins an otherwise equal choice (untried properties precede old ones).
+        let last_attempt = [OperationKind::Surveillance, OperationKind::Sabotage]
+            .into_iter()
+            .filter_map(|kind| last.get(&(id, kind)).map(|(at, _)| *at))
+            .max();
+        candidates.push((Reverse(gain), !observed, last_attempt, id, name, kind));
     }
     candidates.sort_unstable_by_key(|item| (item.0, item.1, item.2, item.3));
     for (_, _, _, id, name, kind) in candidates {

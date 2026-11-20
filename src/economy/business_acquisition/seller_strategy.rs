@@ -38,15 +38,17 @@ pub(super) fn negotiated_reference_price(
     state: &AppState,
     business: BusinessId,
 ) -> Result<i128, BusinessAcquisitionError> {
-    let record = state
-        .world()
-        .get_business(business)
-        .ok_or(BusinessAcquisitionError::MissingBusiness(business))?;
-    let economics = registry.get_business(record.kind()).economics();
-    let net = forecast_normal_business_net(registry, state, business)?;
-    Ok(i128::from(economics.acquisition_cost().cents())
-        + i128::from(net.cents().max(0)) * VALUATION_DAYS * i128::from(DAY_MINUTES)
-            / i128::from(economics.cycle().as_minutes()))
+    Ok(super::appraise_business(registry, state, business)?.reference_offer_cents)
+}
+
+pub(super) fn appraisal_reference_offer(
+    standard_price: Money,
+    cycle_net: Money,
+    cycle_minutes: u32,
+) -> i128 {
+    i128::from(standard_price.cents())
+        + i128::from(cycle_net.cents().max(0)) * VALUATION_DAYS * i128::from(DAY_MINUTES)
+            / i128::from(cycle_minutes)
 }
 
 /// Staffed criminal enterprises are ongoing employers, not passive sellers. Preserve a

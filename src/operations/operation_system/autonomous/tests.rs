@@ -35,6 +35,10 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_scout_rating(scout_rating: u8) -> Fixture {
+    fixture_with_competitors(scout_rating, None)
+}
+
+fn fixture_with_competitors(scout_rating: u8, second_competitor: Option<BusinessKind>) -> Fixture {
     let registry = crate::build_registry();
     let mut state = AppState::new(0x95AC);
     let mut organization = |name: &str| {
@@ -73,13 +77,13 @@ fn fixture_with_scout_rating(scout_rating: u8) -> Fixture {
     };
     let harbor = district("Harbor");
     let elsewhere = district("Uptown");
-    let mut venue = |name: &str, owner, neighborhood| {
+    let mut venue = |name: &str, owner, neighborhood, kind| {
         let business = insert_business(
             &registry,
             &mut state,
             BusinessDraft {
                 name: name.to_owned(),
-                kind: BusinessKind::Retail,
+                kind,
                 functions: BTreeSet::from([
                     BusinessFunction::CustomerAccess,
                     BusinessFunction::ProfessionalRecords,
@@ -120,9 +124,12 @@ fn fixture_with_scout_rating(scout_rating: u8) -> Fixture {
         business
     };
     // The lower-ID foreign property is out of territory and must not be selected.
-    venue("Uptown Store", player, elsewhere);
-    venue("Harbor Crew Store", rival, harbor);
-    let competitor = venue("Finch Harbor Store", player, harbor);
+    venue("Uptown Store", player, elsewhere, BusinessKind::Retail);
+    venue("Harbor Crew Store", rival, harbor, BusinessKind::Retail);
+    let competitor = venue("Finch Harbor Store", player, harbor, BusinessKind::Retail);
+    if let Some(kind) = second_competitor {
+        venue("Second Finch Harbor Store", player, harbor, kind);
+    }
 
     let mut member = |organization, name: &str, capabilities| {
         insert_character(
@@ -343,6 +350,59 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
 }
 
 #[test]
+fn rival_reassesses_market_after_a_concerted_campaign() {
+    let Fixture {
+        registry,
+        mut state,
+        rival,
+        competitor,
+        ..
+    } = fixture_with_competitors(100, Some(BusinessKind::Pharmacy));
+    let second = state
+        .world()
+        .public_business_directory()
+        .find(|(_, name, _, _)| *name == "Second Finch Harbor Store")
+        .unwrap()
+        .0;
+    for kind in [
+        OperationKind::Surveillance,
+        OperationKind::Sabotage,
+        OperationKind::Sabotage,
+    ] {
+        let tick = next_day(&registry, &mut state);
+        assert_eq!(tick.autonomous_operations.len(), 1);
+        let id = tick.autonomous_operations[0];
+        let record = state.operations().get_operation(id).unwrap();
+        assert_eq!(record.responsible_organization(), rival);
+        assert_eq!(record.kind(), kind);
+        assert_eq!(record.objective().business_target(), Some(competitor));
+        finish_operation(&registry, &mut state, id);
+        assert!(
+            state
+                .operations()
+                .get_operation(id)
+                .unwrap()
+                .resolution()
+                .is_some_and(|outcome| outcome.objective_outcome()
+                    != crate::operations::OperationObjectiveOutcome::Failed)
+        );
+    }
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    let tick = next_day(&registry, &mut state);
+    assert_eq!(tick, next_day(&registry, &mut restored));
+    let record = state
+        .operations()
+        .get_operation(tick.autonomous_operations[0])
+        .unwrap();
+    assert_eq!(record.kind(), OperationKind::Surveillance);
+    assert_eq!(record.objective().business_target(), Some(second));
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn held_business_settlement_stales_when_local_competitor_is_damaged() {
     use crate::economy::business_economy_system::{
         BusinessEconomyError, decide_business_cycle, validate_business_cycle_plan,
@@ -390,7 +450,7 @@ fn held_business_settlement_stales_when_local_competitor_is_damaged() {
             .get_cycle(id)
             .unwrap()
             .market_gross_basis_points(&registry)
-            > 9_000
+            == 8_857
     );
     restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
 }

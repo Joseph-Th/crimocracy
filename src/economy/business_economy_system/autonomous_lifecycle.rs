@@ -58,7 +58,9 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
             continue;
         }
         let sector = (business.neighborhood(), business.kind());
-        if reopening_sectors.contains(&sector) {
+        if reopening_sectors.iter().any(|&(district, kind)| {
+            district == sector.0 && super::market::market_trades_compete(kind, sector.1)
+        }) {
             continue;
         }
         let neighborhood = state

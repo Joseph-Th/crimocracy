@@ -126,6 +126,8 @@ pub(super) struct BusinessCycleContext {
 pub(crate) struct MarketSnapshot {
     healthy_competitors: u32,
     damaged_competitors: u32,
+    related_healthy_competitors: u32,
+    related_damaged_competitors: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

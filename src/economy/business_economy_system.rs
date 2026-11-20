@@ -5,6 +5,7 @@ mod autonomous_lifecycle;
 mod autonomous_profit_sweep;
 mod cycle_planning;
 mod market;
+pub(crate) use market::forecast_competitor_disruption_gain;
 
 #[cfg(test)]
 use cycle_planning::resolve_gross_before_variance;

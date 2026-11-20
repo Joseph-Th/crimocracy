@@ -3,15 +3,13 @@
 
 use super::seller_strategy::daily_net;
 use super::{
-    BusinessAcquisitionDraft, acquisition_offer, negotiated_reference_price,
-    validate_acquire_business, validate_offer_business,
+    BusinessAcquisitionDraft, acquisition_offer, appraise_business, validate_acquire_business,
+    validate_offer_business,
 };
 use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, is_recurring_boundary};
-use crate::economy::{
-    BusinessOperatingStatus, business_economy_system::forecast_normal_business_net,
-};
+use crate::economy::BusinessOperatingStatus;
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
@@ -111,7 +109,7 @@ fn invest(
         return None;
     }
     let mut candidates = Vec::new();
-    for (id, _, kind, district) in state.world.public_business_directory() {
+    for (id, _, _, district) in state.world.public_business_directory() {
         if owned.contains(&id) {
             continue;
         }
@@ -124,13 +122,13 @@ fn invest(
             continue;
         }
         let listed = listing.is_some();
+        let Ok(appraisal) = appraise_business(registry, state, id) else {
+            continue;
+        };
         let price = if let Some((price, _)) = listing {
             price
         } else {
-            let Ok(cents) = negotiated_reference_price(registry, state, id) else {
-                continue;
-            };
-            let Ok(cents) = i64::try_from(cents) else {
+            let Ok(cents) = i64::try_from(appraisal.reference_offer_cents) else {
                 continue;
             };
             Money::from_cents(cents)
@@ -138,13 +136,11 @@ fn invest(
         if price <= Money::ZERO || i128::from(price.cents()) > budget {
             continue;
         }
-        let Ok(net) = forecast_normal_business_net(registry, state, id) else {
-            continue;
-        };
+        let net = appraisal.expected_cycle_net;
         if net <= Money::ZERO {
             continue;
         }
-        let cycle = registry.get_business(kind).economics().cycle().as_minutes();
+        let cycle = appraisal.cycle_minutes;
         let return_score = i128::from(net.cents()) * 1_000_000_000_000_i128
             / i128::from(price.cents())
             / i128::from(cycle);

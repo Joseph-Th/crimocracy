@@ -111,6 +111,42 @@ pub enum BusinessAcquisitionError {
     IdExhaustion(#[from] IdExhaustionError),
 }
 
+/// An appraisal derived only from public directory and neighborhood economics. Neither
+/// ownership, operating status, accounts nor a seller's willingness enters this estimate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BusinessAppraisal {
+    pub standard_price: Money,
+    pub expected_cycle_net: Money,
+    pub cycle_minutes: u32,
+    pub reference_offer_cents: i128,
+}
+
+pub fn appraise_business(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+) -> Result<BusinessAppraisal, BusinessAcquisitionError> {
+    let record = state
+        .world()
+        .get_business(business)
+        .ok_or(BusinessAcquisitionError::MissingBusiness(business))?;
+    let economics = registry.get_business(record.kind()).economics();
+    let standard_price = economics.acquisition_cost();
+    let cycle_minutes = economics.cycle().as_minutes();
+    let expected_cycle_net =
+        business_economy_system::forecast_normal_business_net(registry, state, business)?;
+    Ok(BusinessAppraisal {
+        standard_price,
+        expected_cycle_net,
+        cycle_minutes,
+        reference_offer_cents: seller_strategy::appraisal_reference_offer(
+            standard_price,
+            expected_cycle_net,
+            cycle_minutes,
+        ),
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct BusinessAcquisitionDraft {
     pub organization: OrganizationId,

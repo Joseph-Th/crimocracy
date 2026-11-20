@@ -40,6 +40,13 @@ fn market_and_intelligence_browsing_preserve_knowledge_boundaries() {
         }
     }
     assert!(market.contains("VehicleFleet"));
+    let outlook = session.execute("business-outlook 1").unwrap().0;
+    assert!(outlook.contains("Forecast net:"));
+    assert!(outlook.contains("Negotiated reference offer:"));
+    assert!(outlook.contains("seller consent is not guaranteed"));
+    assert!(session.execute("business-outlook 999999").is_err());
+    assert!(session.execute("business-outlook").is_err());
+    assert!(session.execute("business-outlook 1 2").is_err());
     let first = session.execute("intelligence 1 1").unwrap().0;
     let second = session.execute("intelligence 1 2").unwrap().0;
     assert_ne!(first.lines().nth(1), second.lines().nth(1));
