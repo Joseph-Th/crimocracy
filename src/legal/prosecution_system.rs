@@ -1,6 +1,11 @@
 //! Explicit police-to-prosecutor evidence referral and prosecution-case intake.
 
+mod adjudication;
 mod artifacts;
+mod fine_collection;
+pub use adjudication::member_judgments;
+pub(crate) use adjudication::validate_judgment_history;
+pub(crate) use fine_collection::{apply_due_fine_collections, validate_fine_history};
 mod autonomous;
 mod staffing;
 
@@ -160,6 +165,12 @@ pub enum ProsecutionError {
         expected: u32,
         found: u32,
     },
+    #[error("prosecution case {0} is not ready for judicial disposition")]
+    JudgmentNotDue(ProsecutionCaseId),
+    #[error("prosecution case {0} judgment proof or defense changed after planning")]
+    StaleJudgment(ProsecutionCaseId),
+    #[error(transparent)]
+    Finance(#[from] crate::finance::finance_system::FinanceError),
     #[error(transparent)]
     Intelligence(#[from] IntelligenceError),
     #[error(transparent)]
@@ -258,6 +269,7 @@ impl ValidatedProsecutionCaseOpening {
                     resolution_information: None,
                     resolution_report: None,
                     resolution_prosecutor: None,
+                    judgment: None,
                 },
                 version: 1,
             },

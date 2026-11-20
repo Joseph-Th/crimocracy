@@ -30,8 +30,20 @@ impl LegalState {
                     .prosecutions
                     .reviewing_without_prosecutor
                     .contains(&id),
-                (ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed, None) => true,
-                (ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed, Some(_)) => false,
+                (
+                    ProsecutionCaseStatus::Declined
+                    | ProsecutionCaseStatus::Closed
+                    | ProsecutionCaseStatus::Convicted
+                    | ProsecutionCaseStatus::Acquitted,
+                    None,
+                ) => true,
+                (
+                    ProsecutionCaseStatus::Declined
+                    | ProsecutionCaseStatus::Closed
+                    | ProsecutionCaseStatus::Convicted
+                    | ProsecutionCaseStatus::Acquitted,
+                    Some(_),
+                ) => false,
             };
             if !assignment_indexed
                 || case.referrals().iter().any(|referral| {
@@ -52,14 +64,19 @@ impl LegalState {
                 .get(&(case.arrest(), case.prosecutor_office()));
             match case.status() {
                 ProsecutionCaseStatus::Reviewing if open != Some(&id) => return false,
-                ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed
+                ProsecutionCaseStatus::Declined
+                | ProsecutionCaseStatus::Closed
+                | ProsecutionCaseStatus::Convicted
+                | ProsecutionCaseStatus::Acquitted
                     if open == Some(&id) =>
                 {
                     return false;
                 }
                 ProsecutionCaseStatus::Reviewing
                 | ProsecutionCaseStatus::Declined
-                | ProsecutionCaseStatus::Closed => {}
+                | ProsecutionCaseStatus::Closed
+                | ProsecutionCaseStatus::Convicted
+                | ProsecutionCaseStatus::Acquitted => {}
             }
         }
         for (arrest, ids) in &self.indexes.prosecutions.by_arrest {

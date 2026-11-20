@@ -35,6 +35,11 @@ struct ProsecutionCaseRefs<'a> {
 
 pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateValidationError> {
     let mut seen = SeenProsecutionArtifacts::default();
+    if !crate::legal::prosecution_system::validate_fine_history(state) {
+        return Err(StateValidationError::IndexInconsistency {
+            subsystem: "court fine history",
+        });
+    }
     for case in state.legal.prosecution_cases() {
         validate_case(state, case, &mut seen)?;
     }
@@ -43,6 +48,18 @@ pub(super) fn validate_prosecution_cases(state: &AppState) -> Result<(), StateVa
             return Err(StateValidationError::InvalidProsecutionReferral {
                 referral: referral.id(),
             });
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_judgments_against_registry(
+    registry: &crate::registry::Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    for case in state.legal.prosecution_cases() {
+        if !crate::legal::prosecution_system::validate_judgment_history(registry, state, case) {
+            return Err(invalid_case(case));
         }
     }
     Ok(())
@@ -90,7 +107,12 @@ fn validate_case_base(
     case: &ProsecutionCaseRecord,
     refs: &ProsecutionCaseRefs<'_>,
 ) -> Result<(), StateValidationError> {
-    if case.opened_at() > state.now()
+    if case.judgment().is_some()
+        != matches!(
+            case.status(),
+            ProsecutionCaseStatus::Convicted | ProsecutionCaseStatus::Acquitted
+        )
+        || case.opened_at() > state.now()
         || case.opened_at() < refs.arrest.arrested_at()
         || case.version() == 0
         || case.referrals().is_empty()
@@ -117,9 +139,10 @@ fn validate_case_lifecycle(
 ) -> Result<(), StateValidationError> {
     match case.status() {
         ProsecutionCaseStatus::Reviewing => validate_reviewing_case(state, case),
-        ProsecutionCaseStatus::Declined | ProsecutionCaseStatus::Closed => {
-            validate_resolved_case(state, case, refs, seen)
-        }
+        ProsecutionCaseStatus::Declined
+        | ProsecutionCaseStatus::Closed
+        | ProsecutionCaseStatus::Convicted
+        | ProsecutionCaseStatus::Acquitted => validate_resolved_case(state, case, refs, seen),
     }
 }
 
@@ -328,6 +351,12 @@ fn resolved_case_rendering(
             "Prosecution review closed",
             ProsecutionCaseResolution::Closed,
         ),
+        ProsecutionCaseStatus::Convicted => {
+            ("Court conviction", ProsecutionCaseResolution::Convicted)
+        }
+        ProsecutionCaseStatus::Acquitted => {
+            ("Court acquittal", ProsecutionCaseResolution::Acquitted)
+        }
         ProsecutionCaseStatus::Reviewing => {
             unreachable!("resolved prosecution cases are never under review")
         }

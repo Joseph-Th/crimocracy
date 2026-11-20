@@ -146,6 +146,44 @@ impl LegalState {
         case.version = advance_version_preflighted(case.version);
     }
 
+    pub(in crate::legal) fn attach_judgment(
+        &mut self,
+        id: ProsecutionCaseId,
+        judgment: crate::legal::JudicialJudgment,
+    ) {
+        let case = self
+            .prosecution_cases
+            .get_mut(&id)
+            .expect("judgment owns its resolved case");
+        debug_assert!(matches!(
+            case.status(),
+            ProsecutionCaseStatus::Convicted | ProsecutionCaseStatus::Acquitted
+        ));
+        debug_assert!(case.resolution_artifacts.judgment.is_none());
+        case.resolution_artifacts.judgment = Some(judgment);
+    }
+
+    pub(in crate::legal) fn record_fine_payment(
+        &mut self,
+        id: ProsecutionCaseId,
+        payment: crate::core::id::LedgerTransactionId,
+    ) {
+        let case = self
+            .prosecution_cases
+            .get_mut(&id)
+            .expect("validated fine owns its case");
+        debug_assert_eq!(case.status(), ProsecutionCaseStatus::Convicted);
+        let inserted = case
+            .resolution_artifacts
+            .judgment
+            .as_mut()
+            .expect("conviction has judgment")
+            .payments
+            .insert(payment);
+        debug_assert!(inserted);
+        case.version = advance_version_preflighted(case.version);
+    }
+
     pub(in crate::legal) fn set_prosecution_case_prosecutor(
         &mut self,
         id: ProsecutionCaseId,

@@ -30,8 +30,8 @@ pub use policing::{
     PoliceResponsePatrolSnapshot, PoliceResponseRecord, PoliceResponseStatus,
 };
 pub use prosecution::{
-    ProsecutionCaseDraft, ProsecutionCaseRecord, ProsecutionCaseStatus, ProsecutionReferralDraft,
-    ProsecutionReferralRecord,
+    JudicialJudgment, ProsecutionCaseDraft, ProsecutionCaseRecord, ProsecutionCaseStatus,
+    ProsecutionReferralDraft, ProsecutionReferralRecord,
 };
 pub use representation::{
     LegalRepresentationDraft, LegalRepresentationEndReason, LegalRepresentationOrigin,

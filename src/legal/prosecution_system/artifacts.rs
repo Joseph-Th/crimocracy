@@ -37,6 +37,14 @@ pub(crate) fn write_resolution_summary(
             out,
             "{office_name} closed its prosecution review of {defendant_name} after review by {lead_name}."
         ),
+        ProsecutionCaseResolution::Convicted => write!(
+            out,
+            "The court convicted {defendant_name} on the case presented by {lead_name} of {office_name}."
+        ),
+        ProsecutionCaseResolution::Acquitted => write!(
+            out,
+            "The court acquitted {defendant_name} on the case presented by {lead_name} of {office_name}."
+        ),
     }
 }
 
@@ -65,6 +73,8 @@ pub(super) fn validate_resolution_artifacts(
     let title = match resolution {
         ProsecutionCaseResolution::Declined => "Prosecution declined",
         ProsecutionCaseResolution::Closed => "Prosecution review closed",
+        ProsecutionCaseResolution::Convicted => "Court conviction",
+        ProsecutionCaseResolution::Acquitted => "Court acquittal",
     };
     let mut summary_buffer = String::new();
     write_resolution_summary(

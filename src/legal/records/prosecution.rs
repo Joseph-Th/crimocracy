@@ -1,10 +1,11 @@
 //! Prosecution case/referral records, lifecycle artifacts, drafts, and live indexes.
 
 use crate::core::id::{
-    ArrestId, CharacterId, EvidenceId, InformationId, InvestigationId, OrganizationId,
-    ProsecutionCaseId, ProsecutionReferralId, ReportId,
+    ArrestId, CharacterId, EvidenceId, InformationId, InvestigationId, LedgerTransactionId,
+    LegalRepresentationId, OrganizationId, ProsecutionCaseId, ProsecutionReferralId, ReportId,
 };
 use crate::core::time::SimTime;
+use crate::finance::Money;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,12 +14,16 @@ pub enum ProsecutionCaseStatus {
     Reviewing,
     Declined,
     Closed,
+    Convicted,
+    Acquitted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProsecutionCaseResolution {
     Declined,
     Closed,
+    Convicted,
+    Acquitted,
 }
 
 impl ProsecutionCaseResolution {
@@ -26,6 +31,8 @@ impl ProsecutionCaseResolution {
         match self {
             Self::Declined => ProsecutionCaseStatus::Declined,
             Self::Closed => ProsecutionCaseStatus::Closed,
+            Self::Convicted => ProsecutionCaseStatus::Convicted,
+            Self::Acquitted => ProsecutionCaseStatus::Acquitted,
         }
     }
 }
@@ -56,11 +63,45 @@ pub(crate) struct ProsecutionCaseLifecycle {
     pub(in crate::legal) status: ProsecutionCaseStatus,
 }
 
+/// The abstract court's actual disposition and personal monetary sentence. Evidence,
+/// counsel and fine are frozen at judgment. Payments reference canonical ledger entries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JudicialJudgment {
+    pub(in crate::legal) defense: Option<LegalRepresentationId>,
+    pub(in crate::legal) independent_sources: u32,
+    pub(in crate::legal) strong_sources: u32,
+    pub(in crate::legal) proof_score: u64,
+    pub(in crate::legal) fine: Money,
+    pub(in crate::legal) payments: BTreeSet<LedgerTransactionId>,
+}
+
+impl JudicialJudgment {
+    pub fn defense(&self) -> Option<LegalRepresentationId> {
+        self.defense
+    }
+    pub fn independent_sources(&self) -> u32 {
+        self.independent_sources
+    }
+    pub fn strong_sources(&self) -> u32 {
+        self.strong_sources
+    }
+    pub fn proof_score(&self) -> u64 {
+        self.proof_score
+    }
+    pub fn fine(&self) -> Money {
+        self.fine
+    }
+    pub fn payments(&self) -> &BTreeSet<LedgerTransactionId> {
+        &self.payments
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ProsecutionCaseResolutionArtifacts {
     pub(in crate::legal) resolution_information: Option<InformationId>,
     pub(in crate::legal) resolution_report: Option<ReportId>,
     pub(in crate::legal) resolution_prosecutor: Option<CharacterId>,
+    pub(in crate::legal) judgment: Option<JudicialJudgment>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,6 +162,9 @@ impl ProsecutionCaseRecord {
     }
     pub fn resolution_prosecutor(&self) -> Option<CharacterId> {
         self.resolution_artifacts.resolution_prosecutor
+    }
+    pub fn judgment(&self) -> Option<&JudicialJudgment> {
+        self.resolution_artifacts.judgment.as_ref()
     }
     pub fn version(&self) -> u32 {
         self.version

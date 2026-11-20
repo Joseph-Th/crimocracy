@@ -260,7 +260,7 @@ determinism and client contracts.
 10  run_investigation_work_phase           resolve due work (RNG: investigation stream)
 11  apply_autonomous_evidence_arrests      active LawEnforcement cases: independent-evidence threshold → custody + responsibility preemption + managed enterprise suspension
 12  apply_autonomous_prosecution_staffing  refill prosecution seats released by custody
-    ──► apply_due_prosecution_referrals    daily one action per available prosecutor; supplement, screen, or admit; own-member notice
+    ──► apply_due_prosecution_referrals    daily one action per available prosecutor; supplement, screen, refer or present screened case for court disposition; own-member notice
 13  apply_automatic_legal_support          conclude only after custody and every open prosecution review end;
                                                 retain for custody or open post-release prosecution,
                                                 with pending detainee decisions funded first
@@ -273,7 +273,8 @@ determinism and client contracts.
 19  run_enterprise_cycle_phase             per due enterprise (RNG: enterprise stream, 2 draws unconditionally)
     ──► apply_enterprise_observations      staffed vice file observes actual later cycle (RNG: investigation stream); personal evidence enters next minute's custody decision
 20  apply_due_autonomous_profit_sweeps     earned NPC and opt-in player business surplus → accounted reserves, retaining working capital
-21  apply_daily_payroll  →  apply_reputation_phase
+21  apply_daily_payroll  →  apply_due_fine_collections  →  apply_reputation_phase
+          court fines collect only from convicted defendants' accessible personal funds, including wages
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence
     ──► apply_due_autonomous_acquisitions
           weekly rival citywide listings or negotiated purchases after payroll and recruitment; new infrastructure available for expansion

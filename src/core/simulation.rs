@@ -52,6 +52,8 @@ pub struct TickOutcome {
     pub opened_prosecution_cases: Vec<ProsecutionCaseId>,
     pub prosecution_supplements: Vec<crate::core::id::ProsecutionReferralId>,
     pub declined_prosecution_cases: Vec<ProsecutionCaseId>,
+    pub adjudicated_prosecution_cases: Vec<ProsecutionCaseId>,
+    pub court_fine_payments: Vec<crate::core::id::LedgerTransactionId>,
     pub informant_recruitments: Vec<crate::core::id::InformantId>,
     pub informant_disclosures: Vec<crate::core::id::InformantDisclosureId>,
     pub custody_releases: Vec<crate::core::id::ArrestId>,
@@ -212,6 +214,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // than a mixture of pre- and post-boundary state.
     let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state)
         .expect("valid state should settle every due criminal-organization payroll");
+    // Collect adjudicated personal debts after actual wages arrive; no employer
+    // asset is a payment source merely because its member was convicted.
+    let court_fine_payments = crate::legal::prosecution_system::apply_due_fine_collections(state)
+        .expect("valid personal fine history must reconcile");
     let reputation_changes =
         apply_reputation_phase(registry, state, &resolved_operations, &enterprise_cycles)
             .expect("valid state should apply the preflighted reputation consequence cohort");
@@ -271,6 +277,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         opened_prosecution_cases: prosecution.opened,
         prosecution_supplements: prosecution.supplemented,
         declined_prosecution_cases: prosecution.declined,
+        adjudicated_prosecution_cases: prosecution.adjudicated,
+        court_fine_payments,
         informant_recruitments,
         informant_disclosures,
         custody_releases,

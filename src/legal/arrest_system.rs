@@ -739,6 +739,75 @@ pub(crate) fn arrest_evidence_meets_threshold(
     assessment.meets(minimum_qualifying_evidence)
 }
 
+/// Court proof uses the same independent provenance as custody, but requires admissible,
+/// credible evidence of conduct, not mere association. A derivative can strengthen its
+/// own source, never create another. A previously adjudicated file contributes only
+/// genuinely later primary evidence, not a new analysis of an old exhibit.
+pub(crate) fn judicial_proof(
+    state: &AppState,
+    evidence_ids: &BTreeSet<EvidenceId>,
+    after: Option<SimTime>,
+) -> (u32, u32, u64) {
+    use crate::legal::{Admissibility, EvidenceKind, EvidenceReliability, EvidenceStrength};
+    let mut sources = std::collections::BTreeMap::<CustodyCorroborationSource, (u8, bool)>::new();
+    for id in evidence_ids {
+        let Some(e) = state.legal.get_evidence(*id) else {
+            continue;
+        };
+        if e.admissibility() != Admissibility::Admissible
+            || e.reliability() < EvidenceReliability::Credible
+        {
+            continue;
+        }
+        let root = match e.derived_from().len() {
+            0 => e,
+            1 => {
+                let Some(root) = e
+                    .derived_from()
+                    .iter()
+                    .next()
+                    .and_then(|id| state.legal.get_evidence(*id))
+                else {
+                    continue;
+                };
+                root
+            }
+            _ => continue,
+        };
+        if root.kind() == EvidenceKind::KnownAssociation
+            || e.kind() == EvidenceKind::KnownAssociation
+            || root.admissibility() != Admissibility::Admissible
+            || after.is_some_and(|time| root.discovered_at() <= time)
+        {
+            continue;
+        }
+        let strength = match e.strength() {
+            EvidenceStrength::Weak => continue,
+            EvidenceStrength::Corroborating => 1,
+            EvidenceStrength::Strong => 2,
+            EvidenceStrength::Direct => 3,
+        };
+        let score = strength
+            + if e.reliability() == EvidenceReliability::HighlyReliable {
+                2
+            } else {
+                1
+            };
+        let Some(source) = CustodyEvidenceAssessment::evidence_source(state, e) else {
+            continue;
+        };
+        let entry = sources.entry(source).or_default();
+        entry.0 = entry.0.max(score);
+        entry.1 |= strength >= 2;
+    }
+    (
+        u32::try_from(sources.len()).expect("source count fits evidence ID space"),
+        u32::try_from(sources.values().filter(|(_, strong)| *strong).count())
+            .expect("source count fits evidence ID space"),
+        sources.values().map(|(score, _)| u64::from(*score)).sum(),
+    )
+}
+
 /// Single semantic predicate for evidence that may support custody. Runtime arrest validation,
 /// autonomous arrest selection, and persistence invariants all consume this owner so a save can
 /// never restore an arrest that the canonical transaction would reject.

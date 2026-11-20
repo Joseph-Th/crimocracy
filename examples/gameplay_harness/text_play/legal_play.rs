@@ -69,6 +69,21 @@ impl Session<'_> {
                     ) {
                         out.push_str("  Prosecutorial review remains open; release does not end the legal matter.\n");
                     }
+                    for judgment in crimocracy::legal::prosecution_system::member_judgments(
+                        &self.state,
+                        self.player,
+                        id,
+                    ) {
+                        writeln!(
+                            out,
+                            "  Court: {:?} on {} | personal fine: {} cents | outstanding: {} cents",
+                            judgment.status,
+                            time_label(judgment.resolved_at.as_minutes()),
+                            judgment.fine.cents(),
+                            judgment.outstanding.cents()
+                        )
+                        .unwrap();
+                    }
                     if let Some(representation) =
                         self.state.legal().active_representation_for_arrest(id)
                     {

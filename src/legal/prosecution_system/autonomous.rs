@@ -5,6 +5,7 @@
 //! canonical transactions as explicit institutional actions. A daily finite intake budget
 //! prevents every historical arrest being processed in one minute.
 
+use super::adjudication::{ValidatedJudgment, judgment_due, screened_case, validate_judgment};
 use super::{
     ProsecutionCaseDraft, ProsecutionError, ProsecutionReferralDraft,
     ValidatedProsecutionCaseOpening, ValidatedProsecutionCaseResolution,
@@ -26,9 +27,7 @@ use crate::intelligence::{
     InformationDraft, InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
     LegalPersonStatusSignal, Reliability, Specificity,
 };
-use crate::legal::{
-    Admissibility, ArrestRecord, ArrestStatus, InvestigationStatus, ProsecutionCaseStatus,
-};
+use crate::legal::{ArrestRecord, ArrestStatus, InvestigationStatus, ProsecutionCaseStatus};
 use crate::registry::Registry;
 use crate::reports::report_system::{ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
@@ -41,6 +40,7 @@ pub(crate) struct AutonomousProsecutionOutcome {
     pub(crate) opened: Vec<ProsecutionCaseId>,
     pub(crate) supplemented: Vec<ProsecutionReferralId>,
     pub(crate) declined: Vec<ProsecutionCaseId>,
+    pub(crate) adjudicated: Vec<ProsecutionCaseId>,
 }
 
 struct MemberNotice {
@@ -99,7 +99,7 @@ fn member_notice(
             entries: vec![ReportEntry {
                 attention: AttentionClass::Exception,
                 summary: format!(
-                    "{}'s arrest matter {} has been referred for prosecutorial review. Counsel may continue after release; review is not a conviction.",
+                    "{}'s arrest matter {} has been referred for prosecutorial review. Counsel may continue after release; review is not a conviction. A screened file can reach a hearing after fourteen days of preparation.",
                     defendant.name(),
                     arrest.id()
                 ),
@@ -179,6 +179,7 @@ fn defendant_evidence(
 enum Action {
     Open(ValidatedProsecutionCaseOpening, Option<MemberNotice>),
     Supplement(ValidatedProsecutionReferral),
+    Judgment(ValidatedJudgment),
     Decline(
         ProsecutionCaseId,
         ValidatedProsecutionCaseResolution,
@@ -198,6 +199,7 @@ impl Action {
                     (IdKind::ProsecutionReferral, 1),
                 ]
             }
+            Self::Judgment(plan) => plan.id_budget(),
             Self::Supplement(_) => vec![
                 (IdKind::Information, 1),
                 (IdKind::Report, 1),
@@ -270,13 +272,15 @@ pub(crate) fn apply_due_prosecution_referrals(
     let mut plans = Vec::new();
     let mut used = BTreeSet::new();
     let mut reviewing_subjects = BTreeSet::new();
+    let mut acted_subjects = BTreeSet::new();
     // Plan each already-open review first. Supplemental work has priority over new intake.
     for arrest_id in state.legal().arrests_with_open_prosecutions() {
         let arrest = state
             .legal()
             .get_arrest(arrest_id)
             .expect("open review owns its arrest");
-        reviewing_subjects.insert((arrest.investigation(), arrest.character()));
+        let subject = (arrest.investigation(), arrest.character());
+        reviewing_subjects.insert(subject);
         let evidence = defendant_evidence(state, arrest)?;
         for case in state
             .legal()
@@ -288,12 +292,19 @@ pub(crate) fn apply_due_prosecution_referrals(
             };
             if !prosecutors.contains_key(&lead)
                 || used.contains(&lead)
+                || acted_subjects.contains(&subject)
                 || case.version() > u32::MAX - 2
             {
                 continue;
             }
             let additions: BTreeSet<_> = evidence.difference(case.evidence()).copied().collect();
-            let action = if !additions.is_empty() {
+            let screened = screened_case(registry, state, case, state.now());
+            // Once a screened file has had its defense preparation window, the court
+            // can adjudicate the evidence already referred, even if later police work
+            // continues. Continuous supplements must not postpone a hearing forever.
+            let action = if screened && judgment_due(state, case) {
+                Action::Judgment(validate_judgment(registry, state, case.id())?)
+            } else if !additions.is_empty() {
                 Action::Supplement(validate_supplement_prosecution_case(
                     state,
                     ProsecutionReferralDraft {
@@ -304,8 +315,8 @@ pub(crate) fn apply_due_prosecution_referrals(
             } else {
                 // The case is ready for a conservative screening decision only after release
                 // and after police stop active work. Unknown admissibility is not proof.
-                // A sufficient referred file stays open for a future adjudication phase;
-                // this is NOT a conviction or a way to extend arrest custody.
+                // Sufficient files proceed to the court after preparation; screening
+                // is not itself a conviction or a way to extend arrest custody.
                 let investigation = state
                     .legal()
                     .get_investigation(arrest.investigation())
@@ -317,22 +328,7 @@ pub(crate) fn apply_due_prosecution_referrals(
                 {
                     continue;
                 }
-                let admissible: BTreeSet<_> = case
-                    .evidence()
-                    .iter()
-                    .copied()
-                    .filter(|id| {
-                        state
-                            .legal()
-                            .get_evidence(*id)
-                            .is_some_and(|e| e.admissibility() == Admissibility::Admissible)
-                    })
-                    .collect();
-                if crate::legal::arrest_system::arrest_evidence_meets_threshold(
-                    state,
-                    &admissible,
-                    registry.legal().minimum_arrest_qualifying_evidence(),
-                ) {
+                if screened {
                     continue;
                 }
                 Action::Decline(
@@ -343,6 +339,7 @@ pub(crate) fn apply_due_prosecution_referrals(
             };
             if state.ids.reserve_many(&action.id_budget()).is_ok() {
                 used.insert(lead);
+                acted_subjects.insert(subject);
                 plans.push(action);
             }
         }
@@ -429,6 +426,12 @@ pub(crate) fn apply_due_prosecution_referrals(
                         .expect("member notice report was preflighted");
                 }
                 outcome.opened.push(id);
+            }
+            Action::Judgment(plan) => {
+                outcome.adjudicated.push(
+                    plan.commit(registry, state)
+                        .expect("preflighted independent court disposition must commit"),
+                );
             }
             Action::Supplement(plan) => {
                 outcome.supplemented.push(
