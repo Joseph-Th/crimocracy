@@ -208,6 +208,130 @@ fn credit_account(
 }
 
 #[test]
+fn payroll_departures_are_terminal_when_the_last_leader_has_no_remaining_resources() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    crate::world::world_system::designate_player_organization(
+        &mut fixture.state,
+        fixture.organization,
+    )
+    .unwrap();
+    for day in 1..=5 {
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(DAY_MINUTES - 1));
+        let tick = crate::core::simulation::run_tick(&registry, &mut fixture.state).unwrap();
+        if day < 5 {
+            assert!(tick.payroll_departures.is_empty());
+        } else {
+            assert_eq!(tick.payroll_departures, vec![fixture.member, fixture.boss]);
+        }
+    }
+    assert!(fixture.state.player_organization_defeated());
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .characters_in_organization(fixture.organization)
+            .count(),
+        0
+    );
+    assert!(
+        fixture
+            .state
+            .reports()
+            .reports_for(fixture.organization)
+            .any(|report| report.title() == "Organization dissolved")
+    );
+    let bytes = bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap();
+    let mut restored = restore_save(&registry, bincode::deserialize(&bytes).unwrap()).unwrap();
+    assert!(restored.player_organization_defeated());
+    let before = restored.now();
+    assert_eq!(
+        crate::core::simulation::run_tick(&registry, &mut restored),
+        Err(crate::core::simulation::TickError::PlayerOrganizationDissolved)
+    );
+    assert_eq!(restored.now(), before);
+}
+
+#[test]
+fn payroll_departures_block_immediate_and_unfunded_rehire_after_reload() {
+    use crate::world::world_system::{WorldError, validate_reassign_character};
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    // Another independent executive means that the organization still has leadership.
+    insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second executive".to_owned(),
+            organization: Some(fixture.organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Tight,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    for _ in 0..5 {
+        fixture
+            .state
+            .advance_clock(SimDuration::from_minutes(DAY_MINUTES - 1));
+        crate::core::simulation::run_tick(&registry, &mut fixture.state).unwrap();
+    }
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.member)
+            .unwrap()
+            .organization(),
+        None
+    );
+    let bytes = bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap();
+    fixture.state = restore_save(&registry, bincode::deserialize(&bytes).unwrap()).unwrap();
+    let check = |state: &AppState| {
+        validate_reassign_character(
+            state,
+            fixture.member,
+            Some(fixture.organization),
+            Some(fixture.boss),
+        )
+    };
+    assert!(matches!(
+        check(&fixture.state),
+        Err(WorldError::PayrollDepartureCoolingOff { .. })
+    ));
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(7 * DAY_MINUTES));
+    assert!(matches!(
+        check(&fixture.state),
+        Err(WorldError::PayrollDepartureUnfunded { .. })
+    ));
+    credit_account(
+        &mut fixture.state,
+        fixture.boss,
+        fixture.treasury,
+        registry.upkeep().per_member_daily().cents() * 7,
+    );
+    check(&fixture.state)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .get_character(fixture.member)
+            .unwrap()
+            .organization(),
+        Some(fixture.organization)
+    );
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn payroll_is_due_only_on_nonzero_day_boundaries() {
     assert!(!is_payroll_due(SimTime::ZERO));
     assert!(!is_payroll_due(SimTime::from_minutes(1_439)));

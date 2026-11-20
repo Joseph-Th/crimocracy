@@ -1,10 +1,12 @@
 //! Campaign-history validation and insertion; sibling history state owns the record map.
 
 use crate::core::entity::{EntityRef, is_entity_present};
-use crate::core::id::{HistoryEventId, IdExhaustionError};
+use crate::core::id::{CharacterId, HistoryEventId, IdExhaustionError, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{SimTime, ensure_time_current};
-use crate::history::{HistoryEventDraft, HistoryEventRecord};
+use crate::finance::Money;
+use crate::history::{HistoryEventDraft, HistoryEventKind, HistoryEventRecord};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -17,6 +19,10 @@ pub enum HistoryError {
     MissingEntity(EntityRef),
     #[error("history event was validated at {expected:?}, but simulation time is now {found:?}")]
     StaleTime { expected: SimTime, found: SimTime },
+    #[error("payroll departures must be recorded through the payroll departure owner")]
+    ReservedPayrollDeparture,
+    #[error("payroll departure does not agree with member {0}'s current membership transition")]
+    InvalidPayrollDeparture(CharacterId),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
 }
@@ -29,6 +35,19 @@ impl ValidatedHistoryEvent {
     pub fn commit(self, state: &mut AppState) -> Result<HistoryEventId, HistoryError> {
         ensure_time_current(state.now(), self.occurred_at)
             .map_err(|(expected, found)| HistoryError::StaleTime { expected, found })?;
+        if let HistoryEventKind::PayrollDeparture {
+            member,
+            resulting_version,
+            ..
+        } = self.draft.kind
+            && state.world().get_character(member).is_none_or(|record| {
+                record.organization().is_some()
+                    || record.supervisor().is_some()
+                    || record.version() != resulting_version
+            })
+        {
+            return Err(HistoryError::InvalidPayrollDeparture(member));
+        }
         let id = state.ids.next_history_event()?;
         state.history.insert(HistoryEventRecord {
             id,
@@ -42,6 +61,54 @@ impl ValidatedHistoryEvent {
 }
 
 pub fn validate_record_event(
+    state: &AppState,
+    draft: HistoryEventDraft,
+) -> Result<ValidatedHistoryEvent, HistoryError> {
+    if matches!(draft.kind, HistoryEventKind::PayrollDeparture { .. }) {
+        return Err(HistoryError::ReservedPayrollDeparture);
+    }
+    validate_event(state, draft)
+}
+
+pub(crate) fn validate_payroll_departure_event(
+    state: &AppState,
+    member: CharacterId,
+    organization: OrganizationId,
+    daily_wage: Money,
+) -> Result<ValidatedHistoryEvent, HistoryError> {
+    let person = state
+        .world()
+        .get_character(member)
+        .ok_or(HistoryError::InvalidPayrollDeparture(member))?;
+    if person.organization() != Some(organization)
+        || !crate::core::time::is_day_boundary(state.now())
+        || daily_wage <= Money::ZERO
+    {
+        return Err(HistoryError::InvalidPayrollDeparture(member));
+    }
+    let resulting_version = person
+        .version()
+        .checked_add(1)
+        .ok_or(HistoryError::InvalidPayrollDeparture(member))?;
+    validate_event(
+        state,
+        HistoryEventDraft {
+            kind: HistoryEventKind::PayrollDeparture {
+                member,
+                organization,
+                resulting_version,
+                daily_wage,
+            },
+            summary: format!("{} left after wage nonpayment.", person.name()),
+            entities: BTreeSet::from([
+                EntityRef::Character(member),
+                EntityRef::Organization(organization),
+            ]),
+        },
+    )
+}
+
+fn validate_event(
     state: &AppState,
     draft: HistoryEventDraft,
 ) -> Result<ValidatedHistoryEvent, HistoryError> {

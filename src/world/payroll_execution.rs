@@ -55,6 +55,7 @@ pub struct PayrollOutcome {
     paid: Money,
     short: Money,
     transaction: Option<LedgerTransactionId>,
+    underpaid_members: Vec<CharacterId>,
 }
 
 struct OrganizationPayrollPlan {
@@ -110,6 +111,9 @@ impl PayrollOutcome {
     }
     pub fn short(&self) -> Money {
         self.short
+    }
+    pub(crate) fn underpaid_members(&self) -> &[CharacterId] {
+        &self.underpaid_members
     }
     /// Canonical ledger transaction that paid this payroll. `None` means the organization
     /// had no spendable liquidity, so no money moved even though the wage obligation and
@@ -290,6 +294,7 @@ fn preflight_organization_payroll(
             paid: plan.paid,
             short,
             transaction: None,
+            underpaid_members: Vec::new(),
         };
         let underpaid: Vec<_> = plan
             .allocations
@@ -325,6 +330,12 @@ fn apply_organization_payroll(
         paid: plan.paid,
         short,
         transaction: None,
+        underpaid_members: plan
+            .allocations
+            .iter()
+            .filter(|(_, _, amount)| *amount < plan.per_member)
+            .map(|(member, _, _)| *member)
+            .collect(),
     };
     let consequences = if short.cents() > 0 {
         let underpaid: Vec<_> = plan

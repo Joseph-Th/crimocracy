@@ -526,6 +526,7 @@ fn upkeep_definition_rejects_unrepresentable_payroll_and_out_of_rail_resentment(
         builder.register_upkeep(UpkeepConfigSpec {
             per_member_daily: Money::from_cents(i64::MAX),
             shortfall_resentment: 10,
+            departure_resentment_floor: 60,
         }),
         Err(RegistryBuildError::InvalidUpkeepArithmeticRange)
     ));
@@ -535,6 +536,7 @@ fn upkeep_definition_rejects_unrepresentable_payroll_and_out_of_rail_resentment(
         builder.register_upkeep(UpkeepConfigSpec {
             per_member_daily: Money::from_cents(1_000),
             shortfall_resentment: 101,
+            departure_resentment_floor: 60,
         }),
         Err(RegistryBuildError::InvalidUpkeepResentment)
     ));

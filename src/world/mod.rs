@@ -3,6 +3,7 @@
 //! `stores` owns the record collections; `payroll_execution` owns the daily wage pass;
 //! `territory_influence`, `rating`, and `vocabulary` are read-only derivation.
 
+pub(crate) mod payroll_departures;
 pub mod payroll_execution;
 pub mod rating;
 pub mod territory_influence;

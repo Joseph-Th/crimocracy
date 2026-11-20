@@ -3,9 +3,10 @@
 pub mod history_system;
 
 use crate::core::entity::EntityRef;
-use crate::core::id::HistoryEventId;
 use crate::core::id::IdKeyedBounds;
+use crate::core::id::{CharacterId, HistoryEventId, OrganizationId};
 use crate::core::time::SimTime;
+use crate::finance::Money;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,6 +16,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum HistoryEventKind {
     Operation,
     Recruitment,
+    PayrollDeparture {
+        member: CharacterId,
+        organization: OrganizationId,
+        resulting_version: u32,
+        daily_wage: Money,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,6 +54,8 @@ impl HistoryEventRecord {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HistoryState {
     records: BTreeMap<HistoryEventId, HistoryEventRecord>,
+    #[serde(skip)]
+    latest_departures: BTreeMap<(CharacterId, OrganizationId), HistoryEventId>,
 }
 
 impl HistoryState {
@@ -62,7 +71,47 @@ impl HistoryState {
     pub(crate) fn event_id_bounds(&self) -> Option<(u32, u32)> {
         self.records.id_bounds()
     }
+    pub(crate) fn latest_payroll_departure(
+        &self,
+        member: CharacterId,
+        organization: OrganizationId,
+    ) -> Option<&HistoryEventRecord> {
+        self.latest_departures
+            .get(&(member, organization))
+            .and_then(|id| self.get_event(*id))
+    }
+    pub(crate) fn organization_has_payroll_departures(&self, organization: OrganizationId) -> bool {
+        self.latest_departures
+            .keys()
+            .any(|(_, owner)| *owner == organization)
+    }
+
+    fn derive_departure_index(&self) -> BTreeMap<(CharacterId, OrganizationId), HistoryEventId> {
+        self.records
+            .values()
+            .filter_map(|record| match record.kind() {
+                HistoryEventKind::PayrollDeparture {
+                    member,
+                    organization,
+                    ..
+                } => Some(((member, organization), record.id())),
+                HistoryEventKind::Operation | HistoryEventKind::Recruitment => None,
+            })
+            .collect()
+    }
+    pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.latest_departures = self.derive_departure_index();
+    }
     fn insert(&mut self, event: HistoryEventRecord) {
+        if let HistoryEventKind::PayrollDeparture {
+            member,
+            organization,
+            ..
+        } = event.kind()
+        {
+            self.latest_departures
+                .insert((member, organization), event.id());
+        }
         let previous = self.records.insert(event.id(), event);
         debug_assert!(
             previous.is_none(),
@@ -71,9 +120,12 @@ impl HistoryState {
     }
 
     pub(crate) fn has_consistent_indexes(&self) -> bool {
-        // History has no secondary indexes, but the authoritative map key and monotone event
+        // Reconcile the departure index and the authoritative map key and monotone event
         // chronology are still part of durable identity. Canonical event IDs are allocated at
         // commit time, so iteration by ID must never rewind campaign time.
+        if self.latest_departures != self.derive_departure_index() {
+            return false;
+        }
         let mut previous_at = None;
         for (id, event) in &self.records {
             if *id != event.id() || previous_at.is_some_and(|at| event.occurred_at() < at) {

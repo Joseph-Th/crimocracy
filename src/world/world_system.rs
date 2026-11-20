@@ -42,6 +42,22 @@ pub enum WorldError {
     )]
     CharacterReassignmentUnchanged { character: CharacterId },
     #[error(
+        "former member {character} will not return to organization {organization} within a week of walking away"
+    )]
+    PayrollDepartureCoolingOff {
+        character: CharacterId,
+        organization: OrganizationId,
+    },
+    #[error(
+        "former member {character} will not return to organization {organization} without a week's wage reserve ({required_cents} cents; {available_cents} available)"
+    )]
+    PayrollDepartureUnfunded {
+        character: CharacterId,
+        organization: OrganizationId,
+        required_cents: i128,
+        available_cents: i128,
+    },
+    #[error(
         "character {character} cannot join organization {organization} while recruitment approval {decision} still owns that route"
     )]
     PendingRecruitmentApprovalAssignment {
@@ -524,6 +540,9 @@ fn validate_reassignment_preconditions(
                 decision,
             });
         }
+        if let Some(organization) = organization {
+            validate_payroll_return(state, character, organization)?;
+        }
         validate_organization_change_release(state, character, organization)?;
     }
     if organization_changed || supervisor_changed {
@@ -549,6 +568,53 @@ fn validate_reassignment_preconditions(
             .get_character(current)
             .ok_or(WorldError::MissingCharacter(current))?;
         cursor = current_record.supervisor();
+    }
+    Ok(())
+}
+
+fn validate_payroll_return(
+    state: &AppState,
+    character: CharacterId,
+    organization: OrganizationId,
+) -> Result<(), WorldError> {
+    use crate::history::HistoryEventKind;
+    let Some(event) = state
+        .history()
+        .latest_payroll_departure(character, organization)
+    else {
+        return Ok(());
+    };
+    let HistoryEventKind::PayrollDeparture { daily_wage, .. } = event.kind() else {
+        unreachable!("departure index only contains payroll departures");
+    };
+    // A disappointed member requires time away and evidence of a credible offer,
+    // not an immediate unenforceable promise. The reserve is not a new ledger charge.
+    if state
+        .now()
+        .as_minutes()
+        .saturating_sub(event.occurred_at().as_minutes())
+        < 7 * crate::core::time::DAY_MINUTES
+    {
+        return Err(WorldError::PayrollDepartureCoolingOff {
+            character,
+            organization,
+        });
+    }
+    let required_cents = i128::from(daily_wage.cents()) * 7;
+    let available_cents = state
+        .finance()
+        .accounts_for(crate::finance::FinancialOwner::Organization(organization))
+        .map(|account| {
+            i128::from(crate::world::payroll_execution::payroll_funding_balance(account).cents())
+        })
+        .sum::<i128>();
+    if available_cents < required_cents {
+        return Err(WorldError::PayrollDepartureUnfunded {
+            character,
+            organization,
+            required_cents,
+            available_cents,
+        });
     }
     Ok(())
 }

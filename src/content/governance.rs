@@ -54,6 +54,7 @@ pub(super) fn register_upkeep(builder: &mut RegistryBuilder) {
             // choice without making a small crew immediately insolvent.
             per_member_daily: Money::from_cents(40_00),
             shortfall_resentment: 12,
+            departure_resentment_floor: 60,
         })
         .unwrap_or_else(|error| panic!("invalid upkeep registry: {error}"));
 }

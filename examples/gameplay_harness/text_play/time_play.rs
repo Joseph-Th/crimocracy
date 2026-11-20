@@ -19,6 +19,9 @@ fn bounded_advance_span(
 impl Session<'_> {
     pub(super) fn execute_advance(&mut self, duration: &str) -> Result<String, String> {
         let requested = parse_advance(duration)?;
+        if self.state.player_organization_defeated() {
+            return Err("Campaign over: your organization dissolved".to_owned());
+        }
         if self
             .state
             .decisions()
@@ -122,7 +125,9 @@ impl Session<'_> {
                 .state
                 .attention_settings()
                 .is_auto_pause_enabled(crimocracy::core::attention::AttentionClass::Exception);
-            if self
+            if self.state.player_organization_defeated() {
+                reason = Some("Campaign over: your organization dissolved");
+            } else if self
                 .state
                 .decisions()
                 .pending_for_recipient(self.player)

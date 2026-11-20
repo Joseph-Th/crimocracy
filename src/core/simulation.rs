@@ -69,6 +69,8 @@ pub struct TickOutcome {
     /// Balanced ledger distribution of authorized owners' business earnings, never retained capital.
     pub autonomous_profit_sweeps: Option<crate::core::id::LedgerTransactionId>,
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
+    /// Members who voluntarily left following unresolved wage shortfalls.
+    pub payroll_departures: Vec<CharacterId>,
     /// Number of individual reputation dimensions that actually moved this tick, including
     /// day-boundary decay and current operation/racket consequences. This makes reputation-only
     /// persistent ticks observable to validation/adapters instead of hiding them behind phases
@@ -89,6 +91,8 @@ pub struct TickOutcome {
 pub enum TickError {
     #[error("simulation clock is exhausted at minute {now:?}; no later canonical tick exists")]
     ClockExhausted { now: SimTime },
+    #[error("Campaign over: your organization dissolved")]
+    PlayerOrganizationDissolved,
 }
 
 pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome, TickError> {
@@ -97,6 +101,9 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // The state owner performs the checked mutation itself. A terminal campaign state is valid,
     // but it has no successor minute; rejecting here keeps the whole tick atomic and leaves no
     // unchecked production clock mutator for another caller to reuse accidentally.
+    if state.player_organization_defeated() {
+        return Err(TickError::PlayerOrganizationDissolved);
+    }
     let previous_now = state.now();
     state
         .try_advance_clock(SimDuration::ONE_MINUTE)
@@ -214,6 +221,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // than a mixture of pre- and post-boundary state.
     let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state)
         .expect("valid state should settle every due criminal-organization payroll");
+    // Departures see actual wages and current resentment before recruitment and expansion
+    // evaluate the roster and delegated authorities.
+    let payroll_departures =
+        crate::world::payroll_departures::apply_payroll_departures(registry, state, &payrolls);
     // Collect adjudicated personal debts after actual wages arrive; no employer
     // asset is a payment source merely because its member was convicted.
     let court_fine_payments = crate::legal::prosecution_system::apply_due_fine_collections(state)
@@ -290,6 +301,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         enterprise_observations,
         autonomous_profit_sweeps,
         payrolls,
+        payroll_departures,
         reputation_changes,
         recruitment_attempts,
         resumed_enterprises,

@@ -235,12 +235,15 @@ impl RegistryBuilder {
         if i128::from(spec.per_member_daily.cents()) * i128::from(u32::MAX) > i128::from(i64::MAX) {
             return Err(RegistryBuildError::InvalidUpkeepArithmeticRange);
         }
-        if !(1..=crate::social::RelationshipLevel::MAX_VALUE).contains(&spec.shortfall_resentment) {
+        if !(1..=crate::social::RelationshipLevel::MAX_VALUE).contains(&spec.shortfall_resentment)
+            || !(1..=95).contains(&spec.departure_resentment_floor)
+        {
             return Err(RegistryBuildError::InvalidUpkeepResentment);
         }
         self.upkeep = Some(UpkeepConfigDefinition {
             per_member_daily: spec.per_member_daily,
             shortfall_resentment: spec.shortfall_resentment,
+            departure_resentment_floor: spec.departure_resentment_floor,
         });
         Ok(())
     }

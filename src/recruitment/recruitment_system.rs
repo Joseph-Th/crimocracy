@@ -385,6 +385,8 @@ fn candidate_reassignment_is_unavailable(error: WorldError) -> bool {
         | WorldError::ActiveInstitutionalContactAssignment { .. }
         | WorldError::DirectReportAssignment { .. }
         | WorldError::PendingRecruitmentApprovalAssignment { .. }
+        | WorldError::PayrollDepartureCoolingOff { .. }
+        | WorldError::PayrollDepartureUnfunded { .. }
         | WorldError::VersionCapacity(_) => true,
         WorldError::EmptyName
         | WorldError::MissingOrganization(_)

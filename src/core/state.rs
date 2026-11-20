@@ -119,6 +119,19 @@ impl AppState {
         self.campaign.player_organization
     }
 
+    /// An abandoned player organization has no surviving membership and a recorded payroll departure.
+    pub fn player_organization_defeated(&self) -> bool {
+        self.player_organization().is_some_and(|organization| {
+            self.world()
+                .characters_in_organization(organization)
+                .next()
+                .is_none()
+                && self
+                    .history()
+                    .organization_has_payroll_departures(organization)
+        })
+    }
+
     pub fn world(&self) -> &WorldState {
         &self.world
     }
@@ -242,6 +255,7 @@ impl AppState {
             return false;
         }
         self.reports.rebuild_derived_indexes();
+        self.history.rebuild_derived_indexes();
         true
     }
 

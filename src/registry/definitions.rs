@@ -892,11 +892,14 @@ pub struct UpkeepConfigSpec {
     /// Resentment increment applied to each unpaid member's relationship toward their
     /// supervisor when a payroll run cannot fully fund itself.
     pub shortfall_resentment: u8,
+    /// Minimum accumulated resentment for a freshly underpaid member to consider leaving.
+    pub departure_resentment_floor: u8,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct UpkeepConfigDefinition {
     pub(super) per_member_daily: Money,
     pub(super) shortfall_resentment: u8,
+    pub(super) departure_resentment_floor: u8,
 }
 impl UpkeepConfigDefinition {
     /// Daily wage owed per active organization member.
@@ -905,6 +908,9 @@ impl UpkeepConfigDefinition {
     }
     pub fn shortfall_resentment(self) -> u8 {
         self.shortfall_resentment
+    }
+    pub fn departure_resentment_floor(self) -> u8 {
+        self.departure_resentment_floor
     }
 }
 #[derive(Clone, Copy, Debug)]

@@ -43,6 +43,8 @@ pub enum StateValidationError {
     EmptyEntityName { entity: EntityRef },
     #[error("character {character} has invalid persisted version 0")]
     InvalidCharacterVersion { character: CharacterId },
+    #[error("history event {event} contains an invalid payroll departure")]
+    InvalidPayrollDeparture { event: HistoryEventId },
     #[error("non-criminal organization {organization} stores a criminal reputation record")]
     InvalidReputationOrganization { organization: OrganizationId },
     #[error("organization {organization:?} stores an out-of-range {audience:?} reputation score")]
@@ -466,6 +468,7 @@ pub fn validate_state_against_registry(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     world::validate_organization_policies_against_registry(registry, state)?;
+    history::validate_history_against_registry(registry, state)?;
     validate_legal_subsystems_against_registry(registry, state)?;
     operations::validate_operations_against_registry(registry, state)?;
     validate_opportunities_against_registry(registry, state)?;

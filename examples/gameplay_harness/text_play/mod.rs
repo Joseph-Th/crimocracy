@@ -874,6 +874,10 @@ impl<'a> Session<'a> {
     }
 
     fn brief(&self) -> String {
+        if self.state.player_organization_defeated() {
+            return "Campaign over: your organization dissolved. Review the final reports."
+                .to_owned();
+        }
         let state = &self.state;
         let player = self.player;
         let name = state
