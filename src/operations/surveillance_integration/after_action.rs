@@ -19,6 +19,7 @@ pub(crate) fn surveillance_after_action_clause(
     let plan = plan?;
     let findings = plan.observation_findings().collect::<Vec<_>>().join("; ");
     Some(render_surveillance_after_action_clause(
+        plan.infiltration,
         plan.observation_count(),
         &findings,
         outcome,
@@ -26,13 +27,19 @@ pub(crate) fn surveillance_after_action_clause(
 }
 
 fn render_surveillance_after_action_clause(
+    infiltration: bool,
     observation_count: usize,
     findings: &str,
     outcome: OperationObjectiveOutcome,
 ) -> String {
+    let method = if infiltration {
+        "Infiltration"
+    } else {
+        "Surveillance"
+    };
     match outcome {
         OperationObjectiveOutcome::Achieved => format!(
-            "Surveillance produced {} usable target observation{}{}.",
+            "{method} produced {} usable target observation{}{}.",
             observation_count,
             if observation_count == 1 { "" } else { "s" },
             if findings.is_empty() {
@@ -42,7 +49,7 @@ fn render_surveillance_after_action_clause(
             }
         ),
         OperationObjectiveOutcome::Partial => format!(
-            "Surveillance produced {} limited target observation{}; important details remain unresolved.{}",
+            "{method} produced {} limited target observation{}; important details remain unresolved.{}",
             observation_count,
             if observation_count == 1 { "" } else { "s" },
             if findings.is_empty() {
@@ -52,7 +59,7 @@ fn render_surveillance_after_action_clause(
             }
         ),
         OperationObjectiveOutcome::Failed => {
-            "Surveillance produced no target observation reliable enough for planning.".to_owned()
+            format!("{method} produced no target observation reliable enough for planning.")
         }
     }
 }
@@ -72,6 +79,7 @@ pub(crate) fn persisted_surveillance_after_action_clause(
     let resolution = operation.resolution().ok_or(())?;
     if resolution.objective_outcome() == OperationObjectiveOutcome::Failed {
         return Ok(Some(render_surveillance_after_action_clause(
+            operation.kind() == OperationKind::Infiltration,
             0,
             "",
             resolution.objective_outcome(),
@@ -84,11 +92,12 @@ pub(crate) fn persisted_surveillance_after_action_clause(
             state
                 .intelligence
                 .get_information(*information)
-                .and_then(|record| persisted_surveillance_finding(state, record))
+                .and_then(|record| persisted_surveillance_finding(state, operation.kind(), record))
                 .ok_or(())
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(render_surveillance_after_action_clause(
+        operation.kind() == OperationKind::Infiltration,
         findings.len(),
         &findings.join("; "),
         resolution.objective_outcome(),
@@ -97,6 +106,7 @@ pub(crate) fn persisted_surveillance_after_action_clause(
 
 fn persisted_surveillance_finding(
     state: &AppState,
+    kind: OperationKind,
     information: &InformationRecord,
 ) -> Option<String> {
     match (information.topic(), information.subject()) {
@@ -108,10 +118,15 @@ fn persisted_surveillance_finding(
             .world
             .get_business(id)
             .map(|record| format!("access intelligence at {}", record.name())),
-        (InformationTopic::Personnel, EntityRef::Character(id)) => state
-            .world
-            .get_character(id)
-            .map(|record| format!("the movements of {}", record.name())),
+        (InformationTopic::Personnel, EntityRef::Character(id)) => {
+            state.world.get_character(id).map(|record| {
+                if kind == OperationKind::Infiltration {
+                    format!("personnel file on {}", record.name())
+                } else {
+                    format!("the movements of {}", record.name())
+                }
+            })
+        }
         (InformationTopic::LegalActivity, EntityRef::Organization(id)) => state
             .world
             .get_organization(id)
@@ -136,6 +151,39 @@ fn persisted_surveillance_finding(
             };
             Some(format!(
                 "{} activity at {location}",
+                enterprise_kind_label(enterprise.kind())
+            ))
+        }
+        (InformationTopic::FinancialPerformance, EntityRef::Business(id))
+            if kind == OperationKind::Infiltration =>
+        {
+            state
+                .world
+                .get_business(id)
+                .map(|record| format!("internal books of {}", record.name()))
+        }
+        (InformationTopic::MarketAccess, EntityRef::Organization(id))
+            if kind == OperationKind::Infiltration =>
+        {
+            state
+                .world
+                .get_organization(id)
+                .map(|record| format!("commercial records of {}", record.name()))
+        }
+        (
+            topic @ (InformationTopic::FinancialPerformance | InformationTopic::MarketAccess),
+            EntityRef::Enterprise(id),
+        ) if kind == OperationKind::Infiltration => {
+            let enterprise = state.enterprises.get_enterprise(id)?;
+            let location =
+                super::observation_text::enterprise_location_name(state, enterprise.location());
+            let label = if topic == InformationTopic::FinancialPerformance {
+                "internal books"
+            } else {
+                "support network"
+            };
+            Some(format!(
+                "{label} of {} at {location}",
                 enterprise_kind_label(enterprise.kind())
             ))
         }

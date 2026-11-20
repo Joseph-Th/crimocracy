@@ -42,6 +42,76 @@ fn starting_cash(session: &Session<'_>) -> u32 {
 }
 
 #[test]
+fn reassign_racket_preserves_cycle_history_and_rejects_unmandated_members() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let record = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .next()
+        .unwrap();
+    let id = record.id();
+    let former = record.manager();
+    let cash = record.cash_account();
+    let settlement = record.settlement_account();
+    let successor = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|member| {
+            member.id() != former
+                && member.supervisor().is_some()
+                && session
+                    .state
+                    .delegation()
+                    .active_for_manager(member.id())
+                    .is_none()
+        })
+        .unwrap()
+        .id();
+    let command = format!("reassign-racket {} {}", id.raw(), successor.raw());
+    let before = snapshot(&registry, &session);
+    assert!(session.execute(&command).is_err());
+    assert_eq!(snapshot(&registry, &session), before);
+    session
+        .execute(&format!("delegate {} enterprise", successor.raw()))
+        .unwrap();
+    session.execute("advance 1d").unwrap();
+    let old = session.state.enterprises().latest_cycle(id).unwrap().id();
+    session
+        .execute(&format!("racket {} suspend", id.raw()))
+        .unwrap();
+    assert!(
+        session
+            .execute(&command)
+            .unwrap()
+            .0
+            .contains("Still suspended")
+    );
+    session
+        .execute(&format!("racket {} resume", id.raw()))
+        .unwrap();
+    let record = session.state.enterprises().get_enterprise(id).unwrap();
+    assert_eq!(record.manager(), successor);
+    assert_eq!(record.cash_account(), cash);
+    assert_eq!(record.settlement_account(), settlement);
+    assert_eq!(
+        session.state.enterprises().latest_cycle(id).unwrap().id(),
+        old
+    );
+    assert!(
+        session
+            .execute(&format!("racket-cycles {}", id.raw()))
+            .unwrap()
+            .0
+            .contains(&format!("manager char-{}", former.raw()))
+    );
+    let _ = snapshot(&registry, &session);
+}
+
+#[test]
 fn racket_outlook_is_owned_read_only_and_distinguishes_unknown_from_observed_heat() {
     let registry = crimocracy::build_registry();
     let mut session =

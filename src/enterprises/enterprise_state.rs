@@ -489,6 +489,35 @@ impl EnterpriseState {
         );
     }
 
+    /// Only the validated succession operation changes enterprise authority. The
+    /// active mandate index changes with the record; the schedule and books do not.
+    pub(super) fn reassign_authority(
+        &mut self,
+        id: EnterpriseId,
+        authority: crate::delegation::MandateAuthority,
+        at: SimTime,
+    ) {
+        let record = self
+            .records
+            .get_mut(&id)
+            .expect("validated enterprise exists");
+        let former = record.authority();
+        if record.status() == EnterpriseStatus::Active && former.mandate != authority.mandate {
+            Self::remove_from_set_index(&mut self.active_by_mandate, former.mandate, id);
+            self.active_by_mandate
+                .entry(authority.mandate)
+                .or_default()
+                .insert(id);
+        }
+        record
+            .assignment
+            .previous_authorities
+            .entry(at)
+            .or_insert(former);
+        record.assignment.authority = authority;
+        record.runtime.version = advance_version_preflighted(record.runtime.version);
+    }
+
     pub(super) fn set_status(
         &mut self,
         id: EnterpriseId,

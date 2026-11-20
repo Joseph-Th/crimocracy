@@ -146,6 +146,7 @@ const HELP: &str = "Commands:
   preview-racket <same arguments as start-racket>
                          Validate an investment and estimate earnings without establishing it
   racket <id> <suspend|resume|retire>  Change your racket's lifecycle
+  reassign-racket <id> <member-id>  Transfer management without replacing the racket
   racket-cycles <enterprise-id> [count]
                          Historical racket earnings and enforcement attention
   racket-outlook <enterprise-id>  Conditional earnings and shared working-cash estimate
@@ -426,7 +427,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "recruit" | "scout" => 2..=3,
         "start-racket" | "preview-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
-        "racket" | "launder" | "sweep" | "decide" | "business" => 3..=3,
+        "racket" | "reassign-racket" | "launder" | "sweep" | "decide" | "business" => 3..=3,
         "move" | "deposit" => 4..=4,
         "dispose" => 5..=5,
         "reports" | "treasury" => 1..=2,

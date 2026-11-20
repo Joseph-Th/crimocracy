@@ -274,6 +274,49 @@ impl Session<'_> {
                     .unwrap();
                 }
             }
+            "reassign-racket" => {
+                let raw = parse_number(words[1], "enterprise")?;
+                let record = state
+                    .enterprises()
+                    .enterprises_for_organization(self.player)
+                    .find(|enterprise| enterprise.id().raw() == raw)
+                    .ok_or("no owned enterprise with that ID")?;
+                let manager = self.requested_member(words[2])?;
+                let authority = self.enterprise_authority(
+                    record.location(),
+                    record.supporting_businesses(),
+                    Some(manager),
+                )?;
+                let old_manager = state
+                    .world()
+                    .get_character(record.manager())
+                    .ok_or("manager disappeared")?
+                    .name()
+                    .to_owned();
+                let new_manager = state
+                    .world()
+                    .get_character(manager)
+                    .ok_or("manager disappeared")?
+                    .name()
+                    .to_owned();
+                let status = record.status();
+                crimocracy::enterprises::enterprise_execution::validate_reassign_enterprise(
+                    state,
+                    record.id(),
+                    authority,
+                )
+                .map_err(|e| e.to_string())?
+                .commit(&mut self.state)
+                .map_err(|e| e.to_string())?;
+                writeln!(out, "Enterprise {raw}: {old_manager} handed responsibility to {new_manager}. Existing accounts and cycle history retained.").unwrap();
+                if status == crimocracy::enterprises::EnterpriseStatus::Suspended {
+                    writeln!(
+                        out,
+                        "Still suspended; use 'racket {raw} resume' when ready."
+                    )
+                    .unwrap();
+                }
+            }
             "racket" => {
                 if words.len() != 3 {
                     return Err("racket <enterprise-id> <suspend|resume|retire>".to_owned());

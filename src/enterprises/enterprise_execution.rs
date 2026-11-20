@@ -4,6 +4,7 @@ mod cycle_planning;
 mod economics;
 mod establishment;
 mod lifecycle;
+mod succession;
 mod support;
 
 #[cfg(test)]
@@ -34,6 +35,7 @@ pub use lifecycle::{
     ValidatedEnterpriseStatusChange, validate_resume_enterprise, validate_retire_enterprise,
     validate_suspend_enterprise,
 };
+pub use succession::{ValidatedEnterpriseReassignment, validate_reassign_enterprise};
 
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
@@ -178,6 +180,10 @@ pub enum EnterpriseError {
         account: FinancialAccountId,
         enterprise: EnterpriseId,
     },
+    #[error("enterprise {0} already has that authority")]
+    EnterpriseAuthorityUnchanged(EnterpriseId),
+    #[error("enterprise {0} has a settlement due; settle or suspend it before reassigning")]
+    EnterpriseReassignmentCycleDue(EnterpriseId),
     #[error("enterprise {0} is not active")]
     EnterpriseNotActive(EnterpriseId),
     #[error("enterprise {0} is not suspended")]

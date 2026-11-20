@@ -148,7 +148,7 @@ populate the targeting directory, and defers objective viability to the
 operation owner. Surveillance and infiltration observe the target through
 `surveillance_integration`, producing first-party intel after the simulated
 resolution rather than at authorization. Successful local watches use indexed district and venue enterprises to produce bounded typed enterprise-location and organization-personnel observations; they reveal only sampled active foreign operations. An institutional sightline about
-player-originated cases does not confer access to all the authority's cases.
+player-originated cases does not confer access to all the authority's cases. Successful infiltration adds target-bounded internal findings from business ownership and settlement records, organization leadership and mandates, or enterprise support and settlement records. These findings participate in the same resolution snapshot, production information creation, and immutable after-action report reconstruction; incomplete infiltration does not acquire internal records.
 
 The planner attaches the registry's supported police contingencies, bounded
 relative scheduling, completion deadlines and known-topic requirements to
@@ -214,7 +214,7 @@ dependency or reset laundering capacity by suspending a front. District racket
 creation resolves delegation authority against a real neighborhood; the
 adapter requires the registry's physical-host functions before allowing a
 business kind at district-only scale. All other supporting-network, account
-and operating-state checks stay with `enterprise_execution`.
+and operating-state checks stay with `enterprise_execution`. Racket succession validates the replacement mandate against the complete operating network and commits through the enterprise owner, changing the active mandate index but retaining the original accounts and settlement schedule. Persisted authority history assigns each completed cycle and its legal evidence to the responsible manager at the settlement minute, including transfers after settlement in that same minute.
 
 Static definitions describe what may exist. Runtime records describe what does exist.
 Mutable progress does not live in the registry. Future-affecting generated state is

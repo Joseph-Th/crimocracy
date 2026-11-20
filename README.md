@@ -131,14 +131,14 @@ racket, and shows the chosen manager, conditional costs and earnings, and the
 case-pressure threshold for nonpositive expected earnings. `business business-N suspend` pauses a player-owned storefront
 only after its active racket dependencies are suspended;
 `business business-N resume` restarts its real operating cycle without resetting the
-current laundering window. Rackets must be resumed separately.
+current laundering window. Rackets must be resumed separately. `reassign-racket <id> <member-id>` transfers an existing racket to an eligible manager whose mandate covers its whole network, retaining the accounts, historical settlements, and current operating status. Use `racket <id> resume` afterward if it was suspended. An active racket with a due settlement must settle or suspend before reassignment.
 
 For financial review, `ledger [count]` lists recent transactions touching
 organization-owned accounts, and `transaction transaction-N` shows only
 the player's own postings, excluding the counterparties' private books.
 `business-cycles business-N [count]` summarizes actual storefront
 settlements earned under player ownership;
-`racket-cycles enterprise-N [count]` reports gross, operating costs, net cash and enforcement costs.
+`racket-cycles enterprise-N [count]` reports gross, operating costs, net cash, enforcement costs, and the manager responsible for each historical settlement.
 All histories are read-only and survive save/load.
 
 Leadership decisions include `policies`, `policy`, `mandates`, `delegate`, and
@@ -150,7 +150,7 @@ supported approaches, and relevant intelligence topics. `plan <kind> <target-id>
 authorizes operations against eligible business targets. Surveillance and
 infiltration additionally accept public `district-N` and `business-N` targets,
 or identified `char-N`, `org-N`, `operation-N`, `investigation-N`,
-and `enterprise-N` records. `known-targets` lists identified institutional and
+and `enterprise-N` records. Successful infiltration of a business can reveal its owner and latest operating results; infiltration of a criminal or commercial organization reveals actual leadership and mandates, and enterprise infiltration can reveal its supporting businesses and latest settlement. Ordinary surveillance does not expose these internal records. `known-targets` lists identified institutional and
 administrative targets; it never searches hidden case or rival rosters.
 `known-people` includes current crew, observed people, contacts, and recruitment
 prospects. The `prospects` view identifies familiar vocational skills without

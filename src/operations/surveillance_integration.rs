@@ -1,6 +1,7 @@
 //! Surveillance operation integration that turns observed world state into bounded organization knowledge.
 
 mod after_action;
+mod infiltration;
 mod observation_text;
 
 pub(crate) use after_action::{
@@ -60,6 +61,8 @@ pub(crate) struct SurveillanceIntelligencePlan {
     observed_at: SimTime,
     surveiller: OrganizationId,
     snapshot: SurveillanceTargetSnapshot,
+    infiltration: bool,
+    inside_observations: Option<Vec<SurveillanceObservation>>,
     observations: Vec<SurveillanceObservation>,
 }
 
@@ -256,12 +259,27 @@ pub(crate) fn decide_surveillance_intelligence(
             .as_minutes(),
     )
     .expect("validated patrol observation bucket must fit one-day minute width");
-    let observations = build_observations(&snapshot, outcome, observed_at, bucket_minutes);
+    let mut observations = build_observations(&snapshot, outcome, observed_at, bucket_minutes);
+    let infiltration = operation.kind() == OperationKind::Infiltration;
+    let inside_observations = (infiltration && outcome == OperationObjectiveOutcome::Achieved)
+        .then(|| infiltration::internal_findings(state, *target));
+    if infiltration {
+        if let SurveillanceTargetSnapshot::Character { name, .. } = &snapshot {
+            for observation in &mut observations {
+                observation.finding = format!("personnel file on {name}");
+            }
+        }
+        if let Some(inside) = &inside_observations {
+            observations.extend(inside.iter().cloned());
+        }
+    }
     Ok(Some(SurveillanceIntelligencePlan {
         target: *target,
         observed_at,
         surveiller,
         snapshot,
+        infiltration,
+        inside_observations,
         observations,
     }))
 }
@@ -280,7 +298,11 @@ pub(crate) fn validate_surveillance_plan_snapshot(
         plan.surveiller,
         off_window_patrol_presence_percent,
     )?;
-    if current != plan.snapshot {
+    if current != plan.snapshot
+        || plan.inside_observations.as_ref().is_some_and(|expected| {
+            infiltration::internal_findings(state, plan.target) != *expected
+        })
+    {
         return Err(SurveillanceError::StaleTarget(plan.target));
     }
     Ok(())
@@ -340,6 +362,21 @@ pub(crate) fn is_valid_persisted_surveillance_information(
         || information.reliability() != expected_reliability
         || information.specificity() != expected_specificity
         || !information.derived_from().is_empty()
+    {
+        return false;
+    }
+    // Internal records cannot be produced by an ordinary watch or incomplete infiltration.
+    if matches!(
+        (information.topic(), information.subject()),
+        (
+            InformationTopic::FinancialPerformance,
+            EntityRef::Business(_) | EntityRef::Enterprise(_)
+        ) | (
+            InformationTopic::MarketAccess,
+            EntityRef::Organization(_) | EntityRef::Enterprise(_)
+        )
+    ) && (operation.kind() != OperationKind::Infiltration
+        || resolution.objective_outcome() != OperationObjectiveOutcome::Achieved)
     {
         return false;
     }

@@ -223,10 +223,11 @@ pub(crate) fn resolve_historical_enterprise_cycle_financials(
         });
     }
     let profile = resolve_location_profile(state, record.location())?;
+    let manager_id = record.authority_for_cycle_at(cycle.occurred_at()).manager;
     let manager = state
         .world
-        .get_character(record.manager())
-        .ok_or(DelegationError::MissingManager(record.manager()))?;
+        .get_character(manager_id)
+        .ok_or(DelegationError::MissingManager(manager_id))?;
     let gross_before_variance = resolve_gross_before_variance(
         record.id(),
         economics,

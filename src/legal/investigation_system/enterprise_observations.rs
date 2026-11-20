@@ -22,7 +22,7 @@ fn observation_chance(skill: u8, presence: u8) -> usize {
 }
 
 /// The existing surveillance vocabulary distinguishes a personal vice observation from
-/// the weak enterprise-only intake. The enterprise's manager assignment is immutable.
+/// the weak enterprise-only intake. Use the manager responsible for the observed cycle.
 pub(crate) fn enterprise_observation_origin(
     kind: EvidenceKind,
     subject: EntityRef,
@@ -48,7 +48,12 @@ pub(super) fn validate_observation_draft(
     let enterprise = state.enterprises().get_enterprise(id).ok_or_else(invalid)?;
     let cycle = state.enterprises().latest_cycle(id).ok_or_else(invalid)?;
     let lead = case.lead_investigator().ok_or_else(invalid)?;
-    if draft.subject != EntityRef::Character(enterprise.manager())
+    if draft.subject
+        != EntityRef::Character(
+            enterprise
+                .authority_for_cycle_at(cycle.occurred_at())
+                .manager,
+        )
         || draft.discovered_at != state.now()
         || cycle.occurred_at() != state.now()
         || cycle.drew_enforcement_attention()
@@ -101,7 +106,11 @@ pub(crate) fn apply_enterprise_observations(
             .get_enterprise(cycle.enterprise())
             .expect("settled enterprise exists");
         let target = EntityRef::Enterprise(enterprise.id());
-        let subject = EntityRef::Character(enterprise.manager());
+        let subject = EntityRef::Character(
+            enterprise
+                .authority_for_cycle_at(cycle.occurred_at())
+                .manager,
+        );
         let district = resolve_location_neighborhood(state, enterprise.location())
             .expect("settled enterprise has district");
         let presence = state

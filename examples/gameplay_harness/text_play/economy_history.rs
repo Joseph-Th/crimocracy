@@ -85,7 +85,7 @@ impl Session<'_> {
                 }
                 for cycle in cycles {
                     writeln!(out,
-                        "  enterprise-cycle-{} | {} | gross {} cents | cost {} cents | net {:+} cents | heat {} cents | enforcement: {}",
+                        "  enterprise-cycle-{} | {} | gross {} cents | cost {} cents | net {:+} cents | heat {} cents | enforcement: {} | manager char-{}", 
                         cycle.id().raw(),
                         time_label(cycle.occurred_at().as_minutes()),
                         cycle.gross_revenue().cents(),
@@ -93,6 +93,7 @@ impl Session<'_> {
                         cycle.net_cash().cents(),
                         cycle.investigation_heat().cents(),
                         cycle.drew_enforcement_attention(),
+                        enterprise.authority_for_cycle_at(cycle.occurred_at()).manager.raw(),
                     ).unwrap();
                 }
             }

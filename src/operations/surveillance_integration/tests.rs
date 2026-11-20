@@ -46,6 +46,7 @@ use crate::world::{
 use std::collections::{BTreeMap, BTreeSet};
 
 mod enterprise_discovery;
+mod infiltration;
 
 struct Fixture {
     registry: Registry,

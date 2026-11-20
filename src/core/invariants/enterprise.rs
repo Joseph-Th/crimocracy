@@ -63,6 +63,7 @@ fn validate_enterprise_record(
         });
     }
     let refs = resolve_enterprise_authority(state, enterprise)?;
+    validate_previous_authorities(state, enterprise, &refs)?;
     validate_enterprise_accounts(state, enterprise)?;
     validate_enterprise_schedule(state, enterprise)?;
     validate_enterprise_status(state, enterprise, &refs)
@@ -110,6 +111,52 @@ fn resolve_enterprise_authority<'a>(
         neighborhood,
         supporting_businesses,
     })
+}
+
+fn validate_previous_authorities(
+    state: &AppState,
+    enterprise: &EnterpriseRecord,
+    refs: &EnterpriseAuthorityRefs<'_>,
+) -> Result<(), StateValidationError> {
+    use crate::enterprises::enterprise_execution::can_authority_cover_location;
+    let invalid = || StateValidationError::InvalidEnterpriseAuthority {
+        enterprise: enterprise.id(),
+    };
+    let history = enterprise.previous_authorities();
+    if history.len() >= enterprise.version() as usize {
+        return Err(invalid());
+    }
+    for (through, authority) in history {
+        if *through < enterprise.established_at()
+            || *through > state.now()
+            || enterprise
+                .retired_at()
+                .is_some_and(|retired| *through > retired)
+            || !state
+                .delegation
+                .get_mandate(authority.mandate)
+                .is_some_and(|mandate| {
+                    mandate.organization() == enterprise.organization()
+                        && mandate.manager() == authority.manager
+                })
+            || state.world.get_character(authority.manager).is_none()
+            || !can_authority_cover_location(
+                authority.scope,
+                enterprise.location(),
+                refs.neighborhood,
+            )
+            || !refs.supporting_businesses.iter().all(|business| {
+                can_authority_cover_location(
+                    authority.scope,
+                    EnterpriseLocation::Business(business.id()),
+                    business.neighborhood(),
+                )
+            })
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 fn resolve_enterprise_neighborhood(
@@ -460,7 +507,12 @@ fn validate_cycle_attention(
             if information.holder() != KnowledgeHolder::Organization(enterprise.organization())
                 || information.source_kind() != InformationSourceKind::AfterAction
                 || information.topic() != InformationTopic::FinancialPerformance
-                || information.source_entity() != Some(EntityRef::Character(enterprise.manager()))
+                || information.source_entity()
+                    != Some(EntityRef::Character(
+                        enterprise
+                            .authority_for_cycle_at(cycle.occurred_at())
+                            .manager,
+                    ))
                 || information.subject() != EntityRef::Enterprise(enterprise.id())
                 || information.observed_at() != cycle.occurred_at()
                 || information.recorded_at() != cycle.occurred_at()

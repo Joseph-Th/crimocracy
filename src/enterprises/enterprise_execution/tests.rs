@@ -63,6 +63,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod autonomous_expansion;
 mod cycle_boundaries;
+mod succession;
 mod vice_observations;
 
 fn apply_due_autonomous_enterprises(
@@ -1298,6 +1299,7 @@ struct EnterpriseIdentityWire {
 struct EnterpriseAssignmentWire {
     organization: OrganizationId,
     authority: MandateAuthority,
+    previous_authorities: BTreeMap<SimTime, MandateAuthority>,
     location: EnterpriseLocation,
     supporting_businesses: BTreeSet<BusinessId>,
     cash_account: FinancialAccountId,
@@ -1331,6 +1333,7 @@ fn enterprise_wire(record: &crate::enterprises::EnterpriseRecord) -> EnterpriseR
         assignment: EnterpriseAssignmentWire {
             organization: record.organization(),
             authority: record.authority(),
+            previous_authorities: record.previous_authorities().clone(),
             location: record.location(),
             supporting_businesses: record.supporting_businesses().clone(),
             cash_account: record.cash_account(),

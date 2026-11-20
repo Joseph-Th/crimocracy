@@ -23,7 +23,7 @@ use crate::core::time::SimTime;
 use crate::delegation::MandateAuthority;
 use crate::finance::Money;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum EnterpriseKind {
@@ -93,6 +93,10 @@ struct EnterpriseIdentity {
 struct EnterpriseAssignment {
     organization: OrganizationId,
     authority: MandateAuthority,
+    /// Prior authorities keyed by their inclusive final settlement minute. A transfer
+    /// cannot occur before an already-due cycle settles; same-minute transfers preserve
+    /// the first outgoing authority so history never changes retroactively.
+    previous_authorities: BTreeMap<SimTime, MandateAuthority>,
     location: EnterpriseLocation,
     supporting_businesses: BTreeSet<BusinessId>,
     cash_account: FinancialAccountId,
@@ -138,6 +142,19 @@ impl EnterpriseRecord {
 
     pub fn authority(&self) -> MandateAuthority {
         self.assignment.authority
+    }
+
+    /// Authority responsible for a historical settled cycle, not the current manager.
+    pub fn authority_for_cycle_at(&self, at: SimTime) -> MandateAuthority {
+        self.assignment
+            .previous_authorities
+            .range(at..)
+            .next()
+            .map_or(self.authority(), |(_, authority)| *authority)
+    }
+
+    pub(crate) fn previous_authorities(&self) -> &BTreeMap<SimTime, MandateAuthority> {
+        &self.assignment.previous_authorities
     }
 
     pub fn manager(&self) -> crate::core::id::CharacterId {
@@ -312,6 +329,7 @@ fn build_enterprise_record(
         assignment: EnterpriseAssignment {
             organization,
             authority,
+            previous_authorities: BTreeMap::new(),
             location,
             supporting_businesses,
             cash_account,

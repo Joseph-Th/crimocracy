@@ -207,7 +207,7 @@ prospect surveillance, watchable own operation/enterprise records, and a real
 police sightline after a criminal incident. `planning_options_tests.rs`
 proves bounded schedule arithmetic, deadline and pre-entry contingency gates,
 same-state rejection, persistence, and the flow from surveillance-learned
-personnel information into a genuine required-intelligence infiltration.
+personnel information into a genuine required-intelligence infiltration. The production surveillance integration tests distinguish successful infiltration's internal records from ordinary watches and check the persisted after-action reconstruction, including ownership identity and the institutional privacy boundary.
 `cancellation_tests.rs` proves player-only cancellation of scheduled and
 in-progress operations via the production abort owner, durable debriefs,
 crew-booking release, and restored state equivalence.
@@ -271,7 +271,7 @@ Start with `cargo text-play --generate --seed 12 --city-size small`
 or `cargo text-play --seed 12` for reproducibility and use `help` for
 the available actions. `advance` is the sole time-advance command. It stops at
 player attention events or the finite clock, reporting actual minutes advanced
-instead of rejecting after partial progress. The leadership brief distinguishes active and suspended rackets, excluding retired
+instead of rejecting after partial progress. Enterprise succession tests exercise active and suspended transfers, stale tokens, mandate indexes, historical settlement attribution and exact save restoration. The text client exercises reassignment and preserves the same settlement account and cycle IDs. The leadership brief distinguishes active and suspended rackets, excluding retired
 history still visible in `enterprises`. Treasury tests cover explicit daily
 distribution, retained capital, payroll funding, disabling the order, and
 deterministic save/restore. Contact briefing tests exercise the canonical per-source

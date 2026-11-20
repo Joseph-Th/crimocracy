@@ -779,7 +779,7 @@ pub(super) fn validate_evidence_records(
                 .ok_or_else(|| invalid_evidence_provenance(evidence))?;
             if !cycle_events.contains(&event)
                 || !observations.insert(event)
-                || evidence.subject() != EntityRef::Character(record.manager())
+                || evidence.subject() != EntityRef::Character(record.authority_for_cycle_at(evidence.discovered_at()).manager)
                 || evidence.strength() != crate::legal::EvidenceStrength::Strong
                 || evidence.reliability() != crate::legal::EvidenceReliability::Credible
                 || evidence.admissibility() != Admissibility::Admissible
