@@ -112,6 +112,71 @@ fn reassign_racket_preserves_cycle_history_and_rejects_unmandated_members() {
 }
 
 #[test]
+fn player_sees_management_concentration_before_and_after_establishment() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let original = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .next()
+        .unwrap();
+    let manager = original.manager();
+    let district = session.state.world().neighborhoods().next().unwrap().id();
+    let cash = starting_cash(&session);
+    let settlement = fresh_settlement(&mut session);
+    let args = format!(
+        "protection district-{} {cash} {settlement} manager=char-{}",
+        district.raw(),
+        manager.raw()
+    );
+    let before = snapshot(&registry, &session);
+    assert!(
+        !session
+            .execute("enterprises")
+            .unwrap()
+            .0
+            .contains("Management concentration")
+    );
+    assert!(
+        session
+            .execute(&format!("preview-racket {args}"))
+            .unwrap()
+            .0
+            .contains("2 active rackets")
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    session.execute(&format!("start-racket {args}")).unwrap();
+    let before = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute("enterprises")
+            .unwrap()
+            .0
+            .contains("Detention would suspend all of them")
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    let second = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .find(|r| r.kind() == EnterpriseKind::Protection)
+        .unwrap()
+        .id();
+    session
+        .execute(&format!("racket {} suspend", second.raw()))
+        .unwrap();
+    assert!(
+        !session
+            .execute("enterprises")
+            .unwrap()
+            .0
+            .contains("Management concentration")
+    );
+}
+
+#[test]
 fn racket_outlook_is_owned_read_only_and_distinguishes_unknown_from_observed_heat() {
     let registry = crimocracy::build_registry();
     let mut session =

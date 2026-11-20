@@ -63,10 +63,17 @@ impl Session<'_> {
                 if words.len() != 1 {
                     return Err("enterprises takes no arguments".to_owned());
                 }
+                let mut active_by_manager = BTreeMap::<CharacterId, Vec<EnterpriseId>>::new();
                 for enterprise in state
                     .enterprises()
                     .enterprises_for_organization(self.player)
                 {
+                    if enterprise.status() == EnterpriseStatus::Active {
+                        active_by_manager
+                            .entry(enterprise.manager())
+                            .or_default()
+                            .push(enterprise.id());
+                    }
                     writeln!(
                         out,
                         "{} {:?} | {:?} at {} | next settlement {}",
@@ -110,6 +117,21 @@ impl Session<'_> {
                 }
                 if out.is_empty() {
                     out.push_str("No enterprises owned.");
+                }
+                for (manager, ids) in active_by_manager {
+                    if ids.len() > 1 {
+                        let name = state
+                            .world()
+                            .get_character(manager)
+                            .ok_or("manager disappeared")?
+                            .name();
+                        let rackets = ids
+                            .iter()
+                            .map(|id| id.raw().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        writeln!(out, "Management concentration: {name} (char-{}) oversees {} active rackets ({rackets}). Detention would suspend all of them. Use delegate and reassign-racket to distribute authority.", manager.raw(), ids.len()).unwrap();
+                    }
                 }
             }
             "racket-outlook" => {
@@ -259,6 +281,17 @@ impl Session<'_> {
                     )
                     .unwrap();
                     write_enterprise_outlook(&mut out, outlook);
+                    let existing = state
+                        .enterprises()
+                        .enterprises_for_organization(self.player)
+                        .filter(|record| {
+                            record.status() == EnterpriseStatus::Active
+                                && record.manager() == authority.manager
+                        })
+                        .count();
+                    if existing > 0 {
+                        writeln!(out, "  Management concentration: this investment would put {} active rackets under {manager_label}. Detention would suspend them together.", existing + 1).unwrap();
+                    }
                 } else {
                     let established = validate_establish_enterprise(self.registry, state, draft)
                         .map_err(|error| error.to_string())?

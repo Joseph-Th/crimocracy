@@ -128,7 +128,7 @@ functions. Add `manager=char-N` to choose an eligible manager explicitly; a
 cross-district network requires an organization-wide enterprise scope.
 `preview-racket` takes the same arguments, validates without establishing the
 racket, and shows the chosen manager, conditional costs and earnings, and the
-case-pressure threshold for nonpositive expected earnings. `business business-N suspend` pauses a player-owned storefront
+case-pressure threshold for nonpositive expected earnings. Both `preview-racket` and `enterprises` warn when assigning several active rackets to one manager would expose them to a simultaneous suspension on detention. `business business-N suspend` pauses a player-owned storefront
 only after its active racket dependencies are suspended;
 `business business-N resume` restarts its real operating cycle without resetting the
 current laundering window. Rackets must be resumed separately. `reassign-racket <id> <member-id>` transfers an existing racket to an eligible manager whose mandate covers its whole network, retaining the accounts, historical settlements, and current operating status. Use `racket <id> resume` afterward if it was suspended. An active racket with a due settlement must settle or suspend before reassignment.

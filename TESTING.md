@@ -271,7 +271,7 @@ Start with `cargo text-play --generate --seed 12 --city-size small`
 or `cargo text-play --seed 12` for reproducibility and use `help` for
 the available actions. `advance` is the sole time-advance command. It stops at
 player attention events or the finite clock, reporting actual minutes advanced
-instead of rejecting after partial progress. Enterprise succession tests exercise active and suspended transfers, stale tokens, mandate indexes, historical settlement attribution and exact save restoration. The text client exercises reassignment and preserves the same settlement account and cycle IDs. The leadership brief distinguishes active and suspended rackets, excluding retired
+instead of rejecting after partial progress. Enterprise succession tests exercise active and suspended transfers, stale tokens, mandate indexes, historical settlement attribution and exact save restoration. The text client exercises reassignment and preserves the same settlement account and cycle IDs. The management-concentration test checks read-only warnings before investment, after establishment, and after suspension. The leadership brief distinguishes active and suspended rackets, excluding retired
 history still visible in `enterprises`. Treasury tests cover explicit daily
 distribution, retained capital, payroll funding, disabling the order, and
 deterministic save/restore. Contact briefing tests exercise the canonical per-source
