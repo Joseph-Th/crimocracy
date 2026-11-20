@@ -462,6 +462,74 @@ fn protection_draft(fixture: &Fixture) -> RecruitmentDraft {
 }
 
 #[test]
+fn last_player_member_defection_ends_campaign_after_restore() {
+    let mut fixture = fixture();
+    validate_reassign_character(
+        &fixture.state,
+        fixture.candidate,
+        Some(fixture.source),
+        None,
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    validate_reassign_character(&fixture.state, fixture.incumbent, None, None)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    designate_player_organization(&mut fixture.state, fixture.source).unwrap();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(100, 100, 0, 100, 100, 0, 100),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+
+    assert!(!fixture.state.player_organization_defeated());
+    let attempt = validate_recruitment_attempt(
+        &fixture.registry,
+        &fixture.state,
+        protection_draft(&fixture),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .get_attempt(attempt)
+            .unwrap()
+            .outcome(),
+        RecruitmentOutcome::Accepted
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .characters_in_organization(fixture.source)
+            .count(),
+        0
+    );
+    assert!(fixture.state.player_organization_defeated());
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert!(restored.player_organization_defeated());
+    let before = bincode::serialize(&restored).unwrap();
+    assert_eq!(
+        crate::core::simulation::run_tick(&fixture.registry, &mut restored),
+        Err(crate::core::simulation::TickError::PlayerOrganizationDissolved)
+    );
+    assert_eq!(bincode::serialize(&restored).unwrap(), before);
+}
+
+#[test]
 fn executive_channel_rejects_supervised_recruiters() {
     let mut fixture = fixture();
     let supervised = insert_character(

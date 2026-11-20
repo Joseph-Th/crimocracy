@@ -385,6 +385,14 @@ impl RecruitmentState {
     pub(crate) fn attempts(&self) -> impl Iterator<Item = &RecruitmentAttemptRecord> {
         self.records.values()
     }
+
+    pub(crate) fn organization_has_defections(&self, organization: OrganizationId) -> bool {
+        self.attempts().any(|attempt| {
+            attempt.previous_organization() == Some(organization)
+                && attempt.outcome() == RecruitmentOutcome::Accepted
+        })
+    }
+
     pub(crate) fn recruitment_attempt_id_bounds(&self) -> Option<(u32, u32)> {
         self.records.id_bounds()
     }
