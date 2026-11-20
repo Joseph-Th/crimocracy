@@ -53,7 +53,9 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 mod autonomous;
+mod seller_strategy;
 pub(crate) use autonomous::apply_due_autonomous_acquisitions;
+use seller_strategy::{negotiated_reference_price, seller_preserves_earning_base};
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum BusinessAcquisitionError {
@@ -87,7 +89,7 @@ pub enum BusinessAcquisitionError {
     #[error("business acquisition must name at least one accounted-funds account")]
     NoFundingAccounts,
     #[error(
-        "the owner declined your acquisition offer; increase the price or consider another property"
+        "the owner declined your acquisition offer; price or strategic commitments may prevent a sale"
     )]
     OfferDeclined,
     #[error("an acquisition offer must be positive")]
@@ -761,14 +763,10 @@ fn eligible_offer_seller(
     {
         return Err(BusinessAcquisitionError::OfferDeclined);
     }
-    let economics = registry.get_business(record.kind()).economics();
-    let expected_net =
-        business_economy_system::forecast_normal_business_net(registry, state, business)?;
-    // Use a common calendar horizon even for business definitions with different cycle lengths.
-    let foregone_cents = i128::from(expected_net.cents().max(0)) * 90 * 1440
-        / i128::from(economics.cycle().as_minutes());
-    let minimum = i128::from(economics.acquisition_cost().cents()) + foregone_cents;
-    if i128::from(offer.cents()) < minimum {
+    let minimum = negotiated_reference_price(registry, state, business)?;
+    if i128::from(offer.cents()) < minimum
+        || seller_preserves_earning_base(registry, state, seller, business, offer)?
+    {
         return Err(BusinessAcquisitionError::OfferDeclined);
     }
     Ok(seller)

@@ -14,6 +14,8 @@ use crate::world::{
 };
 use std::collections::BTreeSet;
 
+mod strategic_investment;
+
 const SEED: u64 = 0x0AC0_5171;
 
 struct AcquisitionFixture {

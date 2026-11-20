@@ -105,7 +105,11 @@ independent businesses. When the listings are exhausted, `offer <business-id> <c
 submits a binding negotiated purchase offer to another organization's owner. An
 owner may refuse; sufficient consideration must compensate its asset value and
 foregone operating income, and it will not sell infrastructure used by active or
-suspended rackets. Accepted offers pay the actual seller, transfer the existing
+suspended rackets. A staffed rival also protects its productive payroll base if
+there is no affordable replacement, and keeps a newly acquired profitable active
+storefront for at least ninety days. Refusal alone does not reveal the reason.
+Rivals invest across the city and submit voluntary offers themselves, but cannot
+purchase your properties without your consent. Accepted offers pay the actual seller, transfer the existing
 books, and restart the acquired operating cycle. `launder` converts street cash within an owned front's
 real capacity, `businesses` shows owned infrastructure and earned owner-withdrawal headroom, `treasury daily` authorizes daily profit distributions before payroll (protected working capital stays in the storefront), `treasury manual` restores explicit withdrawals, and
 `racket-kinds` lists enterprise requirements. `open-account`, `move`,
