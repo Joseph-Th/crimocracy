@@ -108,6 +108,7 @@ fn crew(
             })
             .filter_map(|p| {
                 p.capability(capability)
+                    .filter(|rating| rating.value() > 0)
                     .map(|rating| (rating.value(), Reverse(p.id())))
             })
             .max()?
@@ -183,7 +184,9 @@ fn choose_plan<'r>(
             });
         let ended_at = operation
             .resolution()
-            .map_or(operation.authorized_at(), |r| r.resolved_at());
+            .map(|resolution| resolution.resolved_at())
+            .or_else(|| operation.abort_record().map(|abort| abort.aborted_at()))
+            .expect("terminal operation must record its end instant");
         let entry = last
             .entry((target, operation.kind()))
             .or_insert((ended_at, success));

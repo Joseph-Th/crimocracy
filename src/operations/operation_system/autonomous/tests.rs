@@ -31,6 +31,10 @@ fn rating(value: u8) -> Rating {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_scout_rating(100)
+}
+
+fn fixture_with_scout_rating(scout_rating: u8) -> Fixture {
     let registry = crate::build_registry();
     let mut state = AppState::new(0x95AC);
     let mut organization = |name: &str| {
@@ -144,7 +148,7 @@ fn fixture() -> Fixture {
         rival,
         "Harbor Scout",
         BTreeMap::from([
-            (CapabilityKind::Surveillance, rating(100)),
+            (CapabilityKind::Surveillance, rating(scout_rating)),
             (CapabilityKind::Burglary, rating(100)),
             (CapabilityKind::Stealth, rating(100)),
         ]),
@@ -406,6 +410,45 @@ fn rival_without_operational_authority_cannot_launch_pressure() {
         .unwrap();
     let tick = next_day(&registry, &mut state);
     assert!(tick.autonomous_operations.is_empty());
+}
+
+#[test]
+fn rival_planner_rejects_untrained_scout() {
+    let Fixture {
+        registry,
+        mut state,
+        ..
+    } = fixture_with_scout_rating(0);
+    assert!(
+        next_day(&registry, &mut state)
+            .autonomous_operations
+            .is_empty()
+    );
+}
+
+#[test]
+fn rival_planner_cooldown_starts_at_abort_not_authorization() {
+    let Fixture {
+        registry,
+        mut state,
+        ..
+    } = fixture();
+    let operation = next_day(&registry, &mut state).autonomous_operations[0];
+    run_test_tick(&registry, &mut state);
+    super::super::apply_transition(
+        &registry,
+        &mut state,
+        operation,
+        super::super::OperationTransition::Abort,
+    )
+    .unwrap();
+    let retry_minutes = u32::try_from(UNSUCCESSFUL_RETRY_MINUTES - 1).unwrap();
+    state.advance_clock(SimDuration::from_minutes(retry_minutes));
+    assert!(apply_due_rival_operations(&registry, &mut state).is_empty());
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(DAY_MINUTES).unwrap(),
+    ));
+    assert_eq!(apply_due_rival_operations(&registry, &mut state).len(), 1);
 }
 
 #[test]

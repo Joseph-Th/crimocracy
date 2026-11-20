@@ -5,7 +5,11 @@ use crate::build_registry;
 use crate::core::id::IdKind;
 use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::time::SimDuration;
-use crate::finance::finance_system::insert_account;
+use crate::economy::BusinessEconomyDraft;
+use crate::finance::finance_system::{insert_account, validate_record_transaction};
+use crate::finance::{
+    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+};
 use crate::world::world_system::{insert_business, insert_neighborhood, insert_organization};
 use crate::world::{
     BusinessDraft, BusinessFunction, BusinessKind, NeighborhoodDraft, NeighborhoodEconomyProfile,
@@ -140,6 +144,56 @@ fn acquisition_draft(fixture: &AcquisitionFixture) -> BusinessAcquisitionDraft {
         business: fixture.business,
         funding_accounts: BTreeSet::from([fixture.accounted]),
     }
+}
+
+#[test]
+fn stale_acquisition_listing_rejects_after_ownership_round_trip() {
+    let mut fixture = make_independent_fixture();
+    let price = hospitality_price(&fixture);
+    fund_accounted_from_street(&mut fixture, price.cents());
+    let token = validate_acquire_business(
+        &fixture.registry,
+        &fixture.state,
+        acquisition_draft(&fixture),
+    )
+    .unwrap();
+    for owner in [
+        BusinessOwner::Organization(fixture.organization),
+        BusinessOwner::Independent,
+    ] {
+        validate_transfer_business_ownership(&fixture.state, fixture.business, owner)
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+    }
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        token.commit(&fixture.registry, &mut fixture.state),
+        Err(BusinessAcquisitionError::StaleListing(fixture.business))
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+}
+
+#[test]
+fn stale_acquisition_token_rejects_after_clock_advances() {
+    let mut fixture = make_independent_fixture();
+    let price = hospitality_price(&fixture);
+    fund_accounted_from_street(&mut fixture, price.cents());
+    let token = validate_acquire_business(
+        &fixture.registry,
+        &fixture.state,
+        acquisition_draft(&fixture),
+    )
+    .unwrap();
+    let expected = fixture.state.now();
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let found = fixture.state.now();
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        token.commit(&fixture.registry, &mut fixture.state),
+        Err(BusinessAcquisitionError::StaleTime { expected, found })
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
 }
 
 fn establish_existing_independent_economy(

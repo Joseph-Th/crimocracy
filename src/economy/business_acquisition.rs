@@ -23,16 +23,11 @@ use crate::core::id::{
     BusinessId, FinancialAccountId, IdExhaustionError, IdKind, OpportunityId, OrganizationId,
 };
 use crate::core::state::AppState;
-use crate::economy::{BusinessEconomyDraft, business_economy_system};
-use crate::finance::finance_system::{
-    FinanceError, validate_open_accounts, validate_record_transaction,
-    validate_record_transaction_with_openings,
-};
+use crate::core::time::{SimTime, ensure_time_current};
+use crate::economy::business_economy_system;
+use crate::finance::Money;
+use crate::finance::finance_system::FinanceError;
 use crate::finance::helpers::format_money_cents;
-use crate::finance::{
-    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
-    Money,
-};
 use crate::intelligence::intelligence_system::{
     IntelligenceError, ValidatedInformation, validate_record_information,
 };
@@ -53,8 +48,10 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 mod autonomous;
+mod payment;
 mod seller_strategy;
 pub(crate) use autonomous::apply_due_autonomous_acquisitions;
+use payment::validate_funding_accounts;
 use seller_strategy::{negotiated_reference_price, seller_preserves_earning_base};
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -94,6 +91,10 @@ pub enum BusinessAcquisitionError {
     OfferDeclined,
     #[error("an acquisition offer must be positive")]
     InvalidOffer,
+    #[error("acquisition validated at {expected:?} cannot commit at {found:?}")]
+    StaleTime { expected: SimTime, found: SimTime },
+    #[error("the listing for business {0} changed after acquisition validation")]
+    StaleListing(BusinessId),
     #[error(transparent)]
     World(#[from] WorldError),
     #[error(transparent)]
@@ -141,7 +142,9 @@ pub struct ValidatedBusinessAcquisition {
     business: BusinessId,
     business_name: String,
     organization: OrganizationId,
-    negotiated_seller: Option<(OrganizationId, u32)>,
+    validated_at: SimTime,
+    expected_business_version: u32,
+    negotiated_seller: Option<OrganizationId>,
 }
 
 impl ValidatedBusinessAcquisition {
@@ -150,15 +153,16 @@ impl ValidatedBusinessAcquisition {
         registry: &Registry,
         state: &mut AppState,
     ) -> Result<AcquiredBusiness, BusinessAcquisitionError> {
-        // ---- Phase 1: re-validate every fallible condition against live state. --------
-        // A validated token can be held across intervening mutations, so solvency,
-        // ownership, and hosting conflicts are re-checked before anything mutates.
+        // Recheck the clock and listed ownership revision before planning any effects.
+        // Same-minute changes in solvency, dependencies and leads still require live preflight.
+        ensure_time_current(state.now(), self.validated_at)
+            .map_err(|(expected, found)| BusinessAcquisitionError::StaleTime { expected, found })?;
         let business_record = state
             .world
             .get_business(self.business)
             .ok_or(BusinessAcquisitionError::MissingBusiness(self.business))?;
-        if let Some((seller, version)) = self.negotiated_seller {
-            if business_record.version() != version
+        if let Some(seller) = self.negotiated_seller {
+            if business_record.version() != self.expected_business_version
                 || eligible_offer_seller(
                     registry,
                     state,
@@ -174,6 +178,8 @@ impl ValidatedBusinessAcquisition {
                 business: self.business,
                 owner: business_record.owner(),
             });
+        } else if business_record.version() != self.expected_business_version {
+            return Err(BusinessAcquisitionError::StaleListing(self.business));
         }
         validate_funding_accounts(state, self.organization, &self.funding_accounts, self.price)?;
         // Hosting conflicts (active enterprise venues/supporters) reject through the same
@@ -191,112 +197,7 @@ impl ValidatedBusinessAcquisition {
         // buyer cannot inherit a nearly due seller cycle or the seller's chronic-loss streak.
         let establish_now = existing_economy.is_none();
 
-        // ---- Phase 2: plan fresh books and pre-validate every remaining leg. ---------
-        // Fresh account IDs are predicted without consuming allocator state. The payment token
-        // owns that plan and opens the accounts only when the whole acquisition is ready to
-        // commit, so no rollback path exists and every rejection is truly state-neutral.
-        let mut establishment = None;
-        let payment = if let Some((seller, _)) = self.negotiated_seller {
-            // The seller actually receives spendable purchase consideration. Select a viable
-            // account deterministically or open one atomically with the transfer.
-            let destination = state
-                .finance
-                .accounts_for(FinancialOwner::Organization(seller))
-                .find(|account| {
-                    account.kind() == AccountKind::AccountedFunds
-                        && account.version() < u32::MAX
-                        && account.balance().checked_add(self.price).is_some()
-                })
-                .map(|account| account.id());
-            if let Some(destination) = destination {
-                validate_record_transaction(
-                    state,
-                    acquisition_payment_draft(
-                        state,
-                        &self.funding_accounts,
-                        destination,
-                        self.price,
-                        &self.business_name,
-                    ),
-                )?
-            } else {
-                let openings = validate_open_accounts(
-                    state,
-                    vec![FinancialAccountDraft {
-                        owner: FinancialOwner::Organization(seller),
-                        kind: AccountKind::AccountedFunds,
-                    }],
-                )?;
-                let destination = openings
-                    .account_id(0)
-                    .expect("seller account opening must expose its ID");
-                validate_record_transaction_with_openings(
-                    state,
-                    openings,
-                    acquisition_payment_draft(
-                        state,
-                        &self.funding_accounts,
-                        destination,
-                        self.price,
-                        &self.business_name,
-                    ),
-                )?
-            }
-        } else if let Some(economy) = existing_economy {
-            validate_record_transaction(
-                state,
-                acquisition_payment_draft(
-                    state,
-                    &self.funding_accounts,
-                    economy.settlement_account(),
-                    self.price,
-                    &self.business_name,
-                ),
-            )?
-        } else {
-            let openings = validate_open_accounts(
-                state,
-                vec![
-                    FinancialAccountDraft {
-                        owner: FinancialOwner::Business(self.business),
-                        kind: AccountKind::LegitimateOperating,
-                    },
-                    FinancialAccountDraft {
-                        owner: FinancialOwner::Business(self.business),
-                        kind: AccountKind::Settlement,
-                    },
-                ],
-            )?;
-            let operating_account = openings
-                .account_id(0)
-                .expect("two-account acquisition plan must expose its operating account");
-            let settlement_account = openings
-                .account_id(1)
-                .expect("two-account acquisition plan must expose its settlement account");
-            establishment = Some(
-                business_economy_system::validate_composed_business_economy_establishment(
-                    state,
-                    BusinessEconomyDraft {
-                        business: self.business,
-                        operating_account,
-                        settlement_account,
-                    },
-                    self.economy_cycle_duration,
-                    &openings,
-                )?,
-            );
-            validate_record_transaction_with_openings(
-                state,
-                openings,
-                acquisition_payment_draft(
-                    state,
-                    &self.funding_accounts,
-                    settlement_account,
-                    self.price,
-                    &self.business_name,
-                ),
-            )?
-        };
+        let (payment, establishment) = self.plan_payment(state, existing_economy)?;
         let restart = if existing_economy.is_some() {
             Some(business_economy_system::validate_acquisition_restart(
                 state,
@@ -385,7 +286,7 @@ impl ValidatedBusinessAcquisition {
             })
             .transpose()?;
 
-        let seller_notice = self.negotiated_seller.map(|(seller, _)| {
+        let seller_notice = self.negotiated_seller.map(|seller| {
             validate_record_report(state, ReportDraft {
                 recipient: seller,
                 kind: ReportKind::Financial,
@@ -549,99 +450,6 @@ fn plan_institutional_sale_observations(
     Ok(observations)
 }
 
-fn acquisition_payment_draft(
-    state: &AppState,
-    funding_accounts: &BTreeSet<FinancialAccountId>,
-    seller_settlement_account: FinancialAccountId,
-    price: Money,
-    business_name: &str,
-) -> LedgerTransactionDraft {
-    // Spend the largest spendable balance first so one well-funded accounted pocket covers
-    // the price alone instead of draining every low-ID dust account. ID breaks exact-balance
-    // ties. This matches payroll's largest-first funding order; the debit set is otherwise
-    // identical, only the fragmentation differs.
-    let mut ordered: Vec<(FinancialAccountId, Money)> = funding_accounts
-        .iter()
-        .map(|account| {
-            let spendable = state
-                .finance
-                .get_account(*account)
-                .expect("validated acquisition funding account must exist")
-                .spendable_balance();
-            (*account, spendable)
-        })
-        .filter(|(_, spendable)| *spendable != Money::ZERO)
-        .collect();
-    ordered.sort_by_key(|(account, spendable)| (std::cmp::Reverse(spendable.cents()), *account));
-    let mut postings = Vec::with_capacity(funding_accounts.len() + 1);
-    let mut remaining = price;
-    for (account, spendable) in ordered {
-        if remaining == Money::ZERO {
-            break;
-        }
-        let debit = spendable.min(remaining);
-        postings.push(LedgerPosting {
-            account,
-            amount: debit
-                .checked_neg()
-                .expect("positive acquisition debit must negate"),
-        });
-        remaining = remaining
-            .checked_sub(debit)
-            .expect("acquisition debit cannot exceed remaining price");
-    }
-    debug_assert_eq!(remaining, Money::ZERO);
-    postings.push(LedgerPosting {
-        account: seller_settlement_account,
-        amount: price,
-    });
-    LedgerTransactionDraft {
-        occurred_at: state.now(),
-        memo: format!("Business acquisition of {business_name}"),
-        postings,
-        authorization: None,
-    }
-}
-
-fn validate_funding_accounts(
-    state: &AppState,
-    organization: OrganizationId,
-    funding_accounts: &BTreeSet<FinancialAccountId>,
-    price: Money,
-) -> Result<(), BusinessAcquisitionError> {
-    if funding_accounts.is_empty() {
-        return Err(BusinessAcquisitionError::NoFundingAccounts);
-    }
-    let mut available_cents = 0_i128;
-    for account in funding_accounts {
-        let funding = state
-            .finance
-            .get_account(*account)
-            .ok_or(BusinessAcquisitionError::MissingFundingAccount(*account))?;
-        if funding.owner() != FinancialOwner::Organization(organization) {
-            return Err(BusinessAcquisitionError::FundingAccountOwnerMismatch {
-                account: *account,
-                organization,
-            });
-        }
-        if funding.kind() != AccountKind::AccountedFunds {
-            return Err(BusinessAcquisitionError::InvalidFundingAccountKind(
-                *account,
-            ));
-        }
-        available_cents = (available_cents + i128::from(funding.spendable_balance().cents()))
-            .min(i128::from(price.cents()));
-    }
-    if available_cents < i128::from(price.cents()) {
-        return Err(BusinessAcquisitionError::InsufficientFunds {
-            available_cents: i64::try_from(available_cents)
-                .expect("available acquisition funding is bounded by price"),
-            price_cents: price.cents(),
-        });
-    }
-    Ok(())
-}
-
 /// Public offer for an independently owned property that can be transferred to this buyer.
 /// This deliberately discloses only listed infrastructure and price, never a rival's owner,
 /// ledger, enterprise dependencies, or operating performance. Funds are checked at purchase.
@@ -697,8 +505,8 @@ pub fn validate_acquire_business(
     validate_funding_accounts(state, draft.organization, &draft.funding_accounts, price)?;
     // Ownership conflicts (active enterprise hosts/supports) reject through the canonical
     // transfer path; unchanged ownership is impossible because an Independent owner never
-    // equals an Organization owner. Commit re-runs this read against live state, so the
-    // token itself carries no transfer snapshot.
+    // equals an Organization owner. Commit checks the ownership revision and re-runs
+    // transfer validation against live enterprise dependencies.
     validate_transfer_business_ownership(
         state,
         draft.business,
@@ -717,6 +525,8 @@ pub fn validate_acquire_business(
         business: draft.business,
         business_name: business_record.name().to_owned(),
         organization: draft.organization,
+        validated_at: state.now(),
+        expected_business_version: business_record.version(),
         negotiated_seller: None,
     })
 }
@@ -799,7 +609,9 @@ pub fn validate_offer_business(
         business: draft.business,
         business_name: business.name().to_owned(),
         organization: draft.organization,
-        negotiated_seller: Some((seller, business.version())),
+        validated_at: state.now(),
+        expected_business_version: business.version(),
+        negotiated_seller: Some(seller),
     })
 }
 
