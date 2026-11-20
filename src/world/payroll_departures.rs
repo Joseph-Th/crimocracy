@@ -135,10 +135,7 @@ pub(crate) fn apply_payroll_departures(
             || state
                 .finance()
                 .accounts_for(crate::finance::FinancialOwner::Organization(organization))
-                .any(|account| {
-                    crate::world::payroll_execution::payroll_funding_balance(account)
-                        > crate::finance::Money::ZERO
-                })
+                .any(|account| account.available_payment_balance() > crate::finance::Money::ZERO)
             || state
                 .enterprises()
                 .enterprises_for_organization(organization)

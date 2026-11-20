@@ -341,13 +341,6 @@ fn payroll_is_due_only_on_nonzero_day_boundaries() {
 }
 
 #[test]
-fn payroll_account_selection_respects_terminal_version_capacity() {
-    assert!(payroll_account_has_posting_headroom(1));
-    assert!(payroll_account_has_posting_headroom(u32::MAX - 1));
-    assert!(!payroll_account_has_posting_headroom(u32::MAX));
-}
-
-#[test]
 fn funded_payroll_does_not_silently_garnish_a_members_negative_cash_pocket() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();

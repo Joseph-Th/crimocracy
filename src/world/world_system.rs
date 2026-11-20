@@ -604,9 +604,7 @@ fn validate_payroll_return(
     let available_cents = state
         .finance()
         .accounts_for(crate::finance::FinancialOwner::Organization(organization))
-        .map(|account| {
-            i128::from(crate::world::payroll_execution::payroll_funding_balance(account).cents())
-        })
+        .map(|account| i128::from(account.available_payment_balance().cents()))
         .sum::<i128>();
     if available_cents < required_cents {
         return Err(WorldError::PayrollDepartureUnfunded {

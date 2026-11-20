@@ -50,8 +50,7 @@ impl ValidatedBusinessAcquisition {
                 .accounts_for(FinancialOwner::Organization(seller))
                 .find(|account| {
                     account.kind() == AccountKind::AccountedFunds
-                        && account.version() < u32::MAX
-                        && account.balance().checked_add(self.price).is_some()
+                        && account.can_receive_liquid_payment(self.price)
                 })
                 .map(|account| account.id());
             if let Some(destination) = destination {
@@ -127,7 +126,7 @@ fn acquisition_payment_draft(
                 .finance
                 .get_account(*account)
                 .expect("validated acquisition funding account must exist")
-                .spendable_balance();
+                .available_payment_balance();
             (*account, spendable)
         })
         .filter(|(_, spendable)| *spendable != Money::ZERO)
@@ -189,8 +188,9 @@ pub(super) fn validate_funding_accounts(
                 *account,
             ));
         }
-        available_cents = (available_cents + i128::from(funding.spendable_balance().cents()))
-            .min(i128::from(price.cents()));
+        available_cents = (available_cents
+            + i128::from(funding.available_payment_balance().cents()))
+        .min(i128::from(price.cents()));
     }
     if available_cents < i128::from(price.cents()) {
         return Err(BusinessAcquisitionError::InsufficientFunds {

@@ -236,6 +236,36 @@ fn staffed_seller_retains_earning_base_until_a_funded_replacement_exists() {
     .unwrap();
     let offer = Money::from_cents(hospitality_price(&fixture).cents() * 100);
     fund_accounted_from_street(&mut fixture, offer.cents());
+    // An existing liability must not swallow the consideration that justified the sale.
+    let indebted_account = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(seller),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Existing seller debt".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: indebted_account,
+                    amount: offer.checked_neg().unwrap(),
+                },
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: offer,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
     // The acquisition has not served its investment period, so even a feasible replacement
     // cannot cause an immediate flip.
     let replacement = another_property(&mut fixture, BusinessOwner::Independent, true);
@@ -296,6 +326,28 @@ fn staffed_seller_retains_earning_base_until_a_funded_replacement_exists() {
         owner(&fixture, fixture.business),
         BusinessOwner::Organization(player)
     );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(indebted_account)
+            .unwrap()
+            .balance(),
+        offer.checked_neg().unwrap()
+    );
+    let spendable_proceeds = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(seller))
+        .filter(|account| account.kind() == AccountKind::AccountedFunds)
+        .map(|account| account.available_payment_balance().cents())
+        .sum::<i64>();
+    assert_eq!(spendable_proceeds, offer.cents());
+    fixture.state = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
     // The seller has received the consideration and can reinvest without any existing holdings.
     assert_eq!(
         apply_due_autonomous_acquisitions(&fixture.registry, &mut fixture.state),

@@ -138,6 +138,26 @@ impl FinancialAccountRecord {
             Money::ZERO
         }
     }
+    /// Liquidity that can actually fund a new ledger posting. A terminal
+    /// account retains historical value but cannot be debited.
+    pub(crate) fn available_payment_balance(&self) -> Money {
+        if self.version < u32::MAX {
+            self.spendable_balance()
+        } else {
+            Money::ZERO
+        }
+    }
+
+    /// An ordinary liquid receipt must arrive in full, without implicitly
+    /// settling unrelated debt or exceeding finite posting capacity.
+    pub(crate) fn can_receive_liquid_payment(&self, amount: Money) -> bool {
+        self.kind.is_liquid()
+            && self.balance >= Money::ZERO
+            && amount > Money::ZERO
+            && self.version < u32::MAX
+            && self.balance.checked_add(amount).is_some()
+    }
+
     pub fn version(&self) -> u32 {
         self.version
     }

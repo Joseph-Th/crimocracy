@@ -62,9 +62,7 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
             .accounts_for(FinancialOwner::Organization(*organization))
             .find(|account| {
                 account.kind() == AccountKind::AccountedFunds
-                    && account.balance() >= Money::ZERO
-                    && account.version() < u32::MAX
-                    && account.balance().checked_add(group.total).is_some()
+                    && account.can_receive_liquid_payment(group.total)
             })
             .map(|account| account.id());
         if existing.is_none() {

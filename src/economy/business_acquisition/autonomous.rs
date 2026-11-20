@@ -15,7 +15,6 @@ use crate::economy::{
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
-use crate::world::payroll_execution::payroll_funding_balance;
 use std::collections::BTreeSet;
 
 const REVIEW_DAYS: u32 = 7;
@@ -95,7 +94,7 @@ fn invest(
         .finance
         .accounts_for(FinancialOwner::Organization(organization))
     {
-        let spendable = payroll_funding_balance(account);
+        let spendable = account.available_payment_balance();
         if spendable == Money::ZERO {
             continue;
         }

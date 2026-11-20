@@ -574,7 +574,7 @@ fn find_funding_accounts(
         .finance()
         .accounts_for(owner)
         .filter_map(|account| {
-            let spendable = payroll_funding_balance(account);
+            let spendable = account.available_payment_balance();
             (spendable > Money::ZERO).then_some((account.kind(), spendable, account.id()))
         })
         .collect();
@@ -584,15 +584,6 @@ fn find_funding_accounts(
     // ordinary payroll transactions compact; account ID is only the deterministic final tie.
     crate::finance::helpers::sort_unrestricted_payment_sources(&mut accounts);
     accounts.into_iter().map(|(_, _, id)| id).collect()
-}
-
-/// Liquidity eligible for payroll, shared with investment planners that preserve wage reserves.
-pub(crate) fn payroll_funding_balance(account: &crate::finance::FinancialAccountRecord) -> Money {
-    if payroll_account_has_posting_headroom(account.version()) {
-        account.spendable_balance()
-    } else {
-        Money::ZERO
-    }
 }
 
 fn find_existing_wage_account(
@@ -609,14 +600,8 @@ fn find_existing_wage_account(
                 // offset the employee's unrelated negative balance while reporting cash wages
                 // as paid. Open a fresh cash pocket instead; debt settlement requires an
                 // explicit ledger action rather than implicit payroll garnishment.
-                && account.balance() >= Money::ZERO
-                && payroll_account_has_posting_headroom(account.version())
-                && account.balance().checked_add(amount).is_some()
+                && account.can_receive_liquid_payment(amount)
         })
-}
-
-fn payroll_account_has_posting_headroom(version: u32) -> bool {
-    version < u32::MAX
 }
 
 struct ValidatedPayrollShortfallConsequences {

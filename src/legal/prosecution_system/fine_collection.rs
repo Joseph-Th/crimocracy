@@ -120,10 +120,10 @@ pub(crate) fn apply_due_fine_collections(
             .finance()
             .accounts_for(FinancialOwner::Character(case.defendant()))
         {
-            if !collectible(account.kind()) || account.version() == u32::MAX {
+            if !collectible(account.kind()) {
                 continue;
             }
-            let payment = needed.min(account.spendable_balance());
+            let payment = needed.min(account.available_payment_balance());
             if payment <= Money::ZERO {
                 continue;
             }

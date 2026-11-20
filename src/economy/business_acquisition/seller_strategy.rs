@@ -10,7 +10,6 @@ use crate::economy::business_economy_system::forecast_normal_business_net;
 use crate::finance::{FinancialOwner, Money};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
-use crate::world::payroll_execution::payroll_funding_balance;
 
 /// Public appraisal horizon. It is also the minimum period over which a staffed
 /// outfit expects to exploit a newly acquired productive business before reselling.
@@ -120,7 +119,7 @@ pub(super) fn seller_preserves_earning_base(
         .finance()
         .accounts_for(FinancialOwner::Organization(seller))
     {
-        let balance = i128::from(payroll_funding_balance(account).cents());
+        let balance = i128::from(account.available_payment_balance().cents());
         if account.kind() == crate::finance::AccountKind::AccountedFunds {
             accounted += balance;
         } else {

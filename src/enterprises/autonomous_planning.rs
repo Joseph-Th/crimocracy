@@ -153,14 +153,11 @@ pub(crate) fn available_working_capital(
     account: &FinancialAccountRecord,
     reservations: &BTreeMap<FinancialAccountId, Money>,
 ) -> Money {
-    if account.version() == u32::MAX {
-        return Money::ZERO;
-    }
     let reserved = reservations
         .get(&account.id())
         .copied()
         .unwrap_or(Money::ZERO);
-    let spendable = account.spendable_balance();
+    let spendable = account.available_payment_balance();
     if spendable <= reserved {
         return Money::ZERO;
     }
