@@ -89,7 +89,12 @@ exposes private ownership or law-enforcement state. Commands validate current
 player membership, account ownership and available authority before composing
 production owner transactions. The generic treasury allocation command only
 moves same-kind liquid funds: street money cannot become accounted money except
-through its canonical conversion path. Consequential mutation still belongs
+through the canonical laundering path. Explicit accounted-to-street capitalization
+is validated and posted by `finance_system::validate_capitalize_street_cash` as
+an auditable, one-way, two-posting ledger transaction; it never clears a
+negative destination balance or grants access to another organization's cash.
+The adapter only selects its player's accounts, and reports spendable balances
+separately from net balances. Consequential mutation still belongs
 to validators/commits and the one-minute `run_tick`; the save envelope owns
 future-affecting state, not the text client.
 

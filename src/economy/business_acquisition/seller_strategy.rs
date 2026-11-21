@@ -14,6 +14,9 @@ use crate::world::OrganizationKind;
 /// Public appraisal horizon. It is also the minimum period over which a staffed
 /// outfit expects to exploit a newly acquired productive business before reselling.
 const VALUATION_DAYS: i128 = 90;
+/// A fully funded year of the post-sale wage shortfall is a viable alternative
+/// to holding the same property indefinitely when the city has no listings.
+pub(super) const SALE_RUNWAY_DAYS: i128 = 365;
 
 pub(super) fn daily_net(
     registry: &Registry,
@@ -52,10 +55,14 @@ pub(super) fn appraisal_reference_offer(
 }
 
 /// Staffed criminal enterprises are ongoing employers, not passive sellers. Preserve a
-/// productive earning base when disposing of it would leave the outfit dependent on a
-/// dwindling cash pile and there is no feasible replacement. Idle or unprofitable properties
-/// can still be sold, as can surplus holdings. The initial valuation holding period prevents
-/// autonomous buyers and sellers from undoing yesterday's investment over and over.
+/// productive earning base unless the remaining portfolio covers wages, a comparably
+/// useful replacement is available, or the offer plus net liquid reserves finances an
+/// entire year's post-sale wage gap. Cash-poor sellers do not liquidate their livelihood
+/// just to cover a week's payroll. Idle or unprofitable properties can still be sold,
+/// as can surplus holdings. During the initial valuation holding period a sale
+/// requires a buyout above the normal appraisal, not merely the routine offer
+/// that autonomous investors repeatedly submit. This prevents weekly churn
+/// without locking every traded storefront for 90 of the next 105 days.
 pub(super) fn seller_preserves_earning_base(
     registry: &Registry,
     state: &AppState,
@@ -96,7 +103,20 @@ pub(super) fn seller_preserves_earning_base(
                 ) < VALUATION_DAYS * i128::from(DAY_MINUTES)
         })
     {
-        return Ok(true);
+        // A very large voluntary offer can rationally buy out a new investment.
+        // Require the original standard capital plus *two* full appraisal periods
+        // of expected earnings. Autonomous bidders quote only one period, so
+        // letting an exceptional player offer through does not create a weekly
+        // round-trip between otherwise identical rival investors. The later
+        // payroll and replacement checks still protect a dependent employer.
+        let standard_price = registry
+            .get_business(record.kind())
+            .economics()
+            .acquisition_cost();
+        let early_buyout = i128::from(standard_price.cents()) + 2 * VALUATION_DAYS * net;
+        if i128::from(offer.cents()) < early_buyout {
+            return Ok(true);
+        }
     }
     let daily_payroll = i128::from(registry.upkeep().per_member_daily().cents()) * members as i128;
     let mut remaining = 0_i128;
@@ -117,16 +137,30 @@ pub(super) fn seller_preserves_earning_base(
     // Sale proceeds are clean, but still need to leave one week of payroll uncommitted.
     // The seller's own other liquid funds can supply that reserve, not the price.
     let (mut accounted, mut other) = (i128::from(offer.cents()), 0_i128);
+    let mut net_liquid_after_sale = i128::from(offer.cents());
     for account in state
         .finance()
         .accounts_for(FinancialOwner::Organization(seller))
     {
+        // Available cash funds replacement purchases; negative liquid balances are
+        // still genuine obligations when judging whether the sale leaves a secure runway.
+        if account.kind().is_liquid() {
+            net_liquid_after_sale += i128::from(account.balance().cents());
+        }
         let balance = i128::from(account.available_payment_balance().cents());
         if account.kind() == crate::finance::AccountKind::AccountedFunds {
             accounted += balance;
         } else {
             other += balance;
         }
+    }
+    // A mature cash-rich organization can rationally accept a strong offer even
+    // with no remaining independent listings. Without this exit, a fully-owned city
+    // can freeze its property market forever. This is seller-private information;
+    // the buyer still receives only the generic refusal on an unsuccessful offer.
+    let post_sale_gap = daily_payroll - remaining;
+    if net_liquid_after_sale >= post_sale_gap * SALE_RUNWAY_DAYS + daily_payroll * 7 {
+        return Ok(false);
     }
     let available = accounted - (daily_payroll * 7 - other).max(0);
     let minimum_replacement = net.min(daily_payroll - remaining);

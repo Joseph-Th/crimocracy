@@ -45,8 +45,8 @@ use crimocracy::enterprises::{
     ALL_ENTERPRISE_KINDS, EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseStatus,
 };
 use crimocracy::finance::finance_system::{
-    LaunderingDraft, insert_account, remaining_laundering_capacity, validate_launder_funds,
-    validate_record_transaction,
+    LaunderingDraft, StreetCapitalizationDraft, insert_account, remaining_laundering_capacity,
+    validate_capitalize_street_cash, validate_launder_funds, validate_record_transaction,
 };
 use crimocracy::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
@@ -160,6 +160,8 @@ const HELP: &str = "Commands:
                          Open an empty account in the organization's own books
   move <source-id> <dest-id> <cents>
                          Transfer between same-kind organization accounts
+  fund-street <accounted-id> <street-id> <cents>
+                         Withdraw clean funds into street operating cash (recorded, not laundering)
   case-brief             Recently disclosed case activity, with dates and provenance IDs
   intelligence [count] [page] [target-id]
                          Browse held observations, newest observed first (default 20 per page)
@@ -429,7 +431,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "start-racket" | "preview-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
         "racket" | "reassign-racket" | "launder" | "sweep" | "decide" | "business" => 3..=3,
-        "move" | "deposit" => 4..=4,
+        "move" | "deposit" | "fund-street" => 4..=4,
         "dispose" => 5..=5,
         "reports" | "treasury" => 1..=2,
         "intelligence" => 1..=4,
@@ -936,15 +938,32 @@ impl<'a> Session<'a> {
         let mut street = 0_i128;
         let mut concealed = 0_i128;
         let mut clean = 0_i128;
+        let mut street_spendable = 0_i128;
+        let mut concealed_spendable = 0_i128;
+        let mut clean_spendable = 0_i128;
+        let mut deficits = 0_i128;
         for account in state
             .finance()
             .accounts_for(FinancialOwner::Organization(player))
         {
             let amount = i128::from(account.balance().cents());
+            let spendable = i128::from(account.available_payment_balance().cents());
             match account.kind() {
-                AccountKind::StreetCash => street += amount,
-                AccountKind::ConcealedCash => concealed += amount,
-                AccountKind::AccountedFunds => clean += amount,
+                AccountKind::StreetCash => {
+                    street += amount;
+                    street_spendable += spendable;
+                    deficits += (-amount).max(0);
+                }
+                AccountKind::ConcealedCash => {
+                    concealed += amount;
+                    concealed_spendable += spendable;
+                    deficits += (-amount).max(0);
+                }
+                AccountKind::AccountedFunds => {
+                    clean += amount;
+                    clean_spendable += spendable;
+                    deficits += (-amount).max(0);
+                }
                 AccountKind::LegitimateOperating | AccountKind::Settlement => {}
             }
         }
@@ -964,7 +983,7 @@ impl<'a> Session<'a> {
                 format!("Report {}: {}", report.id().raw(), report.title())
             });
         format!(
-            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nDaily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
+            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nDaily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
             time_label(state.now().as_minutes()),
             self.district,
             self.district_variant,
@@ -1109,3 +1128,5 @@ mod legal_planning_tests;
 mod openings_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod treasury_capitalization_tests;

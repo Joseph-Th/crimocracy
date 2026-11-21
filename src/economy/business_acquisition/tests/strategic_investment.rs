@@ -266,15 +266,23 @@ fn staffed_seller_retains_earning_base_until_a_funded_replacement_exists() {
     .unwrap()
     .commit(&mut fixture.state)
     .unwrap();
-    // The acquisition has not served its investment period, so even a feasible replacement
-    // cannot cause an immediate flip.
+    // The ordinary public reference offer must not flip a recent acquisition.
+    // This unusually generous offer can buy out the investment period, but it
+    // still has to satisfy the seller's private wage-base and replacement rules.
     let replacement = another_property(&mut fixture, BusinessOwner::Independent, true);
+    let ordinary_offer = Money::from_cents(
+        i64::try_from(
+            negotiated_reference_price(&fixture.registry, &fixture.state, fixture.business)
+                .unwrap(),
+        )
+        .unwrap(),
+    );
     assert!(matches!(
         validate_offer_business(
             &fixture.registry,
             &fixture.state,
             acquisition_draft(&fixture),
-            offer
+            ordinary_offer
         ),
         Err(BusinessAcquisitionError::OfferDeclined)
     ));
@@ -362,4 +370,195 @@ fn staffed_seller_retains_earning_base_until_a_funded_replacement_exists() {
         build_save(&fixture.registry, &fixture.state).unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+fn mature_seller_can_accept_full_years_payroll_without_a_replacement() {
+    let mut fixture = make_independent_fixture();
+    let player = fixture.organization;
+    designate_player_organization(&mut fixture.state, player).unwrap();
+    let seller = organization(&mut fixture, "Mature seller", OrganizationKind::Criminal);
+    executive(&mut fixture, seller);
+    for index in 0..4 {
+        insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: format!("Mature seller employee {index}"),
+                organization: Some(seller),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    }
+    establish_existing_independent_economy(&mut fixture);
+    validate_transfer_business_ownership(
+        &fixture.state,
+        fixture.business,
+        BusinessOwner::Organization(seller),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(91 * 1440));
+
+    // There is no independent replacement anywhere in this fixture.
+    let daily_payroll = i128::from(fixture.registry.upkeep().per_member_daily().cents()) * 5;
+    let runway = daily_payroll * (super::super::seller_strategy::SALE_RUNWAY_DAYS + 7);
+    let reference =
+        negotiated_reference_price(&fixture.registry, &fixture.state, fixture.business).unwrap();
+    assert!(
+        reference < runway,
+        "ordinary appraisal must not fund this seller's wage gap"
+    );
+    let price = Money::from_cents(i64::try_from(runway).unwrap());
+    fund_accounted_from_street(&mut fixture, price.cents());
+
+    assert!(matches!(
+        validate_offer_business(
+            &fixture.registry,
+            &fixture.state,
+            acquisition_draft(&fixture),
+            Money::from_cents(i64::try_from(reference).unwrap()),
+        ),
+        Err(BusinessAcquisitionError::OfferDeclined)
+    ));
+    let before = bincode::serialize(&fixture.state).unwrap();
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        validate_offer_business(
+            &fixture.registry,
+            state,
+            BusinessAcquisitionDraft {
+                organization: player,
+                business: fixture.business,
+                funding_accounts: BTreeSet::from([fixture.accounted]),
+            },
+            price,
+        )
+        .unwrap()
+        .commit(&fixture.registry, state)
+        .unwrap();
+        assert_eq!(
+            state
+                .world()
+                .get_business(fixture.business)
+                .unwrap()
+                .owner(),
+            BusinessOwner::Organization(player)
+        );
+        let seller_liquidity: i128 = state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(seller))
+            .filter(|account| account.kind().is_liquid())
+            .map(|account| i128::from(account.balance().cents()))
+            .sum();
+        assert!(seller_liquidity >= runway);
+        validate_invariants(state);
+    }
+    assert_ne!(bincode::serialize(&fixture.state).unwrap(), before);
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
+fn recently_acquired_property_requires_exceptional_buyout_not_routine_resale() {
+    let mut fixture = make_independent_fixture();
+    let player = fixture.organization;
+    designate_player_organization(&mut fixture.state, player).unwrap();
+    let seller = organization(&mut fixture, "Protected seller", OrganizationKind::Criminal);
+    executive(&mut fixture, seller);
+    establish_existing_independent_economy(&mut fixture);
+    validate_transfer_business_ownership(
+        &fixture.state,
+        fixture.business,
+        BusinessOwner::Organization(seller),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let other = another_property(&mut fixture, BusinessOwner::Organization(seller), false);
+    let retained_income =
+        super::super::seller_strategy::daily_net(&fixture.registry, &fixture.state, other).unwrap();
+    assert!(
+        retained_income >= i128::from(fixture.registry.upkeep().per_member_daily().cents()),
+        "the remaining active holding must cover the sole seller executive's wages"
+    );
+    let appraisal = appraise_business(&fixture.registry, &fixture.state, fixture.business).unwrap();
+    let daily_net = super::super::seller_strategy::daily_net(
+        &fixture.registry,
+        &fixture.state,
+        fixture.business,
+    )
+    .unwrap();
+    let buyout_floor = i128::from(appraisal.standard_price.cents()) + 180 * daily_net;
+    assert!(buyout_floor > appraisal.reference_offer_cents);
+    let buyout = Money::from_cents(i64::try_from(buyout_floor).unwrap());
+    let below_buyout = Money::from_cents(buyout.cents() - 1);
+    fund_accounted_from_street(&mut fixture, buyout.cents());
+
+    let before = bincode::serialize(&fixture.state).unwrap();
+    for ordinary in [
+        Money::from_cents(i64::try_from(appraisal.reference_offer_cents).unwrap()),
+        below_buyout,
+    ] {
+        assert!(matches!(
+            validate_offer_business(
+                &fixture.registry,
+                &fixture.state,
+                acquisition_draft(&fixture),
+                ordinary
+            ),
+            Err(BusinessAcquisitionError::OfferDeclined)
+        ));
+        assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    }
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        validate_offer_business(
+            &fixture.registry,
+            state,
+            BusinessAcquisitionDraft {
+                organization: player,
+                business: fixture.business,
+                funding_accounts: BTreeSet::from([fixture.accounted]),
+            },
+            buyout,
+        )
+        .unwrap()
+        .commit(&fixture.registry, state)
+        .unwrap();
+        assert_eq!(
+            state
+                .world()
+                .get_business(fixture.business)
+                .unwrap()
+                .owner(),
+            BusinessOwner::Organization(player)
+        );
+        assert_eq!(
+            state.world().get_business(other).unwrap().owner(),
+            BusinessOwner::Organization(seller)
+        );
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
 }

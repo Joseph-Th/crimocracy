@@ -702,6 +702,10 @@ fn resolve_transaction_budget(
     })
 }
 
+mod capitalization;
+pub use capitalization::{
+    StreetCapitalizationDraft, StreetCapitalizationError, validate_capitalize_street_cash,
+};
 mod laundering;
 #[cfg(test)]
 use laundering::resolve_laundering_split;

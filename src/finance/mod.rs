@@ -140,7 +140,7 @@ impl FinancialAccountRecord {
     }
     /// Liquidity that can actually fund a new ledger posting. A terminal
     /// account retains historical value but cannot be debited.
-    pub(crate) fn available_payment_balance(&self) -> Money {
+    pub fn available_payment_balance(&self) -> Money {
         if self.version < u32::MAX {
             self.spendable_balance()
         } else {

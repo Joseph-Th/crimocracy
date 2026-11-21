@@ -105,19 +105,32 @@ independent businesses. When the listings are exhausted, `offer <business-id> <c
 submits a binding negotiated purchase offer to another organization's owner. An
 owner may refuse; sufficient consideration must compensate its asset value and
 foregone operating income, and it will not sell infrastructure used by active or
-suspended rackets. A staffed rival also protects its productive payroll base if
-there is no affordable replacement, and keeps a newly acquired profitable active
-storefront for at least ninety days. Refusal alone does not reveal the reason.
+suspended rackets. A staffed rival protects its productive payroll base if there is no affordable
+replacement and the offered price plus liquid reserves cannot cover a full year
+of any post-sale payroll shortfall plus a week's payroll. Recently purchased
+profitable storefronts ordinarily stay with the buyer for ninety days, but a
+large buyout covering their standard price plus 180 days of forecast profit
+can justify selling sooner. Rival executives still offer only the ordinary
+90-day appraisal, preventing constant weekly flips. Refusal alone does not
+reveal the reason.
 Rivals invest across the city and submit voluntary offers themselves, but cannot
 purchase your properties without your consent. Accepted offers pay the actual seller, transfer the existing
 books, and restart the acquired operating cycle. `launder` converts street cash within an owned front's
 real capacity, `businesses` shows owned infrastructure and earned owner-withdrawal headroom, `treasury daily` authorizes daily profit distributions before payroll (protected working capital stays in the storefront), `treasury manual` restores explicit withdrawals, and
 `racket-kinds` lists enterprise requirements. `open-account`, `move`,
-and `start-racket` let leadership fund and establish more enterprises with
-actual mandates and existing books. Ordinary `move` transfers only between
-accounts of the same spendable money kind, never dirty cash directly to clean
-funds. `operation`, `dispose` and `deposit` handle held proceeds through
-production reports and ledger transactions.
+`fund-street`, and `start-racket` let leadership fund and establish more
+enterprises with actual mandates and existing books. `brief` and `accounts`
+show both net treasury values and actual spendable funds, with deficits kept
+visible rather than silently netted against another account's purchasing power.
+Ordinary `move` transfers only between accounts of the same spendable money
+kind, never dirty cash directly to clean funds. `fund-street <accounted-id>
+<street-id> <cents>` explicitly withdraws available clean funds into a
+nonnegative street-cash operating account. That payment has a balanced,
+auditable ledger receipt and cannot be reversed to clean funds without using
+an actual laundering front. If an old street account is overdrawn, open a
+new `street` account and use its ID instead of silently erasing that liability.
+`operation`, `dispose` and `deposit` handle held proceeds through production
+reports and ledger transactions.
 
 `start-racket` accepts either an owned `business-N` venue or a public
 `district-N` for rackets that do not require a physical host. Supply any

@@ -73,7 +73,7 @@ impl Session<'_> {
                 }
                 out.push_str("Pending decisions, own-member custody changes, and completed or aborted operations always pause.");
             }
-            "treasury" | "accounts" | "open-account" | "move" | "finances" => {
+            "treasury" | "accounts" | "open-account" | "move" | "fund-street" | "finances" => {
                 out = self.execute_treasury_commands(&words)?;
             }
             "debriefs" | "debrief" => out = self.execute_debrief(&words)?,

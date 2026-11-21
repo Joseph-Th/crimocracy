@@ -177,8 +177,9 @@ intelligence. The CLI must not read hidden legal cases or rival records to
 recommend actions. Role assignments come from current organization members;
 no participant/authority IDs from the starting fixture are retained. Entity
 selection checks organizational ownership before producing actionable plans.
-Opening accounts, same-kind treasury allocation, laundering, recruitment,
-business acquisition, enterprise establishment and lifecycle, burglary and
+Opening accounts, same-kind treasury allocation, one-way accounted-to-street
+capitalization through `finance_system::validate_capitalize_street_cash`, laundering,
+recruitment, business acquisition, enterprise establishment and lifecycle, burglary and
 reconnaissance, discovery, disposition, and decision resolution all use canonical
 owner paths. Generic money movement is not a laundering or minting shortcut.
 The `--opening` option selects one of six deterministic authored alternatives;
@@ -263,6 +264,28 @@ player accounts appear once, and a guessed rival transaction ID is not enough
 to display rival books. The detail view prints only player-owned postings.
 `finance_play_tests.rs` proves ownership isolation, same-minute ordering,
 non-mutating rejection, real laundering fees, and save/restore stability.
+`treasury_capitalization_tests.rs` proves a player's account-scoped conversion,
+rejection of wrong-kind, absent, and unfunded accounts without mutation,
+actual balance movement, complete ledger visibility, and restored brief parity.
+`finance_system/capitalization.rs` additionally tests a stale token, an
+existing negative street account, and byte-identical save/restore continuation.
+`business_acquisition/tests/strategic_investment.rs` proves mature sellers
+can accept fully funded payroll-runway offers with no available replacement,
+and recently acquired storefronts still reject ordinary reference bids while
+accepting an exceptional 180-day-income buyout. The tests preserve the original
+90-day investment protection, seller wage-base constraints, private refusal,
+and title/ledger state through save and restoration.
+The actual generated day-1951 campaign save is a player-level regression: its
+negative street account rejects capitalization, the separate zero-balance
+street account receives funds, spendable and net balances remain distinct,
+and its suspended gambling enterprise can subsequently resume. The same saved
+city originally rejected 48 consecutive offers of eight million cents because
+26 rival-owned properties were held for less than ninety days and five were
+committed to non-retired rackets. After the exceptional-buyout rule was added,
+business 35 rejected a 3,143,699-cent offer but accepted 3,143,700 cents,
+its exact standard-price-plus-180-day-forecast buyout threshold, transferring
+title and restarting the business economy. These observations are read-only with respect
+to the persisted campaign: run without saving over the original evidence.
 `economy_history.rs` lists historical business and enterprise cycles from
 their existing indexed queries, restricted to current player assets and to
 business cycles actually earned during player ownership.

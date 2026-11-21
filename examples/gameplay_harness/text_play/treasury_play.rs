@@ -34,9 +34,12 @@ impl Session<'_> {
                         account.kind(),
                         account.balance().cents(),
                         if account.kind() == AccountKind::Settlement {
-                            " (clearing only)"
+                            " (clearing only)".to_owned()
                         } else {
-                            ""
+                            format!(
+                                " (spendable {} cents)",
+                                account.available_payment_balance().cents()
+                            )
                         }
                     )
                     .unwrap();
@@ -124,6 +127,45 @@ impl Session<'_> {
                 writeln!(
                     out,
                     "Allocated {cents} cents in transaction {}.",
+                    transaction.raw()
+                )
+                .unwrap();
+            }
+            "fund-street" => {
+                if words.len() != 4 {
+                    return Err("fund-street <accounted-id> <street-id> <cents>".to_owned());
+                }
+                let source = parse_number(words[1], "account")?;
+                let destination = parse_number(words[2], "account")?;
+                let cents = words[3]
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|amount| *amount > 0)
+                    .ok_or("fund-street amount must be positive cents")?;
+                let owner = FinancialOwner::Organization(self.player);
+                let resolve = |raw| {
+                    state
+                        .finance()
+                        .accounts_for(owner)
+                        .find(|account| account.id().raw() == raw)
+                        .map(|account| account.id())
+                        .ok_or("account is not owned by your organization")
+                };
+                let transaction = validate_capitalize_street_cash(
+                    state,
+                    StreetCapitalizationDraft {
+                        organization: self.player,
+                        accounted_account: resolve(source)?,
+                        street_account: resolve(destination)?,
+                        amount: Money::from_cents(cents),
+                    },
+                )
+                .map_err(|error| error.to_string())?
+                .commit(&mut self.state)
+                .map_err(|error| error.to_string())?;
+                writeln!(
+                    out,
+                    "Allocated {cents} cents of working cash in transaction {}.",
                     transaction.raw()
                 )
                 .unwrap();
