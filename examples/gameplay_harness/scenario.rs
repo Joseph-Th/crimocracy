@@ -994,6 +994,87 @@ pub fn build_scenario(
         )?
         .commit(&mut state)?;
     }
+    // Recruitment must be able to grow beyond the opening handful of trusted
+    // leaders. Danny is the bridge to a finite second circle of independent
+    // professionals, not a magic free-hiring menu: until he actually joins,
+    // leadership has no personal relationship with these candidates.
+    for (name, primary, secondary) in [
+        (
+            "Grace Mercer",
+            CapabilityKind::Management,
+            CapabilityKind::Negotiation,
+        ),
+        (
+            "Walter Kane",
+            CapabilityKind::Intimidation,
+            CapabilityKind::Driving,
+        ),
+        (
+            "Evelyn Cross",
+            CapabilityKind::Management,
+            CapabilityKind::Surveillance,
+        ),
+        (
+            "Thomas Reed",
+            CapabilityKind::Driving,
+            CapabilityKind::Burglary,
+        ),
+        (
+            "Iris Calder",
+            CapabilityKind::Negotiation,
+            CapabilityKind::SocialAccess,
+        ),
+        (
+            "Victor Lane",
+            CapabilityKind::Management,
+            CapabilityKind::Intimidation,
+        ),
+        (
+            "Olive Marsh",
+            CapabilityKind::Surveillance,
+            CapabilityKind::Stealth,
+        ),
+        (
+            "Daniel Ward",
+            CapabilityKind::Management,
+            CapabilityKind::Driving,
+        ),
+    ] {
+        let recruit = insert_character(
+            &mut state,
+            CharacterDraft {
+                name: name.to_owned(),
+                organization: None,
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([(primary, rating(77)), (secondary, rating(68))]),
+                traits: BTreeSet::from([TraitKind::Ambitious]),
+                // These are people seeking better-paid responsibility, not an
+                // inert list of names whose motives preclude every actual offer.
+                // Recruitment still goes through the normal deterministic
+                // willingness scorer, current social tie and manager policy.
+                drives: BTreeMap::from([
+                    (DriveKind::Money, rating(75)),
+                    (DriveKind::Status, rating(70)),
+                ]),
+            },
+        )?;
+        validate_set_relationship(
+            &state,
+            recruit,
+            danny_ferro,
+            RelationshipDimensions {
+                trust: level(82),
+                respect: level(80),
+                fear: level(7),
+                affection: level(68),
+                dependence: level(15),
+                resentment: level(0),
+                debt: level(15),
+            },
+        )?
+        .commit(&mut state)?;
+    }
     crimocracy::core::invariants::validate_state(&state)?;
     crimocracy::core::invariants::validate_state_against_registry(registry, &state)?;
     Ok(state)

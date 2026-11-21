@@ -435,6 +435,16 @@ A basic hierarchy may contain:
 
 The exact historical naming matters less than the functional hierarchy.
 
+The named-character roster is the leadership and specialist layer, not a literal
+roll call of every bartender, collector, driver, or street associate. Routine
+workers sit below that layer and are part of an enterprise's operating overhead
+until a dedicated workforce model exists. **Citywide criminal dominance must
+not be awarded for revenue alone:** it requires enough paid, independently
+accountable commanders to cover the city, with distinct durable local crews and
+redundant leadership instead of one manager nominally directing every district.
+Expansion therefore brings both wage obligations and a real need to recruit and
+delegate, not merely to open another profitable racket.
+
 Each manager has:
 
 - People they directly control.

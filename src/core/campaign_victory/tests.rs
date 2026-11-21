@@ -551,7 +551,11 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
     use crate::enterprises::enterprise_execution::validate_establish_enterprise;
     use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
+    use crate::world::world_system::insert_business;
     use crate::world::world_system::validate_set_character_autonomy;
+    use crate::world::{
+        BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CapabilityKind, Rating,
+    };
 
     let registry = build_registry();
     let mut city = generate_city(
@@ -673,6 +677,87 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         .commit(&mut city.state)
         .unwrap();
     }
+    // Independent profitable captains, rather than one omnipresent manager,
+    // must be answerable for each long-established district foothold.
+    for (index, district) in [home, empty_districts[0], empty_districts[1]]
+        .into_iter()
+        .enumerate()
+    {
+        let captain = insert_character(
+            &mut city.state,
+            CharacterDraft {
+                name: format!("Independent district captain {index}"),
+                organization: Some(city.player),
+                supervisor: Some(city.boss),
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Management,
+                    Rating::try_new(95).unwrap(),
+                )]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let scope = ResponsibilityScope::Neighborhood(district);
+        let mandate = validate_assign_mandate(
+            &city.state,
+            MandateDraft {
+                organization: city.player,
+                manager: captain,
+                scopes: BTreeSet::from([scope]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+        let venue = insert_business(
+            &registry,
+            &mut city.state,
+            BusinessDraft {
+                name: format!("Independent district front {index}"),
+                kind: BusinessKind::Hospitality,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::MeetingSpace,
+                    BusinessFunction::CustomerAccess,
+                ]),
+                neighborhood: district,
+                owner: BusinessOwner::Organization(city.player),
+            },
+        )
+        .unwrap();
+        let settlement = insert_account(
+            &mut city.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(city.player),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .unwrap();
+        validate_establish_enterprise(
+            &registry,
+            &city.state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Gambling,
+                organization: city.player,
+                authority: MandateAuthority {
+                    mandate,
+                    manager: captain,
+                    scope,
+                },
+                location: EnterpriseLocation::Business(venue),
+                supporting_businesses: BTreeSet::new(),
+                cash_account: cash,
+                settlement_account: settlement,
+            },
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    }
     let standing = progress(&registry, &city.state).unwrap();
     assert_eq!(standing.own_active_racket_districts, 3);
     assert_eq!(standing.established_racket_districts, 0);
@@ -762,9 +847,138 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     }
     let established = progress(&registry, &city.state).unwrap();
     assert!(established.established_racket_districts >= established.required_underboss_districts);
+    assert_eq!(established.staffed_underboss_districts, 3);
+    assert_eq!(established.required_underboss_personnel, 10);
+    assert!(established.key_personnel < established.required_underboss_personnel);
     assert!(established.racket_self_sufficient);
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(progress(&registry, &restored).unwrap(), established);
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        validate_claim_victory(&registry, &city.state, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady),
+        "territorial strength cannot replace a staffed command roster"
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+    hire_additional_staff(
+        &mut city.state,
+        city.player,
+        city.boss,
+        established.required_underboss_personnel - established.key_personnel,
+    );
+    let ready = progress(&registry, &city.state).unwrap();
+    assert_eq!(ready.key_personnel, ready.required_underboss_personnel);
+    assert_eq!(
+        ready.staffed_underboss_districts,
+        ready.required_underboss_districts
+    );
+    assert!(ready.racket_self_sufficient);
+    // Reassigning one established district's second racket to its first
+    // captain leaves the same profits, payroll, membership and territory,
+    // but destroys the independent local command structure.
+    let mut concentrated =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    let second_venue_racket = concentrated
+        .enterprises()
+        .enterprises_for_organization(city.player)
+        .find(|racket| match racket.location() {
+            EnterpriseLocation::Business(business) => {
+                concentrated
+                    .world()
+                    .get_business(business)
+                    .unwrap()
+                    .neighborhood()
+                    == empty_districts[0]
+            }
+            EnterpriseLocation::Neighborhood(_) => false,
+        })
+        .unwrap()
+        .id();
+    let first_captain = managers[0];
+    let captain_mandate = concentrated
+        .delegation()
+        .active_for_manager(first_captain)
+        .unwrap()
+        .id();
+    crate::enterprises::enterprise_execution::validate_reassign_enterprise(
+        &concentrated,
+        second_venue_racket,
+        MandateAuthority {
+            mandate: captain_mandate,
+            manager: first_captain,
+            scope: ResponsibilityScope::Neighborhood(empty_districts[0]),
+        },
+    )
+    .unwrap()
+    .commit(&mut concentrated)
+    .unwrap();
+    let concentrated_progress = progress(&registry, &concentrated).unwrap();
+    assert_eq!(concentrated_progress.key_personnel, ready.key_personnel);
+    assert_eq!(
+        concentrated_progress.racket_daily_net,
+        ready.racket_daily_net
+    );
+    assert_eq!(concentrated_progress.staffed_underboss_districts, 2);
+    assert_eq!(
+        validate_claim_victory(&registry, &concentrated, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+    validate_invariants(&concentrated);
+    // A newly hired manager can take over the same mature racket, but cannot
+    // retroactively claim its predecessor's 20 profitable settlements.
+    let mut unproven =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    let replacement = insert_character(
+        &mut unproven,
+        CharacterDraft {
+            name: "Unproven replacement captain".to_owned(),
+            organization: Some(city.player),
+            supervisor: Some(city.boss),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let replacement_scope = ResponsibilityScope::Neighborhood(empty_districts[0]);
+    let replacement_mandate = validate_assign_mandate(
+        &unproven,
+        MandateDraft {
+            organization: city.player,
+            manager: replacement,
+            scopes: BTreeSet::from([replacement_scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut unproven)
+    .unwrap();
+    crate::enterprises::enterprise_execution::validate_reassign_enterprise(
+        &unproven,
+        second_venue_racket,
+        MandateAuthority {
+            mandate: replacement_mandate,
+            manager: replacement,
+            scope: replacement_scope,
+        },
+    )
+    .unwrap()
+    .commit(&mut unproven)
+    .unwrap();
+    let unproven_progress = progress(&registry, &unproven).unwrap();
+    assert!(unproven_progress.key_personnel >= unproven_progress.required_underboss_personnel);
+    assert!(unproven_progress.racket_self_sufficient);
+    assert_eq!(unproven_progress.staffed_underboss_districts, 2);
+    assert_eq!(
+        validate_claim_victory(&registry, &unproven, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+    validate_invariants(&unproven);
     let mut overstaffed =
         restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     hire_additional_staff(&mut overstaffed, city.player, city.boss, 50);
@@ -832,6 +1046,41 @@ fn established_crews_must_outnumber_combined_rivals_not_only_win_a_plurality() {
     );
     assert!(mature_territorial_majority(&district, player, 3));
     assert!(!mature_territorial_majority(&district, rival_a, 1));
+}
+
+#[test]
+fn city_command_posts_cannot_be_filled_twice_by_the_same_manager() {
+    assert_eq!(required_underboss_personnel(2), 10);
+    assert_eq!(required_underboss_personnel(3), 10);
+    assert_eq!(required_underboss_personnel(6), 16);
+    assert_eq!(required_underboss_personnel(12), 28);
+    let first = NeighborhoodId::from_raw(1);
+    let second = NeighborhoodId::from_raw(2);
+    let third = NeighborhoodId::from_raw(3);
+    let a = CharacterId::from_raw(1);
+    let b = CharacterId::from_raw(2);
+    let c = CharacterId::from_raw(3);
+    let d = CharacterId::from_raw(4);
+    let e = CharacterId::from_raw(5);
+    let districts = BTreeSet::from([first, second]);
+    let mut captains = BTreeMap::from([
+        (first, BTreeSet::from([a, b])),
+        (second, BTreeSet::from([a, b])),
+    ]);
+    assert_eq!(staffed_racket_districts(&districts, &captains), 1);
+    captains.insert(second, BTreeSet::from([a, b, c]));
+    assert_eq!(staffed_racket_districts(&districts, &captains), 1);
+    captains.insert(second, BTreeSet::from([c, d]));
+    assert_eq!(staffed_racket_districts(&districts, &captains), 2);
+    let districts = BTreeSet::from([first, second, third]);
+    captains.insert(third, BTreeSet::from([e]));
+    assert_eq!(staffed_racket_districts(&districts, &captains), 2);
+    // Overlapping candidate lists still permit matching when enough distinct
+    // managers exist, regardless of which district the matcher visits first.
+    captains.insert(first, BTreeSet::from([a, b, c]));
+    captains.insert(second, BTreeSet::from([a, d]));
+    captains.insert(third, BTreeSet::from([b, e]));
+    assert_eq!(staffed_racket_districts(&districts, &captains), 2);
 }
 
 #[test]

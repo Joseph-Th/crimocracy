@@ -525,6 +525,83 @@ fn text_play_prospects_and_recruitment_are_organization_scoped() {
 }
 
 #[test]
+fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_crew() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let progress = session.execute("victory").unwrap().0;
+    assert!(
+        progress.contains("Named command staff: 4 / 10 required"),
+        "{progress}"
+    );
+    assert!(progress.contains("independently captained mature districts"));
+    let initial = session.execute("prospects").unwrap().0;
+    assert!(initial.contains("Danny Ferro"));
+    assert!(
+        !initial.contains("Grace Mercer"),
+        "unconnected outsiders must stay hidden"
+    );
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(session.execute("claim-victory underboss").is_err());
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    let accepted = session.execute("recruit 7 advancement").unwrap().0;
+    assert!(accepted.contains("Accepted"), "{accepted}");
+    session.execute("autonomy 7 delegated").unwrap();
+    session.execute("delegate 7 personnel").unwrap();
+    let next_circle = session.execute("prospects").unwrap().0;
+    for candidate in ["Grace Mercer", "Walter Kane", "Evelyn Cross", "Daniel Ward"] {
+        assert!(
+            next_circle.contains(candidate),
+            "{candidate} absent: {next_circle}"
+        );
+    }
+    assert!(
+        session
+            .execute("victory")
+            .unwrap()
+            .0
+            .contains("Named command staff: 5 / 10 required")
+    );
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(
+        session
+            .execute("prospects")
+            .unwrap()
+            .0
+            .contains("Grace Mercer")
+    );
+    let personnel_manager = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|member| member.name() == "Danny Ferro")
+        .unwrap()
+        .id();
+    session.execute("policy recruitment delegate").unwrap();
+    session.execute("advance 1d").unwrap();
+    let recruited = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .filter(|member| member.supervisor() == Some(personnel_manager))
+        .count();
+    assert!(
+        recruited >= 1,
+        "delegated personnel authority must grow the real roster"
+    );
+    assert!(
+        session
+            .execute("victory")
+            .unwrap()
+            .0
+            .contains("Named command staff: 6 / 10 required")
+    );
+}
+
+#[test]
 fn text_play_recruits_through_available_executive_connection() {
     use crimocracy::social::{
         RelationshipDimensions, relationship_system::validate_set_relationship,

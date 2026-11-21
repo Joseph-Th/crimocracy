@@ -149,9 +149,14 @@ impl Session<'_> {
                 writeln!(out, "  Underboss: active rackets in {} districts, {} productive mature districts ({} required); local majority and superior strength relative to rivals required",
                     standing.own_active_racket_districts, standing.established_racket_districts,
                     standing.required_underboss_districts).unwrap();
+                writeln!(out, "    Named command staff: {} / {} required; independently captained mature districts: {} / {} required ({} distinct proven active-racket managers per district, not shared across districts)",
+                    standing.key_personnel, standing.required_underboss_personnel,
+                    standing.staffed_underboss_districts, standing.required_underboss_districts,
+                    crimocracy::core::campaign_victory::UNDERBOSS_CAPTAINS_PER_DISTRICT).unwrap();
                 writeln!(out, "    Mature racket income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.racket_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.racket_self_sufficient { "yes" } else { "no" }).unwrap();
+                out.push_str("    A proven captain personally directed 20 profitable settlements in the last 30 days. Named personnel are the command roster; routine racket labor is abstracted in operating expenses, not individual character records.\n");
                 writeln!(out, "  Productive mature districts require 90 days of ownership/operation, 20 profitable settlements in the last 30 days, a settlement within 7 days, and 30-day net income sufficient for one crew member's daily wage ({} cents/day).",
                     self.registry.upkeep().per_member_daily().cents()).unwrap();
                 out.push_str(

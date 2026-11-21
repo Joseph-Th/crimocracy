@@ -62,10 +62,29 @@ pub const POLITICAL_CONTACT_DAYS: u64 = 30;
 pub const VICTORY_PROFITABLE_CYCLES: usize = 20;
 pub const VICTORY_INCOME_WINDOW_DAYS: u64 = 30;
 const VICTORY_FRESH_SETTLEMENT_DAYS: u64 = 7;
+/// Named members are the organization's command cadre, not a complete simulation of
+/// every runner or employee working below its racket managers. Even a small city
+/// needs a headquarters reserve and multiple leaders per controlled district before it can
+/// plausibly claim control of the entire underworld.
+pub const UNDERBOSS_MIN_KEY_PERSONNEL: usize = 10;
+pub const UNDERBOSS_HEADQUARTERS_PERSONNEL: usize = 4;
+pub const UNDERBOSS_KEY_PERSONNEL_PER_DISTRICT: usize = 2;
+pub const UNDERBOSS_CAPTAINS_PER_DISTRICT: usize = 2;
+
+fn required_underboss_personnel(required_districts: usize) -> usize {
+    UNDERBOSS_MIN_KEY_PERSONNEL.max(
+        UNDERBOSS_HEADQUARTERS_PERSONNEL.saturating_add(
+            required_districts.saturating_mul(UNDERBOSS_KEY_PERSONNEL_PER_DISTRICT),
+        ),
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VictoryProgress {
     pub total_districts: usize,
+    /// Current named leadership, not an estimate of unnamed racket employees.
+    pub key_personnel: usize,
+    pub required_underboss_personnel: usize,
     pub required_political_districts: usize,
     pub owned_operating_business_districts: usize,
     pub active_political_contacts: usize,
@@ -74,6 +93,8 @@ pub struct VictoryProgress {
     pub required_underboss_districts: usize,
     pub own_active_racket_districts: usize,
     pub established_racket_districts: usize,
+    /// Uncontested mature profitable districts with independent, non-reused captains.
+    pub staffed_underboss_districts: usize,
     /// Average realized daily profits from eligible 90-day businesses, over 30 days.
     pub legitimate_daily_net: Money,
     /// Average realized daily profits from eligible 90-day rackets, over 30 days.
@@ -122,7 +143,7 @@ pub enum VictoryError {
     )]
     RetirementNotReady,
     #[error(
-        "city underboss requires mature profitable rackets earning at least one member's wages and a majority in three quarters of districts, with total racket earnings covering payroll and more active rackets than any rival"
+        "city underboss requires enough named command staff, two independent mature-racket captains per qualifying district, profitable local majorities in three quarters of districts, racket income covering payroll, and more active rackets than any rival"
     )]
     UnderbossNotReady,
     #[error("retirement payment arithmetic overflow")]
@@ -230,6 +251,63 @@ fn mature_territorial_majority(
             .map(|standing| u64::from(standing.active_enterprises))
             .sum::<u64>()
             < mature_count
+}
+
+/// A manager can hold multiple mandates and run rackets in several districts, but
+/// cannot count as two independent field captains or supply concurrent district
+/// command in two places for the underboss ending. Match each district's two
+/// command posts against distinct real managers, with augmenting paths so the
+/// result does not depend on a greedy choice of which manager to assign first.
+fn staffed_racket_districts(
+    districts: &BTreeSet<NeighborhoodId>,
+    captains: &BTreeMap<NeighborhoodId, BTreeSet<CharacterId>>,
+) -> usize {
+    type Post = (NeighborhoodId, usize);
+
+    fn match_post(
+        post: Post,
+        captains: &BTreeMap<NeighborhoodId, BTreeSet<CharacterId>>,
+        assignments: &mut BTreeMap<CharacterId, Post>,
+        visited: &mut BTreeSet<CharacterId>,
+    ) -> bool {
+        let Some(candidates) = captains.get(&post.0) else {
+            return false;
+        };
+        for &candidate in candidates {
+            if !visited.insert(candidate) {
+                continue;
+            }
+            let previous = assignments.get(&candidate).copied();
+            if previous.is_none()
+                || previous
+                    .is_some_and(|previous| match_post(previous, captains, assignments, visited))
+            {
+                assignments.insert(candidate, post);
+                return true;
+            }
+        }
+        false
+    }
+
+    let mut assignments = BTreeMap::new();
+    for &district in districts {
+        for post in 0..UNDERBOSS_CAPTAINS_PER_DISTRICT {
+            match_post(
+                (district, post),
+                captains,
+                &mut assignments,
+                &mut BTreeSet::new(),
+            );
+        }
+    }
+    let mut posts_by_district = BTreeMap::<NeighborhoodId, usize>::new();
+    for &(district, _) in assignments.values() {
+        *posts_by_district.entry(district).or_default() += 1;
+    }
+    posts_by_district
+        .values()
+        .filter(|&&posts| posts == UNDERBOSS_CAPTAINS_PER_DISTRICT)
+        .count()
 }
 
 fn recent_racket_net(state: &AppState, racket: &crate::enterprises::EnterpriseRecord) -> i128 {
@@ -381,20 +459,37 @@ fn established_racket(state: &AppState, racket: &crate::enterprises::EnterpriseR
         == VICTORY_PROFITABLE_CYCLES
 }
 
+/// The current captain must have personally directed a recent profitable run.
+/// Reassigning a mature racket cannot confer an instant record of local command.
+fn proven_racket_captain(state: &AppState, racket: &crate::enterprises::EnterpriseRecord) -> bool {
+    state
+        .enterprises()
+        .cycles_for(racket.id())
+        .rev()
+        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
+        .filter(|cycle| {
+            cycle.occurred_at() <= state.now()
+                && racket.authority_for_cycle_at(cycle.occurred_at()).manager == racket.manager()
+                && cycle.net_cash() > Money::ZERO
+        })
+        .take(VICTORY_PROFITABLE_CYCLES)
+        .count()
+        == VICTORY_PROFITABLE_CYCLES
+}
+
 pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress, VictoryError> {
     let organization = state.player_organization().ok_or(VictoryError::NoPlayer)?;
     let total_districts = state.world().neighborhoods().count();
+    let key_personnel = state
+        .world()
+        .characters_in_organization(organization)
+        .count();
     let required_political_districts = (total_districts * 3).div_ceil(4);
     let required_underboss_districts = (total_districts * 3).div_ceil(4);
+    let required_underboss_personnel = required_underboss_personnel(required_underboss_districts);
     let per_member_wage = i128::from(registry.upkeep().per_member_daily().cents());
-    let daily_payroll = per_member_wage
-        * i128::try_from(
-            state
-                .world()
-                .characters_in_organization(organization)
-                .count(),
-        )
-        .expect("member count fits i128");
+    let daily_payroll =
+        per_member_wage * i128::try_from(key_personnel).expect("member count fits i128");
     let income_window = i128::from(VICTORY_INCOME_WINDOW_DAYS);
     // A credible district foothold must pay at least one crew member's wage
     // from that district's own mature operations. A few barely-profitable
@@ -462,6 +557,7 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .collect::<BTreeSet<_>>()
         .len();
     let mut rackets_by_district: BTreeMap<_, (i128, u64)> = BTreeMap::new();
+    let mut captains_by_district = BTreeMap::<NeighborhoodId, BTreeSet<CharacterId>>::new();
     for racket in own_rackets.iter().filter(|enterprise| {
         established_for(
             state.now(),
@@ -474,6 +570,12 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
             *net += recent_racket_net(state, racket);
             if established_racket(state, racket) {
                 *count += 1;
+                if proven_racket_captain(state, racket) {
+                    captains_by_district
+                        .entry(district)
+                        .or_default()
+                        .insert(racket.manager());
+                }
             }
         }
     }
@@ -486,7 +588,7 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .values()
         .map(|(net, _)| net)
         .sum::<i128>();
-    let uncontested = established_racket_districts
+    let uncontested_districts = established_racket_districts
         .iter()
         .filter(|district| {
             let mature_count = rackets_by_district
@@ -497,7 +599,12 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
                 mature_territorial_majority(&summary, organization, mature_count)
             })
         })
-        .count();
+        .copied()
+        .collect::<BTreeSet<_>>();
+    // Territorial control and independent command must hold in the SAME
+    // districts; two disjoint sets of three cannot combine into a victory.
+    let staffed_underboss_districts =
+        staffed_racket_districts(&uncontested_districts, &captains_by_district);
     let own_active = state
         .enterprises()
         .enterprises_for_organization(organization)
@@ -529,6 +636,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .unwrap_or(RETIREMENT_NEST_EGG);
     Ok(VictoryProgress {
         total_districts,
+        key_personnel,
+        required_underboss_personnel,
         required_political_districts,
         owned_operating_business_districts,
         active_political_contacts,
@@ -537,6 +646,7 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         required_underboss_districts,
         own_active_racket_districts,
         established_racket_districts: established_racket_districts.len(),
+        staffed_underboss_districts,
         legitimate_daily_net: Money::from_cents(
             (legitimate_window_net / income_window)
                 .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
@@ -555,7 +665,9 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         accounted_net: Money::from_cents(net as i64),
         retirement_total,
         underboss_ready: total_districts > 0
-            && uncontested >= required_underboss_districts
+            && uncontested_districts.len() >= required_underboss_districts
+            && key_personnel >= required_underboss_personnel
+            && staffed_underboss_districts >= required_underboss_districts
             && own_active >= 2
             && own_active > rival_max
             && daily_payroll > 0
