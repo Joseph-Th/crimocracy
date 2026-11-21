@@ -6,8 +6,8 @@ use crate::contacts::{ContactKind, ContactStatus};
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    CharacterId, HistoryEventId, IdExhaustionError, IdKind, LedgerTransactionId, OrganizationId,
-    ReportId,
+    BusinessId, CharacterId, HistoryEventId, IdExhaustionError, IdKind, LedgerTransactionId,
+    OrganizationId, ReportId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current};
@@ -27,10 +27,12 @@ use crate::history::history_system::{
 use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_report_draft};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::territory_influence::resolve_neighborhood_influence;
+use crate::world::territory_influence::{
+    NeighborhoodInfluenceSummary, resolve_neighborhood_influence,
+};
 use crate::world::{BusinessOwner, OrganizationKind};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 /// These are ending choices, not automatic achievements. Variant order is persistent.
@@ -57,7 +59,8 @@ pub const RETIREMENT_SEVERANCE_DAYS: i64 = 180;
 pub const VICTORY_ESTABLISHMENT_DAYS: u64 = 90;
 pub const POLITICAL_CONTACT_DAYS: u64 = 30;
 pub const VICTORY_PROFITABLE_CYCLES: usize = 20;
-const VICTORY_RECENT_CYCLE_DAYS: u64 = 7;
+pub const VICTORY_INCOME_WINDOW_DAYS: u64 = 30;
+const VICTORY_FRESH_SETTLEMENT_DAYS: u64 = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VictoryProgress {
@@ -70,6 +73,15 @@ pub struct VictoryProgress {
     pub required_underboss_districts: usize,
     pub own_active_racket_districts: usize,
     pub established_racket_districts: usize,
+    /// Average realized daily profits from eligible 90-day businesses, over 30 days.
+    pub legitimate_daily_net: Money,
+    /// Average realized daily profits from eligible 90-day rackets, over 30 days.
+    pub racket_daily_net: Money,
+    pub daily_payroll: Money,
+    /// Whether mature legitimate operations can cover the organization's wages.
+    pub legitimate_self_sufficient: bool,
+    /// Whether mature criminal enterprises can cover the organization's wages.
+    pub racket_self_sufficient: bool,
     pub accounted_net: Money,
     pub retirement_total: Money,
     /// Only valid in a full simulation context; do not expose hidden rival standing in the player client.
@@ -85,7 +97,7 @@ pub enum VictoryError {
     #[error("Campaign over: victory has already been claimed")]
     AlreadyWon,
     #[error(
-        "legitimate political power requires a political contact held for 30 days and profitable businesses operated for 90 days in three quarters of the city's districts"
+        "legitimate political power requires a 30-day political contact and 90-day businesses earning at least one member's wages per district across three quarters of the city, with a mature legitimate portfolio covering total payroll"
     )]
     PoliticalNotReady,
     #[error(
@@ -93,7 +105,7 @@ pub enum VictoryError {
     )]
     RetirementNotReady,
     #[error(
-        "city underboss requires 90-day profitable rackets leading uncontested in three quarters of districts and more active rackets than any rival"
+        "city underboss requires mature profitable rackets earning at least one member's wages and a majority in three quarters of districts, with total racket earnings covering payroll and more active rackets than any rival"
     )]
     UnderbossNotReady,
     #[error("retirement payment arithmetic overflow")]
@@ -157,29 +169,84 @@ fn established_for(now: SimTime, since: SimTime, days: u64) -> bool {
 
 fn settled_recently(now: SimTime, settled: SimTime) -> bool {
     settled <= now
-        && now.as_minutes() - settled.as_minutes() <= VICTORY_RECENT_CYCLE_DAYS * DAY_MINUTES
+        && now.as_minutes() - settled.as_minutes() <= VICTORY_FRESH_SETTLEMENT_DAYS * DAY_MINUTES
+}
+
+fn recent_income_start(now: SimTime) -> u64 {
+    now.as_minutes()
+        .saturating_sub(VICTORY_INCOME_WINDOW_DAYS * DAY_MINUTES)
+}
+
+/// Net operating profit, not laundering volume or appraisal, earned by the
+/// present owner during the recent income window. Losses must offset profits.
+fn recent_business_net(state: &AppState, business: BusinessId, owner: OrganizationId) -> i128 {
+    let Some(record) = state.world().get_business(business) else {
+        return 0;
+    };
+    state
+        .economy()
+        .cycles_for(business)
+        .rev()
+        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
+        .filter(|cycle| {
+            cycle.occurred_at() <= state.now()
+                && cycle.business_version() == record.version()
+                && cycle.owner() == BusinessOwner::Organization(owner)
+        })
+        .map(|cycle| i128::from(cycle.net_cash().cents()))
+        .sum()
+}
+
+/// New rackets may help defend the district today, but they cannot be used to
+/// declare a long-established underboss majority. Established operating crews
+/// themselves must outnumber the combined current rival presence.
+fn mature_territorial_majority(
+    summary: &NeighborhoodInfluenceSummary,
+    organization: OrganizationId,
+    mature_count: u64,
+) -> bool {
+    summary.economic_leader() == Some(organization)
+        && summary
+            .standings
+            .iter()
+            .filter(|standing| standing.organization != organization)
+            .map(|standing| u64::from(standing.active_enterprises))
+            .sum::<u64>()
+            < mature_count
+}
+
+fn recent_racket_net(state: &AppState, racket: &crate::enterprises::EnterpriseRecord) -> i128 {
+    state
+        .enterprises()
+        .cycles_for(racket.id())
+        .rev()
+        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
+        .filter(|cycle| cycle.occurred_at() <= state.now())
+        .map(|cycle| i128::from(cycle.net_cash().cents()))
+        .sum()
+}
+
+fn mature_business_title(state: &AppState, business: BusinessId, owner: OrganizationId) -> bool {
+    let Some(record) = state.world().get_business(business) else {
+        return false;
+    };
+    state
+        .world()
+        .get_business_ownership_change_for_version(business, record.version())
+        .is_some_and(|change| {
+            change.new_owner() == BusinessOwner::Organization(owner)
+                && established_for(state.now(), change.changed_at(), VICTORY_ESTABLISHMENT_DAYS)
+        })
 }
 
 /// A recent settlement and a substantial record of profitable cycles under
 /// current title prevent an instant acquisition from inheriting the seller's
 /// political standing.
-fn established_business(
-    state: &AppState,
-    business: crate::core::id::BusinessId,
-    owner: OrganizationId,
-) -> bool {
+fn established_business(state: &AppState, business: BusinessId, owner: OrganizationId) -> bool {
     let Some(record) = state.world().get_business(business) else {
         return false;
     };
-    let Some(change) = state
-        .world()
-        .get_business_ownership_change_for_version(business, record.version())
-    else {
-        return false;
-    };
-    let since = change.changed_at();
-    if change.new_owner() != BusinessOwner::Organization(owner)
-        || !established_for(state.now(), since, VICTORY_ESTABLISHMENT_DAYS)
+    if !mature_business_title(state, business, owner)
         || !state.economy().latest_cycle(business).is_some_and(|cycle| {
             cycle.owner() == BusinessOwner::Organization(owner)
                 && settled_recently(state.now(), cycle.occurred_at())
@@ -191,9 +258,12 @@ fn established_business(
         .economy()
         .cycles_for(business)
         .rev()
-        .take_while(|cycle| cycle.occurred_at() >= since)
+        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
         .filter(|cycle| {
-            cycle.owner() == BusinessOwner::Organization(owner) && cycle.net_cash() > Money::ZERO
+            cycle.occurred_at() <= state.now()
+                && cycle.business_version() == record.version()
+                && cycle.owner() == BusinessOwner::Organization(owner)
+                && cycle.net_cash() > Money::ZERO
         })
         .take(VICTORY_PROFITABLE_CYCLES)
         .count()
@@ -215,7 +285,8 @@ fn established_racket(state: &AppState, racket: &crate::enterprises::EnterpriseR
         .enterprises()
         .cycles_for(racket.id())
         .rev()
-        .filter(|cycle| cycle.net_cash() > Money::ZERO)
+        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
+        .filter(|cycle| cycle.occurred_at() <= state.now() && cycle.net_cash() > Money::ZERO)
         .take(VICTORY_PROFITABLE_CYCLES)
         .count()
         == VICTORY_PROFITABLE_CYCLES
@@ -226,6 +297,20 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
     let total_districts = state.world().neighborhoods().count();
     let required_political_districts = (total_districts * 3).div_ceil(4);
     let required_underboss_districts = (total_districts * 3).div_ceil(4);
+    let per_member_wage = i128::from(registry.upkeep().per_member_daily().cents());
+    let daily_payroll = per_member_wage
+        * i128::try_from(
+            state
+                .world()
+                .characters_in_organization(organization)
+                .count(),
+        )
+        .expect("member count fits i128");
+    let income_window = i128::from(VICTORY_INCOME_WINDOW_DAYS);
+    // A credible district foothold must pay at least one crew member's wage
+    // from that district's own mature operations. A few barely-profitable
+    // storefronts cannot substitute for actual local economic leverage.
+    let local_income_floor = per_member_wage * income_window;
     let owned_businesses = state
         .world()
         .businesses_owned_by_organization(organization)
@@ -241,12 +326,28 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .map(|business| business.neighborhood())
         .collect::<BTreeSet<_>>()
         .len();
-    let established_business_districts = owned_businesses
+    let mut legitimate_net_by_district: BTreeMap<_, i128> = BTreeMap::new();
+    let mut qualified_business_districts = BTreeSet::new();
+    for business in owned_businesses
         .iter()
-        .filter(|business| established_business(state, business.id(), organization))
-        .map(|business| business.neighborhood())
-        .collect::<BTreeSet<_>>()
-        .len();
+        .filter(|business| mature_business_title(state, business.id(), organization))
+    {
+        *legitimate_net_by_district
+            .entry(business.neighborhood())
+            .or_default() += recent_business_net(state, business.id(), organization);
+        if established_business(state, business.id(), organization) {
+            qualified_business_districts.insert(business.neighborhood());
+        }
+    }
+    let established_business_districts = legitimate_net_by_district
+        .iter()
+        .filter(|(district, net)| {
+            qualified_business_districts.contains(district)
+                && **net >= local_income_floor
+                && **net > 0
+        })
+        .count();
+    let legitimate_window_net = legitimate_net_by_district.values().sum::<i128>();
     let political_contacts = state
         .contacts()
         .contacts_for_sponsor(organization)
@@ -295,18 +396,40 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .filter_map(|enterprise| racket_district(enterprise))
         .collect::<BTreeSet<_>>()
         .len();
-    let established_racket_districts = own_rackets
+    let mut rackets_by_district: BTreeMap<_, (i128, u64)> = BTreeMap::new();
+    for racket in own_rackets.iter().filter(|enterprise| {
+        established_for(
+            state.now(),
+            enterprise.established_at(),
+            VICTORY_ESTABLISHMENT_DAYS,
+        )
+    }) {
+        if let Some(district) = racket_district(racket) {
+            let (net, count) = rackets_by_district.entry(district).or_default();
+            *net += recent_racket_net(state, racket);
+            if established_racket(state, racket) {
+                *count += 1;
+            }
+        }
+    }
+    let established_racket_districts = rackets_by_district
         .iter()
-        .filter(|enterprise| established_racket(state, enterprise))
-        .filter_map(|enterprise| racket_district(enterprise))
+        .filter(|(_, (net, count))| *count > 0 && *net >= local_income_floor && *net > 0)
+        .map(|(district, _)| *district)
         .collect::<BTreeSet<_>>();
-    let uncontested = state
-        .world()
-        .neighborhoods()
+    let racket_window_net = rackets_by_district
+        .values()
+        .map(|(net, _)| net)
+        .sum::<i128>();
+    let uncontested = established_racket_districts
+        .iter()
         .filter(|district| {
-            resolve_neighborhood_influence(state, district.id()).is_ok_and(|summary| {
-                summary.economic_leader() == Some(organization)
-                    && established_racket_districts.contains(&district.id())
+            let mature_count = rackets_by_district
+                .get(district)
+                .expect("qualifying district came from the mature racket map")
+                .1;
+            resolve_neighborhood_influence(state, **district).is_ok_and(|summary| {
+                mature_territorial_majority(&summary, organization, mature_count)
             })
         })
         .count();
@@ -349,12 +472,29 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         required_underboss_districts,
         own_active_racket_districts,
         established_racket_districts: established_racket_districts.len(),
+        legitimate_daily_net: Money::from_cents(
+            (legitimate_window_net / income_window)
+                .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+        ),
+        racket_daily_net: Money::from_cents(
+            (racket_window_net / income_window).clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+                as i64,
+        ),
+        daily_payroll: Money::from_cents(
+            daily_payroll.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+        ),
+        legitimate_self_sufficient: daily_payroll > 0
+            && legitimate_window_net >= daily_payroll * income_window,
+        racket_self_sufficient: daily_payroll > 0
+            && racket_window_net >= daily_payroll * income_window,
         accounted_net: Money::from_cents(net as i64),
         retirement_total,
         underboss_ready: total_districts > 0
             && uncontested >= required_underboss_districts
             && own_active >= 2
-            && own_active > rival_max,
+            && own_active > rival_max
+            && daily_payroll > 0
+            && racket_window_net >= daily_payroll * income_window,
     })
 }
 
@@ -376,7 +516,8 @@ fn ensure_eligible(
             if standing.established_political_contacts == 0
                 || standing.total_districts == 0
                 || standing.established_business_districts
-                    < standing.required_political_districts =>
+                    < standing.required_political_districts
+                || !standing.legitimate_self_sufficient =>
         {
             Err(VictoryError::PoliticalNotReady)
         }

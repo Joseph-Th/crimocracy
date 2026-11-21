@@ -92,6 +92,30 @@ fn fund(state: &mut AppState, owner: OrganizationId, cents: i64) {
     .unwrap();
 }
 
+/// Wage obligations increase with real personnel, even when profits do not.
+fn hire_additional_staff(
+    state: &mut AppState,
+    organization: OrganizationId,
+    boss: CharacterId,
+    count: usize,
+) {
+    for index in 0..count {
+        insert_character(
+            state,
+            CharacterDraft {
+                name: format!("Additional employee {index}"),
+                organization: Some(organization),
+                supervisor: Some(boss),
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    }
+}
+
 #[test]
 fn retirement_rejects_unfunded_settlement_without_mutating_books() {
     let (registry, mut state, owner, _, _) = retirement_fixture();
@@ -374,11 +398,42 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         "qualifying productive business districts: {:?}",
         established
     );
+    assert!(established.legitimate_self_sufficient);
+    assert!(established.legitimate_daily_net >= established.daily_payroll);
     let restored_before_claim =
         restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(
         progress(&registry, &restored_before_claim).unwrap(),
         established
+    );
+    let mut overstaffed =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    hire_additional_staff(&mut overstaffed, city.player, city.boss, 50);
+    let underfunded = progress(&registry, &overstaffed).unwrap();
+    assert!(underfunded.established_business_districts >= underfunded.required_political_districts);
+    assert!(!underfunded.legitimate_self_sufficient);
+    let before = bincode::serialize(&build_save(&registry, &overstaffed).unwrap()).unwrap();
+    assert_eq!(
+        validate_claim_victory(&registry, &overstaffed, VictoryPath::PoliticalPower).err(),
+        Some(VictoryError::PoliticalNotReady)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &overstaffed).unwrap()).unwrap()
+    );
+
+    // Historical successes cannot fund a permanent win if no new cycles have
+    // been settled in the last month. This is a read-only progress probe.
+    let mut stale = restored_before_claim;
+    stale.set_now_for_test(SimTime::from_minutes(
+        city.state.now().as_minutes() + (VICTORY_INCOME_WINDOW_DAYS + 1) * DAY_MINUTES,
+    ));
+    let stale_progress = progress(&registry, &stale).unwrap();
+    assert_eq!(stale_progress.established_business_districts, 0);
+    assert_eq!(stale_progress.legitimate_daily_net, Money::ZERO);
+    assert_eq!(
+        validate_claim_victory(&registry, &stale, VictoryPath::PoliticalPower).err(),
+        Some(VictoryError::PoliticalNotReady)
     );
     let outcome = validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower)
         .unwrap()
@@ -615,8 +670,24 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     }
     let established = progress(&registry, &city.state).unwrap();
     assert!(established.established_racket_districts >= established.required_underboss_districts);
+    assert!(established.racket_self_sufficient);
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(progress(&registry, &restored).unwrap(), established);
+    let mut overstaffed =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    hire_additional_staff(&mut overstaffed, city.player, city.boss, 50);
+    let underfunded = progress(&registry, &overstaffed).unwrap();
+    assert!(underfunded.established_racket_districts >= underfunded.required_underboss_districts);
+    assert!(!underfunded.racket_self_sufficient);
+    let before = bincode::serialize(&build_save(&registry, &overstaffed).unwrap()).unwrap();
+    assert_eq!(
+        validate_claim_victory(&registry, &overstaffed, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &overstaffed).unwrap()).unwrap()
+    );
     let outcome = validate_claim_victory(&registry, &city.state, VictoryPath::CityUnderboss)
         .unwrap()
         .commit(&registry, &mut city.state)
@@ -636,6 +707,134 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
             .unwrap()
             .id(),
         outcome.history
+    );
+}
+
+#[test]
+fn established_crews_must_outnumber_combined_rivals_not_only_win_a_plurality() {
+    use crate::world::territory_influence::{NeighborhoodInfluenceSummary, TerritoryStanding};
+
+    let player = OrganizationId::from_raw(1);
+    let rival_a = OrganizationId::from_raw(2);
+    let rival_b = OrganizationId::from_raw(3);
+    let district = NeighborhoodInfluenceSummary {
+        standings: vec![
+            TerritoryStanding {
+                organization: player,
+                active_enterprises: 4,
+            },
+            TerritoryStanding {
+                organization: rival_a,
+                active_enterprises: 1,
+            },
+            TerritoryStanding {
+                organization: rival_b,
+                active_enterprises: 1,
+            },
+        ],
+    };
+    assert_eq!(district.economic_leader(), Some(player));
+    assert!(
+        !mature_territorial_majority(&district, player, 2),
+        "fresh rackets cannot turn an established tie into underboss dominance"
+    );
+    assert!(mature_territorial_majority(&district, player, 3));
+    assert!(!mature_territorial_majority(&district, rival_a, 1));
+}
+
+#[test]
+fn long_owned_low_margin_storefront_does_not_create_political_leverage() {
+    use crate::city_generation::{CityScale, generate_city};
+    use crate::economy::business_acquisition::{
+        BusinessAcquisitionDraft, validate_acquire_business,
+    };
+    use crate::economy::business_economy_system::{
+        decide_business_cycle, forecast_normal_business_net, validate_business_cycle_plan,
+    };
+    use crate::opportunities::OpportunityStatus;
+    use crate::opportunities::opportunity_system::validate_dismiss_opportunity;
+    use crate::world::{BusinessKind, BusinessOwner};
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(947)).unwrap();
+    let storefront = city
+        .state
+        .world()
+        .public_business_directory()
+        .map(|(id, _, _, _)| id)
+        .find(|id| {
+            let business = city.state.world().get_business(*id).unwrap();
+            business.kind() == BusinessKind::SoupKitchen
+                && business.neighborhood() != city.home
+                && business.owner() == BusinessOwner::Independent
+        })
+        .expect("the generated city must have a purchasable outlying kitchen");
+    let one_wage = registry.upkeep().per_member_daily().cents();
+    let forecast = forecast_normal_business_net(&registry, &city.state, storefront).unwrap();
+    assert!(forecast > Money::ZERO);
+    assert!(forecast.cents() < one_wage);
+    fund(&mut city.state, city.player, 500_000);
+    let funding = city
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(city.player))
+        .filter(|account| account.kind() == AccountKind::AccountedFunds)
+        .map(|account| account.id())
+        .collect::<BTreeSet<_>>();
+    validate_acquire_business(
+        &registry,
+        &city.state,
+        BusinessAcquisitionDraft {
+            organization: city.player,
+            business: storefront,
+            funding_accounts: funding,
+        },
+    )
+    .unwrap()
+    .commit(&registry, &mut city.state)
+    .unwrap();
+
+    let open = city
+        .state
+        .opportunities()
+        .opportunities_for_organization(city.player)
+        .filter(|opportunity| opportunity.status() == OpportunityStatus::Open)
+        .map(|opportunity| opportunity.id())
+        .collect::<Vec<_>>();
+    for opportunity in open {
+        validate_dismiss_opportunity(&registry, &city.state, opportunity)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    for _ in 0..VICTORY_ESTABLISHMENT_DAYS {
+        city.state
+            .advance_clock(crate::core::time::SimDuration::from_minutes(
+                DAY_MINUTES as u32,
+            ));
+        validate_business_cycle_plan(
+            &city.state,
+            decide_business_cycle(&registry, &city.state, storefront, 0).unwrap(),
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    }
+    assert!(established_business(&city.state, storefront, city.player));
+    let earned = recent_business_net(&city.state, storefront, city.player);
+    assert!(earned > 0);
+    assert!(earned < i128::from(one_wage) * i128::from(VICTORY_INCOME_WINDOW_DAYS));
+    let standing = progress(&registry, &city.state).unwrap();
+    assert_eq!(standing.owned_operating_business_districts, 2);
+    assert_eq!(standing.established_business_districts, 0);
+    assert!(!standing.legitimate_self_sufficient);
+    assert_eq!(
+        progress(
+            &registry,
+            &restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap()
+        )
+        .unwrap(),
+        standing
     );
 }
 

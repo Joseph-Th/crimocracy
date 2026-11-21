@@ -94,15 +94,23 @@ impl Session<'_> {
                     "Optional endings (claim-victory <political|retirement|underboss>):"
                 )
                 .unwrap();
-                writeln!(out, "  Political: {}/{} contacts held for 30 days; operating owned businesses in {} districts, {} established for 90 days with 20 profitable cycles ({} required of {} city districts)",
+                writeln!(out, "  Political: {}/{} contacts held for 30 days; owned businesses in {} districts, {} productive mature districts ({} required of {} city districts)",
                     standing.established_political_contacts, standing.active_political_contacts,
                     standing.owned_operating_business_districts, standing.established_business_districts,
                     standing.required_political_districts, standing.total_districts).unwrap();
+                writeln!(out, "    Mature legitimate income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
+                    standing.legitimate_daily_net.cents(), standing.daily_payroll.cents(),
+                    if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
                 writeln!(out, "  Retirement: {} cents net accounted funds; {} cents required for a 50,000-dollar leader nest egg and 180 days severance per subordinate",
                     standing.accounted_net.cents(), standing.retirement_total.cents()).unwrap();
-                writeln!(out, "  Underboss: active rackets in {} districts, {} established for 90 days with 20 profitable cycles ({} required); uncontested control and superior strength relative to rivals also required",
+                writeln!(out, "  Underboss: active rackets in {} districts, {} productive mature districts ({} required); local majority and superior strength relative to rivals required",
                     standing.own_active_racket_districts, standing.established_racket_districts,
                     standing.required_underboss_districts).unwrap();
+                writeln!(out, "    Mature racket income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
+                    standing.racket_daily_net.cents(), standing.daily_payroll.cents(),
+                    if standing.racket_self_sufficient { "yes" } else { "no" }).unwrap();
+                writeln!(out, "  Productive mature districts require 90 days of ownership/operation, 20 profitable settlements in the last 30 days, a settlement within 7 days, and 30-day net income sufficient for one crew member's daily wage ({} cents/day).",
+                    self.registry.upkeep().per_member_daily().cents()).unwrap();
                 out.push_str(
                     "Reaching a threshold does not end sandbox play until you claim the victory.",
                 );
