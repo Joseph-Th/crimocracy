@@ -134,6 +134,11 @@ impl AppState {
         })
     }
 
+    pub fn campaign_victory(&self) -> Option<&crate::history::HistoryEventRecord> {
+        self.player_organization()
+            .and_then(|organization| self.history.campaign_victory(organization))
+    }
+
     pub fn world(&self) -> &WorldState {
         &self.world
     }

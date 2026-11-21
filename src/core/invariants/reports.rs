@@ -21,6 +21,18 @@ fn validate_report(state: &AppState, report: &ReportRecord) -> Result<(), StateV
             report: report.id(),
         });
     }
+    if report.kind() == crate::reports::ReportKind::CampaignVictory {
+        let linked = state.history().campaign_victory(report.recipient()).is_some_and(|event| {
+            matches!(event.kind(), crate::history::HistoryEventKind::CampaignVictory { path, .. }
+                if report.title() == format!("Campaign victory: {}", path.label()))
+                && event.occurred_at() == report.generated_at()
+        });
+        if !linked || report.entries().len() != 1 {
+            return Err(StateValidationError::InvalidCampaignVictoryReport {
+                report: report.id(),
+            });
+        }
+    }
     if state.world.get_organization(report.recipient()).is_none() {
         return Err(StateValidationError::MissingEntity {
             context: "report recipient",

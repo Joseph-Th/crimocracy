@@ -22,6 +22,11 @@ pub enum HistoryEventKind {
         resulting_version: u32,
         daily_wage: Money,
     },
+    CampaignVictory {
+        organization: OrganizationId,
+        path: crate::core::campaign_victory::VictoryPath,
+        settlement: Option<crate::core::id::LedgerTransactionId>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +61,8 @@ pub struct HistoryState {
     records: BTreeMap<HistoryEventId, HistoryEventRecord>,
     #[serde(skip)]
     latest_departures: BTreeMap<(CharacterId, OrganizationId), HistoryEventId>,
+    #[serde(skip)]
+    victory: Option<HistoryEventId>,
 }
 
 impl HistoryState {
@@ -86,6 +93,18 @@ impl HistoryState {
             .any(|(_, owner)| *owner == organization)
     }
 
+    pub fn campaign_victory(&self, organization: OrganizationId) -> Option<&HistoryEventRecord> {
+        self.victory.and_then(|id| self.get_event(id)).filter(|event| {
+            matches!(event.kind(), HistoryEventKind::CampaignVictory { organization: owner, .. } if owner == organization)
+        })
+    }
+
+    fn derive_victory_index(&self) -> Option<HistoryEventId> {
+        self.records.values().find_map(|event| {
+            matches!(event.kind(), HistoryEventKind::CampaignVictory { .. }).then_some(event.id())
+        })
+    }
+
     fn derive_departure_index(&self) -> BTreeMap<(CharacterId, OrganizationId), HistoryEventId> {
         self.records
             .values()
@@ -95,14 +114,21 @@ impl HistoryState {
                     organization,
                     ..
                 } => Some(((member, organization), record.id())),
-                HistoryEventKind::Operation | HistoryEventKind::Recruitment => None,
+                HistoryEventKind::Operation
+                | HistoryEventKind::Recruitment
+                | HistoryEventKind::CampaignVictory { .. } => None,
             })
             .collect()
     }
     pub(crate) fn rebuild_derived_indexes(&mut self) {
         self.latest_departures = self.derive_departure_index();
+        self.victory = self.derive_victory_index();
     }
     fn insert(&mut self, event: HistoryEventRecord) {
+        if matches!(event.kind(), HistoryEventKind::CampaignVictory { .. }) {
+            debug_assert!(self.victory.is_none());
+            self.victory = Some(event.id());
+        }
         if let HistoryEventKind::PayrollDeparture {
             member,
             organization,
@@ -123,7 +149,9 @@ impl HistoryState {
         // Reconcile the departure index and the authoritative map key and monotone event
         // chronology are still part of durable identity. Canonical event IDs are allocated at
         // commit time, so iteration by ID must never rewind campaign time.
-        if self.latest_departures != self.derive_departure_index() {
+        if self.latest_departures != self.derive_departure_index()
+            || self.victory != self.derive_victory_index()
+        {
             return false;
         }
         let mut previous_at = None;

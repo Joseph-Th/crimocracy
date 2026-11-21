@@ -5,6 +5,7 @@
 //! and `version` own their value types.
 
 pub mod attention;
+pub mod campaign_victory;
 pub mod entity;
 pub mod id;
 pub mod invariants;

@@ -290,6 +290,8 @@ to the persisted campaign: run without saving over the original evidence.
 their existing indexed queries, restricted to current player assets and to
 business cycles actually earned during player ownership.
 
+Optional campaign-victory proofs in `core::campaign_victory::tests` exercise insufficient clean funds and unchanged state, accounted personal leader/crew payouts with exact money preservation, stale tokens, a live council contact plus acquired operating businesses across city districts, uncontested district influence and relative racket strength, and terminal behavior across save/reload. `cargo test-focused campaign_victory` is the narrow lane. Text-play `victory` is deliberately informational; `claim-victory` is the only ending action and must reject ineligible claims without mutation. Historical saves lacking the appended victory event remain playable; a victorious saved state must refuse subsequent ticks with no clock or record mutation.
+
 Start with `cargo text-play --generate --seed 12 --city-size small`
 or `cargo text-play --seed 12` for reproducibility and use `help` for
 the available actions. `advance` is the sole time-advance command. It stops at

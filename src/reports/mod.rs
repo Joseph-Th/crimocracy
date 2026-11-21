@@ -23,6 +23,8 @@ pub enum ReportKind {
     Opportunity,
     /// The organization's own street standing shifting after its own operations.
     Standing,
+    /// Voluntary terminal campaign outcome recorded with a matching history event.
+    CampaignVictory,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -27,6 +27,53 @@ impl Session<'_> {
         let verb = normalized.as_str();
         words[0] = verb;
         validate_command_arity(verb, words.len())?;
+        if self.state.campaign_victory().is_some()
+            && !matches!(
+                verb,
+                "help"
+                    | "quit"
+                    | "exit"
+                    | "brief"
+                    | "victory"
+                    | "save"
+                    | "people"
+                    | "known-people"
+                    | "known-targets"
+                    | "connections"
+                    | "contacts"
+                    | "counsel"
+                    | "policies"
+                    | "districts"
+                    | "mandates"
+                    | "prospects"
+                    | "directory"
+                    | "market"
+                    | "businesses"
+                    | "business-outlook"
+                    | "business-cycles"
+                    | "enterprises"
+                    | "racket-kinds"
+                    | "racket-outlook"
+                    | "finances"
+                    | "accounts"
+                    | "ledger"
+                    | "transaction"
+                    | "case-brief"
+                    | "intelligence"
+                    | "intel"
+                    | "debriefs"
+                    | "operation-kinds"
+                    | "opportunities"
+                    | "operations"
+                    | "operation"
+                    | "decisions"
+                    | "reports"
+                    | "report"
+                    | "racket-cycles"
+            )
+        {
+            return Err("Campaign over: victory has already been claimed".to_owned());
+        }
         let state = &self.state;
         let mut out = String::new();
         match verb {
@@ -38,6 +85,53 @@ impl Session<'_> {
                 ));
             }
             "brief" => out = self.brief(),
+            "victory" => {
+                let standing =
+                    crimocracy::core::campaign_victory::progress(self.registry, &self.state)
+                        .map_err(|error| error.to_string())?;
+                writeln!(
+                    out,
+                    "Optional endings (claim-victory <political|retirement|underboss>):"
+                )
+                .unwrap();
+                writeln!(out, "  Political: {} active political contact(s); operating owned businesses in {}/{} districts (half the city required)",
+                    standing.active_political_contacts, standing.owned_operating_business_districts, standing.required_political_districts).unwrap();
+                writeln!(out, "  Retirement: {} cents net accounted funds; {} cents required for a 50,000-dollar leader nest egg and 180 days severance per subordinate",
+                    standing.accounted_net.cents(), standing.retirement_total.cents()).unwrap();
+                writeln!(out, "  Underboss: active rackets present in {}/{} required districts; uncontested control and superior strength relative to rival organizations also required",
+                    standing.own_active_racket_districts, standing.required_underboss_districts).unwrap();
+                out.push_str(
+                    "Reaching a threshold does not end sandbox play until you claim the victory.",
+                );
+            }
+            "claim-victory" => {
+                use crimocracy::core::campaign_victory::{VictoryPath, validate_claim_victory};
+                let path = match words[1] {
+                    "political" => VictoryPath::PoliticalPower,
+                    "retirement" => VictoryPath::FundedRetirement,
+                    "underboss" => VictoryPath::CityUnderboss,
+                    _ => return Err("claim-victory <political|retirement|underboss>".to_owned()),
+                };
+                let result = validate_claim_victory(self.registry, &self.state, path)
+                    .map_err(|error| error.to_string())?
+                    .commit(self.registry, &mut self.state)
+                    .map_err(|error| error.to_string())?;
+                writeln!(
+                    out,
+                    "Campaign over: victory ({}). History {}, report {}.",
+                    result.path.label(),
+                    result.history,
+                    result.report
+                )
+                .unwrap();
+                if let Some(payment) = result.settlement {
+                    writeln!(
+                        out,
+                        "Final retirement payout recorded in transaction {payment}."
+                    )
+                    .unwrap();
+                }
+            }
             "attention" => {
                 use crimocracy::core::attention::AttentionClass;
                 match words.as_slice() {

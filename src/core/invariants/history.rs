@@ -23,6 +23,7 @@ pub(super) fn validate_history_against_registry(
 
 pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationError> {
     let mut previous_departures = BTreeMap::new();
+    let mut victory_seen = false;
     for event in state.history.events() {
         if event.summary().trim().is_empty() {
             return Err(StateValidationError::EmptyHistorySummary { event: event.id() });
@@ -42,6 +43,59 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
                     entity: *entity,
                 });
             }
+        }
+        if let HistoryEventKind::CampaignVictory {
+            organization,
+            path,
+            settlement,
+        } = event.kind()
+        {
+            let invalid = || StateValidationError::InvalidCampaignVictory { event: event.id() };
+            let report_count = state
+                .reports()
+                .reports_for(organization)
+                .filter(|report| {
+                    report.kind() == crate::reports::ReportKind::CampaignVictory
+                        && report.generated_at() == event.occurred_at()
+                        && report.title() == format!("Campaign victory: {}", path.label())
+                })
+                .count();
+            let settlement_valid = match (path, settlement) {
+                (crate::core::campaign_victory::VictoryPath::FundedRetirement, Some(transaction)) => {
+                    state.finance().get_transaction(transaction).is_some_and(|record| {
+                        record.occurred_at() == event.occurred_at()
+                            && record.memo() == "Final campaign retirement settlement: leader nest egg and crew severance"
+                            && record.postings().iter().any(|posting| posting.amount < Money::ZERO
+                                && state.finance().get_account(posting.account).is_some_and(|account| {
+                                    account.owner() == crate::finance::FinancialOwner::Organization(organization)
+                                        && account.kind() == crate::finance::AccountKind::AccountedFunds
+                                }))
+                            && record.postings().iter().any(|posting| posting.amount > Money::ZERO
+                                && state.finance().get_account(posting.account).is_some_and(|account| {
+                                    matches!(account.owner(), crate::finance::FinancialOwner::Character(_))
+                                        && account.kind() == crate::finance::AccountKind::AccountedFunds
+                                }))
+                    })
+                }
+                (crate::core::campaign_victory::VictoryPath::FundedRetirement, None) => false,
+                (_, None) => true,
+                (_, Some(_)) => false,
+            };
+            if victory_seen
+                || state.player_organization() != Some(organization)
+                || state
+                    .world()
+                    .characters_in_organization(organization)
+                    .next()
+                    .is_none()
+                || !settlement_valid
+                || report_count != 1
+                || event.summary() != format!("Campaign victory: {}", path.label())
+                || event.entities() != &BTreeSet::from([EntityRef::Organization(organization)])
+            {
+                return Err(invalid());
+            }
+            victory_seen = true;
         }
         if let HistoryEventKind::PayrollDeparture {
             member,

@@ -77,6 +77,8 @@ owns it. Each `src/*/mod.rs` `//!` header names the canonical mutation path.
 - **Indexes and projections** — derived views maintained from authoritative records. Never independent truth.
 - **Adapters** — own filesystem, process, network, and UI effects. Core systems receive explicit data and return explicit outcomes.
 
+Optional campaign conclusions live in `core::campaign_victory`, which derives eligibility from owned operating businesses, validated political contacts, available accounted-funds balances, current staff payroll, and the read-only world territory influence resolver. Claims are explicit player operations, not autonomous ticks. The retirement path uses the finance owner's balanced ledger and planned personal-account openings; every outcome is recorded through the history and report owners. A `CampaignVictory` event and report have closed, release-safe provenance checks, and the history owner's `serde(skip)` victory index rebuilds on load. `run_tick` checks for a recorded conclusion before modifying the clock. Appending enum variants and reconstructing the derived index retain compatibility with existing serialized campaign states. A text-play read-only victory progress view never discloses private rival counts or locations.
+
 The player-driven text adapter lives in `examples/gameplay_harness/text_play/`
 and can start from either the generated authoritative city or a canonical
 authored opening without running a scripted evaluator. It owns parsing,

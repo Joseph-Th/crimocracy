@@ -45,6 +45,10 @@ pub enum StateValidationError {
     InvalidCharacterVersion { character: CharacterId },
     #[error("history event {event} contains an invalid payroll departure")]
     InvalidPayrollDeparture { event: HistoryEventId },
+    #[error("campaign victory event {event} has inconsistent outcome or provenance")]
+    InvalidCampaignVictory { event: HistoryEventId },
+    #[error("campaign victory report {report} has no matching outcome")]
+    InvalidCampaignVictoryReport { report: ReportId },
     #[error("non-criminal organization {organization} stores a criminal reputation record")]
     InvalidReputationOrganization { organization: OrganizationId },
     #[error("organization {organization:?} stores an out-of-range {audience:?} reputation score")]

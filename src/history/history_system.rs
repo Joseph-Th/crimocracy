@@ -21,6 +21,8 @@ pub enum HistoryError {
     StaleTime { expected: SimTime, found: SimTime },
     #[error("payroll departures must be recorded through the payroll departure owner")]
     ReservedPayrollDeparture,
+    #[error("campaign victories must be recorded through the campaign victory owner")]
+    ReservedCampaignVictory,
     #[error("payroll departure does not agree with member {0}'s current membership transition")]
     InvalidPayrollDeparture(CharacterId),
     #[error(transparent)]
@@ -64,10 +66,36 @@ pub fn validate_record_event(
     state: &AppState,
     draft: HistoryEventDraft,
 ) -> Result<ValidatedHistoryEvent, HistoryError> {
-    if matches!(draft.kind, HistoryEventKind::PayrollDeparture { .. }) {
-        return Err(HistoryError::ReservedPayrollDeparture);
+    match draft.kind {
+        HistoryEventKind::PayrollDeparture { .. } => {
+            return Err(HistoryError::ReservedPayrollDeparture);
+        }
+        HistoryEventKind::CampaignVictory { .. } => {
+            return Err(HistoryError::ReservedCampaignVictory);
+        }
+        HistoryEventKind::Operation | HistoryEventKind::Recruitment => {}
     }
     validate_event(state, draft)
+}
+
+pub(crate) fn validate_campaign_victory_event(
+    state: &AppState,
+    organization: OrganizationId,
+    path: crate::core::campaign_victory::VictoryPath,
+    settlement: Option<crate::core::id::LedgerTransactionId>,
+) -> Result<ValidatedHistoryEvent, HistoryError> {
+    validate_event(
+        state,
+        HistoryEventDraft {
+            kind: HistoryEventKind::CampaignVictory {
+                organization,
+                path,
+                settlement,
+            },
+            summary: format!("Campaign victory: {}", path.label()),
+            entities: BTreeSet::from([EntityRef::Organization(organization)]),
+        },
+    )
 }
 
 pub(crate) fn validate_payroll_departure_event(

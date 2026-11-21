@@ -102,6 +102,9 @@ static NEXT_SAVE_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 const HELP: &str = "Commands:
   brief                  Leadership's current situation
+  victory                View optional political, retirement, and city-underboss ending requirements
+  claim-victory <political|retirement|underboss>
+                         Choose an eligible permanent campaign ending
   attention [exception|crisis on|off]  Inspect or configure optional auto-pauses
   people                 Your current organization members
   known-people           Your members, identified people, and approach-ready prospects
@@ -457,11 +460,11 @@ fn parse_account_kind(raw: &str) -> Result<AccountKind, String> {
 /// Scripted commands reject extraneous arguments instead of silently ignoring them.
 fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
     let range = match command {
-        "help" | "quit" | "exit" | "brief" | "people" | "known-people" | "prospects"
-        | "directory" | "market" | "businesses" | "enterprises" | "racket-kinds" | "finances"
-        | "accounts" | "opportunities" | "operations" | "decisions" | "connections"
-        | "contacts" | "counsel" | "policies" | "mandates" | "operation-kinds" | "districts"
-        | "known-targets" | "debriefs" | "case-brief" => 1..=1,
+        "help" | "quit" | "exit" | "brief" | "victory" | "people" | "known-people"
+        | "prospects" | "directory" | "market" | "businesses" | "enterprises" | "racket-kinds"
+        | "finances" | "accounts" | "opportunities" | "operations" | "decisions"
+        | "connections" | "contacts" | "counsel" | "policies" | "mandates" | "operation-kinds"
+        | "districts" | "known-targets" | "debriefs" | "case-brief" => 1..=1,
         "recruit" | "scout" => 2..=3,
         "start-racket" | "preview-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
@@ -474,8 +477,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "ledger" => 1..=2,
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
-        | "save" | "transaction" | "cancel" | "debrief" | "intel" | "racket-outlook"
-        | "business-outlook" => 2..=2,
+        | "claim-victory" | "save" | "transaction" | "cancel" | "debrief" | "intel"
+        | "racket-outlook" | "business-outlook" => 2..=2,
         "policy" | "delegate" | "autonomy" | "supervise" | "offer" => 3..=3,
         "mandate" => 3..=6,
         "plan" | "preview" => 3..=32,
@@ -909,6 +912,16 @@ impl<'a> Session<'a> {
     }
 
     fn brief(&self) -> String {
+        if let Some(event) = self.state.campaign_victory()
+            && let crimocracy::history::HistoryEventKind::CampaignVictory { path, .. } =
+                event.kind()
+        {
+            return format!(
+                "Campaign over: victory ({}). {}. Review the final reports.",
+                path.label(),
+                event.summary()
+            );
+        }
         if self.state.player_organization_defeated() {
             return "Campaign over: your organization dissolved. Review the final reports."
                 .to_owned();

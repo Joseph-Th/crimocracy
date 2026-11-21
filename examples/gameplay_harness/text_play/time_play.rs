@@ -22,6 +22,9 @@ impl Session<'_> {
         if self.state.player_organization_defeated() {
             return Err("Campaign over: your organization dissolved".to_owned());
         }
+        if let Some(event) = self.state.campaign_victory() {
+            return Err(format!("Campaign over: {}", event.summary()));
+        }
         if self
             .state
             .decisions()
@@ -127,6 +130,8 @@ impl Session<'_> {
                 .is_auto_pause_enabled(crimocracy::core::attention::AttentionClass::Exception);
             if self.state.player_organization_defeated() {
                 reason = Some("Campaign over: your organization dissolved");
+            } else if self.state.campaign_victory().is_some() {
+                reason = Some("Campaign over: victory");
             } else if self
                 .state
                 .decisions()

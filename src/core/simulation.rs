@@ -93,6 +93,10 @@ pub enum TickError {
     ClockExhausted { now: SimTime },
     #[error("Campaign over: your organization dissolved")]
     PlayerOrganizationDissolved,
+    #[error("Campaign over: victory ({path:?})")]
+    CampaignWon {
+        path: crate::core::campaign_victory::VictoryPath,
+    },
 }
 
 pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome, TickError> {
@@ -103,6 +107,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // unchecked production clock mutator for another caller to reuse accidentally.
     if state.player_organization_defeated() {
         return Err(TickError::PlayerOrganizationDissolved);
+    }
+    if let Some(event) = state.campaign_victory()
+        && let crate::history::HistoryEventKind::CampaignVictory { path, .. } = event.kind()
+    {
+        return Err(TickError::CampaignWon { path });
     }
     let previous_now = state.now();
     state

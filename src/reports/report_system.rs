@@ -89,7 +89,10 @@ pub fn validate_record_report(
 ) -> Result<ValidatedReport, ReportError> {
     // Executive briefs are produced only by their owning synthesis path, which enforces the
     // one-brief-per-cadence-boundary invariant; a forged brief could panic or desync it.
-    if draft.kind == ReportKind::ExecutiveBrief {
+    if matches!(
+        draft.kind,
+        ReportKind::ExecutiveBrief | ReportKind::CampaignVictory
+    ) {
         return Err(ReportError::ReservedKind(draft.kind));
     }
     validate_report_draft_with_planned_information(state, draft, None)
@@ -104,7 +107,10 @@ pub(crate) fn validate_record_report_with_planned_information(
     draft: ReportDraft,
     planned: PlannedInformationSource,
 ) -> Result<ValidatedReport, ReportError> {
-    if draft.kind == ReportKind::ExecutiveBrief {
+    if matches!(
+        draft.kind,
+        ReportKind::ExecutiveBrief | ReportKind::CampaignVictory
+    ) {
         return Err(ReportError::ReservedKind(draft.kind));
     }
     validate_report_draft_with_planned_information(state, draft, Some(planned))

@@ -62,6 +62,8 @@ same authoritative minute ticks, validated operations, finances and persistence
 as authored campaigns. No rival ownership or investigation details are revealed
 just because a generated storefront appears in the public directory.
 
+Sandbox campaigns have three **optional, player-claimed endings**. Enter `victory` for public progress and `claim-victory political`, `claim-victory retirement`, or `claim-victory underboss` when qualified. The political ending requires a live political institutional contact and owned operating businesses in at least half the city districts. Retirement requires net accounted reserves covering a $50,000 leader nest egg and 180 days of current per-member wages for each subordinate, paid into their own accounted funds through one balanced ledger transaction. The underboss ending requires uncontested active-racket leadership in three quarters of districts, plus more active rackets than any competing outfit. The political conclusion models a civic coalition rather than a full election system. Merely meeting a threshold does not end freeform play; claiming an ending creates a durable victory record, leaves reports and saves readable, and stops further simulation ticks.
+
 The seeded city can also be projected into the existing interactive WebGL2 map:
 
 ```powershell
