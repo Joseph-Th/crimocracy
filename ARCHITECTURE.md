@@ -99,7 +99,23 @@ is validated and posted by `finance_system::validate_capitalize_street_cash` as
 an auditable, one-way, two-posting ledger transaction; it never clears a
 negative destination balance or grants access to another organization's cash.
 The adapter only selects its player's accounts, and reports spendable balances
-separately from net balances. Consequential mutation still belongs
+separately from net balances. Read-only leadership summaries aggregate actual
+owner-scoped operating cycles over a bounded trailing 30-day window and compare
+their daily net with current payroll, without projecting hidden case activity or
+counting laundering as operating income. The text client also projects own
+suspended rackets through the enterprise owner's conditional outlook and exact
+canonical resume validator, but never selects a recovery move for the player.
+Contact-channel reassignment is a contacts-owner validated transaction: the
+replacement handler must be available, belong to the sponsor, and maintain a
+live social relationship to the same institutional source. The old handler may
+be detained. The contact retains its identity, disclosures, legal-representation
+references, and established-at time; the current handler's relationship snapshot
+and version are refreshed along with the reconstructed handler index. The
+current-schema contact lifecycle accepts further version increments before
+termination without adding a serialized field. Briefing views deduplicate only
+the *displayed/selected* newest unseen subject/topic facts; canonical individual
+contact disclosures preserve the original source IDs, chronology, epistemic
+downshift and historical backlog. Consequential mutation still belongs
 to validators/commits and the one-minute `run_tick`; the save envelope owns
 future-affecting state, not the text client.
 

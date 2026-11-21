@@ -207,10 +207,88 @@ fn text_play_police_disclosure_and_new_legal_channel_remain_independent() {
 }
 
 #[test]
+fn text_play_recent_contact_briefing_selects_latest_per_subject_without_losing_history() {
+    use crimocracy::intelligence::intelligence_system::validate_record_information;
+    use crimocracy::intelligence::{
+        InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
+    };
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let contact = session
+        .state
+        .contacts()
+        .contacts_for_sponsor(session.player)
+        .find(|contact| contact.kind() == ContactKind::Police)
+        .unwrap();
+    let source = contact.contact();
+    let contact_id = contact.id();
+    let institution = contact.institution();
+    let mut ids = Vec::new();
+    for day in 0..3 {
+        let id = validate_record_information(
+            &session.state,
+            InformationDraft {
+                holder: KnowledgeHolder::Character(source),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::LegalActivity,
+                source_entity: None,
+                subject: EntityRef::Organization(institution),
+                observed_at: session.state.now(),
+                reliability: Reliability::GenerallyReliable,
+                specificity: Specificity::Specific,
+                summary: format!("Daily precinct summary {day}"),
+            },
+        )
+        .unwrap()
+        .commit(&mut session.state)
+        .unwrap();
+        ids.push(id);
+        run_tick(&registry, &mut session.state).unwrap();
+    }
+    let before = snapshot(&registry, &session);
+    let contacts = session.execute("contacts").unwrap().0;
+    assert!(
+        contacts.contains("3 undisclosed source(s), 1 unseen subject/topic(s)"),
+        "{contacts}"
+    );
+    assert_eq!(
+        before,
+        snapshot(&registry, &session),
+        "listing contacts must not disclose anything"
+    );
+    let recent = session
+        .execute(&format!("contact {} ask-recent", contact_id.raw()))
+        .unwrap()
+        .0;
+    assert_eq!(recent.matches("Contact disclosed").count(), 1, "{recent}");
+    assert!(recent.contains("Daily precinct summary 2"), "{recent}");
+    assert!(
+        recent.contains("2 undisclosed historical source(s) remain"),
+        "{recent}"
+    );
+    assert_eq!(
+        find_pending_disclosure_sources(&session.state, contact_id),
+        ids[..2].iter().copied().rev().collect::<Vec<_>>()
+    );
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        find_pending_disclosure_sources(&restored, contact_id),
+        ids[..2].iter().copied().rev().collect::<Vec<_>>()
+    );
+    let full = session
+        .execute(&format!("contact {} ask-all", contact_id.raw()))
+        .unwrap()
+        .0;
+    assert_eq!(full.matches("Contact disclosed").count(), 2, "{full}");
+    assert!(find_pending_disclosure_sources(&session.state, contact_id).is_empty());
+}
+
+#[test]
 fn text_play_player_can_retain_and_withdraw_counsel_in_real_custody() {
     use crimocracy::legal::LegalRepresentationStatus;
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let boss = boss_id(&session);
     let lawyer = lawyer_id(&session);
     let lieutenant = session
         .state
@@ -396,6 +474,74 @@ fn text_play_player_can_retain_and_withdraw_counsel_in_real_custody() {
     );
     assert_eq!(after, snapshot(&registry, &session));
 
+    // Counsel locks termination, but not transfer to a socially connected, available handler.
+    // This must preserve the representation and disclosure/contact identities.
+    let replacement = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|member| member.id() != lieutenant && member.id() != boss)
+        .expect("the fixture must have another available member")
+        .id();
+    let mut relationship = crimocracy::social::RelationshipDimensions::zero();
+    relationship.trust = crimocracy::social::RelationshipLevel::try_new(40).unwrap();
+    crimocracy::social::relationship_system::validate_set_relationship(
+        &session.state,
+        replacement,
+        lawyer,
+        relationship,
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    let transfer = session
+        .execute(&format!(
+            "contact contact-{} reassign char-{}",
+            legal_contact.raw(),
+            replacement.raw(),
+        ))
+        .unwrap()
+        .0;
+    assert!(
+        transfer.contains("retained counsel preserved"),
+        "{transfer}"
+    );
+    assert_eq!(
+        session
+            .state
+            .contacts()
+            .get_contact(legal_contact)
+            .unwrap()
+            .handler(),
+        replacement
+    );
+    assert_eq!(
+        session
+            .state
+            .legal()
+            .active_representation_for_arrest(arrest)
+            .unwrap()
+            .id(),
+        representation_id
+    );
+    assert!(
+        session
+            .execute(&format!("contact {} end", legal_contact.raw()))
+            .is_err()
+    );
+    let after_transfer = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute(&format!(
+                "contact {} reassign {}",
+                legal_contact.raw(),
+                boss.raw()
+            ))
+            .is_err(),
+        "a detained handler must not be selected for transfer"
+    );
+    assert_eq!(after_transfer, snapshot(&registry, &session));
+
     let restored_state =
         restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
     let mut restored = Session {
@@ -406,13 +552,24 @@ fn text_play_player_can_retain_and_withdraw_counsel_in_real_custody() {
         district: session.district.clone(),
         district_variant: session.district_variant,
     };
-    assert_eq!(after, snapshot(&registry, &restored));
+    assert_eq!(after_transfer, snapshot(&registry, &restored));
     assert!(
         restored
             .execute("counsel")
             .unwrap()
             .0
             .contains("Nora Keene")
+    );
+    crimocracy::legal::arrest_system::validate_release_arrest(&restored.state, arrest)
+        .unwrap()
+        .commit(&mut restored.state)
+        .unwrap();
+    assert!(
+        restored.execute("counsel").unwrap().0.contains(&format!(
+            "end-counsel representation-{} concluded",
+            representation_id.raw()
+        )),
+        "an explicitly retained lawyer needs an actionable close-out prompt after release"
     );
     restored
         .execute(&format!("end-counsel {} withdraw", representation_id.raw()))
@@ -436,6 +593,51 @@ fn text_play_player_can_retain_and_withdraw_counsel_in_real_custody() {
             .0
             .contains("Terminated")
     );
+}
+
+#[test]
+fn counsel_defaults_to_actionable_matters_and_keeps_explicit_history_accessible() {
+    use crimocracy::legal::arrest_system::validate_release_arrest;
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    session
+        .execute("plan robbery business-1 approach=violent muscle=char-3 coordinator=char-2")
+        .unwrap();
+    session.execute("advance 1d").unwrap();
+    session.execute("advance 1d").unwrap();
+    let arrest = *session.known_member_arrests().iter().next().unwrap();
+    let before_release = session.execute("counsel").unwrap().0;
+    assert!(before_release.contains(&format!("arrest-{}", arrest.raw())));
+    validate_release_arrest(&session.state, arrest)
+        .unwrap()
+        .commit(&mut session.state)
+        .unwrap();
+    assert!(
+        !crimocracy::legal::prosecution_system::member_prosecution_under_review(
+            &session.state,
+            session.player,
+            arrest
+        )
+    );
+    let before_views = snapshot(&registry, &session);
+    let active = session.execute("counsel").unwrap().0;
+    assert!(active.contains("other known arrest matter(s)"), "{active}");
+    assert!(
+        !active.contains(&format!("arrest-{} |", arrest.raw())),
+        "{active}"
+    );
+    let all = session.execute("counsel all").unwrap().0;
+    assert!(all.contains(&format!("arrest-{} |", arrest.raw())), "{all}");
+    let selected = session
+        .execute(&format!("counsel arrest-{}", arrest.raw()))
+        .unwrap()
+        .0;
+    assert!(
+        selected.contains(&format!("arrest-{} |", arrest.raw())),
+        "{selected}"
+    );
+    assert!(session.execute("counsel arrest-999999").is_err());
+    assert_eq!(before_views, snapshot(&registry, &session));
 }
 
 #[test]

@@ -72,7 +72,7 @@ fn validate_active_contact(
     handler: &CharacterRecord,
     source: &CharacterRecord,
 ) -> Result<(), StateValidationError> {
-    if contact.version() != 1
+    if contact.version() == 0
         || contact.terminated_at().is_some()
         || handler.organization() != Some(contact.sponsor())
         || source.organization() != Some(contact.institution())
@@ -93,7 +93,7 @@ fn validate_terminated_contact(
     let terminated_at = contact
         .terminated_at()
         .ok_or_else(|| invalid_contact(contact))?;
-    if contact.version() != 2
+    if contact.version() < 2
         || terminated_at < contact.established_at()
         || terminated_at > state.now()
     {

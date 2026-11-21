@@ -8,7 +8,7 @@ use crate::scenario::build_scenario;
 use crimocracy::city_generation::{CityScale, generate_city};
 use crimocracy::contacts::contact_system::{
     InstitutionalContactDraft, find_pending_disclosure_sources, validate_contact_disclosure,
-    validate_establish_contact, validate_terminate_contact,
+    validate_establish_contact, validate_reassign_contact_handler, validate_terminate_contact,
 };
 use crimocracy::contacts::{ContactKind, ContactStatus};
 use crimocracy::core::entity::EntityRef;
@@ -112,8 +112,14 @@ const HELP: &str = "Commands:
   connections            Known institutional acquaintances with an existing staff relationship
   contacts               Your established institutional channels and their pending disclosures
   connect <handler-id> <known-person-id>  Establish a contact using a real relationship
-  contact <contact-id> [ask|ask-all|end]  Ask for one or up to 64 disclosures, or terminate a channel
-  counsel                Known arrests of current staff and their retained lawyers
+  contact <contact-id> [ask|ask-recent|ask-all|end]
+                         Hear one update, newest unseen fact per subject, up to 64, or end a channel
+  contact <contact-id> reassign <member-id>
+                         Transfer an active channel to a qualified member; retain case/disclosure history
+  counsel                Current custody, prosecution, representation and unpaid fines
+  counsel all            All known staff arrest matters, including quiet history
+  counsel arrest-N       Full details for a known staff arrest
+  recovery               Suspended rackets, their managers, and validated resumption blockers
   retain <arrest-id> <legal-contact-id> <fee-cents>
                          Retain legal counsel for a current member's known case
   end-counsel <representation-id> <concluded|replace|withdraw>
@@ -463,8 +469,10 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "help" | "quit" | "exit" | "brief" | "victory" | "people" | "known-people"
         | "prospects" | "directory" | "market" | "businesses" | "enterprises" | "racket-kinds"
         | "finances" | "accounts" | "opportunities" | "operations" | "decisions"
-        | "connections" | "contacts" | "counsel" | "policies" | "mandates" | "operation-kinds"
+        | "connections" | "contacts" | "policies" | "mandates" | "operation-kinds"
         | "districts" | "known-targets" | "debriefs" | "case-brief" => 1..=1,
+        "counsel" => 1..=2,
+        "recovery" => 1..=1,
         "recruit" | "scout" => 2..=3,
         "start-racket" | "preview-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
@@ -483,7 +491,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "mandate" => 3..=6,
         "plan" | "preview" => 3..=32,
         "connect" => 3..=3,
-        "contact" => 2..=3,
+        "contact" => 2..=4,
         "retain" => 4..=4,
         "end-counsel" => 3..=3,
         _ => return Ok(()),
@@ -1018,6 +1026,32 @@ impl<'a> Session<'a> {
         .expect("valid player payroll estimate");
         let payroll = payroll.cents();
         let covered = covered.cents();
+        // Actual owner-settled cycles, not a forecast or an extrapolation of held cash.
+        // The truncated opening window uses its real elapsed duration so a new campaign
+        // doesn't pretend to have already earned 30 days of income.
+        let window_minutes = state.now().as_minutes().min(30 * DAY_MINUTES);
+        let window_start = crimocracy::core::time::SimTime::from_minutes(
+            state.now().as_minutes() - window_minutes,
+        );
+        let days = window_minutes.div_ceil(DAY_MINUTES).max(1);
+        let business_net = crimocracy::economy::business_reporting::resolve_organization_business_financial_summary(
+            state, player, window_start, state.now(),
+        ).expect("valid player business financial history").totals.net_cash.cents();
+        let racket_net = crimocracy::enterprises::enterprise_reporting::resolve_organization_enterprise_financial_summary(
+            state, player, window_start, state.now(),
+        ).expect("valid player enterprise financial history").totals.net_cash.cents();
+        let avg_daily_net = (i128::from(business_net) + i128::from(racket_net)) / i128::from(days);
+        let payroll_gap = avg_daily_net - i128::from(payroll);
+        let detained_members = state
+            .world()
+            .characters_in_organization(player)
+            .filter(|member| {
+                state
+                    .legal()
+                    .active_arrest_for_character(member.id())
+                    .is_some()
+            })
+            .count();
         let latest = state
             .reports()
             .reports_for(player)
@@ -1026,11 +1060,12 @@ impl<'a> Session<'a> {
                 format!("Report {}: {}", report.id().raw(), report.title())
             });
         format!(
-            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nDaily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
+            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nDaily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)\nRealized operating net (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs payroll {payroll_gap:+} cents/day (excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
             time_label(state.now().as_minutes()),
             self.district,
             self.district_variant,
-            rackets - active_rackets
+            rackets - active_rackets,
+            rackets - active_rackets,
         )
     }
 }

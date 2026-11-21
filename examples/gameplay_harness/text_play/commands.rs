@@ -70,6 +70,7 @@ impl Session<'_> {
                     | "reports"
                     | "report"
                     | "racket-cycles"
+                    | "recovery"
             )
         {
             return Err("Campaign over: victory has already been claimed".to_owned());
@@ -192,6 +193,7 @@ impl Session<'_> {
             "counsel" | "retain" | "end-counsel" => {
                 out = self.execute_legal(&words)?;
             }
+            "recovery" => out = self.recovery(),
             "policies" | "policy" | "mandates" | "delegate" | "mandate" | "autonomy"
             | "supervise" => {
                 out = self.execute_governance(&words)?;

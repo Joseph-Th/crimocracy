@@ -3,6 +3,47 @@
 use super::*;
 
 #[test]
+fn recovery_and_brief_are_read_only_and_explain_dormant_rackets() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let racket = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .find(|enterprise| enterprise.status() == EnterpriseStatus::Active)
+        .expect("the opening must offer an operating racket")
+        .id();
+    session
+        .execute(&format!("racket {} suspend", racket.raw()))
+        .unwrap();
+    let save = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let recovery = session.execute("recovery").unwrap().0;
+    assert!(
+        recovery.contains(&format!("enterprise-{}", racket.raw())),
+        "{recovery}"
+    );
+    assert!(recovery.contains("Can resume manually:"), "{recovery}");
+    let brief = session.execute("brief").unwrap().0;
+    assert!(brief.contains("Realized operating net"), "{brief}");
+    assert!(brief.contains("Detained staff: 0"), "{brief}");
+    assert!(brief.contains("suspended rackets: 1"), "{brief}");
+    assert_eq!(
+        save,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap(),
+        "diagnostic views must not change the campaign"
+    );
+    assert!(session.execute("recovery all").is_err());
+    assert!(session.execute("counsel anything").is_err());
+    assert_eq!(
+        save,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    session.state = restored;
+    assert_eq!(session.execute("recovery").unwrap().0, recovery);
+}
+
+#[test]
 fn command_verbs_are_case_insensitive_across_handlers() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();

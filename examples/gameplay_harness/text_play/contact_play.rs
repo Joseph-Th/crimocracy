@@ -95,15 +95,31 @@ impl Session<'_> {
                         .get_organization(contact.institution())
                         .ok_or("contact institution disappeared")?;
                     let pending = if contact.status() == ContactStatus::Active {
-                        find_pending_disclosure_sources(&self.state, contact.id()).len()
+                        find_pending_disclosure_sources(&self.state, contact.id())
                     } else {
-                        0
+                        Vec::new()
+                    };
+                    let subjects = pending
+                        .iter()
+                        .filter_map(|id| self.state.intelligence().get_information(*id))
+                        .map(|fact| (fact.topic(), fact.subject()))
+                        .collect::<BTreeSet<_>>()
+                        .len();
+                    let availability = if self
+                        .state
+                        .legal()
+                        .active_arrest_for_character(contact.handler())
+                        .is_some()
+                    {
+                        " | handler detained; use contact ID reassign MEMBER"
+                    } else {
+                        ""
                     };
                     writeln!(out,
-                        "contact-{} {:?} {:?} | {} at {} | handler {} (char-{}) | {} undisclosed source(s)",
+                        "contact-{} {:?} {:?} | {} at {} | handler {} (char-{}) | {} undisclosed source(s), {} unseen subject/topic(s){}",
                         contact.id().raw(), contact.kind(), contact.status(),
                         person.name(), institution.name(), handler.name(), handler.id().raw(),
-                        pending,
+                        pending.len(), subjects, availability,
                     ).unwrap();
                 }
                 if out.is_empty() {
@@ -159,6 +175,9 @@ impl Session<'_> {
                 .unwrap();
             }
             "contact" => {
+                if words.len() == 4 && words[2] != "reassign" {
+                    return Err("contact <id> reassign <member-id>".to_owned());
+                }
                 let raw = parse_number(words[1], "contact")?;
                 let id = self
                     .state
@@ -169,7 +188,7 @@ impl Session<'_> {
                     .id();
                 let action = words.get(2).copied().unwrap_or("ask");
                 match action {
-                    "ask" | "ask-all" => {
+                    "ask" | "ask-all" | "ask-recent" => {
                         let active = self
                             .state
                             .contacts()
@@ -179,13 +198,37 @@ impl Session<'_> {
                             return Err("contact is no longer active".to_owned());
                         }
                         let sources = find_pending_disclosure_sources(&self.state, id);
-                        let limit = if action == "ask-all" { 64 } else { 1 };
+                        let limit = match action {
+                            "ask-all" => 64,
+                            "ask-recent" => 16,
+                            _ => 1,
+                        };
+                        // Only the canonical offer surface supplies the source identities.
+                        // De-duplicate the newest unseen item for each topic and subject without
+                        // reading private facts from contacts who are not currently available.
+                        let mut distinct = BTreeSet::new();
+                        let selected: Vec<_> = sources
+                            .iter()
+                            .copied()
+                            .filter(|source| {
+                                if action != "ask-recent" {
+                                    return true;
+                                }
+                                let fact = self
+                                    .state
+                                    .intelligence()
+                                    .get_information(*source)
+                                    .expect("offered contact source must still exist");
+                                distinct.insert((fact.topic(), fact.subject()))
+                            })
+                            .take(limit)
+                            .collect();
                         if sources.is_empty() {
                             out.push_str(
                                 "This contact has no new available information to disclose.",
                             );
                         }
-                        for (index, source) in sources.iter().copied().take(limit).enumerate() {
+                        for (index, source) in selected.iter().copied().enumerate() {
                             // Each disclosure remains a separate canonical transaction. A later
                             // capacity failure must acknowledge earlier successful disclosures.
                             let result = validate_contact_disclosure(&self.state, id, source)
@@ -230,6 +273,28 @@ impl Session<'_> {
                             )
                             .unwrap();
                         }
+                        if action == "ask-recent" {
+                            writeln!(out, "{} undisclosed historical source(s) remain; use 'ask-all' to inspect the full backlog.",
+                                find_pending_disclosure_sources(&self.state, id).len()).unwrap();
+                        }
+                    }
+                    "reassign" => {
+                        if words.len() != 4 {
+                            return Err("contact <id> reassign <member-id>".to_owned());
+                        }
+                        let member_raw = parse_number(words[3], "char")?;
+                        let member = self
+                            .state
+                            .world()
+                            .characters_in_organization(self.player)
+                            .find(|person| person.id().raw() == member_raw)
+                            .ok_or("replacement must be a current organization member")?
+                            .id();
+                        validate_reassign_contact_handler(&self.state, id, member)
+                            .map_err(|error| error.to_string())?
+                            .commit(&mut self.state)
+                            .map_err(|error| error.to_string())?;
+                        writeln!(out, "Contact {raw} transferred to char-{member_raw}; existing disclosures and retained counsel preserved.").unwrap();
                     }
                     "end" => {
                         validate_terminate_contact(&self.state, id)
@@ -238,7 +303,10 @@ impl Session<'_> {
                             .map_err(|e| e.to_string())?;
                         writeln!(out, "Contact {} terminated.", id.raw()).unwrap();
                     }
-                    _ => return Err("contact <contact-id> [ask|ask-all|end]".to_owned()),
+                    _ => return Err(
+                        "contact <contact-id> [ask|ask-recent|ask-all|end|reassign <member-id>]"
+                            .to_owned(),
+                    ),
                 }
             }
             _ => return Err("unknown contact command".to_owned()),

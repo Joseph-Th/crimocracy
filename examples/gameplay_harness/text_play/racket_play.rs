@@ -55,6 +55,81 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
 }
 
 impl Session<'_> {
+    /// A read-only recovery register. The player chooses each resumption; it never creates
+    /// an autonomous policy or silently restarts a suspended criminal operation.
+    pub(super) fn recovery(&self) -> String {
+        let mut out = String::from("Suspended racket recovery (read-only):\n");
+        let mut count = 0_usize;
+        for enterprise in self
+            .state
+            .enterprises()
+            .enterprises_for_organization(self.player)
+            .filter(|enterprise| enterprise.status() == EnterpriseStatus::Suspended)
+        {
+            count += 1;
+            let manager = self
+                .state
+                .world()
+                .get_character(enterprise.manager())
+                .expect("owned racket manager must exist");
+            let detained = self
+                .state
+                .legal()
+                .active_arrest_for_character(manager.id())
+                .is_some();
+            writeln!(
+                out,
+                "  enterprise-{} {:?} at {} | manager {} (char-{}, {})",
+                enterprise.id().raw(),
+                enterprise.kind(),
+                self.enterprise_location_label(enterprise.location()),
+                manager.name(),
+                manager.id().raw(),
+                if detained { "detained" } else { "available" }
+            )
+            .unwrap();
+            if let Some(cycle) = self.state.enterprises().latest_cycle(enterprise.id()) {
+                writeln!(
+                    out,
+                    "    Last settlement: {} | net {} cents",
+                    time_label(cycle.occurred_at().as_minutes()),
+                    cycle.net_cash().cents()
+                )
+                .unwrap();
+            }
+            match crimocracy::enterprises::enterprise_reporting::resolve_enterprise_outlook(
+                self.registry,
+                &self.state,
+                self.player,
+                enterprise.id(),
+            ) {
+                Ok(outlook) => {
+                    writeln!(out, "    Estimated next cycle: {} cents net | shared spendable cash: {} cents{}",
+                        outlook.estimated_net_cash.cents(), outlook.shared_spendable_cash.cents(),
+                        if outlook.observed_pressure.is_none() { " | district pressure unobserved (zero assumed)" } else { "" }).unwrap();
+                    if outlook.shared_spendable_cash < outlook.estimated_operating_cost {
+                        writeln!(out, "    Warning: shared cash is below one estimated cycle's operating cost ({} cents); reopening can be valid but unfunded.", outlook.estimated_operating_cost.cents()).unwrap();
+                    }
+                }
+                Err(error) => writeln!(out, "    Outlook unavailable: {error}").unwrap(),
+            }
+            match validate_resume_enterprise(self.registry, &self.state, enterprise.id()) {
+                Ok(_) => writeln!(
+                    out,
+                    "    Can resume manually: racket {} resume",
+                    enterprise.id().raw()
+                )
+                .unwrap(),
+                Err(error) => writeln!(out, "    Resumption blocked: {error}").unwrap(),
+            }
+        }
+        if count == 0 {
+            out.push_str("  No suspended rackets.\n");
+        }
+        out.push_str("Resumption never happens automatically for player-owned rackets. Repeated shared-account balances are not separate reserves. Outlooks are estimates, not forecasts of undisclosed police cases.");
+        out
+    }
+
     pub(super) fn execute_racket_commands(&mut self, words: &[&str]) -> Result<String, String> {
         let state = &self.state;
         let mut out = String::new();

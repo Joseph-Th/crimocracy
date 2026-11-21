@@ -25,9 +25,10 @@ pub enum ContactStatus {
     Terminated,
 }
 
-/// The social basis a contact was established on. These snapshots are immutable audit
-/// provenance, not permanent access credentials: new contact use rechecks the current social
-/// relationship, while explicit termination remains the canonical lifecycle transition.
+/// The social basis on which the current handler took responsibility for a contact.
+/// A canonical handler reassignment replaces these snapshots and advances the contact version;
+/// new contact use still rechecks the live relationship rather than treating the snapshot as
+/// permanent access credentials.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactRelationshipSnapshot {
     from: CharacterId,
@@ -369,6 +370,34 @@ impl ContactState {
         debug_assert_eq!(removed, Some(id));
         remove_active_contact_index(&mut self.indexes.active_by_handler, handler, id);
         remove_active_contact_index(&mut self.indexes.active_by_contact, contact, id);
+    }
+
+    fn reassign_contact_handler(
+        &mut self,
+        id: ContactId,
+        handler: CharacterId,
+        handler_to_contact: Option<ContactRelationshipSnapshot>,
+        contact_to_handler: Option<ContactRelationshipSnapshot>,
+    ) {
+        let old_handler = {
+            let record = self
+                .contacts
+                .get_mut(&id)
+                .expect("validated contact disappeared before handler reassignment");
+            debug_assert_eq!(record.status(), ContactStatus::Active);
+            let old = record.handler();
+            record.parties.handler = handler;
+            record.relationship_basis.handler_to_contact = handler_to_contact;
+            record.relationship_basis.contact_to_handler = contact_to_handler;
+            record.lifecycle.version = advance_version_preflighted(record.lifecycle.version);
+            old
+        };
+        remove_active_contact_index(&mut self.indexes.active_by_handler, old_handler, id);
+        self.indexes
+            .active_by_handler
+            .entry(handler)
+            .or_default()
+            .insert(id);
     }
 
     fn insert_disclosure(&mut self, record: ContactDisclosureRecord) {

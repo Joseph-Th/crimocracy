@@ -8,29 +8,9 @@ use super::*;
 
 impl Session<'_> {
     pub(super) fn known_member_arrests(&self) -> BTreeSet<ArrestId> {
-        let members: BTreeSet<_> = self
-            .state
-            .world()
-            .characters_in_organization(self.player)
-            .map(|member| member.id())
-            .collect();
-        let mut arrests = BTreeSet::new();
-        for member in &members {
-            if let Some(arrest) = self.state.legal().active_arrest_for_character(*member) {
-                arrests.insert(arrest.id());
-            }
-        }
-        for information in self.organization_information() {
-            if let EntityRef::Character(member) = information.subject()
-                && members.contains(&member)
-                && let Some(InformationSignal::LegalPersonStatus(
-                    LegalPersonStatusSignal::Detained { arrest },
-                )) = information.signal()
-            {
-                arrests.insert(*arrest);
-            }
-        }
-        arrests
+        crimocracy::legal::arrest_system::member_arrest_history(&self.state, self.player)
+            .into_iter()
+            .collect()
     }
 
     pub(super) fn execute_legal(&mut self, words: &[&str]) -> Result<String, String> {
@@ -38,15 +18,56 @@ impl Session<'_> {
         match words[0] {
             "counsel" => {
                 let known = self.known_member_arrests();
+                let selected = match words.get(1).copied() {
+                    None | Some("all") => None,
+                    Some(raw) => {
+                        let id = parse_number(raw, "arrest")?;
+                        Some(
+                            known
+                                .iter()
+                                .copied()
+                                .find(|arrest| arrest.raw() == id)
+                                .ok_or("arrest is not known for a current organization member")?,
+                        )
+                    }
+                };
+                let show_all = words.get(1) == Some(&"all");
+                let mut quiet = 0_usize;
                 if known.is_empty() {
                     out.push_str("No arrests of current members are known to leadership.\n");
                 }
                 for id in known {
+                    if selected.is_some_and(|requested| requested != id) {
+                        continue;
+                    }
                     let record = self
                         .state
                         .legal()
                         .get_arrest(id)
                         .ok_or("known arrest record disappeared")?;
+                    let open_review =
+                        crimocracy::legal::prosecution_system::member_prosecution_under_review(
+                            &self.state,
+                            self.player,
+                            id,
+                        );
+                    let judgments = crimocracy::legal::prosecution_system::member_judgments(
+                        &self.state,
+                        self.player,
+                        id,
+                    );
+                    let representation = self.state.legal().active_representation_for_arrest(id);
+                    let detained = record.status() == crimocracy::legal::ArrestStatus::Detained;
+                    let actionable = detained
+                        || open_review
+                        || representation.is_some()
+                        || judgments
+                            .iter()
+                            .any(|judgment| judgment.outstanding.cents() > 0);
+                    if !show_all && selected.is_none() && !actionable {
+                        quiet += 1;
+                        continue;
+                    }
                     let defendant = self
                         .state
                         .world()
@@ -62,18 +83,10 @@ impl Session<'_> {
                         time_label(record.arrested_at().as_minutes())
                     )
                     .unwrap();
-                    if crimocracy::legal::prosecution_system::member_prosecution_under_review(
-                        &self.state,
-                        self.player,
-                        id,
-                    ) {
+                    if open_review {
                         out.push_str("  Prosecutorial review remains open; release does not end the legal matter.\n");
                     }
-                    for judgment in crimocracy::legal::prosecution_system::member_judgments(
-                        &self.state,
-                        self.player,
-                        id,
-                    ) {
+                    for judgment in judgments {
                         writeln!(
                             out,
                             "  Court: {:?} on {} | personal fine: {} cents | outstanding: {} cents",
@@ -84,9 +97,7 @@ impl Session<'_> {
                         )
                         .unwrap();
                     }
-                    if let Some(representation) =
-                        self.state.legal().active_representation_for_arrest(id)
-                    {
+                    if let Some(representation) = representation {
                         let counsel = self
                             .state
                             .world()
@@ -100,9 +111,19 @@ impl Session<'_> {
                             representation.fee().cents()
                         )
                         .unwrap();
-                    } else {
-                        out.push_str("  No retained counsel. Use 'retain arrest-N contact-N cents' if the legal matter remains open.\n");
+                        if !detained && !open_review {
+                            writeln!(out, "  Legal matter no longer needs active defense. This retainer remains assigned until leadership uses 'end-counsel representation-{} concluded'.", representation.id().raw()).unwrap();
+                        }
+                    } else if detained || open_review {
+                        out.push_str(
+                            "  No retained counsel. Use 'retain arrest-N contact-N cents'.\n",
+                        );
                     }
+                }
+                if quiet > 0 {
+                    writeln!(out, "{quiet} other known arrest matter(s) have no active custody, open review, retainer, or unpaid fine. Use 'counsel all' or 'counsel arrest-N' for history.").unwrap();
+                } else if out.is_empty() {
+                    out.push_str("No known current member matters require legal attention.\n");
                 }
                 for contact in self
                     .state

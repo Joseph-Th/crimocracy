@@ -379,6 +379,174 @@ fn pending_contact_sources_rank_observation_time_before_late_transfer_time() {
     validate_invariants(&fixture.state);
 }
 
+#[test]
+fn contact_handler_transfer_preserves_disclosures_and_survives_restore() {
+    let mut fixture = make_fixture(OrganizationKind::LawEnforcement);
+    let contact = establish(&mut fixture);
+    let source_character = fixture.source;
+    let source = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(source_character),
+        InformationTopic::LegalActivity,
+    );
+    let disclosure = validate_contact_disclosure(&fixture.state, contact, source)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let replacement = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Handler".to_owned(),
+            organization: Some(fixture.sponsor),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let original =
+        bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap();
+    let no_relationship = validate_reassign_contact_handler(&fixture.state, contact, replacement)
+        .expect_err("another member cannot inherit a channel without a real social edge");
+    assert_eq!(
+        no_relationship,
+        ContactError::NoRelationship {
+            handler: replacement,
+            contact: fixture.source,
+        }
+    );
+    assert_eq!(
+        bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap(),
+        original
+    );
+    validate_set_relationship(
+        &fixture.state,
+        replacement,
+        fixture.source,
+        relationship(45, 15),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    assert_eq!(
+        validate_reassign_contact_handler(&fixture.state, contact, fixture.handler).unwrap_err(),
+        ContactError::HandlerUnchanged {
+            contact,
+            handler: fixture.handler
+        }
+    );
+
+    let token = validate_reassign_contact_handler(&fixture.state, contact, replacement).unwrap();
+    let old_handler = fixture.handler;
+    validate_set_relationship(
+        &fixture.state,
+        replacement,
+        fixture.source,
+        relationship(46, 15),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let before_stale =
+        bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap();
+    assert!(matches!(
+        token.commit(&mut fixture.state),
+        Err(ContactError::StaleRelationship { .. })
+    ));
+    assert_eq!(
+        bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap(),
+        before_stale
+    );
+
+    validate_reassign_contact_handler(&fixture.state, contact, replacement)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let active = fixture.state.contacts().get_contact(contact).unwrap();
+    assert_eq!(active.handler(), replacement);
+    assert_eq!(active.version(), 2);
+    assert_eq!(active.status(), ContactStatus::Active);
+    assert!(
+        fixture
+            .state
+            .contacts()
+            .active_contacts_for_handler(old_handler)
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .state
+            .contacts()
+            .active_contacts_for_handler(replacement)
+            .next()
+            .unwrap()
+            .id(),
+        contact
+    );
+    assert_eq!(
+        fixture
+            .state
+            .contacts()
+            .get_disclosure(disclosure)
+            .unwrap()
+            .source_information(),
+        source
+    );
+    assert_eq!(fixture.state.contacts().disclosures().count(), 1);
+    validate_state(&fixture.state).unwrap();
+    validate_invariants(&fixture.state);
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored.contacts().get_contact(contact).unwrap().handler(),
+        replacement
+    );
+    assert_eq!(
+        restored
+            .contacts()
+            .active_contacts_for_handler(replacement)
+            .next()
+            .unwrap()
+            .id(),
+        contact
+    );
+    assert_eq!(
+        restored
+            .contacts()
+            .get_disclosure(disclosure)
+            .unwrap()
+            .source_information(),
+        source
+    );
+    validate_invariants(&restored);
+
+    validate_terminate_contact(&fixture.state, contact)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .contacts()
+            .get_contact(contact)
+            .unwrap()
+            .version(),
+        3
+    );
+    validate_state(&fixture.state).unwrap();
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+}
+
 #[derive(Clone, Serialize)]
 struct ContactPartiesWire {
     sponsor: OrganizationId,
@@ -470,7 +638,7 @@ fn level(value: u8) -> RelationshipLevel {
 }
 
 #[test]
-fn restore_rejects_contact_versions_unreachable_from_the_lifecycle() {
+fn restore_rejects_zero_active_or_unterminated_versions() {
     let mut active_fixture = make_fixture(OrganizationKind::LawEnforcement);
     let active = establish(&mut active_fixture);
     let active_record = active_fixture
@@ -481,7 +649,7 @@ fn restore_rejects_contact_versions_unreachable_from_the_lifecycle() {
         .clone();
     assert_eq!(active_record.version(), 1);
     let mut corrupted_active = contact_wire(&active_record);
-    corrupted_active.lifecycle.version = 2;
+    corrupted_active.lifecycle.version = 0;
     let error = restore_save(
         &active_fixture.registry,
         replace_serialized_contact(
@@ -491,7 +659,7 @@ fn restore_rejects_contact_versions_unreachable_from_the_lifecycle() {
             &corrupted_active,
         ),
     )
-    .expect_err("active contact can only exist at constructor version 1");
+    .expect_err("active contact must have a positive version");
     assert!(matches!(
         error,
         crate::core::persistence::LoadError::InvalidState(
@@ -515,7 +683,7 @@ fn restore_rejects_contact_versions_unreachable_from_the_lifecycle() {
         .clone();
     assert_eq!(terminated_record.version(), 2);
     let mut corrupted_terminated = contact_wire(&terminated_record);
-    corrupted_terminated.lifecycle.version = 3;
+    corrupted_terminated.lifecycle.version = 1;
     let error = restore_save(
         &terminated_fixture.registry,
         replace_serialized_contact(
@@ -525,7 +693,7 @@ fn restore_rejects_contact_versions_unreachable_from_the_lifecycle() {
             &corrupted_terminated,
         ),
     )
-    .expect_err("terminated contact has exactly one lifecycle mutation and must be version 2");
+    .expect_err("terminated contact must have advanced at least once");
     assert!(matches!(
         error,
         crate::core::persistence::LoadError::InvalidState(

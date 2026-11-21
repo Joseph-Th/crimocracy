@@ -1,4 +1,4 @@
-//! Canonical establishment, termination, and information disclosure for institutional contacts.
+//! Canonical establishment, handler reassignment, termination, and disclosure for institutional contacts.
 
 use crate::contacts::{
     ContactDisclosureRecord, ContactKind, ContactRelationshipSnapshot, ContactStatus,
@@ -69,6 +69,11 @@ pub enum ContactError {
     MissingContactRecord(ContactId),
     #[error("institutional contact {0} is not active")]
     ContactNotActive(ContactId),
+    #[error("institutional contact {contact} already has handler {handler}")]
+    HandlerUnchanged {
+        contact: ContactId,
+        handler: CharacterId,
+    },
     #[error("institutional contact {0} no longer has a usable current relationship")]
     RelationshipUnavailable(ContactId),
     #[error(
@@ -239,6 +244,116 @@ pub fn validate_establish_contact(
         kind,
         handler_version: handler.version(),
         contact_version: contact.version(),
+        handler_to_contact,
+        contact_to_handler,
+        validated_at: state.now(),
+    })
+}
+
+/// Transfers an active institutional channel to another qualified organization member without
+/// destroying the contact identity, already disclosed information, or counsel retained through
+/// the channel. The outgoing handler may be detained; only the replacement must be available.
+#[derive(Debug)]
+pub struct ValidatedContactHandlerReassignment {
+    contact: ContactId,
+    new_handler: CharacterId,
+    expected_contact_version: u32,
+    handler_version: u32,
+    source_version: u32,
+    handler_to_contact: Option<ContactRelationshipSnapshot>,
+    contact_to_handler: Option<ContactRelationshipSnapshot>,
+    validated_at: SimTime,
+}
+
+impl ValidatedContactHandlerReassignment {
+    pub fn commit(self, state: &mut AppState) -> Result<ContactId, ContactError> {
+        validate_time(state, self.validated_at)?;
+        let record = state
+            .contacts
+            .get_contact(self.contact)
+            .ok_or(ContactError::MissingContactRecord(self.contact))?;
+        if record.version() != self.expected_contact_version {
+            return Err(ContactError::StaleContact {
+                contact: self.contact,
+                expected: self.expected_contact_version,
+                found: record.version(),
+            });
+        }
+        if record.status() != ContactStatus::Active {
+            return Err(ContactError::ContactNotActive(self.contact));
+        }
+        if record.handler() == self.new_handler {
+            return Err(ContactError::HandlerUnchanged {
+                contact: self.contact,
+                handler: self.new_handler,
+            });
+        }
+        validate_character_version(state, self.new_handler, self.handler_version)?;
+        validate_character_version(state, record.contact(), self.source_version)?;
+        validate_contact_dependencies(state, record.sponsor(), self.new_handler, record.contact())?;
+        validate_relationship_snapshot(state, self.handler_to_contact)?;
+        validate_relationship_snapshot(state, self.contact_to_handler)?;
+        ensure_version_can_advance(record.version(), "institutional contact")?;
+        state.contacts.reassign_contact_handler(
+            self.contact,
+            self.new_handler,
+            self.handler_to_contact,
+            self.contact_to_handler,
+        );
+        Ok(self.contact)
+    }
+}
+
+pub fn validate_reassign_contact_handler(
+    state: &AppState,
+    contact: ContactId,
+    new_handler: CharacterId,
+) -> Result<ValidatedContactHandlerReassignment, ContactError> {
+    let record = state
+        .contacts
+        .get_contact(contact)
+        .ok_or(ContactError::MissingContactRecord(contact))?;
+    if record.status() != ContactStatus::Active {
+        return Err(ContactError::ContactNotActive(contact));
+    }
+    if record.handler() == new_handler {
+        return Err(ContactError::HandlerUnchanged {
+            contact,
+            handler: new_handler,
+        });
+    }
+    ensure_version_can_advance(record.version(), "institutional contact")?;
+    validate_contact_dependencies(state, record.sponsor(), new_handler, record.contact())?;
+    let handler = state
+        .world
+        .get_character(new_handler)
+        .ok_or(ContactError::MissingHandler(new_handler))?;
+    let source = state
+        .world
+        .get_character(record.contact())
+        .ok_or(ContactError::MissingContact(record.contact()))?;
+    let handler_to_contact = state
+        .social
+        .get_relationship(new_handler, record.contact())
+        .filter(|relationship| has_contact_relationship_basis(relationship.dimensions()))
+        .map(build_contact_relationship_snapshot);
+    let contact_to_handler = state
+        .social
+        .get_relationship(record.contact(), new_handler)
+        .filter(|relationship| has_contact_relationship_basis(relationship.dimensions()))
+        .map(build_contact_relationship_snapshot);
+    if handler_to_contact.is_none() && contact_to_handler.is_none() {
+        return Err(ContactError::NoRelationship {
+            handler: new_handler,
+            contact: record.contact(),
+        });
+    }
+    Ok(ValidatedContactHandlerReassignment {
+        contact,
+        new_handler,
+        expected_contact_version: record.version(),
+        handler_version: handler.version(),
+        source_version: source.version(),
         handler_to_contact,
         contact_to_handler,
         validated_at: state.now(),

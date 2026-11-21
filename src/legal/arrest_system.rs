@@ -11,6 +11,24 @@ pub use autonomous::apply_autonomous_evidence_arrests;
 pub use custody::{ValidatedRelease, validate_release_arrest};
 pub(crate) use custody::{apply_due_custody_releases, custody_release_at};
 
+/// The durable arrest episodes of members currently working for a specific organization.
+/// Leadership may inspect its own personnel history after custody ends, even if an ephemeral
+/// detention status report was never transferred into the organization's intelligence store.
+/// This projection never returns arrests of outsiders or foreign criminal-organization members.
+pub fn member_arrest_history(state: &AppState, organization: OrganizationId) -> Vec<ArrestId> {
+    state
+        .legal()
+        .arrests()
+        .filter(|arrest| {
+            state
+                .world()
+                .get_character(arrest.character())
+                .is_some_and(|character| character.organization() == Some(organization))
+        })
+        .map(|arrest| arrest.id())
+        .collect()
+}
+
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     ArrestId, CharacterId, EvidenceId, IdExhaustionError, IdKind, InvestigationId, OperationId,
