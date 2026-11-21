@@ -83,7 +83,10 @@ authored opening without running a scripted evaluator. It owns parsing,
 player-knowledge projections,
 interactive/scripted session I/O, and save-file publication. Restored sessions
 derive their organization and records directly from production persistence
-without reconstructing the authored fixture. Its public storefront directory
+without reconstructing the authored fixture. Saving uses an exclusively created,
+per-writer staging file, syncs the complete serialized campaign before publication,
+and replaces the slot by rename; a failed publication never deletes the existing
+save or another writer's staging data. Its public storefront directory
 projects only name, kind, identity, and district through `WorldState` and never
 exposes private ownership or law-enforcement state. Commands validate current
 player membership, account ownership and available authority before composing

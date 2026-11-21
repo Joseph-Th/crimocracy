@@ -92,11 +92,13 @@ use crimocracy::world::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::BufRead;
+use std::io::{BufRead, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const SAVE_DIR: &str = "target/text-play";
 const MAX_ADVANCE: u64 = DAY_MINUTES * 7;
+static NEXT_SAVE_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 const HELP: &str = "Commands:
   brief                  Leadership's current situation
@@ -354,6 +356,39 @@ fn save_path(slot: &str) -> Result<PathBuf, String> {
     Ok(Path::new(SAVE_DIR).join(format!("{slot}.sav")))
 }
 
+/// Publish only a complete save. A unique, exclusively created staging file prevents
+/// overlapping sessions (and debris from an interrupted session) from replacing each
+/// other's bytes before the final rename. The existing destination is never removed as
+/// part of error handling, so failure to publish retains the last good campaign.
+fn publish_save(path: &Path, data: &[u8]) -> Result<(), String> {
+    let mut staging = None;
+    for _ in 0..16 {
+        let sequence = NEXT_SAVE_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+        let temporary = path.with_extension(format!("sav.{}.{}.tmp", std::process::id(), sequence));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => {
+                staging = Some((temporary, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("cannot stage save: {error}")),
+        }
+    }
+    let (temporary, mut file) = staging.ok_or("cannot allocate a distinct temporary save file")?;
+    let written = file.write_all(data).and_then(|()| file.sync_all());
+    drop(file);
+    let published = written.and_then(|()| std::fs::rename(&temporary, path));
+    if let Err(error) = published {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("cannot publish save: {error}"));
+    }
+    Ok(())
+}
+
 fn time_label(minutes: u64) -> String {
     let clock = minutes % DAY_MINUTES;
     format!(
@@ -566,12 +601,7 @@ impl<'a> Session<'a> {
         })
         .map_err(|e| e.to_string())?;
         std::fs::create_dir_all(SAVE_DIR).map_err(|e| e.to_string())?;
-        let temp = path.with_extension("sav.tmp");
-        std::fs::write(&temp, data).map_err(|e| e.to_string())?;
-        if let Err(error) = std::fs::rename(&temp, &path) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(format!("cannot publish save: {error}"));
-        }
+        publish_save(&path, &data)?;
         Ok(format!("Campaign saved to {}", path.display()))
     }
 

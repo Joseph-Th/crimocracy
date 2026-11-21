@@ -376,6 +376,30 @@ fn text_play_save_restore_continues_exact_simulation() {
 }
 
 #[test]
+fn text_play_save_does_not_overwrite_an_unrelated_temporary_file() {
+    let registry = crimocracy::build_registry();
+    let session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let slot = format!("text_play_distinct_temporary_{}", std::process::id());
+    let path = save_path(&slot).unwrap();
+    let unrelated = path.with_extension("sav.tmp");
+    std::fs::create_dir_all(SAVE_DIR).unwrap();
+    std::fs::write(&unrelated, b"another writer's unfinished save").unwrap();
+
+    session.save(&slot).unwrap();
+    let restored = Session::load(&registry, &slot).unwrap();
+    let temporary_contents = std::fs::read(&unrelated);
+    let _ = std::fs::remove_file(&unrelated);
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(restored.brief(), session.brief());
+    assert_eq!(
+        temporary_contents.unwrap(),
+        b"another writer's unfinished save",
+        "publishing a save must never overwrite or consume another writer's staging file"
+    );
+}
+
+#[test]
 fn text_play_rejects_expiring_lead_before_authorization() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
