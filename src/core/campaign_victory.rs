@@ -176,29 +176,22 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
                     .is_some_and(|handler| handler.organization() == Some(organization))
         })
         .count();
+    // A racketeer's district footprint is a set of its live operating locations.
+    // Traverse the indexed roster once instead of rescanning every enterprise for
+    // every neighborhood when the player opens the victory-progress view.
     let own_active_racket_districts = state
-        .world()
-        .neighborhoods()
-        .filter(|district| {
-            state
-                .enterprises()
-                .enterprises_for_organization(organization)
-                .any(|enterprise| {
-                    if enterprise.status() != EnterpriseStatus::Active {
-                        return false;
-                    }
-                    match enterprise.location() {
-                        crate::enterprises::EnterpriseLocation::Neighborhood(id) => {
-                            id == district.id()
-                        }
-                        crate::enterprises::EnterpriseLocation::Business(id) => state
-                            .world()
-                            .get_business(id)
-                            .is_some_and(|business| business.neighborhood() == district.id()),
-                    }
-                })
+        .enterprises()
+        .enterprises_for_organization(organization)
+        .filter(|enterprise| enterprise.status() == EnterpriseStatus::Active)
+        .filter_map(|enterprise| match enterprise.location() {
+            crate::enterprises::EnterpriseLocation::Neighborhood(id) => Some(id),
+            crate::enterprises::EnterpriseLocation::Business(id) => state
+                .world()
+                .get_business(id)
+                .map(|business| business.neighborhood()),
         })
-        .count();
+        .collect::<BTreeSet<_>>()
+        .len();
     let uncontested = state
         .world()
         .neighborhoods()

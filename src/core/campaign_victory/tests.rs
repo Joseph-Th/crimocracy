@@ -472,3 +472,56 @@ fn political_and_underboss_claims_reject_unsupported_status() {
         Some(VictoryError::UnderbossNotReady)
     );
 }
+
+#[test]
+fn victory_progress_counts_hosted_rackets_only_while_operating_after_restore() {
+    use crate::city_generation::{CityScale, generate_city};
+    use crate::enterprises::EnterpriseLocation;
+    use crate::enterprises::enterprise_execution::validate_suspend_enterprise;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(947)).unwrap();
+    let racket = city
+        .state
+        .enterprises()
+        .enterprises_for_organization(city.player)
+        .next()
+        .expect("generated player has a hosted racket");
+    let racket_id = racket.id();
+    let EnterpriseLocation::Business(venue) = racket.location() else {
+        panic!("the opening racket should be located at a real business");
+    };
+    assert_eq!(
+        city.state
+            .world()
+            .get_business(venue)
+            .unwrap()
+            .neighborhood(),
+        city.home
+    );
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .own_active_racket_districts,
+        1
+    );
+
+    validate_suspend_enterprise(&city.state, racket_id)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .own_active_racket_districts,
+        0
+    );
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        progress(&registry, &restored)
+            .unwrap()
+            .own_active_racket_districts,
+        0
+    );
+    validate_invariants(&restored);
+}

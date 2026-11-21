@@ -96,6 +96,87 @@ fn owner(fixture: &AcquisitionFixture, business: BusinessId) -> BusinessOwner {
 }
 
 #[test]
+fn equally_funded_rivals_alternate_first_access_to_scarce_listings_across_weeks() {
+    let mut fixture = make_independent_fixture();
+    let first = fixture.organization;
+    let second = organization(&mut fixture, "Second rival", OrganizationKind::Criminal);
+    let player = organization(&mut fixture, "Player", OrganizationKind::Criminal);
+    designate_player_organization(&mut fixture.state, player).unwrap();
+    executive(&mut fixture, first);
+    executive(&mut fixture, second);
+    establish_existing_independent_economy(&mut fixture);
+
+    let price = hospitality_price(&fixture).cents();
+    let reserve = fixture.registry.upkeep().per_member_daily().cents() * 7;
+    let cash = price + reserve;
+    fund_accounted_from_street(&mut fixture, cash);
+    let second_accounted = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(second),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .unwrap();
+    let second_street = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(second),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Second rival investment reserves".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: second_street,
+                    amount: Money::from_cents(-cash),
+                },
+                LedgerPosting {
+                    account: second_accounted,
+                    amount: Money::from_cents(cash),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+
+    let opening = fixture.state.clone();
+    for (week, expected_buyer) in [(1, first), (2, second), (3, first)] {
+        let mut state = opening.clone();
+        state.advance_clock(SimDuration::from_minutes(week * 7 * 1440));
+        assert_eq!(
+            apply_due_autonomous_acquisitions(&fixture.registry, &mut state),
+            vec![fixture.business]
+        );
+        assert_eq!(
+            state
+                .world()
+                .get_business(fixture.business)
+                .unwrap()
+                .owner(),
+            BusinessOwner::Organization(expected_buyer)
+        );
+        let restored = restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, &state).unwrap(),
+        )
+        .expect("rotated investment must preserve valid save state");
+        assert_eq!(
+            bincode::serialize(&state).unwrap(),
+            bincode::serialize(&restored).unwrap()
+        );
+    }
+}
+
+#[test]
 fn rival_expands_beyond_its_existing_district_after_local_inventory_sells() {
     let mut fixture = make_independent_fixture();
     let rival = fixture.organization;

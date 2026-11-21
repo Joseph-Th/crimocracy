@@ -288,7 +288,7 @@ determinism and client contracts.
           court fines collect only from convicted defendants' accessible personal funds, including wages
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence
     ──► apply_due_autonomous_acquisitions
-          weekly rival citywide listings or negotiated purchases after payroll and recruitment; new infrastructure available for expansion
+          weekly rival citywide listings or negotiated purchases after payroll and recruitment; competing buyers rotate first access by review week instead of permanent organization-ID privilege; new infrastructure available for expansion
     ──► apply_due_autonomous_enterprise_lifecycle
           suspended NPC rackets: viable reopen; stale frozen authority/assets retire
     ──► apply_due_autonomous_enterprises_excluding

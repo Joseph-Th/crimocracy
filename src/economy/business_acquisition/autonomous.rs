@@ -31,7 +31,7 @@ pub(crate) fn apply_due_autonomous_acquisitions(
     if !is_recurring_boundary(state.now(), cadence) {
         return Vec::new();
     }
-    let organizations: Vec<_> = state
+    let mut organizations: Vec<_> = state
         .world
         .organizations()
         .filter(|organization| {
@@ -40,6 +40,18 @@ pub(crate) fn apply_due_autonomous_acquisitions(
         })
         .map(|organization| organization.id())
         .collect();
+    // Rival investors compete for the same public listings. Always letting the lowest
+    // organization ID offer first would grant the earliest-created rival a permanent
+    // market advantage, even when equally funded executives want the same property.
+    // Rotate the stable ID order each review week; this uses only the campaign clock and
+    // current roster, and never consumes a simulation RNG stream or persists a cursor.
+    if !organizations.is_empty() {
+        organizations.sort_unstable();
+        let review_number = state.now().as_minutes() / (u64::from(REVIEW_DAYS) * DAY_MINUTES);
+        let offset = (review_number - 1)
+            % u64::try_from(organizations.len()).expect("organization count fits u64");
+        organizations.rotate_left(usize::try_from(offset).expect("offset fits roster length"));
+    }
     let mut acquired = Vec::new();
     for organization in organizations {
         if let Some(business) = invest(registry, state, organization) {
@@ -113,14 +125,16 @@ fn invest(
         if owned.contains(&id) {
             continue;
         }
+        // Rival investors buy operating businesses, not empty premises. Both listings
+        // and negotiated offers need existing books: filter before appraisal and bidding
+        // rather than sending impossible offers through the canonical seller validator.
+        if state.economy.get_business_economy(id).is_none() {
+            continue;
+        }
         // Market listing availability and standard appraisals are public. In the
         // absence of a listing, submit a voluntary offer; the seller alone decides
         // using its private portfolio. No foreign balance or owner enters the score.
         let listing = acquisition_offer(registry, state, organization, id);
-        // Do not create operating books from unmodeled premises in the autonomous market.
-        if listing.is_some() && state.economy.get_business_economy(id).is_none() {
-            continue;
-        }
         let listed = listing.is_some();
         let Ok(appraisal) = appraise_business(registry, state, id) else {
             continue;
