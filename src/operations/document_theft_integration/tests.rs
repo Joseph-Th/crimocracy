@@ -287,6 +287,124 @@ fn successful_document_theft_persists_acquired_records_without_fenceable_propert
 }
 
 #[test]
+fn stolen_business_books_do_not_relabel_a_prior_owners_cycle_as_current() {
+    use crate::economy::BusinessEconomyDraft;
+    use crate::economy::business_economy_system::{
+        decide_business_cycle, validate_business_cycle_plan, validate_establish_business_economy,
+    };
+    use crate::finance::finance_system::insert_account;
+    use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+
+    let mut fixture = fixture();
+    let owner = FinancialOwner::Business(fixture.target);
+    let operating = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_establish_business_economy(
+        &fixture.registry,
+        &fixture.state,
+        BusinessEconomyDraft {
+            business: fixture.target,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    fixture.state.advance_clock(
+        fixture
+            .registry
+            .get_business(BusinessKind::ProfessionalServices)
+            .economics()
+            .cycle(),
+    );
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&fixture.registry, &fixture.state, fixture.target, 0).unwrap(),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    assert!(
+        resolve_target_snapshot(&fixture.state, fixture.target)
+            .unwrap()
+            .latest_financials
+            .is_some()
+    );
+
+    for owner in [
+        BusinessOwner::Organization(fixture.crew),
+        BusinessOwner::Independent,
+    ] {
+        validate_transfer_business_ownership(&fixture.state, fixture.target, owner)
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+        assert!(
+            resolve_target_snapshot(&fixture.state, fixture.target)
+                .unwrap()
+                .latest_financials
+                .is_none(),
+            "new ownership periods must not inherit the previous period's settled books"
+        );
+    }
+    let operation = authorize(&mut fixture);
+    let plan = decide_due_resolution(&mut fixture, operation);
+    validate_operation_resolution_plan(&fixture.registry, &fixture.state, plan)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let resolution = fixture
+        .state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .resolution()
+        .unwrap();
+    assert_eq!(
+        resolution.objective_outcome(),
+        OperationObjectiveOutcome::Achieved
+    );
+    let acquired_topics: BTreeSet<_> = resolution
+        .discovered_information()
+        .iter()
+        .map(|id| {
+            fixture
+                .state
+                .intelligence()
+                .get_information(*id)
+                .unwrap()
+                .topic()
+        })
+        .collect();
+    assert!(acquired_topics.contains(&InformationTopic::MarketAccess));
+    assert!(
+        !acquired_topics.contains(&InformationTopic::FinancialPerformance),
+        "new title must not report the previous owner's earnings as current"
+    );
+    validate_invariants(&fixture.state);
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .expect("ownership-period filtered intelligence should round-trip without drift");
+}
+
+#[test]
 fn document_theft_resolution_rejects_changed_target_business() {
     let mut fixture = fixture();
     let operation = authorize(&mut fixture);

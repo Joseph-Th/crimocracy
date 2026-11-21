@@ -313,6 +313,19 @@ impl EconomyState {
         })
     }
 
+    /// The latest book that belongs to the business's *current ownership period*.
+    /// Comparing only the owner identity is insufficient: title may leave an owner and later
+    /// return, without a single settlement in the intervening new tenure. The business
+    /// version identifies the period recorded with each canonical settlement.
+    pub fn latest_cycle_for_business_version(
+        &self,
+        business: BusinessId,
+        business_version: u32,
+    ) -> Option<&BusinessCycleRecord> {
+        self.latest_cycle(business)
+            .filter(|cycle| cycle.business_version() == business_version)
+    }
+
     pub fn get_by_settlement_account(
         &self,
         account: FinancialAccountId,

@@ -265,16 +265,15 @@ fn resolve_target_snapshot(
         .world
         .get_business(target)
         .ok_or(DocumentTheftError::MissingTarget(target))?;
-    let latest_financials =
-        state
-            .economy
-            .latest_cycle(target)
-            .map(|cycle| DocumentFinancialSnapshot {
-                occurred_at: cycle.occurred_at(),
-                gross_revenue: cycle.gross_revenue(),
-                operating_cost: cycle.operating_cost(),
-                net_cash: cycle.net_cash(),
-            });
+    let latest_financials = state
+        .economy
+        .latest_cycle_for_business_version(target, business.version())
+        .map(|cycle| DocumentFinancialSnapshot {
+            occurred_at: cycle.occurred_at(),
+            gross_revenue: cycle.gross_revenue(),
+            operating_cost: cycle.operating_cost(),
+            net_cash: cycle.net_cash(),
+        });
     Ok(DocumentTargetSnapshot {
         business_version: business.version(),
         name: business.name().to_owned(),

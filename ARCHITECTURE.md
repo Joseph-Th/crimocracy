@@ -184,6 +184,14 @@ operation owner. Surveillance and infiltration observe the target through
 resolution rather than at authorization. Successful local watches use indexed district and venue enterprises to produce bounded typed enterprise-location and organization-personnel observations; they reveal only sampled active foreign operations. An institutional sightline about
 player-originated cases does not confer access to all the authority's cases. Successful infiltration adds target-bounded internal findings from business ownership and settlement records, organization leadership and mandates, or enterprise support and settlement records. These findings participate in the same resolution snapshot, production information creation, and immutable after-action report reconstruction; incomplete infiltration does not acquire internal records.
 
+Current business financial intelligence is scoped to the present ownership period, identified
+by the business version frozen on each settled cycle. Both infiltration and document theft
+consume the economy owner's indexed latest-cycle-for-version query. A transferred business
+therefore has no current books until it settles again, even if title returns to a prior owner;
+historical settlements remain intact for their original owners and accounting history.
+Financial findings and court notices render money with the finance owner's currency formatter,
+not raw diagnostic cent counts.
+
 The planner attaches the registry's supported police contingencies, bounded
 relative scheduling, completion deadlines and known-topic requirements to
 `OperationDraft`; `operation_system` validates entry-stage support,

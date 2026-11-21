@@ -217,20 +217,45 @@ pub(super) fn validate_judgment(
     let (outcome, judgment) = assessment(registry, state, case, state.now(), defense);
     let resolution = validate_prosecution_case_resolution(state, id, outcome)?;
     let convicted = outcome == ProsecutionCaseResolution::Convicted;
-    let notice = person.organization().filter(|org| state.world().get_organization(*org).is_some_and(|o| o.kind() == OrganizationKind::Criminal))
-        .map(|recipient| validate_record_report(state, ReportDraft {
-            recipient, kind: ReportKind::Legal,
-            title: if convicted { "Court conviction" } else { "Court acquittal" }.to_owned(),
-            entries: vec![ReportEntry {
-                attention: AttentionClass::Exception,
-                summary: if convicted {
-                    format!("{} was convicted in the matter of {}. The court imposed a personal fine of {} cents, collectible from the defendant's accessible funds.", person.name(), case.arrest(), judgment.fine.cents())
-                } else {
-                    format!("{} was acquitted in the matter of {}. The court's proof standard was not met; no fine was imposed.", person.name(), case.arrest())
+    let notice = person
+        .organization()
+        .filter(|organization| {
+            state
+                .world()
+                .get_organization(*organization)
+                .is_some_and(|record| record.kind() == OrganizationKind::Criminal)
+        })
+        .map(|recipient| {
+            let summary = if convicted {
+                format!(
+                    "{} was convicted in the matter of {}. The court imposed a personal fine of {}, collectible from the defendant's accessible funds.",
+                    person.name(),
+                    case.arrest(),
+                    crate::finance::helpers::format_money_cents(judgment.fine.cents()),
+                )
+            } else {
+                format!(
+                    "{} was acquitted in the matter of {}. The court's proof standard was not met; no fine was imposed.",
+                    person.name(), case.arrest(),
+                )
+            };
+            validate_record_report(
+                state,
+                ReportDraft {
+                    recipient,
+                    kind: ReportKind::Legal,
+                    title: if convicted { "Court conviction" } else { "Court acquittal" }.to_owned(),
+                    entries: vec![ReportEntry {
+                        attention: AttentionClass::Exception,
+                        summary,
+                        sources: Vec::new(),
+                        entities: BTreeSet::from([EntityRef::Character(person.id())]),
+                        decision: None,
+                    }],
                 },
-                sources: Vec::new(), entities: BTreeSet::from([EntityRef::Character(person.id())]), decision: None,
-            }],
-        })).transpose()?;
+            )
+        })
+        .transpose()?;
     Ok(ValidatedJudgment {
         case: id,
         resolution,

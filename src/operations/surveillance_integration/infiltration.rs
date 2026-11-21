@@ -1,5 +1,6 @@
 //! Internal records available only after a successful infiltration, never from public watch.
 use super::*;
+use crate::finance::helpers::format_money_cents;
 use crate::world::BusinessOwner;
 
 fn finding(
@@ -48,17 +49,19 @@ pub(super) fn internal_findings(
             };
             let financials = state
                 .economy
-                .latest_cycle(id)
-                .filter(|cycle| cycle.owner() == business.owner())
+                .latest_cycle_for_business_version(id, business.version())
                 .map_or_else(
-                    || "No completed operating cycle under this owner was found.".to_owned(),
+                    || {
+                        "No completed operating cycle in the current ownership period was found."
+                            .to_owned()
+                    },
                     |cycle| {
                         format!(
-                            "Last settled cycle at minute {}: gross {}, costs {}, net {} cents.",
+                            "Last settled cycle at minute {}: gross {}, costs {}, net {}.",
                             cycle.occurred_at().as_minutes(),
-                            cycle.gross_revenue().cents(),
-                            cycle.operating_cost().cents(),
-                            cycle.net_cash().cents()
+                            format_money_cents(cycle.gross_revenue().cents()),
+                            format_money_cents(cycle.operating_cost().cents()),
+                            format_money_cents(cycle.net_cash().cents())
                         )
                     },
                 );
@@ -161,8 +164,11 @@ pub(super) fn internal_findings(
             )];
             if let Some(cycle) = state.enterprises.latest_cycle(id) {
                 observations.push(finding(InformationTopic::FinancialPerformance, target,
-                    format!("Inside books of {name} at {location}: last settlement at minute {}, gross {}, cost {}, net {} cents.",
-                        cycle.occurred_at().as_minutes(), cycle.gross_revenue().cents(), cycle.operating_cost().cents(), cycle.net_cash().cents()),
+                    format!("Inside books of {name} at {location}: last settlement at minute {}, gross {}, cost {}, net {}.",
+                        cycle.occurred_at().as_minutes(),
+                        format_money_cents(cycle.gross_revenue().cents()),
+                        format_money_cents(cycle.operating_cost().cents()),
+                        format_money_cents(cycle.net_cash().cents())),
                     format!("internal books of {name} at {location}")));
             }
             observations

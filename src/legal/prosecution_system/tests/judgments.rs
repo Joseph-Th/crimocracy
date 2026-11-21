@@ -305,6 +305,20 @@ fn court_hearing_distinguishes_conviction_from_acquittal_and_collects_only_perso
     assert!(judgment.defense().is_none());
     let fine = judgment.fine().cents();
     assert!(fine > 12000);
+    let notice = state
+        .reports()
+        .reports_for(sponsor)
+        .find(|report| report.title() == "Court conviction")
+        .expect("the member's criminal organization should receive the actual verdict");
+    let summary = &notice.entries()[0].summary;
+    assert!(
+        summary.contains(&format!(
+            "personal fine of {}",
+            crate::finance::helpers::format_money_cents(fine)
+        )),
+        "a court-ordered fine must be rendered as money, not diagnostic cents: {summary}"
+    );
+    assert!(!summary.contains(" cents"));
     assert_eq!(tick.court_fine_payments.len(), 1);
     assert_eq!(
         state.finance().get_account(personal).unwrap().balance(),

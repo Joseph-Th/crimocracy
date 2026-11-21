@@ -91,6 +91,129 @@ fn infiltration_business_reveals_internal_records_and_preserves_report_on_restor
 }
 
 #[test]
+fn infiltrated_business_books_quote_settled_money_in_player_readable_units() {
+    use crate::economy::BusinessEconomyDraft;
+    use crate::economy::business_economy_system::{
+        decide_business_cycle, validate_business_cycle_plan, validate_establish_business_economy,
+    };
+    use crate::finance::finance_system::insert_account;
+    use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+
+    let mut fixture = fixture(100, false);
+    let owner = FinancialOwner::Business(fixture.business);
+    let operating = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_establish_business_economy(
+        &fixture.registry,
+        &fixture.state,
+        BusinessEconomyDraft {
+            business: fixture.business,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    fixture.state.advance_clock(
+        fixture
+            .registry
+            .get_business(BusinessKind::Hospitality)
+            .economics()
+            .cycle(),
+    );
+    let cycle = validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&fixture.registry, &fixture.state, fixture.business, 0).unwrap(),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let record = fixture.state.economy().get_cycle(cycle).unwrap();
+    let observations = super::super::infiltration::internal_findings(
+        &fixture.state,
+        EntityRef::Business(fixture.business),
+    );
+    let financials = observations
+        .iter()
+        .find(|finding| finding.topic == InformationTopic::FinancialPerformance)
+        .expect("a settled inside book should expose an actual operating cycle");
+    for (label, cents) in [
+        ("gross", record.gross_revenue().cents()),
+        ("costs", record.operating_cost().cents()),
+        ("net", record.net_cash().cents()),
+    ] {
+        let amount = crate::finance::helpers::format_money_cents(cents);
+        assert!(financials.summary.contains(&format!("{label} {amount}")));
+    }
+    assert!(!financials.summary.contains(" cents"));
+    // Title can return to the exact same owner. Matching the owner alone must not revive
+    // an earlier tenure's books as if the returned proprietor had already made a sale.
+    for owner in [
+        BusinessOwner::Organization(fixture.crew),
+        BusinessOwner::Independent,
+    ] {
+        crate::world::world_system::validate_transfer_business_ownership(
+            &fixture.state,
+            fixture.business,
+            owner,
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    }
+    let after_return = super::super::infiltration::internal_findings(
+        &fixture.state,
+        EntityRef::Business(fixture.business),
+    );
+    let after_return_financials = after_return
+        .iter()
+        .find(|finding| finding.topic == InformationTopic::FinancialPerformance)
+        .unwrap();
+    assert!(
+        after_return_financials
+            .summary
+            .contains("No completed operating cycle"),
+        "the owner must not receive historical results from a previous tenure: {}",
+        after_return_financials.summary
+    );
+    let target = EntityRef::Business(fixture.business);
+    let operation = authorize_infiltration(&mut fixture, target);
+    complete_infiltration(&mut fixture, operation);
+    let resolution = fixture
+        .state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .resolution()
+        .unwrap();
+    assert!(resolution.discovered_information().iter().any(|id| {
+        fixture
+            .state
+            .intelligence()
+            .get_information(*id)
+            .unwrap()
+            .summary()
+            .contains("No completed operating cycle")
+    }));
+    validate_invariants(&fixture.state);
+}
+
+#[test]
 fn infiltration_organization_identifies_internal_leadership_without_police_file_contents() {
     let mut fixture = fixture(100, false);
     let rival = insert_organization(
