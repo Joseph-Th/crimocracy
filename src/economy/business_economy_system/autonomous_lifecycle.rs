@@ -3,8 +3,8 @@
 //! Cycle settlement owns suspension. This module owns only the autonomous decision to reuse the
 //! canonical resume token later, so there is still one status-mutation path. Businesses controlled
 //! by the player organization remain explicit player decisions; independent, commercial, rival,
-//! and character-owned businesses can recover when their current zero-variance economics are
-//! positive again.
+//! and character-owned businesses can recover when the projected net gain to the
+//! owner's entire local portfolio is positive and future settlements remain possible.
 
 use super::{
     BusinessEconomyError, ValidatedBusinessEconomyStatusChange, resolve_cycle_financials,
@@ -21,7 +21,7 @@ struct RecoveryCandidate {
     business: BusinessId,
     neighborhood: NeighborhoodId,
     kind: BusinessKind,
-    projected_daily_net: i128,
+    incremental_owner_daily_net: i128,
     resume: ValidatedBusinessEconomyStatusChange,
 }
 
@@ -44,7 +44,7 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
     // Rank the entire viable recovery queue before allocating scarce local customer demand.
     // Business-ID order reflects when a shop was created, not which closure is worth reversing.
     // Two simultaneous entrants would each forecast a market without the other, so only the
-    // strongest projected daily earner in a competing sector may reopen on this boundary.
+    // strongest incremental owner earner in a competing sector may reopen on this boundary.
     let mut candidates = Vec::new();
 
     for business_id in suspended {
@@ -55,6 +55,12 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
         // A loss threshold can suspend exactly on this daily boundary. Reopening immediately
         // would erase the consequence and reset the loss streak without a real recovery interval.
         if economy.last_cycle_at() == Some(state.now()) {
+            continue;
+        }
+        // A final-version resume is allowed for an explicit player command, but
+        // it cannot schedule any future settlements. Never reopen an inert NPC
+        // shop merely to make it consume the district's customers forever.
+        if economy.version() >= u32::MAX - 1 {
             continue;
         }
         let business = state
@@ -98,11 +104,20 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
                             .cycle()
                             .as_minutes(),
                     );
+                let displaced_daily_net = super::market::owner_reopening_daily_displacement(
+                    registry,
+                    state,
+                    business_id,
+                )?;
+                let incremental_owner_daily_net = daily_net - displaced_daily_net;
+                if incremental_owner_daily_net <= 0 {
+                    continue;
+                }
                 candidates.push(RecoveryCandidate {
                     business: business_id,
                     neighborhood: business.neighborhood(),
                     kind: business.kind(),
-                    projected_daily_net: daily_net,
+                    incremental_owner_daily_net,
                     resume,
                 });
             }
@@ -117,8 +132,8 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
 
     candidates.sort_unstable_by(|left, right| {
         right
-            .projected_daily_net
-            .cmp(&left.projected_daily_net)
+            .incremental_owner_daily_net
+            .cmp(&left.incremental_owner_daily_net)
             .then(left.business.cmp(&right.business))
     });
     let mut reopening_sectors = std::collections::BTreeSet::new();

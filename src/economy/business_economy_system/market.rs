@@ -132,6 +132,73 @@ pub(super) fn resolve_market_snapshot(
     Ok(snapshot)
 }
 
+/// Revenue an owner's *other* productive storefronts would lose if this suspended
+/// store resumed. An individually profitable reopening may still destroy more
+/// customer revenue in the rest of the owner's portfolio than it brings in.
+/// The same zero-variance settlement calculation is used on both sides of the
+/// counterfactual; only the candidate's market presence changes.
+pub(super) fn owner_reopening_daily_displacement(
+    registry: &Registry,
+    state: &AppState,
+    candidate: BusinessId,
+) -> Result<i128, BusinessEconomyError> {
+    let business = super::validate_business(state, candidate)?;
+    if business.owner() == crate::world::BusinessOwner::Independent {
+        return Ok(0);
+    }
+    let economy = state
+        .economy()
+        .get_business_economy(candidate)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(candidate))?;
+    if economy.status() != BusinessOperatingStatus::Suspended {
+        return Err(BusinessEconomyError::EconomyNotSuspended(candidate));
+    }
+    let incoming_damaged = economy.is_disrupted(state.now());
+    let damage_weight = registry.business_disruption().gross_basis_points();
+    let mut lost_daily_net = 0_i128;
+    for (peer, relationship) in local_peers(state, business) {
+        if peer.owner() != business.owner() {
+            continue;
+        }
+        let Some(peer_economy) = state.economy().get_business_economy(peer.id()) else {
+            continue;
+        };
+        // A terminal active record has no future cycle and therefore no future
+        // revenue to cannibalize. Only scheduled, live peers belong in this sum.
+        if peer_economy.status() != BusinessOperatingStatus::Active
+            || peer_economy.next_cycle_at().is_none()
+        {
+            continue;
+        }
+        let current_market = resolve_market_snapshot(state, peer.id())?;
+        let mut reopened_market = current_market;
+        reopened_market.add_competitor(relationship, incoming_damaged);
+        let neighborhood = state
+            .world()
+            .get_neighborhood(peer.neighborhood())
+            .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(peer.id()))?;
+        let economics = registry.get_business(peer.kind()).economics();
+        let settled_net = |market| {
+            super::resolve_cycle_financials(
+                peer.id(),
+                economics,
+                neighborhood.profile(),
+                damage_weight,
+                peer_economy.is_disrupted(state.now()),
+                market,
+                0,
+            )
+            .map(|(_, _, net)| net)
+        };
+        let before = settled_net(current_market)?;
+        let after = settled_net(reopened_market)?;
+        lost_daily_net += (i128::from(before.cents()) - i128::from(after.cents()))
+            * i128::from(DAY_MINUTES)
+            / i128::from(economics.cycle().as_minutes());
+    }
+    Ok(lost_daily_net)
+}
+
 /// Acquisition forecasts must not act as a free live reconnaissance query. Assume all
 /// neighboring directory peers are operating normally, regardless of actual private books.
 pub(super) fn forecast_market_snapshot(
