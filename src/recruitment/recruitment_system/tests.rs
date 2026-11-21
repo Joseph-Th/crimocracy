@@ -1648,6 +1648,10 @@ fn pending_approval_excludes_only_its_live_recruitment_route() {
     .expect("approval should commit");
 
     assert!(
+        recent_recruitment_approval_refusals(&fixture.registry, &fixture.state).is_empty(),
+        "a pending request has not been refused"
+    );
+    assert!(
         find_recruitment_candidates(
             &fixture.registry,
             &fixture.state,
@@ -1675,6 +1679,12 @@ fn pending_approval_excludes_only_its_live_recruitment_route() {
         fixture.state.recruitment().attempts().count(),
         before_rejection
     );
+    let refusals = BTreeSet::from([(fixture.target, fixture.candidate)]);
+    assert_eq!(
+        recent_recruitment_approval_refusals(&fixture.registry, &fixture.state),
+        refusals,
+        "only a resolved refusal should suppress another autonomous approval request"
+    );
     assert_eq!(
         find_recruitment_candidates(
             &fixture.registry,
@@ -1693,6 +1703,11 @@ fn pending_approval_excludes_only_its_live_recruitment_route() {
         build_save(&fixture.registry, &fixture.state).expect("approval route must save"),
     )
     .expect("approval route must survive restore");
+    assert_eq!(
+        recent_recruitment_approval_refusals(&fixture.registry, &restored),
+        refusals,
+        "the refusal snapshot must reconstruct directly from durable resolved decisions"
+    );
     assert_eq!(
         find_recruitment_candidates(
             &fixture.registry,

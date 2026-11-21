@@ -3,6 +3,121 @@
 use super::*;
 
 #[test]
+fn dissolved_campaign_rejects_mutation_but_preserves_read_only_history_after_restore() {
+    use crimocracy::world::world_system::{
+        designate_player_organization, insert_character, insert_organization,
+    };
+    use crimocracy::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+
+    let registry = crimocracy::build_registry();
+    let mut state = AppState::new(41);
+    let player = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Unfunded family".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut state, player).unwrap();
+    let boss = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Boss".to_owned(),
+            organization: Some(player),
+            supervisor: None,
+            autonomy: AutonomyLevel::Tight,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Associate".to_owned(),
+            organization: Some(player),
+            supervisor: Some(boss),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let mut session = Session {
+        registry: &registry,
+        state,
+        player,
+        seeds: EvaluationSeeds::new(41, 41),
+        district: "Test ward".to_owned(),
+        district_variant: "TEST",
+    };
+    for _ in 0..5 {
+        session
+            .execute("advance 1d")
+            .expect("daily payroll must run");
+    }
+    assert!(session.state.player_organization_defeated());
+    assert!(
+        session
+            .execute("brief")
+            .unwrap()
+            .0
+            .contains("Campaign over")
+    );
+    for command in [
+        "help", "people", "reports", "contacts", "ledger", "recovery",
+    ] {
+        session
+            .execute(command)
+            .expect("terminal history stays inspectable");
+    }
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    for command in [
+        "open-account street",
+        "contact 1",
+        "contact 1 ask",
+        "attention exception off",
+        "recruit 3",
+        "claim-victory retirement",
+        "advance 1m",
+    ] {
+        assert_eq!(
+            session.execute(command),
+            Err("Campaign over: your organization dissolved".to_owned()),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap(),
+        before
+    );
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(session.state.player_organization_defeated());
+    assert_eq!(
+        session.execute("open-account street"),
+        Err("Campaign over: your organization dissolved".to_owned())
+    );
+}
+
+#[test]
+fn terminal_command_allowlist_excludes_contact_disclosures_and_all_other_actions() {
+    assert!(super::commands::terminal_command_is_read_only("contacts"));
+    assert!(super::commands::terminal_command_is_read_only("report"));
+    assert!(!super::commands::terminal_command_is_read_only("contact"));
+    assert!(!super::commands::terminal_command_is_read_only(
+        "open-account"
+    ));
+    assert!(!super::commands::terminal_command_is_read_only(
+        "claim-victory"
+    ));
+}
+
+#[test]
 fn recovery_and_brief_are_read_only_and_explain_dormant_rackets() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();

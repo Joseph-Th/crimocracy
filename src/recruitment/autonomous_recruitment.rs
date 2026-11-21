@@ -15,7 +15,7 @@ use crate::delegation::delegation_system::{DelegationError, resolve_policy_for_m
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::recruitment::recruitment_system::{
     RecruitmentError, ValidatedRecruitmentAttempt, find_recruitment_candidates,
-    recruitment_approval_is_deferred, validate_delegated_recruitment_attempt,
+    recent_recruitment_approval_refusals, validate_delegated_recruitment_attempt,
 };
 use crate::recruitment::scoring::recruitment_relationship_support;
 use crate::recruitment::{
@@ -330,6 +330,10 @@ fn prepare_recruitment_authorities(
     personnel_scope: ResponsibilityScope,
 ) -> Result<Vec<PreparedRecruitmentAuthority>, AutonomousRecruitmentError> {
     let mut prepared = Vec::new();
+    // Resolve recent leadership refusals only if an approval-required authority needs them.
+    // One read-only scan per pass avoids multiplying decision-history work by the number
+    // of prospective candidates and managers.
+    let mut refused_approvals = None;
     for mandate in state.delegation().active_for_scope(personnel_scope) {
         let organization = mandate.organization();
         let manager = mandate.manager();
@@ -355,9 +359,9 @@ fn prepare_recruitment_authorities(
         // different availability policy here.
         let mut candidates = find_recruitment_candidates(registry, state, organization, manager)?;
         if policy == ApprovalPolicy::RequireApproval {
-            candidates.retain(|candidate| {
-                !recruitment_approval_is_deferred(registry, state, organization, *candidate)
-            });
+            let refused = refused_approvals
+                .get_or_insert_with(|| recent_recruitment_approval_refusals(registry, state));
+            candidates.retain(|candidate| !refused.contains(&(organization, *candidate)));
         }
         let candidates = rank_candidates_by_relationship(
             registry.recruitment(),

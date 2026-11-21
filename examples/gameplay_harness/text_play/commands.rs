@@ -17,6 +17,56 @@ fn write_prospect_skills(out: &mut String, person: &CharacterRecord) {
     }
 }
 
+/// Terminal campaigns remain inspectable and saveable, but never actionable.
+/// Admit only verbs whose every supported argument form is read-only. In particular,
+/// `contact <id>` defaults to `ask`, which records a new disclosure.
+pub(super) fn terminal_command_is_read_only(verb: &str) -> bool {
+    matches!(
+        verb,
+        "help"
+            | "quit"
+            | "exit"
+            | "brief"
+            | "victory"
+            | "save"
+            | "people"
+            | "known-people"
+            | "known-targets"
+            | "connections"
+            | "contacts"
+            | "counsel"
+            | "policies"
+            | "districts"
+            | "mandates"
+            | "prospects"
+            | "directory"
+            | "market"
+            | "businesses"
+            | "business-outlook"
+            | "business-cycles"
+            | "enterprises"
+            | "racket-kinds"
+            | "racket-outlook"
+            | "finances"
+            | "accounts"
+            | "ledger"
+            | "transaction"
+            | "case-brief"
+            | "intelligence"
+            | "intel"
+            | "debriefs"
+            | "operation-kinds"
+            | "opportunities"
+            | "operations"
+            | "operation"
+            | "decisions"
+            | "reports"
+            | "report"
+            | "racket-cycles"
+            | "recovery"
+    )
+}
+
 impl Session<'_> {
     pub(super) fn execute(&mut self, command: &str) -> Result<(String, bool), String> {
         let mut words: Vec<_> = command.split_whitespace().collect();
@@ -27,53 +77,17 @@ impl Session<'_> {
         let verb = normalized.as_str();
         words[0] = verb;
         validate_command_arity(verb, words.len())?;
-        if self.state.campaign_victory().is_some()
-            && !matches!(
-                verb,
-                "help"
-                    | "quit"
-                    | "exit"
-                    | "brief"
-                    | "victory"
-                    | "save"
-                    | "people"
-                    | "known-people"
-                    | "known-targets"
-                    | "connections"
-                    | "contacts"
-                    | "counsel"
-                    | "policies"
-                    | "districts"
-                    | "mandates"
-                    | "prospects"
-                    | "directory"
-                    | "market"
-                    | "businesses"
-                    | "business-outlook"
-                    | "business-cycles"
-                    | "enterprises"
-                    | "racket-kinds"
-                    | "racket-outlook"
-                    | "finances"
-                    | "accounts"
-                    | "ledger"
-                    | "transaction"
-                    | "case-brief"
-                    | "intelligence"
-                    | "intel"
-                    | "debriefs"
-                    | "operation-kinds"
-                    | "opportunities"
-                    | "operations"
-                    | "operation"
-                    | "decisions"
-                    | "reports"
-                    | "report"
-                    | "racket-cycles"
-                    | "recovery"
-            )
+        let terminal_reason = if self.state.player_organization_defeated() {
+            Some("Campaign over: your organization dissolved")
+        } else if self.state.campaign_victory().is_some() {
+            Some("Campaign over: victory has already been claimed")
+        } else {
+            None
+        };
+        if let Some(reason) = terminal_reason
+            && !terminal_command_is_read_only(verb)
         {
-            return Err("Campaign over: victory has already been claimed".to_owned());
+            return Err(reason.to_owned());
         }
         let state = &self.state;
         let mut out = String::new();
@@ -379,6 +393,7 @@ impl Session<'_> {
                     .unwrap();
                     write_prospect_skills(&mut out, person);
                 }
+                let mut approval_refusals = None;
                 for (manager, candidates) in self.manager_prospects()? {
                     let member = state
                         .world()
@@ -402,9 +417,13 @@ impl Session<'_> {
                     for candidate in candidates {
                         let status = if policy.independent_recruitment_approval()
                             == crimocracy::world::ApprovalPolicy::RequireApproval
-                            && crimocracy::recruitment::recruitment_system::recruitment_approval_is_deferred(
-                                self.registry, state, self.player, candidate,
-                            )
+                            && approval_refusals
+                                .get_or_insert_with(|| {
+                                    crimocracy::recruitment::recruitment_system::recent_recruitment_approval_refusals(
+                                        self.registry, state,
+                                    )
+                                })
+                                .contains(&(self.player, candidate))
                         {
                             "leadership declined the approach; manager will reconsider after recruitment cooldown"
                         } else {

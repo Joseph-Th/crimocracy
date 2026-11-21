@@ -14,6 +14,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
+use crate::decisions::{DecisionContext, DecisionResponse};
 use crate::delegation::delegation_system::{
     DelegationError, PolicySource, ResolvedPolicy, ensure_mandate_authority_current,
     resolve_mandate_authority, resolve_policy_for_manager,
@@ -276,33 +277,37 @@ struct RecruitmentPlanDependencies {
     reputation_baseline: u8,
 }
 
-/// Leadership's refusal defers further approval-seeking for this organization and prospect,
-/// without pretending the candidate received (or rejected) an actual pitch. A deliberate
-/// executive approach or a newly delegated recruitment policy remains an explicit override.
-/// The durable resolved decision is the authority; no parallel cooldown record is persisted.
-pub fn recruitment_approval_is_deferred(
+/// A rejected approval is leadership's refusal to authorize a pitch, not a refused pitch
+/// by the candidate. Resolve all still-current organization/candidate refusal pairs from
+/// durable decision history once, so multiple autonomous managers or a player prospect view
+/// can reuse the same read-only answer without rereading lifetime history for each prospect.
+/// No independent cooldown record is persisted and executive/delegated attempts remain able
+/// to override this approval-only deferral.
+pub fn recent_recruitment_approval_refusals(
     registry: &Registry,
     state: &AppState,
-    organization: OrganizationId,
-    candidate: CharacterId,
-) -> bool {
-    use crate::decisions::{DecisionContext, DecisionResponse};
-
+) -> BTreeSet<(OrganizationId, CharacterId)> {
     let cooldown = u64::from(registry.recruitment().cooldown().as_minutes());
-    state.decisions().decisions().any(|decision| {
-        matches!(
-            decision.context(),
-            DecisionContext::RecruitmentApproval(context)
-                if context.target_organization() == organization && context.candidate() == candidate
-        ) && decision.resolution().is_some_and(|resolution| {
-            resolution.response() == DecisionResponse::Reject
+    if cooldown == 0 {
+        return BTreeSet::new();
+    }
+    state
+        .decisions()
+        .decisions()
+        .filter_map(|decision| {
+            let DecisionContext::RecruitmentApproval(context) = decision.context() else {
+                return None;
+            };
+            let resolution = decision.resolution()?;
+            (resolution.response() == DecisionResponse::Reject
                 && state
                     .now()
                     .as_minutes()
                     .saturating_sub(resolution.resolved_at().as_minutes())
-                    < cooldown
+                    < cooldown)
+                .then_some((context.target_organization(), context.candidate()))
         })
-    })
+        .collect()
 }
 
 pub fn find_recruitment_candidates(
