@@ -1,7 +1,8 @@
 //! Read-only enterprise cycle planning: economics, legal-pressure conversion, and recurrence snapshots.
 
 use super::economics::{
-    resolve_basis_point_variance, resolve_gross_before_variance, resolve_operating_cost,
+    additional_associate_economics, resolve_basis_point_variance, resolve_gross_before_variance,
+    resolve_operating_cost,
 };
 use super::support::{
     build_enforcement_incident_draft, has_active_enterprise_inquiry,
@@ -85,12 +86,17 @@ pub fn decide_enterprise_cycle(
         .get_character(record.manager())
         .expect("resolved enterprise authority manager must exist");
     let economics = definition.economics();
+    let (labor_revenue, labor_cost) =
+        additional_associate_economics(record.kind(), neighborhood, record.associates())
+            .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     let gross_before_variance = resolve_gross_before_variance(
         enterprise,
         economics,
         neighborhood,
         manager.capability(CapabilityKind::Management),
-    )?;
+    )?
+    .checked_add(labor_revenue)
+    .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     let gross_revenue =
         resolve_basis_point_variance(enterprise, gross_before_variance, variance_basis_points)?;
     let cost = resolve_operating_cost(
@@ -100,7 +106,10 @@ pub fn decide_enterprise_cycle(
         direct_cases,
         enterprise,
     )?;
-    let operating_cost = cost.total;
+    let operating_cost = cost
+        .total
+        .checked_add(labor_cost)
+        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
 
     // The racket itself is one standing source of vice exposure even before police have opened
     // a district case. Otherwise an untouched district would make an operating racket permanently

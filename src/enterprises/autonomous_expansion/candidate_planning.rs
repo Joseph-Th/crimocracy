@@ -11,7 +11,8 @@ use crate::enterprises::autonomous_planning::{
     AutonomousEnterpriseError, resolve_observed_district_case_count,
 };
 use crate::enterprises::enterprise_execution::{
-    can_authority_cover_location, resolve_enterprise_financial_projection,
+    EnterpriseProjectionStaffing, can_authority_cover_location, ensure_manager_capacity,
+    resolve_enterprise_financial_projection,
 };
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation};
 use crate::finance::Money;
@@ -169,6 +170,19 @@ fn build_ranked_candidate(
     if economics.occupied_locations.contains(&(kind, location)) {
         return Ok(None);
     }
+    // Managerial span is an operational constraint for rivals as well as
+    // players. Do not propose an enterprise its delegated captain cannot run.
+    if ensure_manager_capacity(
+        economics.state,
+        economics.organization,
+        economics.manager,
+        kind.baseline_associates(),
+        None,
+    )
+    .is_err()
+    {
+        return Ok(None);
+    }
     // Autonomous governance cannot create work whose first recurrence is already outside the
     // representable simulation horizon. Direct establishment still reports the typed overflow;
     // the daily AI pass simply treats that terminal rail as no actionable expansion.
@@ -192,8 +206,11 @@ fn build_ranked_candidate(
         kind,
         location,
         supporting_businesses.len(),
-        economics.management,
         observed_active_cases,
+        EnterpriseProjectionStaffing {
+            management: economics.management,
+            associates: kind.baseline_associates(),
+        },
     )?;
     if required_working_capital > economics.available_working_capital
         || expected_net_cash <= Money::ZERO

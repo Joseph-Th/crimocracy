@@ -5,6 +5,9 @@ use crate::core::entity::EntityRef;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::delegation::{MandateRecord, MandateStatus};
+use crate::enterprises::enterprise_execution::{
+    MAX_ASSOCIATES_PER_MANAGER, MAX_RACKETS_PER_MANAGER,
+};
 use crate::enterprises::{
     EnterpriseCycleRecord, EnterpriseLocation, EnterpriseRecord, EnterpriseStatus,
 };
@@ -26,8 +29,19 @@ struct EnterpriseAuthorityRefs<'a> {
 
 pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
     let mut occupied = BTreeMap::new();
+    let mut manager_load = BTreeMap::<crate::core::id::CharacterId, (u16, u32)>::new();
     for enterprise in state.enterprises.enterprises() {
         validate_enterprise_record(state, enterprise)?;
+        if enterprise.status() == EnterpriseStatus::Active {
+            let load = manager_load.entry(enterprise.manager()).or_default();
+            load.0 = load.0.saturating_add(1);
+            load.1 += u32::from(enterprise.associates());
+            if load.0 > MAX_RACKETS_PER_MANAGER || load.1 > u32::from(MAX_ASSOCIATES_PER_MANAGER) {
+                return Err(StateValidationError::InvalidEnterpriseRuntime {
+                    enterprise: enterprise.id(),
+                });
+            }
+        }
         if enterprise.status() != EnterpriseStatus::Retired
             && let Some(existing) =
                 occupied.insert((enterprise.kind(), enterprise.location()), enterprise.id())
@@ -64,9 +78,37 @@ fn validate_enterprise_record(
     }
     let refs = resolve_enterprise_authority(state, enterprise)?;
     validate_previous_authorities(state, enterprise, &refs)?;
+    validate_enterprise_staffing(state, enterprise)?;
     validate_enterprise_accounts(state, enterprise)?;
     validate_enterprise_schedule(state, enterprise)?;
     validate_enterprise_status(state, enterprise, &refs)
+}
+
+fn validate_enterprise_staffing(
+    state: &AppState,
+    enterprise: &EnterpriseRecord,
+) -> Result<(), StateValidationError> {
+    let invalid = || StateValidationError::InvalidEnterpriseRuntime {
+        enterprise: enterprise.id(),
+    };
+    let allowed = enterprise.kind().baseline_associates()..=enterprise.kind().max_associates();
+    if !allowed.contains(&enterprise.associates())
+        || enterprise.previous_associates().len() >= enterprise.version() as usize
+        || enterprise
+            .previous_associates()
+            .iter()
+            .any(|(through, &count)| {
+                !allowed.contains(&count)
+                    || *through < enterprise.established_at()
+                    || *through > state.now()
+                    || enterprise
+                        .retired_at()
+                        .is_some_and(|retired| *through > retired)
+            })
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn resolve_enterprise_authority<'a>(

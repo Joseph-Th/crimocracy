@@ -602,6 +602,113 @@ fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_
 }
 
 #[test]
+fn text_play_staffing_is_authoritative_financially_visible_and_persistent() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let brief = session.execute("brief").unwrap().0;
+    assert!(
+        brief.contains("People: 4 named | Associates: 5 active"),
+        "{brief}"
+    );
+    assert!(
+        session
+            .execute("enterprises")
+            .unwrap()
+            .0
+            .contains("Rank-and-file associates: 5")
+    );
+    for command in [
+        "staff-racket 1 0",
+        "staff-racket 1 4",
+        "staff-racket 1 14",
+        "staff-racket 1 5",
+        "staff-racket 999 6",
+        "staff-racket 1 -1",
+    ] {
+        assert!(
+            session.execute(command).is_err(),
+            "{command} must be rejected"
+        );
+        assert_eq!(
+            before,
+            bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+        );
+    }
+    let baseline = session.execute("racket-outlook 1").unwrap().0;
+    assert!(
+        session
+            .execute("staff-racket 1 9")
+            .unwrap()
+            .0
+            .contains("9 rank-and-file associates assigned")
+    );
+    assert_ne!(baseline, session.execute("racket-outlook 1").unwrap().0);
+    assert!(
+        session
+            .execute("enterprises")
+            .unwrap()
+            .0
+            .contains("Rank-and-file associates: 9")
+    );
+    assert!(
+        session
+            .execute("brief")
+            .unwrap()
+            .0
+            .contains("Associates: 9 active")
+    );
+    assert!(
+        session
+            .execute("brief")
+            .unwrap()
+            .0
+            .contains("Additional associate wages: 6000 cents/day")
+    );
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    session.execute("advance 1d").unwrap();
+    let racket = session
+        .state
+        .enterprises()
+        .get_enterprise(
+            session
+                .state
+                .enterprises()
+                .enterprises_for_organization(session.player)
+                .next()
+                .unwrap()
+                .id(),
+        )
+        .unwrap();
+    assert_eq!(racket.associates(), 9);
+    assert!(
+        session
+            .state
+            .enterprises()
+            .latest_cycle(racket.id())
+            .is_some()
+    );
+    session.execute("staff-racket 1 5").unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    let first = restored
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .next()
+        .unwrap();
+    let cycle = restored.enterprises().latest_cycle(first.id()).unwrap();
+    assert_eq!(first.associates(), 5);
+    assert_eq!(first.associates_at(cycle.occurred_at()), 9);
+    assert!(
+        session
+            .execute("victory")
+            .unwrap()
+            .0
+            .contains("Proven rank-and-file associates: 0")
+    );
+}
+
+#[test]
 fn text_play_recruits_through_available_executive_connection() {
     use crimocracy::social::{
         RelationshipDimensions, relationship_system::validate_set_relationship,

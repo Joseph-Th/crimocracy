@@ -70,6 +70,8 @@ pub const UNDERBOSS_MIN_KEY_PERSONNEL: usize = 10;
 pub const UNDERBOSS_HEADQUARTERS_PERSONNEL: usize = 4;
 pub const UNDERBOSS_KEY_PERSONNEL_PER_DISTRICT: usize = 2;
 pub const UNDERBOSS_CAPTAINS_PER_DISTRICT: usize = 2;
+/// A local command post needs a substantial sustained rank-and-file crew.
+pub const UNDERBOSS_ASSOCIATES_PER_DISTRICT: u64 = 12;
 
 fn required_underboss_personnel(required_districts: usize) -> usize {
     UNDERBOSS_MIN_KEY_PERSONNEL.max(
@@ -93,6 +95,8 @@ pub struct VictoryProgress {
     pub required_underboss_districts: usize,
     pub own_active_racket_districts: usize,
     pub established_racket_districts: usize,
+    pub mature_associates: u64,
+    pub workforce_ready_districts: usize,
     /// Uncontested mature profitable districts with independent, non-reused captains.
     pub staffed_underboss_districts: usize,
     /// Average realized daily profits from eligible 90-day businesses, over 30 days.
@@ -477,6 +481,33 @@ fn proven_racket_captain(state: &AppState, racket: &crate::enterprises::Enterpri
         == VICTORY_PROFITABLE_CYCLES
 }
 
+/// Extra people hired today do not confer instant territorial strength.
+/// The current captain must have directed this actual complement through
+/// twenty profitable settlements in the most recent thirty days.
+fn proven_racket_associates(
+    state: &AppState,
+    racket: &crate::enterprises::EnterpriseRecord,
+) -> u64 {
+    let proven_cycles = state
+        .enterprises()
+        .cycles_for(racket.id())
+        .rev()
+        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
+        .filter(|cycle| {
+            cycle.occurred_at() <= state.now()
+                && cycle.net_cash() > Money::ZERO
+                && racket.associates_at(cycle.occurred_at()) >= racket.associates()
+                && racket.authority_for_cycle_at(cycle.occurred_at()).manager == racket.manager()
+        })
+        .take(VICTORY_PROFITABLE_CYCLES)
+        .count();
+    if proven_cycles == VICTORY_PROFITABLE_CYCLES {
+        u64::from(racket.associates())
+    } else {
+        0
+    }
+}
+
 pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress, VictoryError> {
     let organization = state.player_organization().ok_or(VictoryError::NoPlayer)?;
     let total_districts = state.world().neighborhoods().count();
@@ -558,6 +589,7 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .len();
     let mut rackets_by_district: BTreeMap<_, (i128, u64)> = BTreeMap::new();
     let mut captains_by_district = BTreeMap::<NeighborhoodId, BTreeSet<CharacterId>>::new();
+    let mut mature_workers_by_district = BTreeMap::<NeighborhoodId, u64>::new();
     for racket in own_rackets.iter().filter(|enterprise| {
         established_for(
             state.now(),
@@ -575,6 +607,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
                         .entry(district)
                         .or_default()
                         .insert(racket.manager());
+                    *mature_workers_by_district.entry(district).or_default() +=
+                        proven_racket_associates(state, racket);
                 }
             }
         }
@@ -601,10 +635,37 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         })
         .copied()
         .collect::<BTreeSet<_>>();
-    // Territorial control and independent command must hold in the SAME
-    // districts; two disjoint sets of three cannot combine into a victory.
+    let mut rival_workers_by_district = BTreeMap::<NeighborhoodId, u64>::new();
+    for racket in state
+        .enterprises()
+        .active_enterprises()
+        .filter(|racket| racket.organization() != organization)
+    {
+        if let Some(district) = racket_district(racket) {
+            *rival_workers_by_district.entry(district).or_default() +=
+                u64::from(racket.associates());
+        }
+    }
+    let workforce_ready = uncontested_districts
+        .iter()
+        .filter(|&&district| {
+            let workers = mature_workers_by_district
+                .get(&district)
+                .copied()
+                .unwrap_or(0);
+            workers >= UNDERBOSS_ASSOCIATES_PER_DISTRICT
+                && workers
+                    > rival_workers_by_district
+                        .get(&district)
+                        .copied()
+                        .unwrap_or(0)
+        })
+        .copied()
+        .collect::<BTreeSet<_>>();
+    // Territorial control, proven labor and independent command must hold in
+    // the SAME districts, not in three unrelated sets of locations.
     let staffed_underboss_districts =
-        staffed_racket_districts(&uncontested_districts, &captains_by_district);
+        staffed_racket_districts(&workforce_ready, &captains_by_district);
     let own_active = state
         .enterprises()
         .enterprises_for_organization(organization)
@@ -646,6 +707,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         required_underboss_districts,
         own_active_racket_districts,
         established_racket_districts: established_racket_districts.len(),
+        mature_associates: mature_workers_by_district.values().sum(),
+        workforce_ready_districts: workforce_ready.len(),
         staffed_underboss_districts,
         legitimate_daily_net: Money::from_cents(
             (legitimate_window_net / income_window)

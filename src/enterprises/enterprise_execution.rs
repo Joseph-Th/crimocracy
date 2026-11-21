@@ -4,6 +4,7 @@ mod cycle_planning;
 mod economics;
 mod establishment;
 mod lifecycle;
+mod staffing;
 mod succession;
 mod support;
 
@@ -23,9 +24,11 @@ pub(crate) use support::{
 pub use cycle_planning::decide_enterprise_cycle;
 pub(crate) use cycle_planning::enterprise_heat_change_is_reportable;
 
+pub use economics::ASSOCIATE_ADDITIONAL_DAILY_WAGE;
 pub(crate) use economics::{
-    decode_enterprise_investigation_case_count, resolve_enterprise_financial_projection,
-    resolve_enterprise_operating_cost_projection, resolve_historical_enterprise_cycle_financials,
+    EnterpriseProjectionStaffing, decode_enterprise_investigation_case_count,
+    resolve_enterprise_financial_projection, resolve_enterprise_operating_cost_projection,
+    resolve_historical_enterprise_cycle_financials,
 };
 #[cfg(test)]
 use establishment::enterprise_location_is_occupied;
@@ -35,6 +38,9 @@ pub use lifecycle::{
     ValidatedEnterpriseStatusChange, validate_resume_enterprise, validate_retire_enterprise,
     validate_suspend_enterprise,
 };
+pub(crate) use staffing::ensure_manager_capacity;
+pub(crate) use staffing::{MAX_ASSOCIATES_PER_MANAGER, MAX_RACKETS_PER_MANAGER};
+pub use staffing::{ValidatedEnterpriseStaffing, validate_staff_enterprise};
 pub use succession::{ValidatedEnterpriseReassignment, validate_reassign_enterprise};
 
 use crate::core::attention::AttentionClass;
@@ -184,6 +190,26 @@ pub enum EnterpriseError {
     EnterpriseAuthorityUnchanged(EnterpriseId),
     #[error("enterprise {0} has a settlement due; settle or suspend it before reassigning")]
     EnterpriseReassignmentCycleDue(EnterpriseId),
+    #[error("racket {enterprise} staffing must be between {minimum} and {maximum} associates")]
+    InvalidAssociateCount {
+        enterprise: EnterpriseId,
+        minimum: u16,
+        maximum: u16,
+    },
+    #[error("racket {0} already has that many associates")]
+    EnterpriseStaffingUnchanged(EnterpriseId),
+    #[error("racket {0} has a settlement due; settle or suspend it before changing staffing")]
+    EnterpriseStaffingCycleDue(EnterpriseId),
+    #[error(
+        "manager {manager} cannot oversee {rackets} active rackets and {associates} associates (limits {max_rackets} rackets, {max_associates} associates)"
+    )]
+    ManagerCapacityExceeded {
+        manager: crate::core::id::CharacterId,
+        rackets: u16,
+        associates: u32,
+        max_rackets: u16,
+        max_associates: u16,
+    },
     #[error("enterprise {0} is not active")]
     EnterpriseNotActive(EnterpriseId),
     #[error("enterprise {0} is not suspended")]

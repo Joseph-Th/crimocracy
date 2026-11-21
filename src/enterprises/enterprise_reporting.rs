@@ -6,8 +6,8 @@ use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::enterprises::autonomous_planning::resolve_observed_district_pressure;
 use crate::enterprises::enterprise_execution::{
-    EnterpriseError, resolve_enterprise_financial_projection, resolve_location_neighborhood,
-    validate_establish_enterprise,
+    EnterpriseError, EnterpriseProjectionStaffing, resolve_enterprise_financial_projection,
+    resolve_location_neighborhood, validate_establish_enterprise,
 };
 use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseRecord};
 use crate::finance::Money;
@@ -97,6 +97,7 @@ pub fn resolve_enterprise_outlook(
             support_count: record.supporting_businesses().len(),
             manager: record.manager(),
             cash: record.cash_account(),
+            associates: record.associates(),
         },
     )
 }
@@ -119,6 +120,7 @@ pub fn preview_enterprise_establishment(
             support_count: draft.supporting_businesses.len(),
             manager: draft.authority.manager,
             cash: draft.cash_account,
+            associates: draft.kind.baseline_associates(),
         },
     )
 }
@@ -130,6 +132,7 @@ struct OutlookConfiguration {
     support_count: usize,
     manager: CharacterId,
     cash: FinancialAccountId,
+    associates: u16,
 }
 
 fn resolve_configuration_outlook(
@@ -154,8 +157,11 @@ fn resolve_configuration_outlook(
             configuration.kind,
             configuration.location,
             configuration.support_count,
-            manager.capability(CapabilityKind::Management),
             case_count,
+            EnterpriseProjectionStaffing {
+                management: manager.capability(CapabilityKind::Management),
+                associates: configuration.associates,
+            },
         )
         .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))
     };

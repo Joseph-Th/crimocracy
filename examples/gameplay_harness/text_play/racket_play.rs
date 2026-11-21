@@ -227,6 +227,9 @@ impl Session<'_> {
                             .collect::<Vec<_>>(),
                     )
                     .unwrap();
+                    writeln!(out, "  Rank-and-file associates: {} (baseline {}, maximum {}); additional hires earn 1500 cents/day each in operating costs",
+                        enterprise.associates(), enterprise.kind().baseline_associates(),
+                        enterprise.kind().max_associates()).unwrap();
                     let book = state
                         .finance()
                         .get_account(enterprise.cash_account())
@@ -545,6 +548,27 @@ impl Session<'_> {
                         .status()
                 )
                 .unwrap();
+            }
+            "staff-racket" => {
+                let raw = parse_number(words[1], "enterprise")?;
+                let associates = words[2]
+                    .parse::<u16>()
+                    .map_err(|_| "associate count must be a nonnegative integer".to_owned())?;
+                let enterprise = state
+                    .enterprises()
+                    .enterprises_for_organization(self.player)
+                    .find(|enterprise| enterprise.id().raw() == raw)
+                    .ok_or("no owned enterprise with that ID")?
+                    .id();
+                crimocracy::enterprises::enterprise_execution::validate_staff_enterprise(
+                    &self.state,
+                    enterprise,
+                    associates,
+                )
+                .map_err(|error| error.to_string())?
+                .commit(&mut self.state)
+                .map_err(|error| error.to_string())?;
+                writeln!(out, "Racket enterprise-{raw}: {associates} rank-and-file associates assigned. Extra pay and local-demand output take effect at the next settlement.").unwrap();
             }
             _ => unreachable!("command routed to the wrong handler"),
         }

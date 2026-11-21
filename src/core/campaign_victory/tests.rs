@@ -737,7 +737,7 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
             },
         )
         .unwrap();
-        validate_establish_enterprise(
+        let second_racket = validate_establish_enterprise(
             &registry,
             &city.state,
             EnterpriseDraft {
@@ -753,6 +753,15 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
                 cash_account: cash,
                 settlement_account: settlement,
             },
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+        // Field strength must actually earn its way into territorial standing.
+        crate::enterprises::enterprise_execution::validate_staff_enterprise(
+            &city.state,
+            second_racket,
+            if index == 0 { 7 } else { 8 },
         )
         .unwrap()
         .commit(&mut city.state)
@@ -847,6 +856,8 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     }
     let established = progress(&registry, &city.state).unwrap();
     assert!(established.established_racket_districts >= established.required_underboss_districts);
+    assert_eq!(established.workforce_ready_districts, 3);
+    assert!(established.mature_associates >= 36);
     assert_eq!(established.staffed_underboss_districts, 3);
     assert_eq!(established.required_underboss_personnel, 10);
     assert!(established.key_personnel < established.required_underboss_personnel);
@@ -876,6 +887,41 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         ready.required_underboss_districts
     );
     assert!(ready.racket_self_sufficient);
+    // New hires need operating history; buying a field crew after day 90
+    // cannot instantly transform the same mature income into territorial force.
+    let mut instant_hiring =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    let home_expansion = instant_hiring
+        .enterprises()
+        .enterprises_for_organization(city.player)
+        .find(|racket| {
+            racket.kind() == EnterpriseKind::Gambling
+                && racket.id() != city.starter_racket
+                && matches!(racket.location(), EnterpriseLocation::Business(venue)
+                    if instant_hiring.world().get_business(venue).unwrap().neighborhood() == home)
+        })
+        .unwrap()
+        .id();
+    crate::enterprises::enterprise_execution::validate_staff_enterprise(
+        &instant_hiring,
+        home_expansion,
+        8,
+    )
+    .unwrap()
+    .commit(&mut instant_hiring)
+    .unwrap();
+    let instant = progress(&registry, &instant_hiring).unwrap();
+    assert_eq!(instant.key_personnel, ready.key_personnel);
+    assert_eq!(
+        instant.established_racket_districts,
+        ready.established_racket_districts
+    );
+    assert_eq!(instant.workforce_ready_districts, 2);
+    assert_eq!(
+        validate_claim_victory(&registry, &instant_hiring, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+    validate_state_against_registry(&registry, &instant_hiring).unwrap();
     // Reassigning one established district's second racket to its first
     // captain leaves the same profits, payroll, membership and territory,
     // but destroys the independent local command structure.

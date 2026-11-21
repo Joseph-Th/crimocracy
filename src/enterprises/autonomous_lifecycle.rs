@@ -16,8 +16,9 @@ use crate::enterprises::autonomous_planning::{
     resolve_observed_district_pressure,
 };
 use crate::enterprises::enterprise_execution::{
-    EnterpriseError, ValidatedEnterpriseStatusChange, resolve_enterprise_financial_projection,
-    validate_resume_enterprise, validate_retire_enterprise,
+    EnterpriseError, EnterpriseProjectionStaffing, ValidatedEnterpriseStatusChange,
+    resolve_enterprise_financial_projection, validate_resume_enterprise,
+    validate_retire_enterprise,
 };
 use crate::finance::Money;
 use crate::registry::Registry;
@@ -105,6 +106,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             Err(EnterpriseError::Delegation(DelegationError::DetainedManager { .. }))
             | Err(EnterpriseError::HostBusinessSuspended { .. })
             | Err(EnterpriseError::SupportingBusinessSuspended { .. })
+            | Err(EnterpriseError::ManagerCapacityExceeded { .. })
             | Err(EnterpriseError::VersionCapacity(_))
             | Err(EnterpriseError::SimulationTimeOverflow) => continue,
             Err(error) => return Err(error.into()),
@@ -156,8 +158,11 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
                 enterprise.kind(),
                 enterprise.location(),
                 enterprise.supporting_businesses().len(),
-                manager_record.capability(CapabilityKind::Management),
                 observed_active_cases,
+                EnterpriseProjectionStaffing {
+                    management: manager_record.capability(CapabilityKind::Management),
+                    associates: enterprise.associates(),
+                },
             )?;
         if expected_net_cash <= Money::ZERO {
             continue;

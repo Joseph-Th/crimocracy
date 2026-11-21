@@ -63,6 +63,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod autonomous_expansion;
 mod cycle_boundaries;
+mod staffing;
 mod succession;
 mod vice_observations;
 
@@ -1304,6 +1305,8 @@ struct EnterpriseAssignmentWire {
     supporting_businesses: BTreeSet<BusinessId>,
     cash_account: FinancialAccountId,
     settlement_account: FinancialAccountId,
+    associates: u16,
+    previous_associates: BTreeMap<SimTime, u16>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1338,6 +1341,8 @@ fn enterprise_wire(record: &crate::enterprises::EnterpriseRecord) -> EnterpriseR
             supporting_businesses: record.supporting_businesses().clone(),
             cash_account: record.cash_account(),
             settlement_account: record.settlement_account(),
+            associates: record.associates(),
+            previous_associates: record.previous_associates().clone(),
         },
         runtime: EnterpriseRuntimeWire {
             status: record.status(),

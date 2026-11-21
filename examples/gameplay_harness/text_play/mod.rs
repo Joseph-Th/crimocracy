@@ -105,6 +105,8 @@ const HELP: &str = "Commands:
   victory                View optional political, retirement, and city-underboss ending requirements
   claim-victory <political|retirement|underboss>
                          Choose an eligible permanent campaign ending
+  staff-racket <enterprise-id> <associate-count>
+                         Hire or release rank-and-file racket workers within the local staffing limit
   attention [exception|crisis on|off]  Inspect or configure optional auto-pauses
   people                 Your current organization members
   known-people           Your members, identified people, and approach-ready prospects
@@ -481,7 +483,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "recruit" | "scout" => 2..=3,
         "start-racket" | "preview-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
-        "racket" | "reassign-racket" | "launder" | "sweep" | "decide" | "business" => 3..=3,
+        "racket" | "reassign-racket" | "staff-racket" | "launder" | "sweep" | "decide"
+        | "business" => 3..=3,
         "move" | "deposit" | "fund-street" => 4..=4,
         "dispose" => 5..=5,
         "reports" | "treasury" => 1..=2,
@@ -1069,6 +1072,28 @@ impl<'a> Session<'a> {
                     .is_some()
             })
             .count();
+        let active_associates: u64 = state
+            .enterprises()
+            .enterprises_for_organization(player)
+            .filter(|racket| racket.status() == EnterpriseStatus::Active)
+            .map(|racket| u64::from(racket.associates()))
+            .sum();
+        let inactive_associates: u64 = state
+            .enterprises()
+            .enterprises_for_organization(player)
+            .filter(|racket| racket.status() == EnterpriseStatus::Suspended)
+            .map(|racket| u64::from(racket.associates()))
+            .sum();
+        let incremental_labor_wages: u64 = state
+            .enterprises()
+            .enterprises_for_organization(player)
+            .filter(|racket| racket.status() == EnterpriseStatus::Active)
+            .map(|racket| {
+                u64::from(racket.associates() - racket.kind().baseline_associates())
+                    * crimocracy::enterprises::enterprise_execution::ASSOCIATE_ADDITIONAL_DAILY_WAGE
+                        .cents() as u64
+            })
+            .sum();
         let latest = state
             .reports()
             .reports_for(player)
@@ -1077,7 +1102,8 @@ impl<'a> Session<'a> {
                 format!("Report {}: {}", report.id().raw(), report.title())
             });
         format!(
-            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} ({suspended_venues} suspended) | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nDaily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)\nRealized operating net (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs payroll {payroll_gap:+} cents/day (excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | suspended storefronts: {suspended_venues} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
+            "{name} | {} | {} ({})\nPeople: {members} named | Associates: {active_associates} active, {inactive_associates} suspended | Venues: {venues} ({suspended_venues} suspended) | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nNamed-member daily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)
+Additional associate wages: {incremental_labor_wages} cents/day through racket operating expenses (baseline workers included in fixed racket costs)\nRealized operating net (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs payroll {payroll_gap:+} cents/day (excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | suspended storefronts: {suspended_venues} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
             time_label(state.now().as_minutes()),
             self.district,
             self.district_variant,

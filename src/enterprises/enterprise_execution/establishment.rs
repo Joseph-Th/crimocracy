@@ -66,6 +66,13 @@ impl ValidatedEnterpriseEstablishment {
             self.draft.location,
             &self.draft.supporting_businesses,
         )?;
+        ensure_manager_capacity(
+            state,
+            self.draft.organization,
+            self.draft.authority.manager,
+            self.draft.kind.baseline_associates(),
+            None,
+        )?;
         match &self.account_openings {
             Some(openings) => {
                 validate_enterprise_accounts_with_planned_settlement(
@@ -157,6 +164,13 @@ fn validate_establish_enterprise_with_optional_openings(
 ) -> Result<ValidatedEnterpriseEstablishment, EnterpriseError> {
     let definition = registry.get_enterprise(draft.kind);
     let authority = resolve_mandate_authority(state, draft.authority)?;
+    ensure_manager_capacity(
+        state,
+        draft.organization,
+        draft.authority.manager,
+        draft.kind.baseline_associates(),
+        None,
+    )?;
     validate_enterprise_environment(
         state,
         draft.organization,

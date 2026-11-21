@@ -619,8 +619,11 @@ fn autonomous_lifecycle_resumes_with_exact_required_working_capital() {
         record.kind(),
         record.location(),
         record.supporting_businesses().len(),
-        management,
         0,
+        EnterpriseProjectionStaffing {
+            management,
+            associates: record.associates(),
+        },
     )
     .expect("suspended enterprise economics should resolve");
     assert!(expected_net_cash > Money::ZERO);

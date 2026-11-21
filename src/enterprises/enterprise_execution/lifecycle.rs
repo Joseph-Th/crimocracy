@@ -108,6 +108,13 @@ impl ValidatedEnterpriseStatusChange {
         ensure_version_can_advance(record.version(), "enterprise")?;
         if let Some(authority) = self.authority {
             ensure_mandate_authority_current(state, authority)?;
+            ensure_manager_capacity(
+                state,
+                record.organization(),
+                record.manager(),
+                record.associates(),
+                Some(record.id()),
+            )?;
             validate_enterprise_environment(
                 state,
                 record.organization(),
@@ -223,6 +230,13 @@ pub fn validate_resume_enterprise(
     }
     ensure_version_can_advance(record.version(), "enterprise")?;
     let authority = resolve_mandate_authority(state, record.authority())?;
+    ensure_manager_capacity(
+        state,
+        record.organization(),
+        record.manager(),
+        record.associates(),
+        Some(record.id()),
+    )?;
     validate_enterprise_environment(
         state,
         record.organization(),

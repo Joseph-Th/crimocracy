@@ -6,7 +6,8 @@ mod candidate_planning;
 mod cohort_planning;
 
 use crate::core::id::{
-    BusinessId, EnterpriseId, FinancialAccountId, IdKind, MandateId, NeighborhoodId, OrganizationId,
+    BusinessId, CharacterId, EnterpriseId, FinancialAccountId, IdKind, MandateId, NeighborhoodId,
+    OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
@@ -54,6 +55,7 @@ struct ExpansionEconomicsContext<'a> {
     registry: &'a Registry,
     state: &'a AppState,
     organization: OrganizationId,
+    manager: CharacterId,
     observed_district_pressure: &'a ObservedDistrictPressure,
     occupied_locations: &'a BTreeSet<(EnterpriseKind, EnterpriseLocation)>,
     management: Option<Rating>,
@@ -211,6 +213,7 @@ fn decide_autonomous_expansion(
         registry: iteration.registry,
         state: iteration.state,
         organization,
+        manager: mandate.manager(),
         observed_district_pressure: iteration.observed_district_pressure,
         occupied_locations,
         management,

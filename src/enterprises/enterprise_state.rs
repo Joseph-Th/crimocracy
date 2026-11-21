@@ -518,6 +518,18 @@ impl EnterpriseState {
         record.runtime.version = advance_version_preflighted(record.runtime.version);
     }
 
+    /// Preserve the outgoing complement for cycles at or before this instant.
+    pub(super) fn set_associates(&mut self, id: EnterpriseId, associates: u16, at: SimTime) {
+        let record = self.records.get_mut(&id).expect("validated racket exists");
+        record
+            .assignment
+            .previous_associates
+            .entry(at)
+            .or_insert(record.assignment.associates);
+        record.assignment.associates = associates;
+        record.runtime.version = advance_version_preflighted(record.runtime.version);
+    }
+
     pub(super) fn set_status(
         &mut self,
         id: EnterpriseId,

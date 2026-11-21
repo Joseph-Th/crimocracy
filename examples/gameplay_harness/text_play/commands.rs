@@ -153,10 +153,14 @@ impl Session<'_> {
                     standing.key_personnel, standing.required_underboss_personnel,
                     standing.staffed_underboss_districts, standing.required_underboss_districts,
                     crimocracy::core::campaign_victory::UNDERBOSS_CAPTAINS_PER_DISTRICT).unwrap();
+                writeln!(out, "    Proven rank-and-file associates: {} across mature rackets; economically uncontested districts with at least {} proven associates and more active associates than rivals combined: {} / {}",
+                    standing.mature_associates,
+                    crimocracy::core::campaign_victory::UNDERBOSS_ASSOCIATES_PER_DISTRICT,
+                    standing.workforce_ready_districts, standing.required_underboss_districts).unwrap();
                 writeln!(out, "    Mature racket income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.racket_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.racket_self_sufficient { "yes" } else { "no" }).unwrap();
-                out.push_str("    A proven captain personally directed 20 profitable settlements in the last 30 days. Named personnel are the command roster; routine racket labor is abstracted in operating expenses, not individual character records.\n");
+                out.push_str("    A captain must direct 20 profitable settlements in 30 days; associate strength must have operated for 20 profitable cycles. Named personnel lead rank-and-file workers, whose compensation is paid through racket operating costs.\n");
                 writeln!(out, "  Productive mature districts require 90 days of ownership/operation, 20 profitable settlements in the last 30 days, a settlement within 7 days, and 30-day net income sufficient for one crew member's daily wage ({} cents/day).",
                     self.registry.upkeep().per_member_daily().cents()).unwrap();
                 out.push_str(
@@ -481,7 +485,8 @@ impl Session<'_> {
                 out = self.execute_business_commands(&words)?;
             }
             "enterprises" | "racket-outlook" | "racket-kinds" | "start-racket"
-            | "preview-racket" | "racket" | "resume-rackets" | "reassign-racket" => {
+            | "preview-racket" | "racket" | "resume-rackets" | "reassign-racket"
+            | "staff-racket" => {
                 out = self.execute_racket_commands(&words)?;
             }
             "case-brief" => {

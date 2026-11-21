@@ -9,6 +9,26 @@ use crate::finance::Money;
 use crate::registry::{EnterpriseEconomicsDefinition, Registry};
 use crate::world::{CapabilityKind, NeighborhoodProfile, Rating};
 
+/// Baseline labor is already included in authored operating costs. Additional
+/// associates earn $15 per cycle and generate demand-dependent additional gross.
+pub const ASSOCIATE_ADDITIONAL_DAILY_WAGE: Money = Money::from_cents(1_500);
+
+pub(crate) fn additional_associate_economics(
+    kind: EnterpriseKind,
+    profile: NeighborhoodProfile,
+    associates: u16,
+) -> Option<(Money, Money)> {
+    let extra = i64::from(associates.checked_sub(kind.baseline_associates())?);
+    let economy = profile.economy;
+    let per_associate = i64::from(economy.illicit_demand.value()) * 20
+        + i64::from(economy.commercial_activity.value()) * 12
+        + i64::from(economy.wealth.value()) * 4;
+    Some((
+        Money::from_cents(per_associate.checked_mul(extra)?),
+        ASSOCIATE_ADDITIONAL_DAILY_WAGE.checked_mul(extra)?,
+    ))
+}
+
 pub(super) fn resolve_gross_before_variance(
     enterprise: EnterpriseId,
     economics: &EnterpriseEconomicsDefinition,
@@ -154,19 +174,29 @@ pub(crate) fn resolve_enterprise_operating_cost_projection(
 /// district pressure. Returns `(operating_cost, expected_net_cash)`. This is a read-only decision
 /// input, not a persisted forecast: an eventual cycle still draws its authored variance and reads
 /// the actual case pressure through the production settlement path.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EnterpriseProjectionStaffing {
+    pub management: Option<Rating>,
+    pub associates: u16,
+}
+
 pub(crate) fn resolve_enterprise_financial_projection(
     registry: &Registry,
     state: &AppState,
     kind: EnterpriseKind,
     location: EnterpriseLocation,
     supporting_business_count: usize,
-    management: Option<Rating>,
     observed_active_cases: u32,
+    staffing: EnterpriseProjectionStaffing,
 ) -> Result<(Money, Money), EnterpriseError> {
     let profile = resolve_location_profile(state, location)?;
     let economics = registry.get_enterprise(kind).economics();
     let projection_overflow = || EnterpriseError::ProjectionArithmeticOverflow { kind, location };
-    let gross = resolve_gross_before_variance_value(economics, profile, management)
+    let (labor_revenue, labor_cost) =
+        additional_associate_economics(kind, profile, staffing.associates)
+            .ok_or_else(projection_overflow)?;
+    let gross = resolve_gross_before_variance_value(economics, profile, staffing.management)
+        .and_then(|gross| gross.checked_add(labor_revenue))
         .ok_or_else(projection_overflow)?;
     let operating_cost = resolve_enterprise_operating_cost_projection(
         registry,
@@ -175,7 +205,9 @@ pub(crate) fn resolve_enterprise_financial_projection(
         location,
         supporting_business_count,
         observed_active_cases,
-    )?;
+    )?
+    .checked_add(labor_cost)
+    .ok_or_else(projection_overflow)?;
     let expected_net_cash = gross
         .checked_sub(operating_cost)
         .ok_or_else(projection_overflow)?;
@@ -228,12 +260,20 @@ pub(crate) fn resolve_historical_enterprise_cycle_financials(
         .world
         .get_character(manager_id)
         .ok_or(DelegationError::MissingManager(manager_id))?;
+    let (labor_revenue, labor_cost) = additional_associate_economics(
+        record.kind(),
+        profile,
+        record.associates_at(cycle.occurred_at()),
+    )
+    .ok_or(EnterpriseError::ArithmeticOverflow(record.id()))?;
     let gross_before_variance = resolve_gross_before_variance(
         record.id(),
         economics,
         profile,
         manager.capability(CapabilityKind::Management),
-    )?;
+    )?
+    .checked_add(labor_revenue)
+    .ok_or(EnterpriseError::ArithmeticOverflow(record.id()))?;
     let gross_revenue = resolve_basis_point_variance(record.id(), gross_before_variance, variance)?;
     let heat = cycle.investigation_heat();
     if decode_enterprise_investigation_case_count(economics, heat).is_none() {
@@ -246,7 +286,9 @@ pub(crate) fn resolve_historical_enterprise_cycle_financials(
         heat,
         record.id(),
     )?
-    .total;
+    .total
+    .checked_add(labor_cost)
+    .ok_or(EnterpriseError::ArithmeticOverflow(record.id()))?;
     let net_cash = gross_revenue
         .checked_sub(operating_cost)
         .ok_or(EnterpriseError::ArithmeticOverflow(record.id()))?;

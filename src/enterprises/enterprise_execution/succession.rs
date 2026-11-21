@@ -32,6 +32,13 @@ pub fn validate_reassign_enterprise(
         if record.next_cycle_at().is_some_and(|due| due <= state.now()) {
             return Err(EnterpriseError::EnterpriseReassignmentCycleDue(enterprise));
         }
+        ensure_manager_capacity(
+            state,
+            record.organization(),
+            authority.manager,
+            record.associates(),
+            Some(enterprise),
+        )?;
     }
     validate_enterprise_environment(
         state,

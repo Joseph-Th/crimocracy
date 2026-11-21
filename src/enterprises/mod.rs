@@ -70,6 +70,34 @@ pub const ALL_ENTERPRISE_KINDS: [EnterpriseKind; 19] = [
     EnterpriseKind::MunicipalGraft,
 ];
 
+/// Rackets have rank-and-file operating crews in addition to their named managers.
+/// Baseline labor is included in the existing authored base operating cost; only
+/// additional associates add explicit daily compensation and incremental output.
+/// An associate is not an independently controllable or informed Character.
+impl EnterpriseKind {
+    pub fn baseline_associates(self) -> u16 {
+        match self {
+            Self::Protection | Self::Fencing | Self::Counterfeiting => 4,
+            Self::Gambling
+            | Self::LaborRacketeering
+            | Self::NumbersRacket
+            | Self::SlotMachineRoute
+            | Self::PrizeFighting => 5,
+            Self::AlcoholDistribution
+            | Self::Brothel
+            | Self::AutoTheftRing
+            | Self::NarcoticsTrade => 6,
+            Self::Speakeasy | Self::Smuggling => 7,
+            Self::Bookmaking | Self::LoanSharking | Self::Fraud | Self::MunicipalGraft => 3,
+            Self::Blackmail => 2,
+        }
+    }
+
+    pub fn max_associates(self) -> u16 {
+        self.baseline_associates() + 8
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum EnterpriseLocation {
     Neighborhood(NeighborhoodId),
@@ -101,6 +129,10 @@ struct EnterpriseAssignment {
     supporting_businesses: BTreeSet<BusinessId>,
     cash_account: FinancialAccountId,
     settlement_account: FinancialAccountId,
+    /// Active enterprise labor complement. A prior entry records the last
+    /// settlement minute for which the outgoing complement remained effective.
+    associates: u16,
+    previous_associates: BTreeMap<SimTime, u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -175,6 +207,22 @@ impl EnterpriseRecord {
 
     pub fn settlement_account(&self) -> FinancialAccountId {
         self.assignment.settlement_account
+    }
+
+    pub fn associates(&self) -> u16 {
+        self.assignment.associates
+    }
+
+    pub fn associates_at(&self, at: SimTime) -> u16 {
+        self.assignment
+            .previous_associates
+            .range(at..)
+            .next()
+            .map_or(self.associates(), |(_, &count)| count)
+    }
+
+    pub(crate) fn previous_associates(&self) -> &BTreeMap<SimTime, u16> {
+        &self.assignment.previous_associates
     }
 
     pub fn status(&self) -> EnterpriseStatus {
@@ -334,6 +382,8 @@ fn build_enterprise_record(
             supporting_businesses,
             cash_account,
             settlement_account,
+            associates: kind.baseline_associates(),
+            previous_associates: BTreeMap::new(),
         },
         runtime: EnterpriseRuntime {
             status: EnterpriseStatus::Active,
