@@ -275,22 +275,11 @@ and recently acquired storefronts still reject ordinary reference bids while
 accepting an exceptional 180-day-income buyout. The tests preserve the original
 90-day investment protection, seller wage-base constraints, private refusal,
 and title/ledger state through save and restoration.
-The actual generated day-1951 campaign save is a player-level regression: its
-negative street account rejects capitalization, the separate zero-balance
-street account receives funds, spendable and net balances remain distinct,
-and its suspended gambling enterprise can subsequently resume. The same saved
-city originally rejected 48 consecutive offers of eight million cents because
-26 rival-owned properties were held for less than ninety days and five were
-committed to non-retired rackets. After the exceptional-buyout rule was added,
-business 35 rejected a 3,143,699-cent offer but accepted 3,143,700 cents,
-its exact standard-price-plus-180-day-forecast buyout threshold, transferring
-title and restarting the business economy. These observations are read-only with respect
-to the persisted campaign: run without saving over the original evidence.
 `economy_history.rs` lists historical business and enterprise cycles from
 their existing indexed queries, restricted to current player assets and to
 business cycles actually earned during player ownership.
 
-Optional campaign-victory proofs in `core::campaign_victory::tests` exercise insufficient clean funds and unchanged state, accounted personal leader/crew payouts with exact money preservation, stale tokens, a live council contact plus acquired operating businesses across city districts, uncontested district influence and relative racket strength, and terminal behavior across save/reload. `cargo test-focused campaign_victory` is the narrow lane. Text-play `victory` is deliberately informational; `claim-victory` is the only ending action and must reject ineligible claims without mutation. Historical saves lacking the appended victory event remain playable; a victorious saved state must refuse subsequent ticks with no clock or record mutation.
+Optional campaign-victory proofs in `core::campaign_victory::tests` exercise insufficient clean funds and unchanged state, accounted personal leader/crew payouts with exact money preservation, stale tokens, a live council contact plus acquired operating businesses across city districts, uncontested district influence and relative racket strength, and terminal behavior across save/reload. `cargo test-focused campaign_victory` is the narrow lane. Text-play `victory` is deliberately informational; `claim-victory` is the only ending action and must reject ineligible claims without mutation. A victorious saved state must refuse subsequent ticks with no clock or record mutation.
 
 Start with `cargo text-play --generate --seed 12 --city-size small`
 or `cargo text-play --seed 12` for reproducibility and use `help` for

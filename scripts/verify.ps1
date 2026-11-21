@@ -16,12 +16,10 @@
 # everything. Skips are printed as SKIP lines with reasons, never silent.
 #
 # The broad gate intentionally stops at canonical smoke. Harness implementation
-# contracts (`cargo test-harness`, ~12s of full-arc sessions) stay in the
-# Harness lane so persistence/invariant checkpoints do not rebuild and rerun
-# the example test binary on every change. Run the Harness lane when harness
-# code itself changes; use `cargo test-harness <filter>` or
-# `verify -Harness -Filter <pat>` plus `cargo harness-rush/-press/-recon`
-# for sub-second harness iteration.
+# contracts (`cargo test-harness`) stay in the Harness lane so persistence/invariant
+# checkpoints do not rebuild and rerun the example test binary on every change.
+# Run the Harness lane when harness code itself changes; for focused iteration use
+# `cargo test-harness <filter>` or `verify -Harness -Filter <pat>`.
 #
 # Soak-class stress (`soak` substring) stays explicit (`cargo soak`) in every
 # lane, including filtered lanes: `-Filter <pat>` excludes soak unless the
