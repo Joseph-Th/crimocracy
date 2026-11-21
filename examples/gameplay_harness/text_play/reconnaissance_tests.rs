@@ -44,6 +44,72 @@ fn market_and_intelligence_browsing_preserve_knowledge_boundaries() {
     assert!(outlook.contains("Forecast net:"));
     assert!(outlook.contains("Negotiated reference offer:"));
     assert!(outlook.contains("seller consent is not guaranteed"));
+    assert!(outlook.contains("Purchase status:"));
+    assert!(outlook.contains("not incremental profit"));
+    let owned = session
+        .state
+        .world()
+        .businesses_owned_by_organization(session.player)
+        .next()
+        .unwrap()
+        .id();
+    let owned_outlook = session
+        .execute(&format!("business-outlook {}", owned.raw()))
+        .unwrap()
+        .0;
+    assert!(owned_outlook.contains("already owned"), "{owned_outlook}");
+    let listed = session
+        .state
+        .world()
+        .public_business_directory()
+        .find(|(id, _, _, _)| {
+            session.state.world().get_business(*id).unwrap().owner()
+                == crimocracy::world::BusinessOwner::Independent
+        })
+        .unwrap()
+        .0;
+    let listed_outlook = session
+        .execute(&format!("business-outlook {}", listed.raw()))
+        .unwrap()
+        .0;
+    assert!(
+        listed_outlook.contains("independently listed"),
+        "{listed_outlook}"
+    );
+    let unlisted = session
+        .state
+        .world()
+        .public_business_directory()
+        .find(|(id, _, _, _)| {
+            matches!(
+                session.state.world().get_business(*id).unwrap().owner(),
+                crimocracy::world::BusinessOwner::Organization(owner) if owner != session.player
+            )
+        })
+        .unwrap()
+        .0;
+    let unlisted_outlook = session
+        .execute(&format!("business-outlook {}", unlisted.raw()))
+        .unwrap()
+        .0;
+    assert!(
+        unlisted_outlook.contains("not available for direct purchase"),
+        "{unlisted_outlook}"
+    );
+    assert!(
+        !unlisted_outlook.contains("owned by organization"),
+        "public outlook must not disclose the seller's organization"
+    );
+    let political = session.execute("victory").unwrap().0;
+    assert!(
+        political.contains("Owned political district readiness (own books only)"),
+        "{political}"
+    );
+    assert!(
+        political.contains("continuously owned for 90 days"),
+        "{political}"
+    );
+    assert!(political.contains("mature 30d net"), "{political}");
     assert!(session.execute("business-outlook 999999").is_err());
     assert!(session.execute("business-outlook").is_err());
     assert!(session.execute("business-outlook 1 2").is_err());

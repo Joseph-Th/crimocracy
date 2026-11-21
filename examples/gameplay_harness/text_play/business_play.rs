@@ -5,6 +5,57 @@ use crimocracy::intelligence::InformationTopic;
 use crimocracy::world::BusinessOwner;
 
 impl Session<'_> {
+    fn settle_laundering(&mut self, business: BusinessId, cents: i64) -> Result<u32, String> {
+        let owner = FinancialOwner::Organization(self.player);
+        let accounted_account = self
+            .state
+            .finance()
+            .accounts_for(owner)
+            .find(|account| account.kind() == AccountKind::AccountedFunds)
+            .ok_or("no accounted-funds account")?
+            .id();
+        let street_account = self
+            .state
+            .finance()
+            .accounts_for(owner)
+            .filter(|account| {
+                account.kind() == AccountKind::StreetCash
+                    && account.available_payment_balance().cents() >= cents
+            })
+            .max_by_key(|account| {
+                (
+                    account.balance().cents(),
+                    std::cmp::Reverse(account.id().raw()),
+                )
+            })
+            .ok_or("no street-cash account holds the requested amount")?
+            .id();
+        let capacity =
+            remaining_laundering_capacity(self.registry, &self.state, self.player, business)
+                .ok_or("business has no active cash-intensive laundering channel")?;
+        if capacity.cents() < cents {
+            return Err(format!(
+                "front can absorb only {} more cents this cycle",
+                capacity.cents()
+            ));
+        }
+        validate_launder_funds(
+            self.registry,
+            &self.state,
+            LaunderingDraft {
+                organization: self.player,
+                street_account,
+                business,
+                accounted_account,
+                amount: Money::from_cents(cents),
+            },
+        )
+        .map_err(|error| error.to_string())?
+        .commit(&mut self.state)
+        .map(|transaction| transaction.raw())
+        .map_err(|error| error.to_string())
+    }
+
     pub(super) fn execute_business_commands(&mut self, words: &[&str]) -> Result<String, String> {
         let state = &self.state;
         let mut out = String::new();
@@ -103,6 +154,16 @@ impl Session<'_> {
                 )
                 .map_err(|error| error.to_string())?;
                 writeln!(out, "Public appraisal for business-{raw} (all directory competitors operating normally):").unwrap();
+                let owned = state.world().get_business(business).is_some_and(|record| {
+                    record.owner() == BusinessOwner::Organization(self.player)
+                });
+                if owned {
+                    out.push_str("  Purchase status: already owned by your organization.\n");
+                } else if acquisition_offer(self.registry, state, self.player, business).is_some() {
+                    writeln!(out, "  Purchase status: independently listed; use 'buy {raw}' (funds checked at purchase).").unwrap();
+                } else {
+                    writeln!(out, "  Purchase status: not available for direct purchase; 'offer {raw} <cents>' may work for an organization-held property, but seller identity and consent are not public.").unwrap();
+                }
                 writeln!(
                     out,
                     "  Standard acquisition price: {} cents",
@@ -116,13 +177,19 @@ impl Session<'_> {
                     appraisal.cycle_minutes
                 )
                 .unwrap();
-                writeln!(
-                    out,
-                    "  Negotiated reference offer: {} cents; seller consent is not guaranteed.",
-                    appraisal.reference_offer_cents
-                )
-                .unwrap();
-                out.push_str("  This estimate excludes actual books, disruptions, variance, owner obligations, and private seller commitments.");
+                if owned {
+                    out.push_str(
+                        "  Negotiated offer: not applicable to a property you already own.\n",
+                    );
+                } else {
+                    writeln!(
+                        out,
+                        "  Negotiated reference offer: {} cents; seller consent is not guaranteed.",
+                        appraisal.reference_offer_cents
+                    )
+                    .unwrap();
+                }
+                out.push_str("  Standalone normal-operations estimate, not incremental profit to your existing portfolio. Another nearby business can lose sales after acquisition. This estimate excludes actual books, disruptions, variance, owner obligations, and private seller commitments.");
             }
             "market" => {
                 for (id, name, kind, district) in state.world().public_business_directory() {
@@ -168,70 +235,135 @@ impl Session<'_> {
                 writeln!(out, "Business {raw}: {:?}.", economy.status()).unwrap();
             }
             "launder" => {
-                if words.len() != 3 {
-                    return Err("launder <business-id> <cents>".to_owned());
-                }
                 let raw = parse_number(words[1], "business")?;
-                let cents = words[2]
-                    .parse::<i64>()
-                    .ok()
-                    .filter(|cents| *cents > 0)
-                    .ok_or("launder needs a positive amount in cents")?;
                 let business = state
                     .world()
                     .businesses_owned_by_organization(self.player)
                     .find(|business| business.id().raw() == raw)
                     .ok_or("not an owned business")?
                     .id();
-                let accounted_account = state
-                    .finance()
-                    .accounts_for(FinancialOwner::Organization(self.player))
-                    .find(|account| account.kind() == AccountKind::AccountedFunds)
-                    .ok_or("no accounted-funds account")?
-                    .id();
-                let street_account = state
-                    .finance()
-                    .accounts_for(FinancialOwner::Organization(self.player))
-                    .filter(|account| {
-                        account.kind() == AccountKind::StreetCash
-                            && account.balance().cents() >= cents
-                    })
-                    .max_by_key(|account| {
-                        (
-                            account.balance().cents(),
-                            std::cmp::Reverse(account.id().raw()),
-                        )
-                    })
-                    .ok_or("no street-cash account holds the requested amount")?
-                    .id();
-                let capacity = remaining_laundering_capacity(
-                    self.registry,
-                    &self.state,
-                    self.player,
-                    business,
-                )
-                .ok_or("business has no active cash-intensive laundering channel")?;
-                if capacity.cents() < cents {
-                    return Err(format!(
-                        "front can absorb only {} more cents this cycle",
-                        capacity.cents()
-                    ));
-                }
-                let transaction = validate_launder_funds(
-                    self.registry,
-                    &self.state,
-                    LaunderingDraft {
-                        organization: self.player,
-                        street_account,
+                let cents = if words[2] == "max" {
+                    let capacity = remaining_laundering_capacity(
+                        self.registry,
+                        &self.state,
+                        self.player,
                         business,
-                        accounted_account,
-                        amount: Money::from_cents(cents),
-                    },
+                    )
+                    .ok_or("business has no active cash-intensive laundering channel")?
+                    .cents();
+                    let largest_street = self
+                        .state
+                        .finance()
+                        .accounts_for(FinancialOwner::Organization(self.player))
+                        .filter(|account| account.kind() == AccountKind::StreetCash)
+                        .map(|account| account.available_payment_balance().cents())
+                        .max()
+                        .unwrap_or(0);
+                    let amount = capacity.min(largest_street);
+                    if amount <= 0 {
+                        return Err(format!(
+                            "no available laundering amount: front room {capacity} cents, largest spendable street account {largest_street} cents"
+                        ));
+                    }
+                    amount
+                } else {
+                    words[2]
+                        .parse::<i64>()
+                        .ok()
+                        .filter(|cents| *cents > 0)
+                        .ok_or("launder needs a positive amount in cents or 'max'")?
+                };
+                let transaction = self.settle_laundering(business, cents)?;
+                writeln!(out, "Laundered {cents} cents at business-{raw} as transaction-{transaction}. Fees and accounted proceeds are recorded in the ledger.").unwrap();
+            }
+            "launder-all" => {
+                let reserve = words[1]
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|amount| *amount >= 0)
+                    .ok_or("launder-all needs a nonnegative street-cash reserve in cents")?;
+                // One explicit player order, not a standing autonomous policy. Every storefront
+                // is independently settled through the finance owner at this same minute.
+                let fronts = state
+                    .world()
+                    .businesses_owned_by_organization(self.player)
+                    .filter(|business| {
+                        remaining_laundering_capacity(
+                            self.registry,
+                            state,
+                            self.player,
+                            business.id(),
+                        )
+                        .is_some_and(|amount| amount.cents() > 0)
+                    })
+                    .map(|business| business.id())
+                    .collect::<Vec<_>>();
+                let mut converted = 0_i128;
+                let mut settled = 0_usize;
+                let mut skipped = 0_usize;
+                for business in fronts {
+                    let accounts = self
+                        .state
+                        .finance()
+                        .accounts_for(FinancialOwner::Organization(self.player))
+                        .filter(|account| account.kind() == AccountKind::StreetCash)
+                        .collect::<Vec<_>>();
+                    let total_spendable: i128 = accounts
+                        .iter()
+                        .map(|account| {
+                            i128::from(account.available_payment_balance().cents().max(0))
+                        })
+                        .sum();
+                    let budget = (total_spendable - i128::from(reserve))
+                        .max(0)
+                        .min(i128::from(i64::MAX)) as i64;
+                    if budget == 0 {
+                        break;
+                    }
+                    let largest_street = accounts
+                        .iter()
+                        .map(|account| account.available_payment_balance().cents())
+                        .max()
+                        .unwrap_or(0);
+                    let capacity = remaining_laundering_capacity(
+                        self.registry,
+                        &self.state,
+                        self.player,
+                        business,
+                    )
+                    .map_or(0, |room| room.cents());
+                    let amount = budget.min(capacity).min(largest_street);
+                    if amount <= 0 {
+                        continue;
+                    }
+                    match self.settle_laundering(business, amount) {
+                        Ok(transaction) => {
+                            converted += i128::from(amount);
+                            settled += 1;
+                            writeln!(
+                                out,
+                                "  business-{}: {} street cents through transaction-{}",
+                                business.raw(),
+                                amount,
+                                transaction
+                            )
+                            .unwrap();
+                        }
+                        Err(error) => {
+                            skipped += 1;
+                            writeln!(out, "  business-{}: skipped, {}", business.raw(), error)
+                                .unwrap();
+                        }
+                    }
+                }
+                if settled == 0 && skipped == 0 {
+                    out.push_str("  No eligible front capacity or street cash above the requested reserve.\n");
+                }
+                writeln!(
+                    out,
+                    "Laundering order complete: {converted} street cents converted at {settled} front(s), {skipped} failed; requested street-cash reserve {reserve} cents. Fees reduce accounted proceeds. Review 'accounts' and 'ledger'."
                 )
-                .map_err(|e| e.to_string())?
-                .commit(&mut self.state)
-                .map_err(|e| e.to_string())?;
-                writeln!(out, "Laundering settled as transaction {}. Fees and accounted proceeds are recorded in the ledger.", transaction.raw()).unwrap();
+                .unwrap();
             }
             "businesses" => {
                 out.push_str("Owned storefronts:\n");

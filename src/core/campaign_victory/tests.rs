@@ -379,6 +379,16 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     assert!(early.owned_operating_business_districts >= early.required_political_districts);
     assert_eq!(early.established_political_contacts, 0);
     assert_eq!(early.established_business_districts, 0);
+    let early_districts = political_district_progress(&registry, &city.state).unwrap();
+    assert_eq!(
+        early_districts
+            .iter()
+            .filter(|row| row.active_owned > 0)
+            .count(),
+        early.owned_operating_business_districts
+    );
+    assert!(early_districts.iter().all(|row| !row.qualifies));
+    assert!(early_districts.iter().all(|row| row.mature_active == 0));
     let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(
         validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
@@ -460,11 +470,27 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     );
     assert!(established.legitimate_self_sufficient);
     assert!(established.legitimate_daily_net >= established.daily_payroll);
+    let mature_districts = political_district_progress(&registry, &city.state).unwrap();
+    assert_eq!(
+        mature_districts.iter().filter(|row| row.qualifies).count(),
+        established.established_business_districts,
+        "district-level view must agree with the victory validator"
+    );
+    assert!(
+        mature_districts
+            .iter()
+            .filter(|row| row.qualifies)
+            .all(|row| row.established_active > 0 && row.mature_window_net > Money::ZERO)
+    );
     let restored_before_claim =
         restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(
         progress(&registry, &restored_before_claim).unwrap(),
         established
+    );
+    assert_eq!(
+        political_district_progress(&registry, &restored_before_claim).unwrap(),
+        mature_districts
     );
     let mut overstaffed =
         restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
@@ -491,6 +517,12 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     let stale_progress = progress(&registry, &stale).unwrap();
     assert_eq!(stale_progress.established_business_districts, 0);
     assert_eq!(stale_progress.legitimate_daily_net, Money::ZERO);
+    assert!(
+        political_district_progress(&registry, &stale)
+            .unwrap()
+            .iter()
+            .all(|row| !row.qualifies)
+    );
     assert_eq!(
         validate_claim_victory(&registry, &stale, VictoryPath::PoliticalPower).err(),
         Some(VictoryError::PoliticalNotReady)

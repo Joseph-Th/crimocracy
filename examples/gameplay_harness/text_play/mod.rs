@@ -119,7 +119,7 @@ const HELP: &str = "Commands:
   counsel                Current custody, prosecution, representation and unpaid fines
   counsel all            All known staff arrest matters, including quiet history
   counsel arrest-N       Full details for a known staff arrest
-  recovery               Suspended rackets, their managers, and validated resumption blockers
+  recovery               Suspended rackets and storefronts, with actionable recovery blockers
   retain <arrest-id> <legal-contact-id> <fee-cents>
                          Retain legal counsel for a current member's known case
   end-counsel <representation-id> <concluded|replace|withdraw>
@@ -150,7 +150,9 @@ const HELP: &str = "Commands:
                          Settled revenue and costs under your ownership
   buy <business-id>      Acquire a listed business at its standard price using clean funds
   offer <business-id> <cents>  Make a binding offer for an organization-owned business
-  launder <business-id> <cents>  Convert street cash via an owned front
+  launder <business-id> <cents|max>  Convert an amount or remaining affordable front capacity
+  launder-all <street-reserve-cents>
+                         One-time conversion through owned fronts, preserving a street-cash reserve
   enterprises            Your rackets and their operating status
   racket-kinds           Available racket kinds and venue requirements
   start-racket <kind> <business-id|district-id> <cash-id> <settlement-id> [support-business-id...] [manager=char-N]
@@ -158,6 +160,7 @@ const HELP: &str = "Commands:
   preview-racket <same arguments as start-racket>
                          Validate an investment and estimate earnings without establishing it
   racket <id> <suspend|resume|retire>  Change your racket's lifecycle
+  resume-rackets <id> [id...]  Resume selected suspended rackets in one validated order
   reassign-racket <id> <member-id>  Transfer management without replacing the racket
   racket-cycles <enterprise-id> [count]
                          Historical racket earnings and enforcement attention
@@ -473,6 +476,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         | "districts" | "known-targets" | "debriefs" | "case-brief" => 1..=1,
         "counsel" => 1..=2,
         "recovery" => 1..=1,
+        "launder-all" => 2..=2,
+        "resume-rackets" => 2..=32,
         "recruit" | "scout" => 2..=3,
         "start-racket" | "preview-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,
@@ -961,6 +966,18 @@ impl<'a> Session<'a> {
             .world()
             .businesses_owned_by_organization(player)
             .count();
+        let suspended_venues = state
+            .world()
+            .businesses_owned_by_organization(player)
+            .filter(|business| {
+                state
+                    .economy()
+                    .get_business_economy(business.id())
+                    .is_some_and(|economy| {
+                        economy.status() == crimocracy::economy::BusinessOperatingStatus::Suspended
+                    })
+            })
+            .count();
         let rackets = state
             .enterprises()
             .enterprises_for_organization(player)
@@ -1060,7 +1077,7 @@ impl<'a> Session<'a> {
                 format!("Report {}: {}", report.id().raw(), report.title())
             });
         format!(
-            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nDaily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)\nRealized operating net (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs payroll {payroll_gap:+} cents/day (excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
+            "{name} | {} | {} ({})\nPeople: {members} | Venues: {venues} ({suspended_venues} suspended) | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nDaily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)\nRealized operating net (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs payroll {payroll_gap:+} cents/day (excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | suspended storefronts: {suspended_venues} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
             time_label(state.now().as_minutes()),
             self.district,
             self.district_variant,

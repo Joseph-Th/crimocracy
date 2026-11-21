@@ -42,6 +42,265 @@ fn starting_cash(session: &Session<'_>) -> u32 {
 }
 
 #[test]
+fn recovered_acquired_storefront_never_leaks_previous_owners_cycle_books() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let independent = session
+        .state
+        .world()
+        .public_business_directory()
+        .find(|(id, _, _, _)| {
+            session.state.world().get_business(*id).unwrap().owner() == BusinessOwner::Independent
+        })
+        .unwrap()
+        .0;
+    session.execute("advance 1d").unwrap();
+    let previous = session
+        .state
+        .economy()
+        .cycles_for(independent)
+        .next_back()
+        .expect("public independent storefront settles in the first day");
+    assert_ne!(
+        previous.owner(),
+        BusinessOwner::Organization(session.player)
+    );
+    let accounted = session
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(session.player))
+        .find(|account| account.kind() == AccountKind::AccountedFunds)
+        .unwrap()
+        .id();
+    let settlement = fresh_settlement(&mut session);
+    let settlement = session
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(session.player))
+        .find(|account| account.id().raw() == settlement)
+        .unwrap()
+        .id();
+    let now = session.state.now();
+    validate_record_transaction(
+        &session.state,
+        LedgerTransactionDraft {
+            occurred_at: now,
+            memo: "Test acquisition funding".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: accounted,
+                    amount: Money::from_cents(2_000_000),
+                },
+                LedgerPosting {
+                    account: settlement,
+                    amount: Money::from_cents(-2_000_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    session
+        .execute(&format!("buy {}", independent.raw()))
+        .unwrap();
+    session
+        .execute(&format!("business {} suspend", independent.raw()))
+        .unwrap();
+    let before = snapshot(&registry, &session);
+    let recovery = session.execute("recovery").unwrap().0;
+    assert!(
+        recovery.contains(&format!("business-{}", independent.raw())),
+        "{recovery}"
+    );
+    assert!(
+        !recovery.contains("Last settlement:"),
+        "the latest independent-owner settlement is not the player's book: {recovery}"
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn explicit_max_and_reserved_laundering_orders_use_real_front_capacity() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let front = session
+        .state
+        .world()
+        .businesses_owned_by_organization(session.player)
+        .find(|business| {
+            remaining_laundering_capacity(&registry, &session.state, session.player, business.id())
+                .is_some_and(|room| room.cents() > 0)
+        })
+        .unwrap()
+        .id();
+    let first_room =
+        remaining_laundering_capacity(&registry, &session.state, session.player, front)
+            .unwrap()
+            .cents();
+    let street = starting_cash(&session);
+    let street_before = session
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(session.player))
+        .find(|account| account.id().raw() == street)
+        .unwrap()
+        .available_payment_balance()
+        .cents();
+    let before = snapshot(&registry, &session);
+    for command in [
+        "launder-all -1",
+        "launder-all nope",
+        "launder-all",
+        "launder-all 0 extra",
+    ] {
+        assert!(session.execute(command).is_err(), "{command}");
+        assert_eq!(before, snapshot(&registry, &session));
+    }
+    let reserve = street_before - 10_000;
+    let first = session
+        .execute(&format!("launder-all {reserve}"))
+        .unwrap()
+        .0;
+    assert!(first.contains("10000 street cents converted"), "{first}");
+    assert!(first.contains("transaction-"), "{first}");
+    let street_after = session
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(session.player))
+        .find(|account| account.id().raw() == street)
+        .unwrap()
+        .available_payment_balance()
+        .cents();
+    assert_eq!(
+        street_after, reserve,
+        "batch must preserve the requested reserve"
+    );
+    let first_save = snapshot(&registry, &session);
+    let repeated = session
+        .execute(&format!("launder-all {reserve}"))
+        .unwrap()
+        .0;
+    assert!(repeated.contains("0 street cents converted"), "{repeated}");
+    assert_eq!(first_save, snapshot(&registry, &session));
+
+    let additional = session.execute(&format!("launder {} max", front.raw()));
+    assert!(additional.is_ok(), "{additional:?}");
+    let remaining = remaining_laundering_capacity(&registry, &session.state, session.player, front)
+        .unwrap()
+        .cents();
+    assert!(remaining < first_room);
+    let no_room = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute(&format!("launder {} max", front.raw()))
+            .is_err()
+    );
+    assert_eq!(no_room, snapshot(&registry, &session));
+    assert!(
+        session
+            .execute("launder-all 0")
+            .unwrap()
+            .0
+            .contains("Laundering order complete")
+    );
+    let saved = snapshot(&registry, &session);
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn resume_rackets_batch_prevalidates_every_selected_lifecycle_change() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let original = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .next()
+        .unwrap();
+    let first = original.id();
+    let manager = original.manager();
+    let district = session.state.world().neighborhoods().next().unwrap().id();
+    let cash = starting_cash(&session);
+    let settlement = fresh_settlement(&mut session);
+    session
+        .execute(&format!(
+            "start-racket protection district-{} {cash} {settlement} manager=char-{}",
+            district.raw(),
+            manager.raw()
+        ))
+        .unwrap();
+    let second = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .find(|enterprise| enterprise.id() != first)
+        .unwrap()
+        .id();
+
+    session
+        .execute(&format!("racket {} suspend", first.raw()))
+        .unwrap();
+    let before = snapshot(&registry, &session);
+    for command in [
+        format!("resume-rackets {} {}", first.raw(), first.raw()),
+        format!("resume-rackets {} 999999", first.raw()),
+        format!("resume-rackets {} {}", first.raw(), second.raw()),
+    ] {
+        assert!(session.execute(&command).is_err(), "{command}");
+        assert_eq!(before, snapshot(&registry, &session));
+    }
+    session
+        .execute(&format!("racket {} suspend", second.raw()))
+        .unwrap();
+    let before = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute(&format!("resume-rackets {} 999999", first.raw()))
+            .is_err()
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    let response = session
+        .execute(&format!("resume-rackets {} {}", second.raw(), first.raw()))
+        .unwrap()
+        .0;
+    assert!(
+        response.contains("Resumed 2 selected racket(s)"),
+        "{response}"
+    );
+    for id in [first, second] {
+        assert_eq!(
+            session
+                .state
+                .enterprises()
+                .get_enterprise(id)
+                .unwrap()
+                .status(),
+            EnterpriseStatus::Active
+        );
+    }
+    let saved = snapshot(&registry, &session);
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn reassign_racket_preserves_cycle_history_and_rejects_unmandated_members() {
     let registry = crimocracy::build_registry();
     let mut session =
@@ -495,6 +754,26 @@ fn text_play_owned_business_can_pause_and_resume_without_laundering_reset() {
             .contains("Suspended")
     );
     let stopped = snapshot(&registry, &session);
+    let recovery = session.execute("recovery").unwrap().0;
+    assert!(
+        recovery.contains("Suspended storefront recovery"),
+        "{recovery}"
+    );
+    assert!(
+        recovery.contains(&format!(
+            "Can resume manually: business {} resume",
+            front.raw()
+        )),
+        "{recovery}"
+    );
+    assert!(
+        session
+            .execute("brief")
+            .unwrap()
+            .0
+            .contains("suspended storefronts: 1")
+    );
+    assert_eq!(stopped, snapshot(&registry, &session));
     assert!(
         session
             .execute(&format!("launder {} 1000", front.raw()))
@@ -518,6 +797,10 @@ fn text_play_owned_business_can_pause_and_resume_without_laundering_reset() {
         remaining_laundering_capacity(&registry, &session.state, session.player, front).unwrap(),
         "resuming a storefront must not reset its laundering budget"
     );
+    assert!(!session.execute("recovery").unwrap().0.contains(&format!(
+        "Can resume manually: business {} resume",
+        front.raw()
+    )));
     session
         .execute(&format!("racket {} resume", racket.raw()))
         .unwrap();

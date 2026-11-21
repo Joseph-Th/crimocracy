@@ -7,7 +7,7 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
     BusinessId, CharacterId, HistoryEventId, IdExhaustionError, IdKind, LedgerTransactionId,
-    OrganizationId, ReportId,
+    NeighborhoodId, OrganizationId, ReportId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current};
@@ -87,6 +87,22 @@ pub struct VictoryProgress {
     pub retirement_total: Money,
     /// Only valid in a full simulation context; do not expose hidden rival standing in the player client.
     underboss_ready: bool,
+}
+
+/// Political progress using only the player's owned business titles and settlements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoliticalDistrictProgress {
+    pub district: NeighborhoodId,
+    pub active_owned: usize,
+    pub suspended_owned: usize,
+    /// Active businesses continuously owned at least 90 days.
+    pub mature_active: usize,
+    /// Mature businesses with fresh settlements and at least 20 profitable cycles in 30 days.
+    pub established_active: usize,
+    /// Last 30 days' net from all mature, active owned storefronts in this district.
+    pub mature_window_net: Money,
+    /// Has an established storefront and enough combined mature net to fund one member for 30 days.
+    pub qualifies: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -271,6 +287,78 @@ fn established_business(state: &AppState, business: BusinessId, owner: Organizat
         == VICTORY_PROFITABLE_CYCLES
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct BusinessDistrictStanding {
+    active: usize,
+    suspended: usize,
+    mature: usize,
+    established: usize,
+    window_net: i128,
+}
+
+impl BusinessDistrictStanding {
+    fn qualifies(self, local_income_floor: i128) -> bool {
+        self.established > 0 && self.window_net >= local_income_floor && self.window_net > 0
+    }
+}
+
+/// Own-books political readiness by district. This excludes unknown rival
+/// operations and shares the same mature-title, settlement and income rules
+/// as the authoritative victory validator.
+pub fn political_district_progress(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<Vec<PoliticalDistrictProgress>, VictoryError> {
+    let organization = state.player_organization().ok_or(VictoryError::NoPlayer)?;
+    let local_income_floor = i128::from(registry.upkeep().per_member_daily().cents())
+        * i128::from(VICTORY_INCOME_WINDOW_DAYS);
+    Ok(business_district_standings(state, organization)
+        .into_iter()
+        .map(|(district, standing)| PoliticalDistrictProgress {
+            district,
+            active_owned: standing.active,
+            suspended_owned: standing.suspended,
+            mature_active: standing.mature,
+            established_active: standing.established,
+            mature_window_net: Money::from_cents(
+                standing
+                    .window_net
+                    .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+            ),
+            qualifies: standing.qualifies(local_income_floor),
+        })
+        .collect())
+}
+
+fn business_district_standings(
+    state: &AppState,
+    owner: OrganizationId,
+) -> BTreeMap<NeighborhoodId, BusinessDistrictStanding> {
+    let mut standings = BTreeMap::<NeighborhoodId, BusinessDistrictStanding>::new();
+    for business in state.world().businesses_owned_by_organization(owner) {
+        let Some(economy) = state.economy().get_business_economy(business.id()) else {
+            continue;
+        };
+        let entry = standings.entry(business.neighborhood()).or_default();
+        if economy.status() == BusinessOperatingStatus::Suspended {
+            entry.suspended += 1;
+            continue;
+        }
+        if economy.status() != BusinessOperatingStatus::Active {
+            continue;
+        }
+        entry.active += 1;
+        if mature_business_title(state, business.id(), owner) {
+            entry.mature += 1;
+            entry.window_net += recent_business_net(state, business.id(), owner);
+            if established_business(state, business.id(), owner) {
+                entry.established += 1;
+            }
+        }
+    }
+    standings
+}
+
 fn established_racket(state: &AppState, racket: &crate::enterprises::EnterpriseRecord) -> bool {
     if !established_for(
         state.now(),
@@ -312,43 +400,19 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
     // from that district's own mature operations. A few barely-profitable
     // storefronts cannot substitute for actual local economic leverage.
     let local_income_floor = per_member_wage * income_window;
-    let owned_businesses = state
-        .world()
-        .businesses_owned_by_organization(organization)
-        .filter(|business| {
-            state
-                .economy()
-                .get_business_economy(business.id())
-                .is_some_and(|economy| economy.status() == BusinessOperatingStatus::Active)
-        })
-        .collect::<Vec<_>>();
-    let owned_operating_business_districts = owned_businesses
-        .iter()
-        .map(|business| business.neighborhood())
-        .collect::<BTreeSet<_>>()
-        .len();
-    let mut legitimate_net_by_district: BTreeMap<_, i128> = BTreeMap::new();
-    let mut qualified_business_districts = BTreeSet::new();
-    for business in owned_businesses
-        .iter()
-        .filter(|business| mature_business_title(state, business.id(), organization))
-    {
-        *legitimate_net_by_district
-            .entry(business.neighborhood())
-            .or_default() += recent_business_net(state, business.id(), organization);
-        if established_business(state, business.id(), organization) {
-            qualified_business_districts.insert(business.neighborhood());
-        }
-    }
-    let established_business_districts = legitimate_net_by_district
-        .iter()
-        .filter(|(district, net)| {
-            qualified_business_districts.contains(district)
-                && **net >= local_income_floor
-                && **net > 0
-        })
+    let business_standings = business_district_standings(state, organization);
+    let owned_operating_business_districts = business_standings
+        .values()
+        .filter(|standing| standing.active > 0)
         .count();
-    let legitimate_window_net = legitimate_net_by_district.values().sum::<i128>();
+    let established_business_districts = business_standings
+        .values()
+        .filter(|standing| standing.qualifies(local_income_floor))
+        .count();
+    let legitimate_window_net = business_standings
+        .values()
+        .map(|standing| standing.window_net)
+        .sum::<i128>();
     let political_contacts = state
         .contacts()
         .contacts_for_sponsor(organization)

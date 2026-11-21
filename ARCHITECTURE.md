@@ -104,7 +104,15 @@ owner-scoped operating cycles over a bounded trailing 30-day window and compare
 their daily net with current payroll, without projecting hidden case activity or
 counting laundering as operating income. The text client also projects own
 suspended rackets through the enterprise owner's conditional outlook and exact
-canonical resume validator, but never selects a recovery move for the player.
+canonical resume validator, and suspended storefronts through the legitimate
+business lifecycle validator. Players may explicitly select a set of rackets to
+resume in one prevalidated order. One-time reserve-bounded laundering orders
+use the existing finance owner for each storefront, report any partial failure,
+and never create a standing or autonomous player move. No recovery or conversion
+command infers foreign owner identities or hidden police investigations.
+Political district progress is a read-only own-books projection derived from the
+same mature-title, recent-settlement, and income calculation as victory
+eligibility; it exposes neither hidden rival territory nor independent policy.
 Contact-channel reassignment is a contacts-owner validated transaction: the
 replacement handler must be available, belong to the sponsor, and maintain a
 live social relationship to the same institutional source. The old handler may

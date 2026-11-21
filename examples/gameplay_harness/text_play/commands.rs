@@ -102,6 +102,46 @@ impl Session<'_> {
                 writeln!(out, "    Mature legitimate income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.legitimate_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
+                let local_floor = i128::from(self.registry.upkeep().per_member_daily().cents())
+                    * i128::from(crimocracy::core::campaign_victory::VICTORY_INCOME_WINDOW_DAYS);
+                let districts = crimocracy::core::campaign_victory::political_district_progress(
+                    self.registry,
+                    &self.state,
+                )
+                .map_err(|error| error.to_string())?;
+                out.push_str("    Owned political district readiness (own books only):\n");
+                if districts.is_empty() {
+                    out.push_str("      No operating or suspended owned storefronts.\n");
+                }
+                for district in districts {
+                    let name = state
+                        .world()
+                        .get_neighborhood(district.district)
+                        .map_or("unknown", |record| record.name());
+                    let reason = if district.qualifies {
+                        "locally qualified"
+                    } else if district.active_owned == 0 {
+                        "no active storefronts; check 'recovery'"
+                    } else if district.mature_active == 0 {
+                        "needs an active storefront continuously owned for 90 days"
+                    } else if district.established_active == 0 {
+                        "needs a mature storefront with 20 profitable cycles in 30 days and a recent settlement"
+                    } else {
+                        "mature storefront income below one member's 30-day wages"
+                    };
+                    writeln!(
+                        out,
+                        "      district-{} {name}: {reason} | {} active, {} suspended, {} mature, {} settlement-qualified | mature 30d net {} / {} cents required",
+                        district.district.raw(),
+                        district.active_owned,
+                        district.suspended_owned,
+                        district.mature_active,
+                        district.established_active,
+                        district.mature_window_net.cents(),
+                        local_floor
+                    )
+                    .unwrap();
+                }
                 writeln!(out, "  Retirement: {} cents net accounted funds; {} cents required ({} dollars for the leader plus {} days' severance per subordinate)",
                     standing.accounted_net.cents(), standing.retirement_total.cents(),
                     crimocracy::core::campaign_victory::RETIREMENT_NEST_EGG.cents() / 100,
@@ -431,12 +471,12 @@ impl Session<'_> {
                 )
                 .unwrap();
             }
-            "directory" | "buy" | "offer" | "market" | "business" | "launder" | "businesses"
-            | "sweep" | "business-outlook" => {
+            "directory" | "buy" | "offer" | "market" | "business" | "launder" | "launder-all"
+            | "businesses" | "sweep" | "business-outlook" => {
                 out = self.execute_business_commands(&words)?;
             }
             "enterprises" | "racket-outlook" | "racket-kinds" | "start-racket"
-            | "preview-racket" | "racket" | "reassign-racket" => {
+            | "preview-racket" | "racket" | "resume-rackets" | "reassign-racket" => {
                 out = self.execute_racket_commands(&words)?;
             }
             "case-brief" => {

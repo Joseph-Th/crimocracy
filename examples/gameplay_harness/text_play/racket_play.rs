@@ -126,7 +126,60 @@ impl Session<'_> {
         if count == 0 {
             out.push_str("  No suspended rackets.\n");
         }
-        out.push_str("Resumption never happens automatically for player-owned rackets. Repeated shared-account balances are not separate reserves. Outlooks are estimates, not forecasts of undisclosed police cases.");
+        out.push_str("Suspended storefront recovery (read-only):\n");
+        let mut storefronts = 0_usize;
+        for business in self
+            .state
+            .world()
+            .businesses_owned_by_organization(self.player)
+        {
+            let Some(economy) = self.state.economy().get_business_economy(business.id()) else {
+                continue;
+            };
+            if economy.status() != crimocracy::economy::BusinessOperatingStatus::Suspended {
+                continue;
+            }
+            storefronts += 1;
+            writeln!(
+                out,
+                "  business-{} {} | district-{}",
+                business.id().raw(),
+                business.name(),
+                business.neighborhood().raw()
+            )
+            .unwrap();
+            if let Some(cycle) =
+                self.state
+                    .economy()
+                    .cycles_for(business.id())
+                    .rev()
+                    .find(|cycle| {
+                        cycle.owner() == crimocracy::world::BusinessOwner::Organization(self.player)
+                    })
+            {
+                writeln!(
+                    out,
+                    "    Last settlement: {} | net {:+} cents | disrupted: {}",
+                    time_label(cycle.occurred_at().as_minutes()),
+                    cycle.net_cash().cents(),
+                    cycle.disrupted()
+                )
+                .unwrap();
+            }
+            match validate_resume_business_economy(self.registry, &self.state, business.id()) {
+                Ok(_) => writeln!(
+                    out,
+                    "    Can resume manually: business {} resume",
+                    business.id().raw()
+                )
+                .unwrap(),
+                Err(error) => writeln!(out, "    Resumption blocked: {error}").unwrap(),
+            }
+        }
+        if storefronts == 0 {
+            out.push_str("  No suspended storefronts.\n");
+        }
+        out.push_str("Rackets and storefronts remain suspended until resumed by the player. Use 'resume-rackets <id> [id...]' for a one-time validated multi-racket order. Repeated shared-account balances are not separate reserves. Outlooks are estimates, not forecasts of undisclosed police cases.");
         out
     }
 
@@ -381,6 +434,42 @@ impl Session<'_> {
                     )
                     .unwrap();
                 }
+            }
+            "resume-rackets" => {
+                // The player explicitly selects every racket. Validate the full cohort
+                // before resuming any of them, so a blocked manager cannot cause a
+                // partial batch. Independent version-pinned status changes then commit
+                // in stable enterprise-ID order without changing shared finances.
+                let mut selected = BTreeSet::new();
+                for raw in &words[1..] {
+                    let id = parse_number(raw, "enterprise")?;
+                    let enterprise = state
+                        .enterprises()
+                        .enterprises_for_organization(self.player)
+                        .find(|enterprise| enterprise.id().raw() == id)
+                        .ok_or(format!("enterprise-{id} is not yours"))?
+                        .id();
+                    if !selected.insert(enterprise) {
+                        return Err(format!("enterprise-{id} was selected more than once"));
+                    }
+                }
+                let plans = selected
+                    .iter()
+                    .map(|id| {
+                        validate_resume_enterprise(self.registry, &self.state, *id)
+                            .map_err(|error| format!("enterprise-{}: {error}", id.raw()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for plan in plans {
+                    plan.commit(&mut self.state)
+                        .map_err(|error| error.to_string())?;
+                }
+                writeln!(
+                    out,
+                    "Resumed {} selected racket(s): {}. Every requested resumption passed validation before the first change.",
+                    selected.len(),
+                    selected.iter().map(|id| format!("enterprise-{}", id.raw())).collect::<Vec<_>>().join(", ")
+                ).unwrap();
             }
             "reassign-racket" => {
                 let raw = parse_number(words[1], "enterprise")?;
