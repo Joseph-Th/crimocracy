@@ -94,12 +94,15 @@ impl Session<'_> {
                     "Optional endings (claim-victory <political|retirement|underboss>):"
                 )
                 .unwrap();
-                writeln!(out, "  Political: {} active political contact(s); operating owned businesses in {}/{} districts (half the city required)",
-                    standing.active_political_contacts, standing.owned_operating_business_districts, standing.required_political_districts).unwrap();
+                writeln!(out, "  Political: {}/{} contacts held for 30 days; operating owned businesses in {} districts, {} established for 90 days with 20 profitable cycles ({} required of {} city districts)",
+                    standing.established_political_contacts, standing.active_political_contacts,
+                    standing.owned_operating_business_districts, standing.established_business_districts,
+                    standing.required_political_districts, standing.total_districts).unwrap();
                 writeln!(out, "  Retirement: {} cents net accounted funds; {} cents required for a 50,000-dollar leader nest egg and 180 days severance per subordinate",
                     standing.accounted_net.cents(), standing.retirement_total.cents()).unwrap();
-                writeln!(out, "  Underboss: active rackets present in {}/{} required districts; uncontested control and superior strength relative to rival organizations also required",
-                    standing.own_active_racket_districts, standing.required_underboss_districts).unwrap();
+                writeln!(out, "  Underboss: active rackets in {} districts, {} established for 90 days with 20 profitable cycles ({} required); uncontested control and superior strength relative to rivals also required",
+                    standing.own_active_racket_districts, standing.established_racket_districts,
+                    standing.required_underboss_districts).unwrap();
                 out.push_str(
                     "Reaching a threshold does not end sandbox play until you claim the victory.",
                 );

@@ -10,7 +10,7 @@ use crate::core::id::{
     ReportId,
 };
 use crate::core::state::AppState;
-use crate::core::time::{SimTime, ensure_time_current};
+use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current};
 use crate::economy::BusinessOperatingStatus;
 use crate::enterprises::EnterpriseStatus;
 use crate::finance::finance_system::{
@@ -27,8 +27,8 @@ use crate::history::history_system::{
 use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_report_draft};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::OrganizationKind;
 use crate::world::territory_influence::resolve_neighborhood_influence;
+use crate::world::{BusinessOwner, OrganizationKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -53,6 +53,11 @@ impl VictoryPath {
 
 pub const RETIREMENT_NEST_EGG: Money = Money::from_cents(5_000_000);
 pub const RETIREMENT_SEVERANCE_DAYS: i64 = 180;
+/// Economic and territorial coalitions must prove they can sustain operations.
+pub const VICTORY_ESTABLISHMENT_DAYS: u64 = 90;
+pub const POLITICAL_CONTACT_DAYS: u64 = 30;
+pub const VICTORY_PROFITABLE_CYCLES: usize = 20;
+const VICTORY_RECENT_CYCLE_DAYS: u64 = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VictoryProgress {
@@ -60,8 +65,11 @@ pub struct VictoryProgress {
     pub required_political_districts: usize,
     pub owned_operating_business_districts: usize,
     pub active_political_contacts: usize,
+    pub established_political_contacts: usize,
+    pub established_business_districts: usize,
     pub required_underboss_districts: usize,
     pub own_active_racket_districts: usize,
+    pub established_racket_districts: usize,
     pub accounted_net: Money,
     pub retirement_total: Money,
     /// Only valid in a full simulation context; do not expose hidden rival standing in the player client.
@@ -77,7 +85,7 @@ pub enum VictoryError {
     #[error("Campaign over: victory has already been claimed")]
     AlreadyWon,
     #[error(
-        "legitimate political power requires a live City Council contact and operating businesses in at least half of the city's districts"
+        "legitimate political power requires a political contact held for 30 days and profitable businesses operated for 90 days in three quarters of the city's districts"
     )]
     PoliticalNotReady,
     #[error(
@@ -85,7 +93,7 @@ pub enum VictoryError {
     )]
     RetirementNotReady,
     #[error(
-        "city underboss requires uncontested influence in three quarters of districts and more active rackets than any rival"
+        "city underboss requires 90-day profitable rackets leading uncontested in three quarters of districts and more active rackets than any rival"
     )]
     UnderbossNotReady,
     #[error("retirement payment arithmetic overflow")]
@@ -143,12 +151,82 @@ fn retirement_members(
     Ok((payees, required))
 }
 
+fn established_for(now: SimTime, since: SimTime, days: u64) -> bool {
+    now.as_minutes().saturating_sub(since.as_minutes()) >= days * DAY_MINUTES
+}
+
+fn settled_recently(now: SimTime, settled: SimTime) -> bool {
+    settled <= now
+        && now.as_minutes() - settled.as_minutes() <= VICTORY_RECENT_CYCLE_DAYS * DAY_MINUTES
+}
+
+/// A recent settlement and a substantial record of profitable cycles under
+/// current title prevent an instant acquisition from inheriting the seller's
+/// political standing.
+fn established_business(
+    state: &AppState,
+    business: crate::core::id::BusinessId,
+    owner: OrganizationId,
+) -> bool {
+    let Some(record) = state.world().get_business(business) else {
+        return false;
+    };
+    let Some(change) = state
+        .world()
+        .get_business_ownership_change_for_version(business, record.version())
+    else {
+        return false;
+    };
+    let since = change.changed_at();
+    if change.new_owner() != BusinessOwner::Organization(owner)
+        || !established_for(state.now(), since, VICTORY_ESTABLISHMENT_DAYS)
+        || !state.economy().latest_cycle(business).is_some_and(|cycle| {
+            cycle.owner() == BusinessOwner::Organization(owner)
+                && settled_recently(state.now(), cycle.occurred_at())
+        })
+    {
+        return false;
+    }
+    state
+        .economy()
+        .cycles_for(business)
+        .rev()
+        .take_while(|cycle| cycle.occurred_at() >= since)
+        .filter(|cycle| {
+            cycle.owner() == BusinessOwner::Organization(owner) && cycle.net_cash() > Money::ZERO
+        })
+        .take(VICTORY_PROFITABLE_CYCLES)
+        .count()
+        == VICTORY_PROFITABLE_CYCLES
+}
+
+fn established_racket(state: &AppState, racket: &crate::enterprises::EnterpriseRecord) -> bool {
+    if !established_for(
+        state.now(),
+        racket.established_at(),
+        VICTORY_ESTABLISHMENT_DAYS,
+    ) || !racket
+        .last_cycle_at()
+        .is_some_and(|at| settled_recently(state.now(), at))
+    {
+        return false;
+    }
+    state
+        .enterprises()
+        .cycles_for(racket.id())
+        .rev()
+        .filter(|cycle| cycle.net_cash() > Money::ZERO)
+        .take(VICTORY_PROFITABLE_CYCLES)
+        .count()
+        == VICTORY_PROFITABLE_CYCLES
+}
+
 pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress, VictoryError> {
     let organization = state.player_organization().ok_or(VictoryError::NoPlayer)?;
     let total_districts = state.world().neighborhoods().count();
-    let required_political_districts = total_districts.div_ceil(2);
+    let required_political_districts = (total_districts * 3).div_ceil(4);
     let required_underboss_districts = (total_districts * 3).div_ceil(4);
-    let owned_operating_business_districts = state
+    let owned_businesses = state
         .world()
         .businesses_owned_by_organization(organization)
         .filter(|business| {
@@ -157,10 +235,19 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
                 .get_business_economy(business.id())
                 .is_some_and(|economy| economy.status() == BusinessOperatingStatus::Active)
         })
+        .collect::<Vec<_>>();
+    let owned_operating_business_districts = owned_businesses
+        .iter()
         .map(|business| business.neighborhood())
         .collect::<BTreeSet<_>>()
         .len();
-    let active_political_contacts = state
+    let established_business_districts = owned_businesses
+        .iter()
+        .filter(|business| established_business(state, business.id(), organization))
+        .map(|business| business.neighborhood())
+        .collect::<BTreeSet<_>>()
+        .len();
+    let political_contacts = state
         .contacts()
         .contacts_for_sponsor(organization)
         .filter(|contact| {
@@ -175,29 +262,52 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
                     .get_character(contact.handler())
                     .is_some_and(|handler| handler.organization() == Some(organization))
         })
+        .collect::<Vec<_>>();
+    let active_political_contacts = political_contacts.len();
+    let established_political_contacts = political_contacts
+        .iter()
+        .filter(|contact| {
+            established_for(
+                state.now(),
+                contact.established_at(),
+                POLITICAL_CONTACT_DAYS,
+            )
+        })
         .count();
     // A racketeer's district footprint is a set of its live operating locations.
     // Traverse the indexed roster once instead of rescanning every enterprise for
     // every neighborhood when the player opens the victory-progress view.
-    let own_active_racket_districts = state
+    let own_rackets = state
         .enterprises()
         .enterprises_for_organization(organization)
         .filter(|enterprise| enterprise.status() == EnterpriseStatus::Active)
-        .filter_map(|enterprise| match enterprise.location() {
+        .collect::<Vec<_>>();
+    let racket_district =
+        |enterprise: &crate::enterprises::EnterpriseRecord| match enterprise.location() {
             crate::enterprises::EnterpriseLocation::Neighborhood(id) => Some(id),
             crate::enterprises::EnterpriseLocation::Business(id) => state
                 .world()
                 .get_business(id)
                 .map(|business| business.neighborhood()),
-        })
+        };
+    let own_active_racket_districts = own_rackets
+        .iter()
+        .filter_map(|enterprise| racket_district(enterprise))
         .collect::<BTreeSet<_>>()
         .len();
+    let established_racket_districts = own_rackets
+        .iter()
+        .filter(|enterprise| established_racket(state, enterprise))
+        .filter_map(|enterprise| racket_district(enterprise))
+        .collect::<BTreeSet<_>>();
     let uncontested = state
         .world()
         .neighborhoods()
         .filter(|district| {
-            resolve_neighborhood_influence(state, district.id())
-                .is_ok_and(|summary| summary.economic_leader() == Some(organization))
+            resolve_neighborhood_influence(state, district.id()).is_ok_and(|summary| {
+                summary.economic_leader() == Some(organization)
+                    && established_racket_districts.contains(&district.id())
+            })
         })
         .count();
     let own_active = state
@@ -234,8 +344,11 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         required_political_districts,
         owned_operating_business_districts,
         active_political_contacts,
+        established_political_contacts,
+        established_business_districts,
         required_underboss_districts,
         own_active_racket_districts,
+        established_racket_districts: established_racket_districts.len(),
         accounted_net: Money::from_cents(net as i64),
         retirement_total,
         underboss_ready: total_districts > 0
@@ -260,9 +373,9 @@ fn ensure_eligible(
     let standing = progress(registry, state)?;
     match path {
         VictoryPath::PoliticalPower
-            if standing.active_political_contacts == 0
+            if standing.established_political_contacts == 0
                 || standing.total_districts == 0
-                || standing.owned_operating_business_districts
+                || standing.established_business_districts
                     < standing.required_political_districts =>
         {
             Err(VictoryError::PoliticalNotReady)

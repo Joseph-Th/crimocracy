@@ -244,7 +244,8 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         1
     );
 
-    // Purchase actual businesses in additional city districts through ordinary acquisition.
+    // Purchase actual businesses in multiple districts. A cheap same-day
+    // purchase plus the newly opened contact must not be a terminal win.
     fund(&mut city.state, city.player, 20_000_000);
     let funding = city
         .state
@@ -253,49 +254,132 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         .filter(|account| account.kind() == AccountKind::AccountedFunds)
         .map(|account| account.id())
         .collect::<BTreeSet<_>>();
-    while progress(&registry, &city.state)
-        .unwrap()
-        .owned_operating_business_districts
-        < progress(&registry, &city.state)
-            .unwrap()
-            .required_political_districts
-    {
-        let occupied = city
-            .state
-            .world()
-            .businesses_owned_by_organization(city.player)
-            .filter(|business| {
-                city.state
-                    .economy()
-                    .get_business_economy(business.id())
-                    .is_some_and(|books| books.status() == BusinessOperatingStatus::Active)
-            })
-            .map(|business| business.neighborhood())
-            .collect::<BTreeSet<_>>();
-        let listing = city
+    let districts = city
+        .state
+        .world()
+        .neighborhoods()
+        .map(|district| district.id())
+        .filter(|district| *district != city.home)
+        .take(2)
+        .collect::<Vec<_>>();
+    for district in districts {
+        let listings = city
             .state
             .world()
             .public_business_directory()
-            .find_map(|(id, _, _, district)| {
-                (!occupied.contains(&district)
-                    && city.state.world().get_business(id).unwrap().owner()
-                        == BusinessOwner::Independent)
-                    .then_some(id)
+            .filter(|(id, _, _, location)| {
+                *location == district
+                    && city.state.world().get_business(*id).unwrap().owner()
+                        == BusinessOwner::Independent
             })
-            .expect("generated city should contain independent properties outside home district");
-        validate_acquire_business(
-            &registry,
-            &city.state,
-            BusinessAcquisitionDraft {
-                organization: city.player,
-                business: listing,
-                funding_accounts: funding.clone(),
-            },
-        )
-        .unwrap()
-        .commit(&registry, &mut city.state)
-        .unwrap();
+            .take(5)
+            .map(|(id, _, _, _)| id)
+            .collect::<Vec<_>>();
+        assert!(!listings.is_empty());
+        for listing in listings {
+            validate_acquire_business(
+                &registry,
+                &city.state,
+                BusinessAcquisitionDraft {
+                    organization: city.player,
+                    business: listing,
+                    funding_accounts: funding.clone(),
+                },
+            )
+            .unwrap()
+            .commit(&registry, &mut city.state)
+            .unwrap();
+        }
     }
+    let early = progress(&registry, &city.state).unwrap();
+    assert!(early.owned_operating_business_districts >= early.required_political_districts);
+    assert_eq!(early.established_political_contacts, 0);
+    assert_eq!(early.established_business_districts, 0);
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
+        Some(VictoryError::PoliticalNotReady)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+
+    // Isolate the victory requirement: settle the owned portfolio through the
+    // economy owner at each real business cycle, without the unrelated city's
+    // autonomous operations. The full minute pipeline is exercised separately.
+    use crate::economy::business_economy_system::{
+        decide_business_cycle, validate_business_cycle_plan,
+    };
+    use crate::opportunities::OpportunityStatus;
+    use crate::opportunities::opportunity_system::validate_dismiss_opportunity;
+    let open = city
+        .state
+        .opportunities()
+        .opportunities_for_organization(city.player)
+        .filter(|opportunity| opportunity.status() == OpportunityStatus::Open)
+        .map(|opportunity| opportunity.id())
+        .collect::<Vec<_>>();
+    for opportunity in open {
+        validate_dismiss_opportunity(&registry, &city.state, opportunity)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    for day in 1..=VICTORY_ESTABLISHMENT_DAYS {
+        city.state
+            .advance_clock(crate::core::time::SimDuration::from_minutes(
+                DAY_MINUTES as u32,
+            ));
+        let businesses = city
+            .state
+            .world()
+            .businesses_owned_by_organization(city.player)
+            .map(|business| business.id())
+            .collect::<Vec<_>>();
+        for business in businesses {
+            if let Ok(plan) = decide_business_cycle(&registry, &city.state, business, 0) {
+                validate_business_cycle_plan(&city.state, plan)
+                    .unwrap()
+                    .commit(&mut city.state)
+                    .unwrap();
+            }
+        }
+        if day == POLITICAL_CONTACT_DAYS {
+            assert_eq!(
+                progress(&registry, &city.state)
+                    .unwrap()
+                    .established_political_contacts,
+                1
+            );
+            assert_eq!(
+                progress(&registry, &city.state)
+                    .unwrap()
+                    .established_business_districts,
+                0
+            );
+        }
+        if day == VICTORY_ESTABLISHMENT_DAYS - 1 {
+            assert_eq!(
+                progress(&registry, &city.state)
+                    .unwrap()
+                    .established_business_districts,
+                0
+            );
+        }
+    }
+    let established = progress(&registry, &city.state).unwrap();
+    assert!(
+        established.established_business_districts >= established.required_political_districts,
+        "qualifying productive business districts: {:?}",
+        established
+    );
+    let restored_before_claim =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        progress(&registry, &restored_before_claim).unwrap(),
+        established
+    );
     let outcome = validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower)
         .unwrap()
         .commit(&registry, &mut city.state)
@@ -444,6 +528,95 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     }
     let standing = progress(&registry, &city.state).unwrap();
     assert_eq!(standing.own_active_racket_districts, 3);
+    assert_eq!(standing.established_racket_districts, 0);
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        validate_claim_victory(&registry, &city.state, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+    validate_invariants(&city.state);
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        progress(&registry, &restored)
+            .unwrap()
+            .established_racket_districts,
+        0
+    );
+    // Elapsed clock time by itself is not operating proof; no settlements
+    // have occurred for the newly placed rackets.
+    let mut clock_only = restored;
+    clock_only.set_now_for_test(SimTime::from_minutes(
+        VICTORY_ESTABLISHMENT_DAYS * DAY_MINUTES,
+    ));
+    assert_eq!(
+        progress(&registry, &clock_only)
+            .unwrap()
+            .established_racket_districts,
+        0
+    );
+
+    use crate::enterprises::enterprise_execution::{
+        EnterpriseCycleRandomness, decide_enterprise_cycle, validate_enterprise_cycle_plan,
+    };
+    use crate::opportunities::OpportunityStatus;
+    use crate::opportunities::opportunity_system::validate_dismiss_opportunity;
+    let open = city
+        .state
+        .opportunities()
+        .opportunities_for_organization(city.player)
+        .filter(|opportunity| opportunity.status() == OpportunityStatus::Open)
+        .map(|opportunity| opportunity.id())
+        .collect::<Vec<_>>();
+    for opportunity in open {
+        validate_dismiss_opportunity(&registry, &city.state, opportunity)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    for day in 1..=VICTORY_ESTABLISHMENT_DAYS {
+        city.state
+            .advance_clock(crate::core::time::SimDuration::from_minutes(
+                DAY_MINUTES as u32,
+            ));
+        let rackets = city
+            .state
+            .enterprises()
+            .enterprises_for_organization(city.player)
+            .map(|enterprise| enterprise.id())
+            .collect::<Vec<_>>();
+        for racket in rackets {
+            let plan = decide_enterprise_cycle(
+                &registry,
+                &city.state,
+                racket,
+                EnterpriseCycleRandomness::new(
+                    0,
+                    EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+                ),
+            )
+            .unwrap();
+            validate_enterprise_cycle_plan(&city.state, plan)
+                .unwrap()
+                .commit(&mut city.state)
+                .unwrap();
+        }
+        if day == VICTORY_ESTABLISHMENT_DAYS - 1 {
+            assert_eq!(
+                progress(&registry, &city.state)
+                    .unwrap()
+                    .established_racket_districts,
+                0
+            );
+        }
+    }
+    let established = progress(&registry, &city.state).unwrap();
+    assert!(established.established_racket_districts >= established.required_underboss_districts);
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(progress(&registry, &restored).unwrap(), established);
     let outcome = validate_claim_victory(&registry, &city.state, VictoryPath::CityUnderboss)
         .unwrap()
         .commit(&registry, &mut city.state)
@@ -456,8 +629,14 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         })
     ));
     validate_invariants(&city.state);
-    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
-    assert!(restored.campaign_victory().is_some());
+    assert_eq!(
+        restore_save(&registry, build_save(&registry, &city.state).unwrap())
+            .unwrap()
+            .campaign_victory()
+            .unwrap()
+            .id(),
+        outcome.history
+    );
 }
 
 #[test]
