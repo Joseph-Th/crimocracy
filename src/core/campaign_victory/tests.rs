@@ -132,6 +132,66 @@ fn retirement_rejects_unfunded_settlement_without_mutating_books() {
 }
 
 #[test]
+fn retirement_requires_a_million_for_the_leader_plus_staff_severance() {
+    let (registry, mut state, owner, boss, _) = retirement_fixture();
+    hire_additional_staff(&mut state, owner, boss, 6);
+    let old_requirement = 10_040_000;
+    let expected_requirement = 105_040_000;
+    assert_eq!(RETIREMENT_NEST_EGG.cents(), 100_000_000);
+    assert_eq!(
+        progress(&registry, &state)
+            .unwrap()
+            .retirement_total
+            .cents(),
+        expected_requirement
+    );
+
+    fund(&mut state, owner, old_requirement);
+    assert_eq!(
+        validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).err(),
+        Some(VictoryError::RetirementNotReady)
+    );
+    fund(
+        &mut state,
+        owner,
+        expected_requirement - old_requirement - 1,
+    );
+    let before = bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(
+        validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).err(),
+        Some(VictoryError::RetirementNotReady)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap()
+    );
+
+    fund(&mut state, owner, 1);
+    validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement)
+        .unwrap()
+        .commit(&registry, &mut state)
+        .unwrap();
+    assert_eq!(
+        state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(owner))
+            .filter(|account| account.kind() == AccountKind::AccountedFunds)
+            .map(|account| account.balance().cents())
+            .sum::<i64>(),
+        0
+    );
+    validate_state_against_registry(&registry, &state).unwrap();
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    assert!(restored.campaign_victory().is_some());
+    assert_eq!(
+        run_tick(&registry, &mut restored),
+        Err(TickError::CampaignWon {
+            path: VictoryPath::FundedRetirement
+        })
+    );
+}
+
+#[test]
 fn funded_retirement_pays_boss_and_staff_and_survives_reload_as_terminal() {
     let (registry, mut state, owner, boss, member) = retirement_fixture();
     let severance = registry

@@ -102,8 +102,10 @@ impl Session<'_> {
                 writeln!(out, "    Mature legitimate income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.legitimate_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
-                writeln!(out, "  Retirement: {} cents net accounted funds; {} cents required for a 50,000-dollar leader nest egg and 180 days severance per subordinate",
-                    standing.accounted_net.cents(), standing.retirement_total.cents()).unwrap();
+                writeln!(out, "  Retirement: {} cents net accounted funds; {} cents required ({} dollars for the leader plus {} days' severance per subordinate)",
+                    standing.accounted_net.cents(), standing.retirement_total.cents(),
+                    crimocracy::core::campaign_victory::RETIREMENT_NEST_EGG.cents() / 100,
+                    crimocracy::core::campaign_victory::RETIREMENT_SEVERANCE_DAYS).unwrap();
                 writeln!(out, "  Underboss: active rackets in {} districts, {} productive mature districts ({} required); local majority and superior strength relative to rivals required",
                     standing.own_active_racket_districts, standing.established_racket_districts,
                     standing.required_underboss_districts).unwrap();

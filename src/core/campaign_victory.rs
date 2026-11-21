@@ -53,7 +53,8 @@ impl VictoryPath {
     }
 }
 
-pub const RETIREMENT_NEST_EGG: Money = Money::from_cents(5_000_000);
+/// A late-game personal retirement fund. Crew severance is additional, not part of this amount.
+pub const RETIREMENT_NEST_EGG: Money = Money::from_cents(100_000_000);
 pub const RETIREMENT_SEVERANCE_DAYS: i64 = 180;
 /// Economic and territorial coalitions must prove they can sustain operations.
 pub const VICTORY_ESTABLISHMENT_DAYS: u64 = 90;
@@ -101,7 +102,7 @@ pub enum VictoryError {
     )]
     PoliticalNotReady,
     #[error(
-        "funded retirement needs one leader, no pending decisions or active operations, and enough accounted money for the leader's nest egg and 180 days of wages for each subordinate"
+        "funded retirement needs one leader, no pending decisions or active operations, and enough accounted money for the leader's $1,000,000 nest egg plus 180 days of wages for each subordinate"
     )]
     RetirementNotReady,
     #[error(
