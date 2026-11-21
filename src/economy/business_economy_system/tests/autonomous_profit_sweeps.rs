@@ -55,12 +55,266 @@ fn player_daily_distribution_survives_restore_and_funds_payroll() {
 }
 
 use super::*;
-use crate::core::id::{BusinessId, NeighborhoodId, OrganizationId};
+use crate::core::id::{BusinessId, IdKind, NeighborhoodId, OrganizationId};
 use crate::world::world_system::{designate_player_organization, insert_character};
 use crate::world::{AutonomyLevel, CharacterDraft};
 use std::collections::BTreeMap;
 
 const ONE_DAY: u32 = 1_440;
+
+fn accounted_treasury_with_headroom(
+    state: &mut AppState,
+    organization: OrganizationId,
+    headroom: i64,
+) -> FinancialAccountId {
+    let owner = FinancialOwner::Organization(organization);
+    let accounted = insert_account(
+        state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .expect("treasury pocket opens");
+    let clearing = insert_account(
+        state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("capital counterparty opens");
+    let opening = Money::from_cents(i64::MAX - headroom);
+    validate_record_transaction(
+        state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Near-capacity legitimate treasury".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: clearing,
+                    amount: opening.checked_neg().unwrap(),
+                },
+                LedgerPosting {
+                    account: accounted,
+                    amount: opening,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("near-capacity credit is balanced")
+    .commit(state)
+    .expect("treasury capitalizes");
+    accounted
+}
+
+#[test]
+fn automatic_owner_distribution_fills_combined_partial_treasury_headroom_without_new_accounts() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(ONE_DAY));
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0).unwrap(),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let surplus =
+        resolve_available_business_profit(&fixture.state, fixture.organization, fixture.business)
+            .expect("earned business cash should be withdrawable");
+    assert!(surplus.cents() > 2);
+    let first_headroom = surplus.cents() / 2;
+    let second_headroom = surplus.cents() - first_headroom;
+    let first =
+        accounted_treasury_with_headroom(&mut fixture.state, fixture.organization, first_headroom);
+    let second =
+        accounted_treasury_with_headroom(&mut fixture.state, fixture.organization, second_headroom);
+    let next_account = fixture.state.ids.next_raw(IdKind::FinancialAccount);
+    let mut restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap())
+        .expect("near-capacity treasury must restore");
+
+    for state in [&mut fixture.state, &mut restored] {
+        let transaction_id = apply_due_autonomous_profit_sweeps(state)
+            .expect("existing treasury capacity should accept the entire distribution")
+            .expect("positive earned cash should be distributed");
+        assert_eq!(state.ids.next_raw(IdKind::FinancialAccount), next_account);
+        let transaction = state.finance().get_transaction(transaction_id).unwrap();
+        assert!(
+            transaction
+                .postings()
+                .iter()
+                .any(|entry| entry.account == first && entry.amount.cents() == first_headroom)
+        );
+        assert!(
+            transaction
+                .postings()
+                .iter()
+                .any(|entry| entry.account == second && entry.amount.cents() == second_headroom)
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(first)
+                .unwrap()
+                .balance()
+                .cents(),
+            i64::MAX
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(second)
+                .unwrap()
+                .balance()
+                .cents(),
+            i64::MAX
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(fixture.operating)
+                .unwrap()
+                .balance(),
+            Money::ZERO
+        );
+        validate_state_against_registry(&registry, state)
+            .expect("split receipts must preserve economy invariants");
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap(),
+    );
+}
+
+#[test]
+fn automatic_owner_distribution_opens_only_the_unallocated_remainder() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(ONE_DAY));
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0).unwrap(),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let surplus =
+        resolve_available_business_profit(&fixture.state, fixture.organization, fixture.business)
+            .unwrap();
+    let headroom = surplus.cents() / 2;
+    assert!(headroom > 0);
+    let existing =
+        accounted_treasury_with_headroom(&mut fixture.state, fixture.organization, headroom);
+    let next_account = fixture.state.ids.next_raw(IdKind::FinancialAccount);
+    let transaction_id = apply_due_autonomous_profit_sweeps(&mut fixture.state)
+        .expect("the remaining proceeds should open a new accounted pocket")
+        .expect("the earned surplus must be distributed");
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::FinancialAccount),
+        next_account + 1,
+    );
+    let transaction = fixture
+        .state
+        .finance()
+        .get_transaction(transaction_id)
+        .unwrap();
+    assert!(
+        transaction
+            .postings()
+            .iter()
+            .any(|entry| { entry.account == existing && entry.amount.cents() == headroom })
+    );
+    let receipts: Vec<_> = transaction
+        .postings()
+        .iter()
+        .filter(|entry| entry.amount > Money::ZERO)
+        .collect();
+    assert_eq!(receipts.len(), 2);
+    assert!(receipts.iter().any(|entry| {
+        entry.account != existing && entry.amount.cents() == surplus.cents() - headroom
+    }));
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(existing)
+            .unwrap()
+            .balance()
+            .cents(),
+        i64::MAX,
+    );
+    validate_state_against_registry(&registry, &fixture.state).unwrap();
+    restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+}
+
+#[test]
+fn automatic_owner_distribution_prefers_one_large_receiver_over_several_small_postings() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(ONE_DAY));
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0).unwrap(),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let surplus =
+        resolve_available_business_profit(&fixture.state, fixture.organization, fixture.business)
+            .unwrap();
+    assert!(surplus.cents() > 1);
+    let small = accounted_treasury_with_headroom(&mut fixture.state, fixture.organization, 1);
+    let large =
+        accounted_treasury_with_headroom(&mut fixture.state, fixture.organization, surplus.cents());
+    assert!(small < large);
+    let next_account = fixture.state.ids.next_raw(IdKind::FinancialAccount);
+    let transaction_id = apply_due_autonomous_profit_sweeps(&mut fixture.state)
+        .unwrap()
+        .expect("earned cash should reach one usable treasury pocket");
+    let transaction = fixture
+        .state
+        .finance()
+        .get_transaction(transaction_id)
+        .unwrap();
+    assert!(
+        transaction
+            .postings()
+            .iter()
+            .any(|entry| { entry.account == large && entry.amount == surplus })
+    );
+    assert!(
+        !transaction
+            .postings()
+            .iter()
+            .any(|entry| entry.account == small)
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(small)
+            .unwrap()
+            .balance()
+            .cents(),
+        i64::MAX - 1,
+    );
+    assert_eq!(
+        fixture.state.ids.next_raw(IdKind::FinancialAccount),
+        next_account
+    );
+    validate_state_against_registry(&registry, &fixture.state).unwrap();
+}
 
 fn add_boss(fixture: &mut BusinessEconomyFixture) {
     insert_character(

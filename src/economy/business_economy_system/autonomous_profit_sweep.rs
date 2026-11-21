@@ -37,8 +37,9 @@ struct OrganizationProfitPlan {
     sources: Vec<PlannedProfitSource>,
 }
 
-/// Distributes existing legitimate earnings before the daily payroll debit. A new accounted
-/// account is opened only when the owner has earned surplus but lacks a usable destination.
+/// Distributes existing legitimate earnings before the daily payroll debit. Reuse the combined
+/// receiving capacity of existing accounted-funds accounts before opening a new account; no
+/// single nearly-full treasury pocket can strand otherwise withdrawable profits.
 /// Every participating business is validated through the direct owner's retained-capital rule;
 /// the entire cross-owner ledger and all destination openings commit as one transaction.
 /// Scarce shared ledger/account IDs defer the complete batch to another day, without giving the
@@ -57,18 +58,34 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
     let mut destinations = BTreeMap::new();
     let mut opening_owners = Vec::new();
     for (organization, group) in &groups {
-        let existing = state
+        let mut remaining = group.total.cents();
+        let mut allocations = Vec::new();
+        let mut receiving_accounts: Vec<_> = state
             .finance
             .accounts_for(FinancialOwner::Organization(*organization))
-            .find(|account| {
+            .filter(|account| {
                 account.kind() == AccountKind::AccountedFunds
-                    && account.can_receive_liquid_payment(group.total)
+                    && account.can_receive_liquid_payment(Money::from_cents(1))
             })
-            .map(|account| account.id());
-        if existing.is_none() {
-            opening_owners.push(*organization);
+            .map(|account| (i64::MAX - account.balance().cents(), account.id()))
+            .collect();
+        // Prefer the largest usable pocket. This preserves the previous single-account
+        // destination when one can take the entire draw, minimizing ledger postings and
+        // version advances; ID decides only equal-capacity ties.
+        receiving_accounts
+            .sort_unstable_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+        for (capacity, account) in receiving_accounts {
+            if remaining == 0 {
+                break;
+            }
+            let amount = remaining.min(capacity);
+            allocations.push((account, Money::from_cents(amount)));
+            remaining -= amount;
         }
-        destinations.insert(*organization, existing);
+        if remaining > 0 {
+            opening_owners.push((*organization, Money::from_cents(remaining)));
+        }
+        destinations.insert(*organization, allocations);
     }
 
     let openings_count =
@@ -89,7 +106,7 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
     } else {
         let drafts = opening_owners
             .iter()
-            .map(|organization| FinancialAccountDraft {
+            .map(|(organization, _)| FinancialAccountDraft {
                 owner: FinancialOwner::Organization(*organization),
                 kind: AccountKind::AccountedFunds,
             })
@@ -97,23 +114,27 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
         Some(validate_open_accounts(state, drafts)?)
     };
     if let Some(openings) = &openings {
-        for (index, organization) in opening_owners.iter().enumerate() {
-            destinations.insert(
-                *organization,
-                Some(
+        for (index, (organization, remaining)) in opening_owners.iter().enumerate() {
+            destinations
+                .get_mut(organization)
+                .expect("an opening belongs to a planned profitable owner")
+                .push((
                     openings
                         .account_id(index)
                         .expect("prevalidated opening has its projected account ID"),
-                ),
-            );
+                    *remaining,
+                ));
         }
     }
 
     let mut postings = Vec::new();
 
     for (organization, group) in &groups {
-        let destination = destinations[organization]
-            .expect("each profitable owner must have an existing or planned accounted account");
+        let allocations = &destinations[organization];
+        let destination = allocations
+            .first()
+            .expect("each profitable owner has at least one receiving account")
+            .0;
         for source in &group.sources {
             let context =
                 resolve_business_profit_sweep_context(state, *organization, source.business)?;
@@ -146,10 +167,10 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
                 amount: source.amount.checked_neg().expect("earned surplus negates"),
             });
         }
-        postings.push(LedgerPosting {
-            account: destination,
-            amount: group.total,
-        });
+        postings.extend(allocations.iter().map(|(account, amount)| LedgerPosting {
+            account: *account,
+            amount: *amount,
+        }));
     }
 
     let draft = LedgerTransactionDraft {

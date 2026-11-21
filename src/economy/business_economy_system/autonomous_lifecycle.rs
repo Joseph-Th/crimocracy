@@ -10,11 +10,20 @@ use super::{
     BusinessEconomyError, ValidatedBusinessEconomyStatusChange, resolve_cycle_financials,
     validate_resume_business_economy,
 };
-use crate::core::id::BusinessId;
+use crate::core::id::{BusinessId, NeighborhoodId};
 use crate::core::state::AppState;
+use crate::core::time::DAY_MINUTES;
 use crate::finance::Money;
 use crate::registry::Registry;
-use crate::world::BusinessOwner;
+use crate::world::{BusinessKind, BusinessOwner};
+
+struct RecoveryCandidate {
+    business: BusinessId,
+    neighborhood: NeighborhoodId,
+    kind: BusinessKind,
+    projected_daily_net: i128,
+    resume: ValidatedBusinessEconomyStatusChange,
+}
 
 pub(crate) fn apply_due_autonomous_business_lifecycle(
     registry: &Registry,
@@ -32,10 +41,11 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
         .suspended_business_economies()
         .map(|economy| economy.business())
         .collect();
-    let mut planned: Vec<(BusinessId, ValidatedBusinessEconomyStatusChange)> = Vec::new();
-    // Two simultaneous entrants would each forecast a market without the other.
-    // Admit at most one reopening per local sector per boundary.
-    let mut reopening_sectors = std::collections::BTreeSet::new();
+    // Rank the entire viable recovery queue before allocating scarce local customer demand.
+    // Business-ID order reflects when a shop was created, not which closure is worth reversing.
+    // Two simultaneous entrants would each forecast a market without the other, so only the
+    // strongest projected daily earner in a competing sector may reopen on this boundary.
+    let mut candidates = Vec::new();
 
     for business_id in suspended {
         let economy = state
@@ -55,12 +65,6 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
             business.owner(),
             BusinessOwner::Organization(owner) if Some(owner) == player_organization
         ) {
-            continue;
-        }
-        let sector = (business.neighborhood(), business.kind());
-        if reopening_sectors.iter().any(|&(district, kind)| {
-            district == sector.0 && super::market::market_trades_compete(kind, sector.1)
-        }) {
             continue;
         }
         let neighborhood = state
@@ -84,8 +88,23 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
 
         match validate_resume_business_economy(registry, state, business_id) {
             Ok(resume) => {
-                reopening_sectors.insert(sector);
-                planned.push((business_id, resume));
+                // Compare earnings on the same time basis even if authored cycles differ.
+                // The i128 intermediate handles every finite Money value without overflow.
+                let daily_net = i128::from(expected_net_cash.cents()) * i128::from(DAY_MINUTES)
+                    / i128::from(
+                        registry
+                            .get_business(business.kind())
+                            .economics()
+                            .cycle()
+                            .as_minutes(),
+                    );
+                candidates.push(RecoveryCandidate {
+                    business: business_id,
+                    neighborhood: business.neighborhood(),
+                    kind: business.kind(),
+                    projected_daily_net: daily_net,
+                    resume,
+                });
             }
             // Finite version or clock capacity is a valid terminal rail. The business remains
             // suspended rather than turning routine autonomous maintenance into a campaign
@@ -95,6 +114,28 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
             Err(error) => return Err(error),
         }
     }
+
+    candidates.sort_unstable_by(|left, right| {
+        right
+            .projected_daily_net
+            .cmp(&left.projected_daily_net)
+            .then(left.business.cmp(&right.business))
+    });
+    let mut reopening_sectors = std::collections::BTreeSet::new();
+    let mut planned = Vec::new();
+    for candidate in candidates {
+        if reopening_sectors.iter().any(|&(district, kind)| {
+            district == candidate.neighborhood
+                && super::market::market_trades_compete(kind, candidate.kind)
+        }) {
+            continue;
+        }
+        reopening_sectors.insert((candidate.neighborhood, candidate.kind));
+        planned.push((candidate.business, candidate.resume));
+    }
+    // The economic choice is independent of ID order; committing and reporting in stable ID
+    // order keeps unrelated sectors' recovery chronology deterministic and easy to inspect.
+    planned.sort_unstable_by_key(|(business_id, _)| *business_id);
 
     // The daily recovery pass is one fallible planning cohort. All businesses were evaluated
     // against the same immutable state above, and status changes touch distinct business-economy

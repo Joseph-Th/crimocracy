@@ -28,6 +28,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 mod autonomous_profit_sweeps;
+mod autonomous_recovery;
 mod cycle_boundaries;
 
 struct BusinessEconomyFixture {
