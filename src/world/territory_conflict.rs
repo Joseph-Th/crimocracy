@@ -25,6 +25,7 @@ use crate::reports::report_system::{ReportError, ValidatedReport, validate_recor
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::OrganizationKind;
 use crate::world::territory_influence::active_standstill;
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -330,7 +331,7 @@ pub fn validate_territory_clash(
 struct DistrictRackets {
     actual_force: u32,
     baseline_force: u32,
-    targets: Vec<EnterpriseId>,
+    targets: Vec<(EnterpriseId, u16)>,
 }
 
 fn recently_repulsed(state: &AppState, attacker: OrganizationId, district: NeighborhoodId) -> bool {
@@ -367,9 +368,18 @@ pub(crate) fn apply_due_autonomous_territory_clashes(
             .or_default();
         position.actual_force += u32::from(racket.associates());
         position.baseline_force += u32::from(racket.kind().baseline_associates());
-        position.targets.push(racket.id());
+        position
+            .targets
+            .push((racket.id(), racket.kind().baseline_associates()));
     }
-    let mut candidates = BTreeMap::<OrganizationId, Vec<(NeighborhoodId, EnterpriseId)>>::new();
+    // An NPC chooses among eligible raids by its *estimated* staffing advantage, not by
+    // when a rival front happened to receive its entity ID. A larger visible baseline
+    // workforce on the target itself breaks equal-risk ties: disrupting that front has
+    // the larger immediate staffing impact. Never consult hidden defender hires here.
+    let mut candidates = BTreeMap::<
+        OrganizationId,
+        Vec<(Reverse<u32>, Reverse<u16>, NeighborhoodId, EnterpriseId)>,
+    >::new();
     for (district, positions) in districts {
         for (&attacker, own) in &positions {
             if state.player_organization() == Some(attacker)
@@ -383,20 +393,26 @@ pub(crate) fn apply_due_autonomous_territory_clashes(
                 {
                     continue;
                 }
-                candidates.entry(attacker).or_default().extend(
-                    rival
-                        .targets
-                        .iter()
-                        .copied()
-                        .map(|target| (district, target)),
-                );
+                let estimated_margin =
+                    own.actual_force - rival.baseline_force - DEFENSIVE_ADVANTAGE;
+                candidates
+                    .entry(attacker)
+                    .or_default()
+                    .extend(rival.targets.iter().copied().map(|(target, baseline)| {
+                        (
+                            Reverse(estimated_margin),
+                            Reverse(baseline),
+                            district,
+                            target,
+                        )
+                    }));
             }
         }
     }
     let mut results = Vec::new();
     for (attacker, mut targets) in candidates {
         targets.sort_unstable();
-        for (_, target) in targets {
+        for (_, _, _, target) in targets {
             if let Ok(plan) = validate_territory_clash(state, attacker, target)
                 && let Ok(outcome) = plan.commit(state)
             {

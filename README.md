@@ -173,10 +173,12 @@ Stronger rivals autonomously contest overlapping territory and can shut down
 player holdings, triggering an actionable crisis report. The resulting lost
 enterprise income and district influence are real.
 NPC challengers estimate opponents' baseline crews rather than reading their
-secret extra hires. Reinforcements can reverse the outcome, and a repelled
-NPC avoids repeating the same district attack for 30 days. Non-player gangs
-may also negotiate ceasefires with each other after actual clashes, with
-treasury-backed tribute when appropriate. They never sign for the player.
+secret extra hires. When several raids are viable, they prioritize the largest
+estimated staffing advantage, then the target with the larger baseline crew;
+creation order only breaks equal strategic ties. Reinforcements can reverse the
+outcome, and a repelled NPC avoids repeating the same district attack for
+30 days. Non-player gangs may negotiate ceasefires with each other after actual
+clashes, with treasury-backed tribute when appropriate. They never sign for the player.
 
 `negotiate district-N org-N [tribute=cents]` proposes a bilateral thirty-day
 standstill. Both parties must currently operate there, or have a racket recently

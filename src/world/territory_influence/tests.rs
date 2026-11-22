@@ -438,6 +438,113 @@ fn strict_higher_enterprise_count_replaces_earlier_leader() {
 }
 
 #[test]
+fn autonomous_raids_prefer_a_safer_rival_over_an_earlier_created_target() {
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::core::time::{DAY_MINUTES, SimDuration};
+    use crate::world::territory_conflict::apply_due_autonomous_territory_clashes;
+
+    let registry = build_registry();
+    let mut fixture = make_influence_fixture();
+    let weaker = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Weaker Rival".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("third organization should validate");
+    let (strong_manager, strong_mandate) = assign_district_authority(
+        &mut fixture.state,
+        fixture.challenger,
+        fixture.neighborhood,
+        "Stronger Rival Manager",
+    );
+    let (weak_manager, weak_mandate) = assign_district_authority(
+        &mut fixture.state,
+        weaker,
+        fixture.neighborhood,
+        "Weaker Rival Manager",
+    );
+    let mut stronger_targets = Vec::new();
+    let mut weaker_target = None;
+
+    // The first eligible rival has two older rackets. Both rivals are beatable,
+    // but the later, single-front rival offers a far larger known force advantage.
+    for (organization, mandate, manager, count, prefix) in [
+        (
+            fixture.dominant,
+            fixture.mandate,
+            fixture.manager,
+            3,
+            "Attacking",
+        ),
+        (
+            fixture.challenger,
+            strong_mandate,
+            strong_manager,
+            2,
+            "Stronger",
+        ),
+        (weaker, weak_mandate, weak_manager, 1, "Weaker"),
+    ] {
+        for index in 0..count {
+            let venue = insert_venue(
+                &registry,
+                &mut fixture.state,
+                &format!("{prefix} Hall {index}"),
+                fixture.neighborhood,
+                BusinessOwner::Organization(organization),
+                hospitality_functions(),
+            );
+            let racket = establish_gambling_at_venue(
+                &registry,
+                &mut fixture.state,
+                organization,
+                mandate,
+                manager,
+                venue,
+            );
+            if organization == fixture.challenger {
+                stronger_targets.push(racket);
+            } else if organization == weaker {
+                weaker_target = Some(racket);
+            }
+        }
+    }
+
+    let weaker_target = weaker_target.expect("weaker organization has a racket");
+    assert!(stronger_targets.iter().all(|&id| id < weaker_target));
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(DAY_MINUTES).unwrap(),
+    ));
+    let clashes = apply_due_autonomous_territory_clashes(&mut fixture.state);
+    assert_eq!(clashes.len(), 1);
+    assert!(clashes[0].attacker_won);
+    assert_eq!(clashes[0].suspended_racket, weaker_target);
+    assert!(stronger_targets.iter().all(|&id| {
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(id)
+            .is_some_and(|racket| racket.status() == EnterpriseStatus::Active)
+    }));
+    validate_invariants(&fixture.state);
+
+    let saved = build_save(&registry, &fixture.state).expect("clash state should save");
+    let restored = restore_save(&registry, saved).expect("clash state should restore");
+    assert_eq!(
+        restored
+            .enterprises()
+            .get_enterprise(weaker_target)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Suspended,
+    );
+    validate_invariants(&restored);
+}
+
+#[test]
 fn suspended_rackets_leave_the_footprint() {
     let registry = build_registry();
     let mut fixture = make_influence_fixture();
