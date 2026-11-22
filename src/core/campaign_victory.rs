@@ -35,6 +35,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+mod command_staffing;
+use command_staffing::staffed_racket_districts;
+
 /// These are ending choices, not automatic achievements. Variant order is persistent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VictoryPath {
@@ -255,63 +258,6 @@ fn mature_territorial_majority(
             .map(|standing| u64::from(standing.active_enterprises))
             .sum::<u64>()
             < mature_count
-}
-
-/// A manager can hold multiple mandates and run rackets in several districts, but
-/// cannot count as two independent field captains or supply concurrent district
-/// command in two places for the underboss ending. Match each district's two
-/// command posts against distinct real managers, with augmenting paths so the
-/// result does not depend on a greedy choice of which manager to assign first.
-fn staffed_racket_districts(
-    districts: &BTreeSet<NeighborhoodId>,
-    captains: &BTreeMap<NeighborhoodId, BTreeSet<CharacterId>>,
-) -> usize {
-    type Post = (NeighborhoodId, usize);
-
-    fn match_post(
-        post: Post,
-        captains: &BTreeMap<NeighborhoodId, BTreeSet<CharacterId>>,
-        assignments: &mut BTreeMap<CharacterId, Post>,
-        visited: &mut BTreeSet<CharacterId>,
-    ) -> bool {
-        let Some(candidates) = captains.get(&post.0) else {
-            return false;
-        };
-        for &candidate in candidates {
-            if !visited.insert(candidate) {
-                continue;
-            }
-            let previous = assignments.get(&candidate).copied();
-            if previous.is_none()
-                || previous
-                    .is_some_and(|previous| match_post(previous, captains, assignments, visited))
-            {
-                assignments.insert(candidate, post);
-                return true;
-            }
-        }
-        false
-    }
-
-    let mut assignments = BTreeMap::new();
-    for &district in districts {
-        for post in 0..UNDERBOSS_CAPTAINS_PER_DISTRICT {
-            match_post(
-                (district, post),
-                captains,
-                &mut assignments,
-                &mut BTreeSet::new(),
-            );
-        }
-    }
-    let mut posts_by_district = BTreeMap::<NeighborhoodId, usize>::new();
-    for &(district, _) in assignments.values() {
-        *posts_by_district.entry(district).or_default() += 1;
-    }
-    posts_by_district
-        .values()
-        .filter(|&&posts| posts == UNDERBOSS_CAPTAINS_PER_DISTRICT)
-        .count()
 }
 
 fn recent_racket_net(state: &AppState, racket: &crate::enterprises::EnterpriseRecord) -> i128 {

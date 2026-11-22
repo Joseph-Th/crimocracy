@@ -18,7 +18,6 @@ use crate::enterprises::enterprise_execution::{
     EnterpriseError, ValidatedEnterpriseStatusChange, validate_suspend_enterprise,
 };
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
-use crate::history::HistoryEventKind;
 use crate::history::history_system::{
     HistoryError, ValidatedHistoryEvent, validate_territory_clash_event,
 };
@@ -61,23 +60,12 @@ pub fn active_district_force(
 }
 
 pub fn suppression_ends_at(state: &AppState, racket: EnterpriseId) -> Option<SimTime> {
-    state
-        .history()
-        .events()
-        .filter_map(|event| {
-            let HistoryEventKind::TerritoryClash { loser, .. } = event.kind() else {
-                return None;
-            };
-            if loser != racket {
-                return None;
-            }
-            let end = event
-                .occurred_at()
-                .as_minutes()
-                .checked_add(CLASH_SUPPRESSION_DAYS * DAY_MINUTES)?;
-            (state.now().as_minutes() < end).then_some(SimTime::from_minutes(end))
-        })
-        .last()
+    let event = state.history().latest_racket_suppression(racket)?;
+    let end = event
+        .occurred_at()
+        .as_minutes()
+        .checked_add(CLASH_SUPPRESSION_DAYS * DAY_MINUTES)?;
+    (state.now().as_minutes() < end).then_some(SimTime::from_minutes(end))
 }
 
 fn next_clash_allowed_at(
@@ -85,28 +73,12 @@ fn next_clash_allowed_at(
     attacker: OrganizationId,
     district: NeighborhoodId,
 ) -> Option<SimTime> {
-    state
-        .history()
-        .events()
-        .filter_map(|event| {
-            let HistoryEventKind::TerritoryClash {
-                attacker: previous,
-                district: location,
-                ..
-            } = event.kind()
-            else {
-                return None;
-            };
-            if previous != attacker || location != district {
-                return None;
-            }
-            let end = event
-                .occurred_at()
-                .as_minutes()
-                .checked_add(CLASH_COOLDOWN_DAYS * DAY_MINUTES)?;
-            (state.now().as_minutes() < end).then_some(SimTime::from_minutes(end))
-        })
-        .last()
+    let event = state.history().latest_territory_clash(attacker, district)?;
+    let end = event
+        .occurred_at()
+        .as_minutes()
+        .checked_add(CLASH_COOLDOWN_DAYS * DAY_MINUTES)?;
+    (state.now().as_minutes() < end).then_some(SimTime::from_minutes(end))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -351,48 +323,27 @@ pub fn validate_territory_clash(
     })
 }
 
-/// One deliberate territorial move per non-player gang per day. The challenger
-/// only fights from a district where it already employs people, and only when
-/// its own strength appears enough to dislodge a visible rival footprint.
-/// It can infer baseline workers from visible racket types, not secretly hired
-/// extra associates. Defenders can therefore ambush an overconfident NPC by
-/// investing in local guards. A failed challenge discourages another raid for
-/// thirty days. Rival operations are visible only within the attacker's own
-/// occupied district; the player still needs sourced reconnaissance.
-fn estimated_defender_force(
-    state: &AppState,
-    defender: OrganizationId,
-    district: NeighborhoodId,
-) -> u32 {
-    state
-        .enterprises()
-        .active_for_organization(defender)
-        .filter(|racket| district_of_racket(state, racket.location()) == Some(district))
-        .map(|racket| u32::from(racket.kind().baseline_associates()))
-        .sum()
+/// Actual and publicly inferable rank-and-file for a single gang in a district.
+/// One daily pass constructs this snapshot: repeatedly resumming all rackets inside each
+/// attacker/defender pairing would make autonomous planning cubic in the local racket count.
+#[derive(Default)]
+struct DistrictRackets {
+    actual_force: u32,
+    baseline_force: u32,
+    targets: Vec<EnterpriseId>,
 }
 
 fn recently_repulsed(state: &AppState, attacker: OrganizationId, district: NeighborhoodId) -> bool {
-    state.history().events().any(|event| {
-        let HistoryEventKind::TerritoryClash {
-            attacker: author,
-            district: ward,
-            assault,
-            loser,
-            ..
-        } = event.kind()
-        else {
-            return false;
-        };
-        author == attacker
-            && ward == district
-            && loser == assault
-            && state
+    state
+        .history()
+        .latest_territory_repulse(attacker, district)
+        .is_some_and(|event| {
+            state
                 .now()
                 .as_minutes()
                 .saturating_sub(event.occurred_at().as_minutes())
                 < 30 * DAY_MINUTES
-    })
+        })
 }
 
 pub(crate) fn apply_due_autonomous_territory_clashes(
@@ -401,37 +352,50 @@ pub(crate) fn apply_due_autonomous_territory_clashes(
     if !is_day_boundary(state.now()) {
         return Vec::new();
     }
+    // Attacker-specific real staff and defender-specific visible baseline are distinct:
+    // secret defender hires may still turn a seemingly safe raid into a real defeat.
+    let mut districts =
+        BTreeMap::<NeighborhoodId, BTreeMap<OrganizationId, DistrictRackets>>::new();
+    for racket in state.enterprises().active_enterprises() {
+        let Some(district) = district_of_racket(state, racket.location()) else {
+            continue;
+        };
+        let position = districts
+            .entry(district)
+            .or_default()
+            .entry(racket.organization())
+            .or_default();
+        position.actual_force += u32::from(racket.associates());
+        position.baseline_force += u32::from(racket.kind().baseline_associates());
+        position.targets.push(racket.id());
+    }
     let mut candidates = BTreeMap::<OrganizationId, Vec<(NeighborhoodId, EnterpriseId)>>::new();
-    let active: Vec<_> = state
-        .enterprises()
-        .active_enterprises()
-        .filter_map(|racket| {
-            district_of_racket(state, racket.location())
-                .map(|district| (district, racket.organization(), racket.id()))
-        })
-        .collect();
-    for &(district, organization, target) in &active {
-        for &(other_district, attacker, _) in &active {
-            if other_district != district
-                || attacker == organization
-                || state.player_organization() == Some(attacker)
+    for (district, positions) in districts {
+        for (&attacker, own) in &positions {
+            if state.player_organization() == Some(attacker)
                 || recently_repulsed(state, attacker, district)
-                || active_district_force(state, attacker, district)
-                    <= estimated_defender_force(state, organization, district)
-                        .saturating_add(DEFENSIVE_ADVANTAGE)
             {
                 continue;
             }
-            candidates
-                .entry(attacker)
-                .or_default()
-                .push((district, target));
+            for (&defender, rival) in &positions {
+                if attacker == defender
+                    || own.actual_force <= rival.baseline_force.saturating_add(DEFENSIVE_ADVANTAGE)
+                {
+                    continue;
+                }
+                candidates.entry(attacker).or_default().extend(
+                    rival
+                        .targets
+                        .iter()
+                        .copied()
+                        .map(|target| (district, target)),
+                );
+            }
         }
     }
     let mut results = Vec::new();
     for (attacker, mut targets) in candidates {
         targets.sort_unstable();
-        targets.dedup();
         for (_, target) in targets {
             if let Ok(plan) = validate_territory_clash(state, attacker, target)
                 && let Ok(outcome) = plan.commit(state)

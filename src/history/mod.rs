@@ -4,7 +4,7 @@ pub mod history_system;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::IdKeyedBounds;
-use crate::core::id::{CharacterId, HistoryEventId, NeighborhoodId, OrganizationId};
+use crate::core::id::{CharacterId, EnterpriseId, HistoryEventId, NeighborhoodId, OrganizationId};
 use crate::core::time::SimTime;
 use crate::finance::Money;
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,53 @@ pub struct HistoryState {
     latest_departures: BTreeMap<(CharacterId, OrganizationId), HistoryEventId>,
     #[serde(skip)]
     victory: Option<HistoryEventId>,
+    #[serde(skip)]
+    territory: TerritoryHistoryIndexes,
+}
+
+/// Chronological heads over authoritative events. A newer treaty/clash always expires no
+/// sooner than an older one, so a single head answers active-window queries. A defeated
+/// attack is indexed separately: a later victory does not erase the earlier deterrent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TerritoryHistoryIndexes {
+    latest_standstill: BTreeMap<(OrganizationId, NeighborhoodId), HistoryEventId>,
+    latest_clash: BTreeMap<(OrganizationId, NeighborhoodId), HistoryEventId>,
+    latest_suppression: BTreeMap<EnterpriseId, HistoryEventId>,
+    latest_repulse: BTreeMap<(OrganizationId, NeighborhoodId), HistoryEventId>,
+}
+
+impl TerritoryHistoryIndexes {
+    fn record(&mut self, event: &HistoryEventRecord) {
+        match event.kind() {
+            HistoryEventKind::TerritoryStandstill {
+                district,
+                initiator,
+                counterparty,
+            } => {
+                self.latest_standstill
+                    .insert((initiator, district), event.id());
+                self.latest_standstill
+                    .insert((counterparty, district), event.id());
+            }
+            HistoryEventKind::TerritoryClash {
+                district,
+                attacker,
+                assault,
+                loser,
+                ..
+            } => {
+                self.latest_clash.insert((attacker, district), event.id());
+                self.latest_suppression.insert(loser, event.id());
+                if loser == assault {
+                    self.latest_repulse.insert((attacker, district), event.id());
+                }
+            }
+            HistoryEventKind::Operation
+            | HistoryEventKind::Recruitment
+            | HistoryEventKind::PayrollDeparture { .. }
+            | HistoryEventKind::CampaignVictory { .. } => {}
+        }
+    }
 }
 
 impl HistoryState {
@@ -86,8 +133,47 @@ impl HistoryState {
     pub fn get_event(&self, id: HistoryEventId) -> Option<&HistoryEventRecord> {
         self.records.get(&id)
     }
-    pub(crate) fn events(&self) -> impl Iterator<Item = &HistoryEventRecord> {
+    pub(crate) fn events(&self) -> impl DoubleEndedIterator<Item = &HistoryEventRecord> {
         self.records.values()
+    }
+    pub(crate) fn latest_territory_standstill(
+        &self,
+        organization: OrganizationId,
+        district: NeighborhoodId,
+    ) -> Option<&HistoryEventRecord> {
+        self.territory
+            .latest_standstill
+            .get(&(organization, district))
+            .and_then(|id| self.get_event(*id))
+    }
+    pub(crate) fn latest_territory_clash(
+        &self,
+        attacker: OrganizationId,
+        district: NeighborhoodId,
+    ) -> Option<&HistoryEventRecord> {
+        self.territory
+            .latest_clash
+            .get(&(attacker, district))
+            .and_then(|id| self.get_event(*id))
+    }
+    pub(crate) fn latest_racket_suppression(
+        &self,
+        racket: EnterpriseId,
+    ) -> Option<&HistoryEventRecord> {
+        self.territory
+            .latest_suppression
+            .get(&racket)
+            .and_then(|id| self.get_event(*id))
+    }
+    pub(crate) fn latest_territory_repulse(
+        &self,
+        attacker: OrganizationId,
+        district: NeighborhoodId,
+    ) -> Option<&HistoryEventRecord> {
+        self.territory
+            .latest_repulse
+            .get(&(attacker, district))
+            .and_then(|id| self.get_event(*id))
     }
     pub(crate) fn event_id_bounds(&self) -> Option<(u32, u32)> {
         self.records.id_bounds()
@@ -136,9 +222,17 @@ impl HistoryState {
             })
             .collect()
     }
+    fn derive_territory_indexes(&self) -> TerritoryHistoryIndexes {
+        let mut territory = TerritoryHistoryIndexes::default();
+        for event in self.records.values() {
+            territory.record(event);
+        }
+        territory
+    }
     pub(crate) fn rebuild_derived_indexes(&mut self) {
         self.latest_departures = self.derive_departure_index();
         self.victory = self.derive_victory_index();
+        self.territory = self.derive_territory_indexes();
     }
     fn insert(&mut self, event: HistoryEventRecord) {
         if matches!(event.kind(), HistoryEventKind::CampaignVictory { .. }) {
@@ -154,6 +248,7 @@ impl HistoryState {
             self.latest_departures
                 .insert((member, organization), event.id());
         }
+        self.territory.record(&event);
         let previous = self.records.insert(event.id(), event);
         debug_assert!(
             previous.is_none(),
@@ -167,6 +262,7 @@ impl HistoryState {
         // commit time, so iteration by ID must never rewind campaign time.
         if self.latest_departures != self.derive_departure_index()
             || self.victory != self.derive_victory_index()
+            || self.territory != self.derive_territory_indexes()
         {
             return false;
         }

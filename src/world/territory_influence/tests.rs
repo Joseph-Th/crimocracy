@@ -846,6 +846,7 @@ fn stronger_npc_territorial_force_displaces_player_racket_and_reports_crisis() {
 
 #[test]
 fn extra_defenders_can_repulse_an_optimistic_rival_ai_and_deter_repeat_raids() {
+    use crate::core::persistence::{build_save, restore_save};
     use crate::core::time::{DAY_MINUTES, SimDuration};
     use crate::enterprises::enterprise_execution::{
         validate_resume_enterprise, validate_staff_enterprise,
@@ -930,6 +931,16 @@ fn extra_defenders_can_repulse_an_optimistic_rival_ai_and_deter_repeat_raids() {
     // leader remembers the repelled raid and will not repeat it immediately.
     assert!(apply_due_autonomous_territory_clashes(&mut fixture.state).is_empty());
     validate_invariants(&fixture.state);
+    let saved = build_save(&registry, &fixture.state).unwrap();
+    let mut restored = restore_save(
+        &registry,
+        bincode::deserialize(&bincode::serialize(&saved).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        apply_due_autonomous_territory_clashes(&mut restored).is_empty(),
+        "restoration must rebuild failed-raid deterrence without rerunning history"
+    );
 }
 
 #[test]
@@ -1095,6 +1106,170 @@ fn an_outnumbered_gang_can_buy_peace_with_real_street_cash() {
             .balance()
             .cents(),
         75_000
+    );
+    assert!(active_standstill(&restored, fixture.dominant, fixture.neighborhood).is_some());
+}
+
+#[test]
+fn tribute_can_draw_from_multiple_spendable_cash_accounts_atomically() {
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::finance::finance_system::validate_record_transaction;
+    use crate::finance::{LedgerPosting, LedgerTransactionDraft, Money};
+
+    let registry = build_registry();
+    let mut fixture = make_influence_fixture();
+    let (rival_manager, rival_mandate) = assign_district_authority(
+        &mut fixture.state,
+        fixture.challenger,
+        fixture.neighborhood,
+        "Rival Lieutenant",
+    );
+    for (name, organization, mandate, manager) in [
+        (
+            "Dominant Hall",
+            fixture.dominant,
+            fixture.mandate,
+            fixture.manager,
+        ),
+        (
+            "Rival Hall",
+            fixture.challenger,
+            rival_mandate,
+            rival_manager,
+        ),
+        (
+            "Rival Annex",
+            fixture.challenger,
+            rival_mandate,
+            rival_manager,
+        ),
+        (
+            "Rival Outpost",
+            fixture.challenger,
+            rival_mandate,
+            rival_manager,
+        ),
+    ] {
+        let venue = insert_venue(
+            &registry,
+            &mut fixture.state,
+            name,
+            fixture.neighborhood,
+            BusinessOwner::Organization(organization),
+            hospitality_functions(),
+        );
+        establish_gambling_at_venue(
+            &registry,
+            &mut fixture.state,
+            organization,
+            mandate,
+            manager,
+            venue,
+        );
+    }
+    let first = fixture
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(fixture.dominant))
+        .find(|account| account.kind() == AccountKind::StreetCash)
+        .expect("an established racket has a street-cash account")
+        .id();
+    let second = org_cash(&mut fixture.state, fixture.dominant);
+    let clearing = fresh_settlement(&mut fixture.state, fixture.dominant);
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Fund separate local cash pockets".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: first,
+                    amount: Money::from_cents(10_000),
+                },
+                LedgerPosting {
+                    account: second,
+                    amount: Money::from_cents(15_000),
+                },
+                LedgerPosting {
+                    account: clearing,
+                    amount: Money::from_cents(-25_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+
+    let unchanged = bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap();
+    assert_eq!(
+        validate_negotiate_standstill_with_tribute(
+            &fixture.state,
+            fixture.dominant,
+            fixture.challenger,
+            fixture.neighborhood,
+            Money::from_cents(25_001),
+        )
+        .err(),
+        Some(TerritoryNegotiationError::InsufficientTributeFunds)
+    );
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap(),
+        unchanged,
+    );
+
+    validate_negotiate_standstill_with_tribute(
+        &fixture.state,
+        fixture.dominant,
+        fixture.challenger,
+        fixture.neighborhood,
+        Money::from_cents(25_000),
+    )
+    .expect("the combined spendable balance covers the required tribute")
+    .commit(&mut fixture.state)
+    .expect("the treaty and three-posting payment commit together");
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(first)
+            .unwrap()
+            .balance(),
+        Money::ZERO
+    );
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(second)
+            .unwrap()
+            .balance(),
+        Money::ZERO
+    );
+    let tribute_payment = fixture.state.finance().transactions().last().unwrap();
+    assert_eq!(tribute_payment.postings().len(), 3);
+    assert!(tribute_payment.postings().iter().any(|posting| {
+        posting.account == first && posting.amount == Money::from_cents(-10_000)
+    }));
+    assert!(tribute_payment.postings().iter().any(|posting| {
+        posting.account == second && posting.amount == Money::from_cents(-15_000)
+    }));
+    validate_invariants(&fixture.state);
+
+    let saved = build_save(&registry, &fixture.state).unwrap();
+    let restored = restore_save(
+        &registry,
+        bincode::deserialize(&bincode::serialize(&saved).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored.finance().get_account(first).unwrap().balance(),
+        Money::ZERO
+    );
+    assert_eq!(
+        restored.finance().get_account(second).unwrap().balance(),
+        Money::ZERO
     );
     assert!(active_standstill(&restored, fixture.dominant, fixture.neighborhood).is_some());
 }

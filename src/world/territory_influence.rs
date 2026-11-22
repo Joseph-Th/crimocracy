@@ -54,37 +54,31 @@ pub fn active_standstill(
     organization: OrganizationId,
     district: NeighborhoodId,
 ) -> Option<TerritoryStandstill> {
-    state
+    let event = state
         .history()
-        .events()
-        .filter_map(|event| {
-            let HistoryEventKind::TerritoryStandstill {
-                district: held,
-                initiator,
-                counterparty,
-            } = event.kind()
-            else {
-                return None;
-            };
-            if held != district || (initiator != organization && counterparty != organization) {
-                return None;
-            }
-            let end = event
-                .occurred_at()
-                .as_minutes()
-                .checked_add(STANDSTILL_DAYS * DAY_MINUTES)?;
-            (state.now().as_minutes() < end).then_some(TerritoryStandstill {
-                history: event.id(),
-                district,
-                counterparty: if initiator == organization {
-                    counterparty
-                } else {
-                    initiator
-                },
-                expires_at: SimTime::from_minutes(end),
-            })
-        })
-        .last()
+        .latest_territory_standstill(organization, district)?;
+    let HistoryEventKind::TerritoryStandstill {
+        initiator,
+        counterparty,
+        ..
+    } = event.kind()
+    else {
+        unreachable!("territory standstill index contains only agreements");
+    };
+    let end = event
+        .occurred_at()
+        .as_minutes()
+        .checked_add(STANDSTILL_DAYS * DAY_MINUTES)?;
+    (state.now().as_minutes() < end).then_some(TerritoryStandstill {
+        history: event.id(),
+        district,
+        counterparty: if initiator == organization {
+            counterparty
+        } else {
+            initiator
+        },
+        expires_at: SimTime::from_minutes(end),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -270,36 +264,51 @@ pub fn validate_negotiate_standstill_with_tribute(
 ) -> Result<ValidatedTerritoryStandstill, TerritoryNegotiationError> {
     validate_standstill_terms(state, initiator, counterparty, district, tribute)?;
     let payment = if tribute > Money::ZERO {
-        let source = state
+        // Cash held in multiple street accounts is still one organization's treasury.
+        // Collect a deterministic, spendable allocation without making the choice of which
+        // racket account happened to be funded decide whether a ceasefire is possible.
+        let mut remaining = tribute;
+        let mut sources = Vec::new();
+        for account in state
             .finance()
             .accounts_for(FinancialOwner::Organization(initiator))
-            .filter(|account| {
-                account.kind() == AccountKind::StreetCash
-                    && account.available_payment_balance() >= tribute
-            })
-            .max_by_key(|account| {
-                (
-                    account.available_payment_balance(),
-                    std::cmp::Reverse(account.id()),
-                )
-            })
-            .ok_or(TerritoryNegotiationError::InsufficientTributeFunds)?
-            .id();
+        {
+            if account.kind() != AccountKind::StreetCash || account.version() == u32::MAX {
+                continue;
+            }
+            let debit = remaining.min(account.available_payment_balance());
+            if debit <= Money::ZERO {
+                continue;
+            }
+            sources.push((account.id(), debit));
+            remaining = remaining
+                .checked_sub(debit)
+                .expect("tribute allocation cannot exceed the promised payment");
+            if remaining == Money::ZERO {
+                break;
+            }
+        }
+        if remaining > Money::ZERO {
+            return Err(TerritoryNegotiationError::InsufficientTributeFunds);
+        }
         let draft = |destination| LedgerTransactionDraft {
             occurred_at: state.now(),
             memo: format!(
                 "Territorial standstill tribute for {district}: {initiator} to {counterparty}"
             ),
-            postings: vec![
-                LedgerPosting {
-                    account: source,
-                    amount: Money::from_cents(-tribute.cents()),
-                },
-                LedgerPosting {
+            postings: sources
+                .iter()
+                .map(|&(account, amount)| LedgerPosting {
+                    account,
+                    amount: amount
+                        .checked_neg()
+                        .expect("positive tribute debit negates"),
+                })
+                .chain(std::iter::once(LedgerPosting {
                     account: destination,
                     amount: tribute,
-                },
-            ],
+                }))
+                .collect(),
             authorization: None,
         };
         let existing = state
@@ -366,7 +375,11 @@ pub(crate) fn apply_due_autonomous_territory_standstills(
     let current = state.now().as_minutes();
     let player = state.player_organization();
     let mut recent = BTreeMap::<NeighborhoodId, (OrganizationId, OrganizationId)>::new();
-    for event in state.history().events() {
+    // History IDs follow campaign chronology. Only the recent seven-day tail can produce
+    // new peace offers; a reverse walk stops as soon as it reaches older history.
+    for event in state.history().events().rev().take_while(|event| {
+        current.saturating_sub(event.occurred_at().as_minutes()) <= 7 * DAY_MINUTES
+    }) {
         let HistoryEventKind::TerritoryClash {
             district,
             attacker,
@@ -394,7 +407,8 @@ pub(crate) fn apply_due_autonomous_territory_standstills(
         } else {
             attacker
         };
-        recent.insert(district, (defeated, victor));
+        // The first eligible clash encountered is the latest one in this district.
+        recent.entry(district).or_insert((defeated, victor));
     }
     let mut agreements = Vec::new();
     for (district, (initiator, counterparty)) in recent {

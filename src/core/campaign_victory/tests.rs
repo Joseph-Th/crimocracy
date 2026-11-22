@@ -1127,6 +1127,14 @@ fn city_command_posts_cannot_be_filled_twice_by_the_same_manager() {
     captains.insert(second, BTreeSet::from([a, d]));
     captains.insert(third, BTreeSet::from([b, e]));
     assert_eq!(staffed_racket_districts(&districts, &captains), 2);
+
+    // Four different managers can fully command the second and third districts.
+    // A maximum individual-post matching that fills the first district greedily
+    // leaves one post in each other district and incorrectly counts only one.
+    captains.insert(first, BTreeSet::from([a, b]));
+    captains.insert(second, BTreeSet::from([a, c]));
+    captains.insert(third, BTreeSet::from([b, d]));
+    assert_eq!(staffed_racket_districts(&districts, &captains), 2);
 }
 
 #[test]
