@@ -38,9 +38,14 @@ pub use lifecycle::{
     ValidatedEnterpriseStatusChange, validate_resume_enterprise, validate_retire_enterprise,
     validate_suspend_enterprise,
 };
-pub(crate) use staffing::ensure_manager_capacity;
+pub use staffing::{
+    ASSOCIATES_PER_AVAILABLE_MEMBER, BASE_ORGANIZATION_ASSOCIATE_CAPACITY,
+    BASE_ORGANIZATION_RACKET_CAPACITY, RACKETS_PER_AVAILABLE_MEMBER,
+    organization_operating_capacity,
+};
 pub(crate) use staffing::{MAX_ASSOCIATES_PER_MANAGER, MAX_RACKETS_PER_MANAGER};
 pub use staffing::{ValidatedEnterpriseStaffing, validate_staff_enterprise};
+pub(crate) use staffing::{apply_due_understaffing_suspensions, ensure_manager_capacity};
 pub use succession::{ValidatedEnterpriseReassignment, validate_reassign_enterprise};
 
 use crate::core::attention::AttentionClass;
@@ -92,6 +97,16 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum EnterpriseError {
+    #[error(
+        "organization {organization} lacks named crew to operate {rackets} rackets ({associates} associates); current capacity is {max_rackets} rackets and {max_associates} associates"
+    )]
+    OrganizationCapacityExceeded {
+        organization: OrganizationId,
+        rackets: usize,
+        associates: u32,
+        max_rackets: usize,
+        max_associates: u32,
+    },
     #[error("district {0} is under a binding territorial standstill; no new rackets may open")]
     TerritoryStandstill(NeighborhoodId),
     #[error("racket {enterprise} lost a territorial clash and cannot reopen until {until:?}")]

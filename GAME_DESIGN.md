@@ -450,6 +450,21 @@ redundant leadership instead of one manager nominally directing every district.
 Expansion therefore brings both wage obligations and a real need to recruit and
 delegate, not merely to open another profitable racket.
 
+**Crew size must constrain the operating empire continuously**, not only the
+victory checklist. Ownership of many legitimate establishments does not imply
+the executive can personally supervise every till and withdraw all daily profits.
+Named available members provide limited trusted distribution throughput; when
+staffing is insufficient, real earned profits remain at their individual
+businesses rather than becoming instantly spendable organization cash.
+Running criminal rackets consumes leadership attention that would otherwise
+support legitimate business collection. Likewise, expanding active rackets and
+the number of rank-and-file workers they command must eventually require more
+named staff, beyond existing per-captain limits. When members are detained or
+leave, the empire loses immediate usable capacity and some active rackets shut
+down, rather than keeping an implausibly profitable footprint. Hiring or
+recruiting restores capacity. These everyday economic consequences must create
+recruitment decisions before the player reaches a victory screen.
+
 Each manager has:
 
 - People they directly control.

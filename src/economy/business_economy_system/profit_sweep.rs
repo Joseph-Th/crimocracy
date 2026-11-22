@@ -2,6 +2,7 @@
 
 use crate::core::id::{BusinessId, FinancialAccountId, OrganizationId};
 use crate::core::state::AppState;
+use crate::core::time::{DAY_MINUTES, SimTime};
 use crate::finance::finance_system::{
     FinanceError, ValidatedLedgerTransaction, validate_record_business_transaction,
 };
@@ -9,7 +10,52 @@ use crate::finance::{
     AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
     helpers::format_money_cents,
 };
+use crate::world::OrganizationKind;
 use thiserror::Error;
+
+/// Daily legitimate profit extraction per undetained named crew member. Every
+/// two operating rackets occupy another member's administrative attention.
+/// Overextended fronts still trade, but their accumulated surplus cannot
+/// magically support an empire run by an executive-only crew.
+pub const DAILY_DRAW_PER_AVAILABLE_MEMBER: Money = Money::from_cents(6_000);
+
+/// Remaining daily owner-withdrawal throughput from real personnel, racket
+/// workload and already-committed ledger draws. Manual and automatic policies
+/// consume the same allowance, including after save/restore.
+pub fn remaining_owner_distribution_capacity(
+    state: &AppState,
+    organization: OrganizationId,
+) -> Money {
+    if !state
+        .world()
+        .get_organization(organization)
+        .is_some_and(|record| record.kind() == OrganizationKind::Criminal)
+    {
+        return Money::from_cents(i64::MAX);
+    }
+    let staff = state
+        .world()
+        .characters_in_organization(organization)
+        .filter(|member| {
+            state
+                .legal()
+                .active_arrest_for_character(member.id())
+                .is_none()
+        })
+        .count();
+    let rackets = state
+        .enterprises()
+        .active_for_organization(organization)
+        .count();
+    let available = staff.saturating_sub(rackets.div_ceil(2));
+    let capacity = (available as i128) * i128::from(DAILY_DRAW_PER_AVAILABLE_MEMBER.cents());
+    let start = SimTime::from_minutes(state.now().as_minutes() / DAY_MINUTES * DAY_MINUTES);
+    let used =
+        state
+            .finance()
+            .business_draws_for_organization_since(organization, start, state.now());
+    Money::from_cents(capacity.saturating_sub(used).clamp(0, i128::from(i64::MAX)) as i64)
+}
 
 /// An owner's draw on a business it owns: legitimate till cash becomes spendable organization
 /// wealth. Laundering fees are excluded because they settle into the business's non-liquid
@@ -76,6 +122,13 @@ pub enum BusinessProfitSweepError {
         available_cents: i64,
         requested_cents: i64,
     },
+    #[error(
+        "available crew can distribute only {available_cents} more cents of legitimate profits today; requested {requested_cents}. Recruit or free managers from operating rackets"
+    )]
+    InsufficientDistributionCapacity {
+        available_cents: i64,
+        requested_cents: i64,
+    },
     #[error("business {business} ownership changed after sweep validation")]
     StaleBusiness {
         business: BusinessId,
@@ -98,6 +151,7 @@ pub struct ValidatedBusinessProfitSweep {
     organization: OrganizationId,
     expected_business_version: u32,
     expected_economy_version: u32,
+    amount: Money,
 }
 
 impl std::fmt::Debug for ValidatedBusinessProfitSweep {
@@ -137,6 +191,7 @@ impl ValidatedBusinessProfitSweep {
                 found: economy.version(),
             });
         }
+        validate_owner_distribution_capacity(state, self.organization, self.amount)?;
         self.transaction.commit(state)?;
         Ok(())
     }
@@ -156,6 +211,7 @@ pub fn validate_sweep_business_profits(
         context.operating_balance,
         context.capital_floor,
     )?;
+    validate_owner_distribution_capacity(state, draft.organization, draft.amount)?;
     let transaction = validate_record_business_transaction(
         state,
         LedgerTransactionDraft {
@@ -187,6 +243,7 @@ pub fn validate_sweep_business_profits(
         organization: draft.organization,
         expected_business_version: context.business_version,
         expected_economy_version: context.economy_version,
+        amount: draft.amount,
     })
 }
 
@@ -278,10 +335,25 @@ pub fn resolve_available_business_profit(
     business: BusinessId,
 ) -> Result<Money, BusinessProfitSweepError> {
     let context = resolve_business_profit_sweep_context(state, organization, business)?;
-    Ok(available_business_profit(
-        context.operating_balance,
-        context.capital_floor,
-    ))
+    Ok(
+        available_business_profit(context.operating_balance, context.capital_floor)
+            .min(remaining_owner_distribution_capacity(state, organization)),
+    )
+}
+
+fn validate_owner_distribution_capacity(
+    state: &AppState,
+    organization: OrganizationId,
+    amount: Money,
+) -> Result<(), BusinessProfitSweepError> {
+    let available = remaining_owner_distribution_capacity(state, organization);
+    if amount > available {
+        return Err(BusinessProfitSweepError::InsufficientDistributionCapacity {
+            available_cents: available.cents(),
+            requested_cents: amount.cents(),
+        });
+    }
+    Ok(())
 }
 
 /// Shared ceiling for manual and automatic withdrawals. Negative or unavailable retained
