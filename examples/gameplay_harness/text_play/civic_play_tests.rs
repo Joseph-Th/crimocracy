@@ -105,7 +105,8 @@ fn generated_city_has_hundreds_of_real_people_and_hires_a_freelancer_for_a_fixed
             .unwrap()
             .fee_cents()
     );
-    session.execute("advance 2d uninterrupted").unwrap();
+    let advance = session.execute("advance 2d uninterrupted").unwrap().0;
+    assert!(advance.contains("1 freelance contract end(s)"), "{advance}");
     assert!(
         session
             .state

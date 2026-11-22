@@ -25,6 +25,8 @@ pub enum CivicPersonError {
     InvalidWorkplace(BusinessId),
     #[error("character {0} is not an unaffiliated non-owner")]
     NotIndependent(CharacterId),
+    #[error("character {0} cannot change vocation during a signed freelance contract")]
+    ActiveFreelanceContract(CharacterId),
     #[error("character {0} already has this occupation and home")]
     Unchanged(CharacterId),
     #[error("character {0} changed after occupation validation")]
@@ -88,6 +90,11 @@ fn validate_occupation(
         .world()
         .get_character(character)
         .ok_or(CivicPersonError::MissingCharacter(character))?;
+    if state.world().active_freelance_contract(character).is_some()
+        && person.life().vocation() != vocation
+    {
+        return Err(CivicPersonError::ActiveFreelanceContract(character));
+    }
     if (person.organization().is_some() && vocation != IndependentVocation::Resident)
         || (person.supervisor().is_some() && vocation != IndependentVocation::Resident)
         || (state
@@ -197,7 +204,10 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
         .world()
         .get_character(character)
         .expect("known character");
-    if detained || day.is_multiple_of(7) {
+    // One rest day per person per week, staggered by persistent identity.
+    // A universal day-seven holiday would leave every police beat and public
+    // institution without any named on-duty staff at the same time.
+    if detained || (day + u64::from(character.raw())).is_multiple_of(7) {
         return DayWork {
             action: None,
             business_profit: 0,

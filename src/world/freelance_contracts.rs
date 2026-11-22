@@ -6,7 +6,7 @@
 
 use crate::core::id::{CharacterId, IdExhaustionError, LedgerTransactionId, OrganizationId};
 use crate::core::state::AppState;
-use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current, is_day_boundary};
+use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current};
 use crate::finance::finance_system::{
     FinanceError, ValidatedLedgerTransaction, validate_open_accounts, validate_record_transaction,
     validate_record_transaction_with_openings,
@@ -75,18 +75,48 @@ impl WorldState {
             .last()
             .filter(|record| record.ended_at.is_none())
     }
+    /// The last signed term, including a completed one. Player adapters can
+    /// identify the actual sponsor of a due departure after membership is gone.
+    pub fn latest_freelance_contract(
+        &self,
+        character: CharacterId,
+    ) -> Option<&FreelanceContractRecord> {
+        self.freelance_contracts.get(&character)?.last()
+    }
     pub(super) fn record_freelance_contract(&mut self, record: FreelanceContractRecord) {
+        self.freelance_expirations
+            .entry(record.expires_at)
+            .or_default()
+            .insert(record.freelancer);
         self.freelance_contracts
             .entry(record.freelancer)
             .or_default()
             .push(record);
     }
     pub(super) fn end_freelance_contract(&mut self, character: CharacterId, now: SimTime) {
-        self.freelance_contracts
+        let record = self
+            .freelance_contracts
             .get_mut(&character)
             .and_then(|records| records.last_mut())
-            .expect("validated active freelance contract exists")
-            .ended_at = Some(now);
+            .expect("validated active freelance contract exists");
+        record.ended_at = Some(now);
+        super::stores::prune_index_entry(
+            &mut self.freelance_expirations,
+            record.expires_at,
+            character,
+        );
+    }
+
+    pub(super) fn due_freelance_contracts(&self, now: SimTime) -> Vec<CharacterId> {
+        let mut due: Vec<_> = self
+            .freelance_expirations
+            .range(..=now)
+            .flat_map(|(_, freelancers)| freelancers.iter().copied())
+            .collect();
+        // Stable character-ID priority preserves deterministic release order when multiple
+        // contracts have distinct overdue instants but become releasable in one minute.
+        due.sort_unstable();
+        due
     }
 }
 
@@ -326,20 +356,17 @@ pub fn validate_hire_freelancer(
     })
 }
 
-/// Contract workers leave after their agreed term. If a case, police custody
-/// or a scheduled operation still binds them, expiry is deferred, not forced.
-pub fn apply_due_freelance_expirations(state: &mut AppState) -> usize {
-    if !is_day_boundary(state.now()) {
-        return 0;
-    }
-    let due: Vec<_> = state
-        .world()
-        .freelance_contracts()
-        .filter(|record| record.ended_at.is_none() && record.expires_at <= state.now())
-        .map(|record| (record.freelancer, record.sponsor))
-        .collect();
-    let mut ended = 0;
-    for (freelancer, sponsor) in due {
+/// Contract workers leave at their exact expiration minute. If a case, police custody
+/// or a scheduled operation still binds them, expiry remains indexed for retry.
+pub fn apply_due_freelance_expirations(state: &mut AppState) -> Vec<CharacterId> {
+    let due = state.world().due_freelance_contracts(state.now());
+    let mut ended = Vec::new();
+    for freelancer in due {
+        let sponsor = state
+            .world()
+            .active_freelance_contract(freelancer)
+            .expect("expiry index references an active contract")
+            .sponsor();
         let org = state
             .world()
             .get_character(freelancer)
@@ -359,7 +386,7 @@ pub fn apply_due_freelance_expirations(state: &mut AppState) -> usize {
         {
             state.world.end_freelance_contract(freelancer, state.now());
         }
-        ended += 1;
+        ended.push(freelancer);
     }
     ended
 }
@@ -378,8 +405,12 @@ pub(crate) fn valid_freelance_contracts(state: &AppState) -> bool {
                     let leader = state.world().get_character(record.manager);
                     let transaction = state.finance().get_transaction(record.transaction);
                     record.freelancer == freelancer
+                        // A vocation describes the person's current work, not their entire
+                        // signed employment history. Ended contracts remain valid after a
+                        // later lawful career change; active contracts retain the vocation.
                         && person.is_some_and(|person| {
-                            person.life().vocation() == IndependentVocation::FreelanceCriminal
+                            record.ended_at.is_some()
+                                || person.life().vocation() == IndependentVocation::FreelanceCriminal
                         })
                         && sponsor.is_some_and(|record| record.kind() == OrganizationKind::Criminal)
                         && leader.is_some()

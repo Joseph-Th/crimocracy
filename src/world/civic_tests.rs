@@ -19,6 +19,60 @@ use crate::world::{BusinessOwner, CivicActivity, CivicProfession, OrganizationKi
 use std::collections::BTreeSet;
 
 #[test]
+fn police_departments_stagger_weekly_rest_instead_of_closing_citywide() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let officers: Vec<_> = city
+        .state
+        .world()
+        .characters()
+        .filter(|person| {
+            city.state.world().civic_profession(person.id()) == Some(CivicProfession::PoliceOfficer)
+        })
+        .map(|person| person.id())
+        .collect();
+    assert!(
+        officers.len() > 7,
+        "city has enough named police for rotating days off"
+    );
+
+    for day in 1..=7 {
+        city.state
+            .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+        crate::opportunities::opportunity_system::apply_opportunity_expiry(
+            &registry,
+            &mut city.state,
+        )
+        .unwrap();
+        apply_due_character_lives(&mut city.state);
+        let on_duty = officers
+            .iter()
+            .filter(|&&officer| {
+                city.state
+                    .world()
+                    .get_character(officer)
+                    .unwrap()
+                    .life()
+                    .last_activity()
+                    .is_some_and(|(at, activity)| {
+                        at == city.state.now()
+                            && matches!(
+                                activity,
+                                CivicActivity::DetectiveWork(_) | CivicActivity::PolicePatrol(_)
+                            )
+                    })
+            })
+            .count();
+        assert!(
+            on_duty > 0,
+            "day {day} cannot close every named police shift simultaneously"
+        );
+    }
+    validate_invariants(&city.state);
+    restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+}
+
+#[test]
 fn actual_named_professions_have_daily_duties_and_private_career_histories() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();

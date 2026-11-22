@@ -44,6 +44,7 @@ impl Session<'_> {
         let mut reason = None;
         let mut deferred_custody = 0_u32;
         let mut deferred_releases = 0_u32;
+        let mut deferred_contracts = 0_usize;
         let mut deferred_shutdowns = 0_u32;
         let mut deferred_losses = 0_u32;
         let mut deferred_payroll = 0_u32;
@@ -96,6 +97,16 @@ impl Session<'_> {
             };
             let own_arrest = own_custody_event(&tick.evidence_arrests);
             let own_release = own_custody_event(&tick.custody_releases);
+            let own_contract_expirations = tick
+                .freelance_contract_expirations
+                .iter()
+                .filter(|&&freelancer| {
+                    self.state
+                        .world()
+                        .latest_freelance_contract(freelancer)
+                        .is_some_and(|term| term.sponsor() == self.player)
+                })
+                .count();
             let own_payroll_shortfall = tick.payrolls.iter().any(|payroll| {
                 payroll.organization() == self.player && payroll.short() > Money::ZERO
             });
@@ -149,6 +160,7 @@ impl Session<'_> {
             if uninterrupted {
                 deferred_custody += u32::from(own_arrest);
                 deferred_releases += u32::from(own_release);
+                deferred_contracts += own_contract_expirations;
                 deferred_shutdowns += u32::from(
                     own_business_suspended || own_managerial_shutdown || own_racket_suspended,
                 );
@@ -173,6 +185,8 @@ impl Session<'_> {
                 reason = Some("your member entered custody; review 'counsel' and 'contacts'");
             } else if !uninterrupted && own_release {
                 reason = Some("your member was released from custody; review 'counsel'");
+            } else if !uninterrupted && own_contract_expirations > 0 {
+                reason = Some("a freelance contract expired; review 'people' and 'freelancers'");
             } else if !uninterrupted && pause_exceptions && own_payroll_shortfall {
                 reason = Some("payroll ran short; review 'treasury', 'businesses' and 'accounts'");
             } else if !uninterrupted && pause_exceptions && own_business_suspended {
@@ -211,7 +225,7 @@ impl Session<'_> {
         if uninterrupted {
             writeln!(
                 out,
-                "Uninterrupted review: {deferred_custody} custody event(s), {deferred_releases} release(s), {deferred_shutdowns} shutdown event(s), {deferred_losses} new loss streak(s), {deferred_payroll} payroll shortfall(s), {deferred_operations} completed/aborted operation minute(s), {deferred_urgent} priority-report minute(s). All events were simulated. Review 'reports', 'counsel', 'recovery' and 'accounts'."
+                "Uninterrupted review: {deferred_custody} custody event(s), {deferred_releases} release(s), {deferred_contracts} freelance contract end(s), {deferred_shutdowns} shutdown event(s), {deferred_losses} new loss streak(s), {deferred_payroll} payroll shortfall(s), {deferred_operations} completed/aborted operation minute(s), {deferred_urgent} priority-report minute(s). All events were simulated. Review 'reports', 'people', 'freelancers', 'counsel', 'recovery' and 'accounts'."
             )
             .unwrap();
         }

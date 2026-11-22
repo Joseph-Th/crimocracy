@@ -11,7 +11,7 @@ use crate::core::id::{
 };
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
-use crate::core::time::{SimDuration, SimTime};
+use crate::core::time::{SimDuration, SimTime, is_day_boundary};
 use crate::decisions::decision_system::DecisionRequestOutcome;
 use crate::legal::investigation_system::apply_autonomous_investigator_staffing;
 use crate::legal::investigation_system::apply_cold_case_decay;
@@ -71,6 +71,9 @@ pub struct TickOutcome {
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
     /// Members who voluntarily left following unresolved wage shortfalls.
     pub payroll_departures: Vec<CharacterId>,
+    /// Freelancers whose signed terms concluded through canonical release this minute.
+    /// Only identity is surfaced; the player adapter must check the original sponsor.
+    pub freelance_contract_expirations: Vec<CharacterId>,
     /// Operational rackets suspended because their assigned captain cannot
     /// supervise the current workforce and geographic command load.
     pub managerial_overstretch_suspensions: Vec<crate::core::id::EnterpriseId>,
@@ -132,8 +135,17 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         registry.legal().maximum_detention(),
     )
     .expect("valid state should release custody that reached the authored maximum");
-    // Phase order is the contract: bounded custody release first; opportunity expiry next so its
-    // durable lifecycle report is available to every remaining same-minute consumer; then
+    // On ordinary minutes, conclude expired freelancer employment before new operations
+    // are started or new personnel assignments can rely on a term that already ended.
+    // At midnight, keep the member through the just-finished day's payroll below;
+    // otherwise a contract expiring precisely on a day boundary earns no final wage.
+    let mut freelance_contract_expirations = if !is_day_boundary(state.now()) {
+        crate::world::freelance_contracts::apply_due_freelance_expirations(state)
+    } else {
+        Vec::new()
+    };
+    // Phase order is the contract: bounded custody release and non-midnight freelancer expiry
+    // first; opportunity expiry next so its durable lifecycle report is available; then
     // operations (police arrivals, overdue cleanup, resolution, starts), legal institutional work
     // (staffing, detective work, new custody, representation, informants, cold decay), economy
     // cycles plus legitimate-business recovery, then the day-boundary governance cluster: payroll,
@@ -243,10 +255,13 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // evaluate the roster and delegated authorities.
     let payroll_departures =
         crate::world::payroll_departures::apply_payroll_departures(registry, state, &payrolls);
-    // Fixed-term freelancers leave via canonical membership release. Active
-    // operation bookings and custody defer their exit rather than deleting
-    // a participant mid-mission.
-    crate::world::freelance_contracts::apply_due_freelance_expirations(state);
+    // Boundary-aligned terms finish after earned payroll; other terms were already
+    // checked before this minute's work. A still-booked or detained freelancer
+    // remains in the derived expiration schedule until release is lawful.
+    if is_day_boundary(state.now()) {
+        freelance_contract_expirations =
+            crate::world::freelance_contracts::apply_due_freelance_expirations(state);
+    }
     // Named civilians and institutional officers independently work, rest and
     // gain experience after today's actual cases and storefront settlements.
     // Updates do not invalidate held organizational authorization tokens.
@@ -350,6 +365,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         autonomous_profit_sweeps,
         payrolls,
         payroll_departures,
+        freelance_contract_expirations,
         managerial_overstretch_suspensions,
         reputation_changes,
         recruitment_attempts,

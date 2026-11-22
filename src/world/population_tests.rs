@@ -11,6 +11,97 @@ use crate::world::freelance_contracts::{
 use crate::world::{CivicProfession, IndependentVocation};
 
 #[test]
+fn freelance_career_change_is_blocked_during_a_contract_but_valid_after_expiry() {
+    use crate::world::character_life::validate_set_civic_occupation;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let freelancer = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            person.life().vocation() == IndependentVocation::FreelanceCriminal
+                && city
+                    .state
+                    .social()
+                    .get_relationship(person.id(), city.boss)
+                    .is_some()
+        })
+        .unwrap()
+        .id();
+    let home = city
+        .state
+        .world()
+        .get_character(freelancer)
+        .unwrap()
+        .life()
+        .home()
+        .unwrap();
+    validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 1)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    assert!(matches!(
+        validate_set_civic_occupation(
+            &city.state,
+            freelancer,
+            home,
+            IndependentVocation::Resident,
+        ),
+        Err(crate::world::character_life::CivicPersonError::ActiveFreelanceContract(id))
+            if id == freelancer
+    ));
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+
+    city.state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+    crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, &mut city.state)
+        .unwrap();
+    assert_eq!(
+        apply_due_freelance_expirations(&mut city.state),
+        vec![freelancer]
+    );
+    validate_set_civic_occupation(
+        &city.state,
+        freelancer,
+        home,
+        IndependentVocation::Journalist,
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    assert!(
+        city.state
+            .world()
+            .active_freelance_contract(freelancer)
+            .is_none()
+    );
+    assert!(
+        city.state
+            .world()
+            .freelance_contracts()
+            .any(|contract| contract.freelancer() == freelancer && contract.ended_at().is_some())
+    );
+    validate_invariants(&city.state);
+    let saved = build_save(&registry, &city.state).unwrap();
+    let restored = restore_save(&registry, saved).unwrap();
+    assert_eq!(
+        restored
+            .world()
+            .get_character(freelancer)
+            .unwrap()
+            .life()
+            .vocation(),
+        IndependentVocation::Journalist
+    );
+}
+
+#[test]
 fn city_scales_create_hundreds_of_distinct_live_people_with_actual_professions() {
     let registry = build_registry();
     let targets = [
@@ -192,12 +283,15 @@ fn paid_freelance_contract_is_personal_temporary_and_recruitable_after_expiry() 
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
     crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, &mut city.state)
         .unwrap();
-    assert_eq!(apply_due_freelance_expirations(&mut city.state), 0);
+    assert!(apply_due_freelance_expirations(&mut city.state).is_empty());
     city.state
         .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
     crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, &mut city.state)
         .unwrap();
-    assert_eq!(apply_due_freelance_expirations(&mut city.state), 1);
+    assert_eq!(
+        apply_due_freelance_expirations(&mut city.state),
+        vec![freelancer]
+    );
     assert_eq!(
         city.state
             .world()
@@ -233,4 +327,95 @@ fn paid_freelance_contract_is_personal_temporary_and_recruitable_after_expiry() 
     .expect("formerly contracted freelancer must be considered by the real recruitment owner");
     validate_invariants(&city.state);
     restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+}
+
+#[test]
+fn freelance_expiration_uses_its_signed_minute_without_charging_an_extra_day() {
+    use crate::core::simulation::run_tick;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let freelancer = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            person.life().vocation() == IndependentVocation::FreelanceCriminal
+                && city
+                    .state
+                    .social()
+                    .get_relationship(person.id(), city.boss)
+                    .is_some()
+        })
+        .unwrap()
+        .id();
+
+    run_tick(&registry, &mut city.state).unwrap(); // Signed one minute after midnight.
+    validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 1)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let deadline = city
+        .state
+        .world()
+        .active_freelance_contract(freelancer)
+        .unwrap()
+        .expires_at();
+    assert_eq!(deadline.as_minutes(), DAY_MINUTES + 1);
+
+    city.state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32 - 2));
+    let midnight = run_tick(&registry, &mut city.state).unwrap();
+    assert_eq!(city.state.now().as_minutes(), DAY_MINUTES);
+    assert!(
+        midnight
+            .payrolls
+            .iter()
+            .any(|payroll| payroll.organization() == city.player
+                && payroll.owed().cents() >= registry.upkeep().per_member_daily().cents())
+    );
+    assert!(
+        city.state
+            .world()
+            .active_freelance_contract(freelancer)
+            .is_some()
+    );
+
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    let ending = run_tick(&registry, &mut city.state).unwrap();
+    let restored_ending = run_tick(&registry, &mut restored).unwrap();
+    assert_eq!(ending.freelance_contract_expirations, vec![freelancer]);
+    assert_eq!(
+        restored_ending.freelance_contract_expirations,
+        vec![freelancer]
+    );
+    assert_eq!(city.state.now(), deadline);
+    assert!(
+        city.state
+            .world()
+            .active_freelance_contract(freelancer)
+            .is_none(),
+        "a signed one-day contract must not remain on payroll for a second day"
+    );
+    let ended = city
+        .state
+        .world()
+        .freelance_contracts()
+        .find(|contract| contract.freelancer() == freelancer)
+        .unwrap();
+    assert_eq!(ended.ended_at(), Some(deadline));
+    assert_eq!(
+        city.state
+            .world()
+            .get_character(freelancer)
+            .unwrap()
+            .organization(),
+        None
+    );
+    validate_invariants(&city.state);
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
 }

@@ -183,7 +183,7 @@ impl BusinessStore {
     }
 }
 /// Removes one entity from an owned-set index, dropping the key entirely when its set empties.
-fn prune_index_entry<K: Ord + Copy, V: Ord + Copy>(
+pub(super) fn prune_index_entry<K: Ord + Copy, V: Ord + Copy>(
     index: &mut BTreeMap<K, BTreeSet<V>>,
     key: K,
     value: V,
@@ -203,6 +203,10 @@ pub struct WorldState {
     businesses: BusinessStore,
     pub(super) freelance_contracts:
         BTreeMap<CharacterId, Vec<super::freelance_contracts::FreelanceContractRecord>>,
+    /// Reconstructed from the last open term per freelancer. Overdue blocked releases
+    /// remain here for retry at each following minute, without scanning old contracts.
+    #[serde(skip)]
+    pub(super) freelance_expirations: BTreeMap<SimTime, BTreeSet<CharacterId>>,
 }
 impl WorldState {
     pub(crate) fn new() -> Self {
@@ -210,6 +214,7 @@ impl WorldState {
     }
 
     pub(crate) fn rebuild_derived_indexes(&mut self) {
+        self.freelance_expirations = self.derived_freelance_expirations();
         self.characters.by_organization.clear();
         self.characters.by_supervisor.clear();
         for record in self.characters.records.values() {
@@ -659,7 +664,30 @@ impl WorldState {
                 .iter()
                 .all(|(id, record)| *id == record.id())
             && self.characters_have_consistent_indexes()
+            && self.freelance_expirations_have_consistent_indexes()
             && self.businesses_have_consistent_indexes()
+    }
+
+    fn freelance_expirations_have_consistent_indexes(&self) -> bool {
+        self.freelance_expirations == self.derived_freelance_expirations()
+    }
+
+    /// Both restoration and release-safe index validation derive the same schedule
+    /// from the signed per-person contract history, never from stored cache fields.
+    fn derived_freelance_expirations(&self) -> BTreeMap<SimTime, BTreeSet<CharacterId>> {
+        let mut expected: BTreeMap<SimTime, BTreeSet<CharacterId>> = BTreeMap::new();
+        for (&character, contracts) in &self.freelance_contracts {
+            if let Some(active) = contracts
+                .last()
+                .filter(|record| record.ended_at().is_none())
+            {
+                expected
+                    .entry(active.expires_at())
+                    .or_default()
+                    .insert(character);
+            }
+        }
+        expected
     }
 
     /// Forward membership plus exact-count agreement proves bidirectional index coherence
