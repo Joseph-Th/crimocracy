@@ -5,8 +5,12 @@ use super::{
     evidence_qualifies_for_custody, repeat_custody_without_new_evidence, validate_arrest,
     validate_custody_evidence_references,
 };
-use crate::core::id::{ArrestId, CharacterId, EvidenceId, InvestigationId, OperationId};
+use crate::core::entity::EntityRef;
+use crate::core::id::{
+    ArrestId, CharacterId, EvidenceId, InvestigationId, OperationId, OrganizationId,
+};
 use crate::core::state::AppState;
+use crate::core::time::{DAY_MINUTES, SimTime};
 use crate::legal::{ArrestDraft, InvestigationStatus};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
@@ -19,6 +23,47 @@ struct AutonomousArrestCandidate {
     evidence: BTreeSet<EvidenceId>,
     independent_sources: usize,
     strong_sources: usize,
+}
+
+/// Routine vice casework may continue after release, but police should consolidate those
+/// observations rather than impose a new detention on every daily settlement. A newly
+/// completed criminal operation is a distinct event and can still justify immediate custody.
+/// This policy is reconstructed from persisted arrests and never alters direct arrest validity.
+const ROUTINE_REARREST_INTERVAL_DAYS: u64 = 14;
+
+fn has_distinct_post_release_operation(
+    state: &AppState,
+    released_at: SimTime,
+    evidence: &BTreeSet<EvidenceId>,
+) -> bool {
+    evidence.iter().any(|id| {
+        state.legal().get_evidence(*id).is_some_and(|record| {
+            let Some(EntityRef::Operation(operation)) = record.origin() else {
+                return false;
+            };
+            record.discovered_at() > released_at
+                && state
+                    .operations()
+                    .get_operation(operation)
+                    .and_then(|operation| operation.resolution())
+                    .is_some_and(|outcome| outcome.resolved_at() > released_at)
+        })
+    })
+}
+
+fn most_recent_release_by_subject_and_authority(
+    state: &AppState,
+) -> BTreeMap<(CharacterId, OrganizationId), SimTime> {
+    let mut latest = BTreeMap::new();
+    for arrest in state.legal().arrests() {
+        if let Some(released_at) = arrest.released_at() {
+            let entry = latest
+                .entry((arrest.character(), arrest.authority()))
+                .or_insert(released_at);
+            *entry = (*entry).max(released_at);
+        }
+    }
+    latest
 }
 
 /// A single case-level evidence pass supplies all character subjects. A multi-subject case
@@ -190,6 +235,32 @@ pub fn apply_autonomous_evidence_arrests(
             state,
             investigation.id(),
         )?);
+    }
+    // Most minutes have no custody-grade candidates. Re-read lifetime release history only
+    // when there is actual qualifying evidence, not on every canonical simulation minute.
+    if !candidates.is_empty() {
+        let most_recent_release = most_recent_release_by_subject_and_authority(state);
+        candidates.retain(|candidate| {
+            let authority = state
+                .legal()
+                .get_investigation(candidate.investigation)
+                .expect("candidate must retain an active investigation")
+                .owner();
+            !most_recent_release
+                .get(&(candidate.character, authority))
+                .is_some_and(|released_at| {
+                    state
+                        .now()
+                        .as_minutes()
+                        .saturating_sub(released_at.as_minutes())
+                        < ROUTINE_REARREST_INTERVAL_DAYS * DAY_MINUTES
+                        && !has_distinct_post_release_operation(
+                            state,
+                            *released_at,
+                            &candidate.evidence,
+                        )
+                })
+        });
     }
     // One character can be arrestable in several police files at once, but only one active
     // detention can own them. Prefer the case with more independent qualifying sources, then

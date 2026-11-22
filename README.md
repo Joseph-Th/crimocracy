@@ -144,11 +144,12 @@ functions across that network. `racket-kinds` lists the required
 functions. Add `manager=char-N` to choose an eligible manager explicitly; a
 cross-district network requires an organization-wide enterprise scope.
 `preview-racket` takes the same arguments, validates without establishing the
-racket, and shows the chosen manager, conditional costs and earnings, and the
-case-pressure threshold for nonpositive expected earnings. Both `preview-racket` and `enterprises` warn when assigning several active rackets to one manager would expose them to a simultaneous suspension on detention. `business business-N suspend` pauses a player-owned storefront
+racket, and shows the chosen manager, conditional costs and earnings, the
+case-pressure threshold for nonpositive expected earnings, and the effects of one or
+two additional active district cases at unchanged gross and staffing. Both `preview-racket` and `enterprises` warn when assigning several active rackets to one manager would expose them to a simultaneous suspension on detention. `business business-N suspend` pauses a player-owned storefront
 only after its active racket dependencies are suspended;
 `business business-N resume` restarts its real operating cycle without resetting the
-current laundering window. Suspended storefronts now also appear in `recovery` alongside rackets, including last realized margin and the actual resume blocker. Each racket still requires a player-authorized resumption, but `resume-rackets <id> [id...]` validates a **player-selected** group before making any status change. It does not automatically restart unselected or detained managers' operations. `reassign-racket <id> <member-id>` transfers an existing racket to an eligible manager whose mandate covers its whole network, retaining the accounts, historical settlements, and current operating status. Use `racket <id> resume` afterward if it was suspended. An active racket with a due settlement must settle or suspend before reassignment.
+current laundering window. Suspended storefronts now also appear in `recovery` alongside rackets, including last realized margin and the actual resume blocker. Each racket still requires a player-authorized resumption, but `resume-rackets <id> [id...]` validates a **player-selected** group before making any status change. It does not automatically restart unselected or detained managers' operations. `reassign-racket <id> <member-id>` transfers an existing racket to an eligible manager whose mandate covers its whole network, retaining the accounts, historical settlements, and current operating status. Use `racket <id> resume` afterward if it was suspended, or use `cover-rackets <char-N> <id> [id...]` to explicitly select one eligible replacement manager and atomically reassign and resume the selected suspended rackets. A blocked member, capacity limit, host, or territory condition rejects the entire order without partial changes. An active racket with a due settlement must settle or suspend before reassignment.
 
 For financial review, `ledger [count]` lists recent transactions touching
 organization-owned accounts, and `transaction transaction-N` shows only
@@ -265,7 +266,7 @@ use the learned episode if the production legal and operation checks permit.
 An institution-level surveillance report about case activity is not itself
 evidence that a specific person is a witness.
 
-`counsel` displays known custody matters involving current members and their
+Routine police vice observations cannot autonomously detain the same person under the same police authority more than once in fourteen days after release, even across separate inquiries; police may still arrest sooner for a newly completed criminal operation, and the ordinary direct arrest evidence gate remains intact. Pending prosecutions and current enforcement costs continue during this interval. `counsel` displays known custody matters involving current members and their
 actual representation. `retain <arrest-id> <legal-contact-id> <fee-cents>`
 hires counsel through a live legal contact and the production ledger.
 `end-counsel <representation-id> <concluded|replace|withdraw>` closes

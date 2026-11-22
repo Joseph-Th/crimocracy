@@ -647,8 +647,8 @@ impl Session<'_> {
                 out = self.execute_business_commands(&words)?;
             }
             "enterprises" | "racket-outlook" | "racket-kinds" | "start-racket"
-            | "preview-racket" | "racket" | "resume-rackets" | "reassign-racket"
-            | "staff-racket" => {
+            | "preview-racket" | "racket" | "resume-rackets" | "cover-rackets"
+            | "reassign-racket" | "staff-racket" => {
                 out = self.execute_racket_commands(&words)?;
             }
             "case-brief" => {

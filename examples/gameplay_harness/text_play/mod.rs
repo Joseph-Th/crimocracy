@@ -169,6 +169,7 @@ const HELP: &str = "Commands:
                          Validate an investment and estimate earnings without establishing it
   racket <id> <suspend|resume|retire>  Change your racket's lifecycle
   resume-rackets <id> [id...]  Resume selected suspended rackets in one validated order
+  cover-rackets <char-N> <id> [id...]  Reassign and resume selected suspended rackets atomically
   reassign-racket <id> <member-id>  Transfer management without replacing the racket
   racket-cycles <enterprise-id> [count]
                          Historical racket earnings and enforcement attention
@@ -486,6 +487,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "recovery" => 1..=1,
         "launder-all" => 2..=2,
         "resume-rackets" => 2..=32,
+        "cover-rackets" => 3..=32,
         "recruit" | "scout" => 2..=3,
         "start-racket" | "preview-racket" => 5..=usize::MAX,
         "burgle" => 2..=5,

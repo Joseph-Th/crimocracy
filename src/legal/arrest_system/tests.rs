@@ -2139,8 +2139,16 @@ fn repeat_custody_requires_new_post_release_evidence_for_direct_and_autonomous_p
         "custody must not restart in the same simulation minute as release"
     );
     fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .expect("fresh evidence should not trigger next-minute routine custody")
+            .is_empty()
+    );
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        14 * u32::try_from(crate::core::time::DAY_MINUTES).unwrap() - 1,
+    ));
     let rearrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
-        .expect("release-minute evidence should permit renewed custody on the next minute");
+        .expect("new evidence should permit routine custody after the consolidation interval");
     assert_eq!(rearrests.len(), 1);
     let second = rearrests[0];
     assert_ne!(second, first);
@@ -2200,6 +2208,112 @@ fn repeat_custody_requires_new_post_release_evidence_for_direct_and_autonomous_p
         3
     );
     validate_state(&fixture.state).expect("repeat custody state should remain structurally valid");
+    validate_invariants(&fixture.state);
+}
+
+#[test]
+fn routine_autonomous_custody_waits_across_distinct_cases_after_restored_release() {
+    let mut fixture = fixture();
+    let corroborating = add_character_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.suspect,
+    );
+    let first = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: fixture.suspect,
+            investigation: fixture.investigation,
+            evidence: BTreeSet::from([fixture.evidence, corroborating]),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        2 * u32::try_from(crate::core::time::DAY_MINUTES).unwrap(),
+    ));
+    validate_release_arrest(&fixture.state, first)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+
+    // A separate, well-corroborated vice case should not restart routine custody after
+    // release merely because it cites fresh records. A deliberate direct arrest remains
+    // governed by evidence and the existing same-case repeat guard.
+    let new_case = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Independent follow-up vice file".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(fixture.suspect)]),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let evidence = BTreeSet::from([
+        add_character_evidence(
+            &mut fixture.state,
+            fixture.police,
+            new_case,
+            fixture.suspect,
+        ),
+        add_character_evidence(
+            &mut fixture.state,
+            fixture.police,
+            new_case,
+            fixture.suspect,
+        ),
+    ]);
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    assert!(
+        validate_arrest(
+            &fixture.registry,
+            &fixture.state,
+            ArrestDraft {
+                character: fixture.suspect,
+                investigation: new_case,
+                evidence: evidence.clone(),
+            },
+        )
+        .is_ok(),
+        "explicit evidence-backed custody should remain available"
+    );
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .unwrap()
+            .is_empty(),
+        "routine automatic arrest must respect the released person's recovery interval"
+    );
+
+    let save = build_save(&fixture.registry, &fixture.state).unwrap();
+    fixture.state = restore_save(&fixture.registry, save).unwrap();
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        14 * u32::try_from(crate::core::time::DAY_MINUTES).unwrap() - 2,
+    ));
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .unwrap()
+            .is_empty(),
+        "the final minute of the consolidation interval is still protected"
+    );
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let arrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+        .expect("matured independent case should again be actionable");
+    assert_eq!(arrests.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_arrest(arrests[0])
+            .unwrap()
+            .investigation(),
+        new_case
+    );
+    validate_state_against_registry(&fixture.registry, &fixture.state).unwrap();
     validate_invariants(&fixture.state);
 }
 
@@ -2420,8 +2534,18 @@ fn repeat_custody_forensic_reanalysis_of_old_source_is_not_new_independent_evide
         fixture.investigation,
         fixture.suspect,
     );
+    // Routine autonomous custody waits for the institution's cross-case consolidation
+    // interval, even though direct custody with this new source is already valid.
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .expect("fresh evidence during the recovery interval must remain pending")
+            .is_empty()
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(14 * 1440));
     let second = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
-        .expect("independent fresh evidence should permit new custody");
+        .expect("independent fresh evidence should permit new custody after the interval");
     assert_eq!(second.len(), 1);
     assert!(
         fixture

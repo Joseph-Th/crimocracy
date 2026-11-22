@@ -26,6 +26,19 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
         outlook.estimated_net_cash.cents()
     )
     .unwrap();
+    // Show a one- and two-case sensitivity without disclosing the actual police case graph.
+    // These scenarios keep gross and staffing fixed; they are not omniscient forecasts.
+    let surcharge = i128::from(outlook.heat_surcharge_per_case.cents());
+    if surcharge > 0 {
+        let conditional_net = i128::from(outlook.estimated_net_cash.cents());
+        writeln!(
+            out,
+            "  If district case pressure rises by 1: {} cents net; by 2: {} cents net (before variance)",
+            conditional_net - surcharge,
+            conditional_net - 2 * surcharge
+        )
+        .unwrap();
+    }
     writeln!(
         out,
         "  Shared account balance: {} cents | spendable cash: {} cents",
@@ -179,7 +192,7 @@ impl Session<'_> {
         if storefronts == 0 {
             out.push_str("  No suspended storefronts.\n");
         }
-        out.push_str("Rackets and storefronts remain suspended until resumed by the player. Use 'resume-rackets <id> [id...]' for a one-time validated multi-racket order. Repeated shared-account balances are not separate reserves. Outlooks are estimates, not forecasts of undisclosed police cases.");
+        out.push_str("Rackets and storefronts remain suspended until resumed by the player. Use 'cover-rackets <char-N> <id> [id...]' to nominate a replacement manager and reopen selected rackets atomically, or 'resume-rackets <id> [id...]' when no handoff is needed. Repeated shared-account balances are not separate reserves. Outlooks are estimates, not forecasts of undisclosed police cases.");
         out
     }
 
@@ -437,6 +450,65 @@ impl Session<'_> {
                     )
                     .unwrap();
                 }
+            }
+            "cover-rackets" => {
+                // One explicit player order covers a nominated set of suspended rackets with
+                // one named manager. Execute canonical reassignment and resumption validators
+                // against a projected state. All failures discard that projection, so neither
+                // a manager-capacity block nor an invalid second racket leaves a partial handoff.
+                let manager = self.requested_member(words[1])?;
+                let mut selected = BTreeSet::new();
+                for raw in &words[2..] {
+                    let raw_id = parse_number(raw, "enterprise")?;
+                    let id = self
+                        .state
+                        .enterprises()
+                        .enterprises_for_organization(self.player)
+                        .find(|record| record.id().raw() == raw_id)
+                        .ok_or(format!("enterprise-{raw_id} is not yours"))?
+                        .id();
+                    if !selected.insert(id) {
+                        return Err(format!("enterprise-{raw_id} was selected more than once"));
+                    }
+                }
+                let mut projected = self.state.clone();
+                for id in &selected {
+                    let racket = projected
+                        .enterprises()
+                        .get_enterprise(*id)
+                        .expect("selected enterprise must exist");
+                    let authority = self.enterprise_authority(
+                        racket.location(),
+                        racket.supporting_businesses(),
+                        Some(manager),
+                    )?;
+                    if racket.manager() != manager {
+                        crimocracy::enterprises::enterprise_execution::validate_reassign_enterprise(
+                            &projected,
+                            *id,
+                            authority,
+                        )
+                        .map_err(|error| format!("enterprise-{}: {error}", id.raw()))?
+                        .commit(&mut projected)
+                        .map_err(|error| format!("enterprise-{}: {error}", id.raw()))?;
+                    }
+                    validate_resume_enterprise(self.registry, &projected, *id)
+                        .map_err(|error| format!("enterprise-{}: {error}", id.raw()))?
+                        .commit(&mut projected)
+                        .map_err(|error| format!("enterprise-{}: {error}", id.raw()))?;
+                }
+                self.state = projected;
+                writeln!(
+                    out,
+                    "Assigned char-{} and resumed {} racket(s): {}. All changes committed together.",
+                    manager.raw(),
+                    selected.len(),
+                    selected
+                        .iter()
+                        .map(|id| format!("enterprise-{}", id.raw()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ).unwrap();
             }
             "resume-rackets" => {
                 // The player explicitly selects every racket. Validate the full cohort

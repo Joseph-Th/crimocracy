@@ -159,6 +159,111 @@ fn recovery_and_brief_are_read_only_and_explain_dormant_rackets() {
 }
 
 #[test]
+fn player_can_cover_suspended_rackets_atomically_without_automatic_manager_selection() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new_generated(
+        &registry,
+        EvaluationSeeds::new(582731, 582731),
+        CityScale::Small,
+    )
+    .expect("seeded city should generate");
+    let original = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .find(|record| record.status() == EnterpriseStatus::Active)
+        .unwrap()
+        .id();
+    assert!(
+        session
+            .execute("recruit char-21 advancement")
+            .unwrap()
+            .0
+            .contains("Accepted")
+    );
+    session.execute("delegate char-21 district-1").unwrap();
+    session
+        .execute("start-racket protection district-1 98 103 manager=char-21")
+        .expect("second racket should establish through the canonical owner");
+    let second = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .find(|record| record.id() != original)
+        .unwrap()
+        .id();
+    session
+        .execute(&format!("racket {} suspend", original.raw()))
+        .unwrap();
+    let snapshot = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let err = session
+        .execute(&format!(
+            "cover-rackets char-21 enterprise-{} enterprise-{}",
+            original.raw(),
+            second.raw()
+        ))
+        .expect_err("active second racket must reject the whole selected cohort");
+    assert!(err.contains("enterprise"), "{err}");
+    assert_eq!(
+        snapshot,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap(),
+        "a failed second resumption cannot commit the preceding management handoff"
+    );
+    assert!(
+        session
+            .execute(&format!(
+                "cover-rackets char-21 enterprise-{} enterprise-{}",
+                original.raw(),
+                original.raw()
+            ))
+            .is_err(),
+        "duplicate selection is not silently deduplicated"
+    );
+    assert_eq!(
+        snapshot,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+
+    let result = session
+        .execute(&format!(
+            "cover-rackets char-21 enterprise-{}",
+            original.raw()
+        ))
+        .expect("one explicit cover order should reassign and resume");
+    assert!(
+        result.0.contains("All changes committed together"),
+        "{result:?}"
+    );
+    let record = session
+        .state
+        .enterprises()
+        .get_enterprise(original)
+        .unwrap();
+    assert_eq!(record.status(), EnterpriseStatus::Active);
+    assert_eq!(record.manager().raw(), 21);
+    let outlook = session
+        .execute(&format!("racket-outlook {}", original.raw()))
+        .unwrap()
+        .0;
+    assert!(
+        outlook.contains("If district case pressure rises by 1"),
+        "{outlook}"
+    );
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap())
+        .expect("composed handoff must save and restore");
+    crimocracy::core::invariants::validate_invariants(&restored);
+    assert_eq!(
+        restored
+            .enterprises()
+            .get_enterprise(original)
+            .unwrap()
+            .manager()
+            .raw(),
+        21
+    );
+}
+
+#[test]
 fn command_verbs_are_case_insensitive_across_handlers() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
