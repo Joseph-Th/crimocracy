@@ -69,6 +69,8 @@ pub struct WardBallot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MayoralElection {
     pub candidate: CharacterId,
+    /// An actual political officeholder, if a municipal council has one.
+    pub incumbent: Option<CharacterId>,
     pub election_day: u64,
     pub held_at: SimTime,
     pub wards_needed: usize,

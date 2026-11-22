@@ -47,7 +47,7 @@ impl ValidatedBusinessAcquisition {
             // account deterministically or open one atomically with the transfer.
             let destination = state
                 .finance
-                .accounts_for(FinancialOwner::Organization(seller))
+                .accounts_for(seller)
                 .find(|account| {
                     account.kind() == AccountKind::AccountedFunds
                         && account.can_receive_liquid_payment(self.price)
@@ -59,7 +59,7 @@ impl ValidatedBusinessAcquisition {
                 let openings = validate_open_accounts(
                     state,
                     vec![FinancialAccountDraft {
-                        owner: FinancialOwner::Organization(seller),
+                        owner: seller,
                         kind: AccountKind::AccountedFunds,
                     }],
                 )?;

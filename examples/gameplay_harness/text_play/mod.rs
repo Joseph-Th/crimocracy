@@ -121,6 +121,8 @@ const HELP: &str = "Commands:
                          Hire or release rank-and-file racket workers within the local staffing limit
   attention [exception|crisis on|off]  Inspect or configure optional auto-pauses
   people                 Your current organization members
+  civics [district-N]     Public civic professions, shopkeepers and municipal offices
+  civic-person <char-N>   Public work history and individually held business titles
   known-people           Your members, identified people, and approach-ready prospects
   known-targets          Identified organizations, operations, cases, and enterprises
   connections            Known institutional acquaintances with an existing staff relationship
@@ -499,7 +501,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         | "case-brief" => 1..=1,
         "counsel" => 1..=2,
         "recovery" => 1..=1,
-        "political" => 2..=2,
+        "political" | "civic-person" => 2..=2,
+        "civics" => 1..=2,
         "advance" => 2..=3,
         "launder-all" => 2..=2,
         "resume-rackets" => 2..=32,
@@ -1168,6 +1171,9 @@ Additional associate wages: {incremental_labor_wages} cents/day through racket o
 mod business_play;
 #[cfg(test)]
 mod cancellation_tests;
+mod civic_play;
+#[cfg(test)]
+mod civic_play_tests;
 mod commands;
 mod contact_play;
 mod debrief_play;

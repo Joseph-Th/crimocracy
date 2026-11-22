@@ -227,6 +227,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     let autonomous_profit_sweeps =
         crate::economy::business_economy_system::apply_due_autonomous_profit_sweeps(state)
             .expect("valid state should distribute due authorized business profits");
+    // Private shopkeepers retain their own accountable earnings after each
+    // shop protects working capital. The payroll phase cannot spend their money.
+    crate::economy::business_economy_system::apply_due_personal_owner_dividends(state)
+        .expect("valid private commercial books should distribute retained profits");
     // Payroll runs after the day's enterprise and business cycles so earned revenue can fund
     // the same day's wages. Reputation then settles the day boundary before recruitment: daily
     // decay advances only impressions old enough to fade, while operation/racket consequences from
@@ -239,6 +243,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // evaluate the roster and delegated authorities.
     let payroll_departures =
         crate::world::payroll_departures::apply_payroll_departures(registry, state, &payrolls);
+    // Named civilians and institutional officers independently work, rest and
+    // gain experience after today's actual cases and storefront settlements.
+    // Updates do not invalidate held organizational authorization tokens.
+    crate::world::character_life::apply_due_character_lives(state);
     // Municipal campaigning spends only funds left after actual payroll.
     // Specialists work, influence decays, and rival organizations challenge
     // local majorities before the day closes; no political progress is free.

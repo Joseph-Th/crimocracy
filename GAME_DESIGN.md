@@ -39,6 +39,10 @@ The city continues to function whether or not the player is looking at it. Busin
 
 The player's job is to understand this world well enough to exploit it.
 
+**Named civic characters are part of the same simulated world as gang members.** A privately held shop has a real proprietor with a title, ledger-funded personal earnings, business decisions, a social network, and a career that survives ownership changes. Police officers and detectives belong to actual precinct rosters and can work patrols or investigations; municipal politicians, lawyers, prosecutors, labor leaders and merchant representatives have their own institutional memberships, work experience, professional standing and fatigue. These people are not cosmetic event names or abstract influence multipliers. Their current work and competence affect police case allocation, mayoral opposition, and the value at which an individual will sell a livelihood. Detention and weekly rest interrupt work, and all relevant changes persist through the normal saved world.
+
+The current implementation simulates specific named shopkeepers and public personnel, with aggregate customers, other employees and voters remaining system-level populations. Expanding to individual residents, worksite employees, electoral canvassing, daily locations, separate public officials' budgets and autonomous officeholders' agendas requires dedicated future systems; those behaviors are not yet silently attributed to the character records.
+
 The central design goal is:
 
 > **High simulation complexity, moderate-to-high decision complexity, low control complexity, and carefully managed information complexity.**

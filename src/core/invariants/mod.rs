@@ -24,6 +24,8 @@ use thiserror::Error;
 pub enum StateValidationError {
     #[error("political campaign has invalid spending, contracts, scope, or influence")]
     InvalidPoliticalCampaign,
+    #[error("a character has invalid personal career, strain, or activity chronology")]
+    InvalidCharacterLife,
     #[error("{kind} state contains reserved persistent ID 0")]
     InvalidPersistentId { kind: &'static str },
     #[error(
@@ -442,6 +444,9 @@ use self::world::validate_world_state;
 pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     if !crate::politics::political_system::valid_political_state(state) {
         return Err(StateValidationError::InvalidPoliticalCampaign);
+    }
+    if !crate::world::character_life::valid_character_lives(state) {
+        return Err(StateValidationError::InvalidCharacterLife);
     }
     validate_id_allocators(state)?;
     validate_indexes(state)?;

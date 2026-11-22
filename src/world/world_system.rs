@@ -14,7 +14,7 @@ use crate::legal::ProsecutionCaseStatus;
 use crate::registry::Registry;
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessOwner, BusinessOwnershipChangeRecord, BusinessRecord,
-    CharacterCapabilities, CharacterDisposition, CharacterDraft, CharacterIdentity,
+    CharacterCapabilities, CharacterDisposition, CharacterDraft, CharacterIdentity, CharacterLife,
     CharacterMembership, CharacterRecord, CharacterRuntime, NeighborhoodDraft, NeighborhoodRecord,
     OrganizationDraft, OrganizationKind, OrganizationRecord, PolicySetting,
 };
@@ -274,6 +274,7 @@ pub fn insert_character(
             drives: draft.drives,
         },
         runtime: CharacterRuntime { version: 1 },
+        life: CharacterLife::default(),
     });
     Ok(id)
 }

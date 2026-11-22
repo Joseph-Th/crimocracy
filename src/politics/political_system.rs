@@ -871,6 +871,54 @@ fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppState) {
     };
     let eligible = eligible_candidate(state, owner, candidacy.candidate)
         && crate::core::campaign_victory::mayoral_ballot_ready(&progress);
+    let incumbent = state
+        .world()
+        .organizations()
+        .filter(|organization| organization.kind() == OrganizationKind::Political)
+        .flat_map(|organization| state.world().characters_in_organization(organization.id()))
+        .filter(|person| {
+            person.supervisor().is_none()
+                && state
+                    .legal()
+                    .active_arrest_for_character(person.id())
+                    .is_none()
+        })
+        .max_by_key(|person| {
+            let negotiating = person
+                .capability(CapabilityKind::Negotiation)
+                .map_or(0, |rating| rating.value());
+            let access = person
+                .capability(CapabilityKind::SocialAccess)
+                .map_or(0, |rating| rating.value());
+            (
+                u32::from(negotiating)
+                    + u32::from(access)
+                    + u32::from(person.life().professional_standing()),
+                std::cmp::Reverse(person.id()),
+            )
+        });
+    let incumbent_id = incumbent.map(|person| person.id());
+    let incumbent_strength = incumbent.map_or(175_u32, |person| {
+        u32::from(
+            person
+                .capability(CapabilityKind::Negotiation)
+                .map_or(0, |rating| rating.value()),
+        ) + u32::from(
+            person
+                .capability(CapabilityKind::SocialAccess)
+                .map_or(0, |rating| rating.value()),
+        ) + u32::from(person.life().professional_standing())
+    });
+    let nominee = state
+        .world()
+        .get_character(candidacy.candidate)
+        .expect("a filed mayoral candidate still exists");
+    let nominee_strength = u32::from(
+        nominee
+            .capability(CapabilityKind::Negotiation)
+            .map_or(0, |rating| rating.value()),
+    ) / 2
+        + u32::from(nominee.life().professional_standing()) / 2;
     let fear = resolve_score(registry, state.reputation(), owner, AudienceKind::Residents);
     let excess_fear = u32::from(fear.saturating_sub(registry.reputation().baseline()));
     let mut ballots = Vec::new();
@@ -895,11 +943,13 @@ fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppState) {
                     .is_some_and(|business| business.neighborhood() == district),
             })
             .count() as u32;
-        let candidate_score = (machine * 50 + grassroots * 30 + institutions * 20) / 100;
+        let candidate_score =
+            (machine * 50 + grassroots * 30 + institutions * 20) / 100 + nominee_strength;
         let candidate_score =
             candidate_score.saturating_sub(excess_fear * 5 + local_rackets.saturating_mul(25));
-        let incumbent_score =
-            495_u32 + u32::from(ward.profile().institutions.police_presence.value()) / 2;
+        let incumbent_score = 320_u32
+            + incumbent_strength
+            + u32::from(ward.profile().institutions.police_presence.value()) / 2;
         let rival_score = u32::from(rival_pressure(state, owner, district)) * 3 / 5;
         let electorate = 5_000_u32
             + u32::from(ward.profile().economy.wealth.value()) * 30
@@ -925,6 +975,7 @@ fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppState) {
     let elected = eligible && wards_won >= progress.required_political_districts;
     let result = MayoralElection {
         candidate: candidacy.candidate,
+        incumbent: incumbent_id,
         election_day: day,
         held_at: state.now(),
         wards_needed: progress.required_political_districts,
@@ -1048,6 +1099,10 @@ pub fn valid_political_state(state: &AppState) -> bool {
                 || election.held_at.as_minutes() != vote_at
                 || election.held_at > state.now()
                 || state.world().get_character(election.candidate).is_none()
+                || election.incumbent.is_some_and(|incumbent| {
+                    state.world().get_character(incumbent).is_none()
+                        || incumbent == election.candidate
+                })
                 || election.wards_needed != (state.world().neighborhoods().count() * 3).div_ceil(4)
                 || election.ballots.len() != state.world().neighborhoods().count()
                 || election.wards_won != election.ballots.iter().filter(|b| b.ward_won).count()

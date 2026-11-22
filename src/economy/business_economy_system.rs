@@ -5,6 +5,7 @@ mod autonomous_lifecycle;
 mod autonomous_profit_sweep;
 mod cycle_planning;
 mod market;
+mod personal_owner_dividends;
 pub(crate) use market::forecast_competitor_disruption_gain;
 
 #[cfg(test)]
@@ -55,6 +56,7 @@ pub use lifecycle::{
     validate_suspend_business_economy,
 };
 pub(crate) use market::acquisition_owner_daily_displacement;
+pub(crate) use personal_owner_dividends::apply_due_personal_owner_dividends;
 pub use profit_sweep::{
     BusinessProfitSweepDraft, BusinessProfitSweepError, ValidatedBusinessProfitSweep,
     resolve_available_business_profit, validate_sweep_business_profits,

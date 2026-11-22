@@ -25,9 +25,9 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::{SimTime, ensure_time_current};
 use crate::economy::business_economy_system;
-use crate::finance::Money;
 use crate::finance::finance_system::FinanceError;
 use crate::finance::helpers::format_money_cents;
+use crate::finance::{FinancialOwner, Money};
 use crate::intelligence::intelligence_system::{
     IntelligenceError, ValidatedInformation, validate_record_information,
 };
@@ -43,7 +43,7 @@ use crate::reports::report_system::{ReportError, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::world_system::WorldError;
 use crate::world::world_system::validate_transfer_business_ownership;
-use crate::world::{BusinessFunction, BusinessOwner, OrganizationKind};
+use crate::world::{BusinessFunction, BusinessOwner, OrganizationKind, TraitKind};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -180,7 +180,7 @@ pub struct ValidatedBusinessAcquisition {
     organization: OrganizationId,
     validated_at: SimTime,
     expected_business_version: u32,
-    negotiated_seller: Option<OrganizationId>,
+    negotiated_seller: Option<FinancialOwner>,
 }
 
 impl ValidatedBusinessAcquisition {
@@ -322,7 +322,10 @@ impl ValidatedBusinessAcquisition {
             })
             .transpose()?;
 
-        let seller_notice = self.negotiated_seller.map(|seller| {
+        let seller_notice = self.negotiated_seller.and_then(|seller| match seller {
+            FinancialOwner::Organization(organization) => Some(organization),
+            FinancialOwner::Character(_) | FinancialOwner::Business(_) => None,
+        }).map(|seller| {
             validate_record_report(state, ReportDraft {
                 recipient: seller,
                 kind: ReportKind::Financial,
@@ -578,7 +581,7 @@ fn eligible_offer_seller(
     buyer: OrganizationId,
     business: BusinessId,
     offer: Money,
-) -> Result<OrganizationId, BusinessAcquisitionError> {
+) -> Result<FinancialOwner, BusinessAcquisitionError> {
     if offer <= Money::ZERO {
         return Err(BusinessAcquisitionError::InvalidOffer);
     }
@@ -586,11 +589,13 @@ fn eligible_offer_seller(
         .world
         .get_business(business)
         .ok_or(BusinessAcquisitionError::MissingBusiness(business))?;
-    let BusinessOwner::Organization(seller) = record.owner() else {
-        return Err(BusinessAcquisitionError::OfferDeclined);
+    let seller = match record.owner() {
+        BusinessOwner::Organization(seller) => FinancialOwner::Organization(seller),
+        BusinessOwner::Character(seller) => FinancialOwner::Character(seller),
+        BusinessOwner::Independent => return Err(BusinessAcquisitionError::OfferDeclined),
     };
-    if seller == buyer
-        || state.player_organization() == Some(seller)
+    if matches!(seller, FinancialOwner::Organization(seller_id)
+        if seller_id == buyer || state.player_organization() == Some(seller_id))
         || state.economy.get_business_economy(business).is_none()
         || state
             .enterprises
@@ -609,13 +614,62 @@ fn eligible_offer_seller(
     {
         return Err(BusinessAcquisitionError::OfferDeclined);
     }
-    let minimum = negotiated_reference_price(registry, state, business)?;
+    let minimum = match seller {
+        FinancialOwner::Organization(_) => negotiated_reference_price(registry, state, business)?,
+        FinancialOwner::Character(person) => {
+            personal_seller_minimum(registry, state, person, business)?
+        }
+        FinancialOwner::Business(_) => unreachable!("business is not a personal proprietor"),
+    };
     if i128::from(offer.cents()) < minimum
-        || seller_preserves_earning_base(registry, state, seller, business, offer)?
+        || matches!(seller, FinancialOwner::Organization(organization)
+            if seller_preserves_earning_base(registry, state, organization, business, offer)?)
     {
         return Err(BusinessAcquisitionError::OfferDeclined);
     }
     Ok(seller)
+}
+
+/// A registered person's choice to part with an actual livelihood. Reliable
+/// profits, professional standing and disposition all influence the price;
+/// exhaustion can make an owner more willing to exit. A single-shop proprietor
+/// requires another 90 days of expected earnings to compensate for losing work.
+/// This is a private reservation price, not an advertised market quotation.
+fn personal_seller_minimum(
+    registry: &Registry,
+    state: &AppState,
+    seller: crate::core::id::CharacterId,
+    business: BusinessId,
+) -> Result<i128, BusinessAcquisitionError> {
+    let person = state
+        .world()
+        .get_character(seller)
+        .ok_or(BusinessAcquisitionError::OfferDeclined)?;
+    if state.legal().active_arrest_for_character(seller).is_some() {
+        return Err(BusinessAcquisitionError::OfferDeclined);
+    }
+    let base = negotiated_reference_price(registry, state, business)?;
+    let only_livelihood = state.world().businesses_owned_by_character(seller).count() == 1;
+    let extra_income = if only_livelihood {
+        seller_strategy::daily_net(registry, state, business)?.max(0) * 90
+    } else {
+        0
+    };
+    let standing = i128::from(person.life().professional_standing());
+    let fatigue = i128::from(person.life().fatigue());
+    let stubbornness = if person.has_trait(TraitKind::Greedy) {
+        18
+    } else if person.has_trait(TraitKind::Proud) {
+        12
+    } else if person.has_trait(TraitKind::Cautious) {
+        8
+    } else if person.has_trait(TraitKind::Impulsive) {
+        -8
+    } else {
+        0
+    };
+    let multiplier = (90 + standing / 4 - fatigue / 3 + stubbornness).clamp(65, 150);
+    Ok(base.saturating_add(extra_income).saturating_mul(multiplier) / 100)
 }
 
 /// Submit a binding offer for a non-player organization's property. Unlike a listing, the

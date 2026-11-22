@@ -58,6 +58,14 @@ city size:
 | Medium (default) | 8 | 144 | 3 | 2 |
 | Large | 16 | 384 | 5 | 4 |
 
+## Named people across the city
+
+A generated city gives individually simulated characters to private business proprietors, municipal politicians, police detectives and officers, prosecutors, lawyers, merchant and labor representatives, alongside criminal personnel. Civilian owners hold actual business titles, accounts and relationships, receive personally earned dividends from shop accounts above protected working-capital floors, and can reject or accept player offers to buy their properties. Their reservation prices reflect their careers, financial livelihood and personal traits. Some properties remain explicitly listed for immediate public acquisition; no direct listing silently turns into a hidden seller.
+
+Every daily boundary assigns named civic characters a real duty or time off. Shopkeepers attend an active business, police cover existing precinct patrols or lead assigned cases, and institutional officials work in their own organizations. Career experience, fatigue and professional standing persist in saves, affect detective allocation, and alter the strength of a named mayoral incumbent and candidate at election time. Detention interrupts work. The game simulates this named professional population rather than all residents or per-minute walking routes.
+
+Use `civics` for public profession counts, `civics district-N` for people in a ward, and `civic-person char-N` for one person's registered business ownership and public work history. Confidential investigation assignments, outsider fatigue and personal bank balances remain private.
+
 Each generated city has distinct district names and correlated economic/policing
 profiles, named civilian and institutional characters, staffed police and rival
 organizations, law enforcement jurisdictions and patrols, operating storefronts

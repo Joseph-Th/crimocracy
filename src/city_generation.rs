@@ -923,6 +923,10 @@ pub fn generate_city(
     let mut secondary_target = None;
     let mut starter_front = None;
     let mut rival_fronts = Vec::new();
+    // Personal biographies must not alter the seeded property mix or the
+    // documented public listing opportunities by consuming geography RNG.
+    let mut proprietor_rng = CityRng::new(config.seed ^ 0xB89D_0A31_2026_F17E);
+    proprietor_rng.used_names = rng.used_names.clone();
     for (district_index, district) in districts.iter().copied().enumerate() {
         let district_name = state
             .world()
@@ -931,7 +935,7 @@ pub fn generate_city(
             .name()
             .to_owned();
         for slot in 0..usize::from(config.businesses_per_district) {
-            let (name, kind, owner) = if district_index == 0 {
+            let (name, kind, mut owner) = if district_index == 0 {
                 match slot {
                     0 => (
                         format!("{} Jewelers", SHOP_PREFIXES[rng.range(SHOP_PREFIXES.len())]),
@@ -990,6 +994,42 @@ pub fn generate_city(
                     &civilians,
                 )
             };
+            // A private operating shop belongs to a particular person. Only
+            // separately advertised public listings retain Independent title
+            // until purchase; they are not anonymous simulated proprietors.
+            // Introduce these people at their actual shop's creation, through
+            // the canonical world owner and with their own accountable finances.
+            if owner == BusinessOwner::Independent
+                && !(district_index == 0 && slot == 1)
+                && kind != K::SoupKitchen
+                && (slot + district_index * 3) % 2 == 0
+            {
+                let proprietor = add_character(
+                    &mut state,
+                    person_name(&mut proprietor_rng),
+                    None,
+                    None,
+                    AutonomyLevel::Guided,
+                    &[
+                        (C::Management, 37 + proprietor_rng.range(54) as u8),
+                        (C::Negotiation, 36 + proprietor_rng.range(53) as u8),
+                        (C::SocialAccess, 32 + proprietor_rng.range(58) as u8),
+                    ],
+                    &[if proprietor_rng.range(2) == 0 {
+                        TraitKind::Cautious
+                    } else {
+                        TraitKind::Ambitious
+                    }],
+                )?;
+                validate_set_relationship(
+                    &state,
+                    proprietor,
+                    merchant,
+                    relationship(47 + proprietor_rng.range(25) as u8, 55, 27),
+                )?
+                .commit(&mut state)?;
+                owner = BusinessOwner::Character(proprietor);
+            }
             let (_, functions) = business_template(kind);
             let id = add_business(
                 registry,
@@ -1012,11 +1052,61 @@ pub fn generate_city(
             }
         }
     }
+    // Reserve the names of all newly created owners before drawing the
+    // additional civic employees, preventing duplicate identities without
+    // altering the city's preceding economic geography.
+    rng.used_names.extend(proprietor_rng.used_names);
     let primary_target =
         primary_target.expect("validated business density includes a primary target");
     let secondary_target =
         secondary_target.expect("validated business density includes a second target");
     let starter_front = starter_front.expect("validated density includes an initial cash front");
+
+    // Institutional headcount follows the city, not a fixed single council
+    // representative and one abstract precinct roster. Each ward has a named
+    // political representative and a named patrol officer who will actually
+    // take daily civic duties and may develop separate career histories.
+    // These appointments are made after opening cast creation so the seeded
+    // leadership remains stable when the city expands.
+    for (index, district) in districts.iter().copied().enumerate() {
+        let ward_delegate = add_character(
+            &mut state,
+            person_name(&mut rng),
+            Some(council),
+            Some(councilor),
+            AutonomyLevel::Delegated,
+            &[
+                (C::Negotiation, 50 + rng.range(40) as u8),
+                (C::SocialAccess, 50 + rng.range(40) as u8),
+                (C::Management, 35 + rng.range(35) as u8),
+            ],
+            &[TraitKind::Ambitious],
+        )?;
+        validate_set_relationship(&state, ward_delegate, councilor, relationship(67, 71, 33))?
+            .commit(&mut state)?;
+        let precinct_index = index % police.len();
+        let officer = add_character(
+            &mut state,
+            person_name(&mut rng),
+            Some(police[precinct_index]),
+            Some(detectives[precinct_index]),
+            AutonomyLevel::Guided,
+            &[
+                (C::Investigation, 48 + rng.range(34) as u8),
+                (C::Surveillance, 44 + rng.range(38) as u8),
+                (C::Management, 30 + rng.range(35) as u8),
+            ],
+            &[TraitKind::Cautious],
+        )?;
+        validate_set_relationship(
+            &state,
+            officer,
+            detectives[precinct_index],
+            relationship(70, 74, 44),
+        )?
+        .commit(&mut state)?;
+        let _ = district;
+    }
 
     let (cash, settlement) = treasury(&mut state, player, 150_000)?;
     let owner = FinancialOwner::Organization(player);

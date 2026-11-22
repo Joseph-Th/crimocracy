@@ -5,6 +5,9 @@
 //! standstills, and `territory_conflict` resolves contested criminal pressure
 //! through canonical enterprise lifecycle. `rating` and `vocabulary` are read-only.
 
+pub mod character_life;
+#[cfg(test)]
+mod civic_tests;
 pub(crate) mod payroll_departures;
 pub mod payroll_execution;
 pub mod rating;
@@ -111,6 +114,68 @@ struct CharacterRuntime {
     version: u32,
 }
 
+/// Every named person retains their own history of work and civic capacity,
+/// independently of organization membership or business-title history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CivicActivity {
+    BusinessManagement(BusinessId),
+    PolicePatrol(NeighborhoodId),
+    DetectiveWork(crate::core::id::InvestigationId),
+    Politics(OrganizationId),
+    LegalService(OrganizationId),
+    Prosecution(OrganizationId),
+    LaborAdvocacy(OrganizationId),
+    CommercialAdvocacy(OrganizationId),
+    Community,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CivicProfession {
+    BusinessOwner,
+    PoliceOfficer,
+    Politician,
+    Lawyer,
+    Prosecutor,
+    LaborRepresentative,
+    MerchantRepresentative,
+    Criminal,
+    Resident,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterLife {
+    professional_standing: u8,
+    fatigue: u8,
+    career_days: u32,
+    last_activity: Option<(SimTime, CivicActivity)>,
+}
+
+impl Default for CharacterLife {
+    fn default() -> Self {
+        Self {
+            professional_standing: 50,
+            fatigue: 0,
+            career_days: 0,
+            last_activity: None,
+        }
+    }
+}
+
+impl CharacterLife {
+    pub fn professional_standing(self) -> u8 {
+        self.professional_standing
+    }
+    pub fn fatigue(self) -> u8 {
+        self.fatigue
+    }
+    pub fn career_days(self) -> u32 {
+        self.career_days
+    }
+    pub fn last_activity(self) -> Option<(SimTime, CivicActivity)> {
+        self.last_activity
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CharacterRecord {
     identity: CharacterIdentity,
@@ -118,6 +183,7 @@ pub struct CharacterRecord {
     capabilities: CharacterCapabilities,
     disposition: CharacterDisposition,
     runtime: CharacterRuntime,
+    life: CharacterLife,
 }
 
 impl CharacterRecord {
@@ -155,6 +221,10 @@ impl CharacterRecord {
 
     pub fn version(&self) -> u32 {
         self.runtime.version
+    }
+
+    pub fn life(&self) -> CharacterLife {
+        self.life
     }
 }
 

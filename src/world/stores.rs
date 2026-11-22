@@ -554,6 +554,17 @@ impl WorldState {
     pub(super) fn insert_character(&mut self, record: CharacterRecord) {
         self.characters.insert(record);
     }
+    pub(super) fn update_character_life(
+        &mut self,
+        character: CharacterId,
+        life: super::CharacterLife,
+    ) {
+        self.characters
+            .records
+            .get_mut(&character)
+            .expect("civic work plan references an existing character")
+            .life = life;
+    }
     pub(super) fn insert_neighborhood(&mut self, record: NeighborhoodRecord) {
         let previous = self.neighborhoods.insert(record.id(), record);
         debug_assert!(

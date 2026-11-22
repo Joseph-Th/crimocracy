@@ -258,7 +258,16 @@ pub(crate) fn apply_autonomous_investigator_staffing(
             .filter_map(|record| {
                 record
                     .capability(CapabilityKind::Investigation)
-                    .map(|capability| (record.id(), capability.value()))
+                    .map(|capability| {
+                        // Career experience and exhaustion belong to this actual
+                        // detective. It is no longer equivalent to the raw skill
+                        // rating on an institution's interchangeable staff list.
+                        let life = record.life();
+                        let effective = i16::from(capability.value()) * 2
+                            + i16::from(life.professional_standing()) / 2
+                            - i16::from(life.fatigue()) * 2 / 3;
+                        (record.id(), effective)
+                    })
             })
             .collect();
         candidates.sort_unstable_by_key(|(investigator, capability)| {
