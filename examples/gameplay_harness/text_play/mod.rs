@@ -105,6 +105,10 @@ const HELP: &str = "Commands:
   victory                View mayoral, retirement, and city-underboss ending requirements
   political <district-N>  Inspect local property, influence, specialists and electoral challenges
   campaign               Inspect own municipal campaign, spending and district influence
+  election               Inspect the official last mayoral election and ward ballot counts
+  nominate-mayor <char-N> File your leader as a mayoral candidate at least 30 days before election
+  campaign-event <district-N> <char-N> <meetings|services|labor|press>
+                         Fund a local civic initiative via a mandated manager and real infrastructure
   buy-influence <district-N> <accounted-cents>
                          Pay clean campaign funds for influence (5000 cents per point)
   hire-specialist <district-N> <char-N> <organizer|publicist|strategist>
@@ -487,11 +491,12 @@ fn parse_account_kind(raw: &str) -> Result<AccountKind, String> {
 /// Scripted commands reject extraneous arguments instead of silently ignoring them.
 fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
     let range = match command {
-        "help" | "quit" | "exit" | "brief" | "victory" | "campaign" | "people" | "known-people"
-        | "prospects" | "directory" | "market" | "businesses" | "enterprises" | "racket-kinds"
-        | "finances" | "accounts" | "opportunities" | "operations" | "decisions"
-        | "connections" | "contacts" | "policies" | "mandates" | "operation-kinds"
-        | "districts" | "turf" | "known-targets" | "debriefs" | "case-brief" => 1..=1,
+        "help" | "quit" | "exit" | "brief" | "victory" | "campaign" | "election" | "people"
+        | "known-people" | "prospects" | "directory" | "market" | "businesses" | "enterprises"
+        | "racket-kinds" | "finances" | "accounts" | "opportunities" | "operations"
+        | "decisions" | "connections" | "contacts" | "policies" | "mandates"
+        | "operation-kinds" | "districts" | "turf" | "known-targets" | "debriefs"
+        | "case-brief" => 1..=1,
         "counsel" => 1..=2,
         "recovery" => 1..=1,
         "political" => 2..=2,
@@ -504,7 +509,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "burgle" => 2..=5,
         "racket" | "reassign-racket" | "staff-racket" | "launder" | "sweep" | "decide"
         | "business" => 3..=3,
-        "move" | "deposit" | "fund-street" | "hire-specialist" => 4..=4,
+        "move" | "deposit" | "fund-street" | "hire-specialist" | "campaign-event" => 4..=4,
         "dispose" => 5..=5,
         "reports" | "treasury" => 1..=2,
         "intelligence" => 1..=4,
@@ -513,7 +518,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss"
         | "claim-victory" | "save" | "transaction" | "cancel" | "debrief" | "intel"
-        | "racket-outlook" | "business-outlook" | "contest" | "preview-contest" => 2..=2,
+        | "racket-outlook" | "business-outlook" | "contest" | "preview-contest"
+        | "nominate-mayor" => 2..=2,
         "policy" | "delegate" | "autonomy" | "supervise" | "offer" | "buy-influence"
         | "fire-specialist" => 3..=3,
         "negotiate" => 3..=4,
@@ -1177,6 +1183,8 @@ mod planning;
 #[cfg(test)]
 mod planning_options_tests;
 mod political_play;
+#[cfg(test)]
+mod political_play_tests;
 mod racket_play;
 mod reconnaissance;
 #[cfg(test)]

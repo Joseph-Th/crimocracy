@@ -223,6 +223,21 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
             };
             if victory_seen
                 || state.player_organization() != Some(organization)
+                || (path == crate::core::campaign_victory::VictoryPath::PoliticalPower
+                    && !state
+                        .politics()
+                        .organization(organization)
+                        .and_then(|campaign| campaign.latest_election())
+                        .is_some_and(|election| {
+                            election.elected
+                                && election.held_at <= event.occurred_at()
+                                && state.world().get_character(election.candidate).is_some_and(
+                                    |person| {
+                                        person.organization() == Some(organization)
+                                            && person.supervisor().is_none()
+                                    },
+                                )
+                        }))
                 || state
                     .world()
                     .characters_in_organization(organization)

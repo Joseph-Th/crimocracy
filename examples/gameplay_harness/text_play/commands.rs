@@ -30,6 +30,7 @@ pub(super) fn terminal_command_is_read_only(verb: &str) -> bool {
             | "victory"
             | "political"
             | "campaign"
+            | "election"
             | "save"
             | "people"
             | "known-people"
@@ -105,7 +106,9 @@ impl Session<'_> {
             "brief" => out = self.brief(),
             "political" => out = self.political_readiness(words[1])?,
             "campaign" => out = self.campaign_readiness()?,
-            "buy-influence" | "hire-specialist" | "fire-specialist" => {
+            "election" => out = self.election_brief()?,
+            "buy-influence" | "hire-specialist" | "fire-specialist" | "nominate-mayor"
+            | "campaign-event" => {
                 out = self.execute_campaign_order(&words)?;
             }
             "victory" => {
@@ -131,11 +134,14 @@ impl Session<'_> {
                     if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
                 writeln!(out, "    Sustained contested electoral majorities: {} / {} districts (800/1000 local influence, stronger than rivals for 30 days)",
                     standing.mayoral_majority_districts, standing.required_political_districts).unwrap();
+                writeln!(out, "    Nomination filed for election day: {:?}; latest election: {:?}, elected: {}. Only an actual winning municipal ballot permits the political victory claim.",
+                    standing.mayoral_nominated_for_day, standing.latest_election_day,
+                    standing.latest_election_won).unwrap();
                 writeln!(out, "    Campaign spending: {} / {} cents; remaining clean reserve: {} / {} cents; leader eligible: {}",
                     standing.campaign_spent_cents, standing.required_campaign_spent_cents,
                     standing.accounted_net.cents(), standing.required_mayoral_reserve_cents,
                     standing.mayoral_leader_eligible).unwrap();
-                out.push_str("    Use 'campaign', 'buy-influence', 'hire-specialist' and 'fire-specialist' to build and maintain contested local support. Influence decays every day; rivals buy it too.\n");
+                out.push_str("    Machine influence, grassroots voters and institutional support all need maintenance. Local initiatives, manager skills and election-day reputation matter. Use 'campaign', 'campaign-event', 'nominate-mayor' and 'election' for the actual political campaign.\n");
                 let local_floor = i128::from(self.registry.upkeep().per_member_daily().cents())
                     * i128::from(crimocracy::core::campaign_victory::VICTORY_INCOME_WINDOW_DAYS);
                 let districts = crimocracy::core::campaign_victory::political_district_progress(

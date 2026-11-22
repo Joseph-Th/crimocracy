@@ -242,7 +242,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // Municipal campaigning spends only funds left after actual payroll.
     // Specialists work, influence decays, and rival organizations challenge
     // local majorities before the day closes; no political progress is free.
-    crate::politics::political_system::apply_due_political_campaigns(state);
+    crate::politics::political_system::apply_due_political_campaigns(registry, state);
     // Collect adjudicated personal debts after actual wages arrive; no employer
     // asset is a payment source merely because its member was convicted.
     let court_fine_payments = crate::legal::prosecution_system::apply_due_fine_collections(state)

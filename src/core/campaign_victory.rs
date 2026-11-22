@@ -112,6 +112,9 @@ pub struct VictoryProgress {
     pub required_campaign_spent_cents: i64,
     pub required_mayoral_reserve_cents: i64,
     pub mayoral_leader_eligible: bool,
+    pub mayoral_nominated_for_day: Option<u64>,
+    pub latest_election_day: Option<u64>,
+    pub latest_election_won: bool,
     pub required_underboss_districts: usize,
     pub own_active_racket_districts: usize,
     pub established_racket_districts: usize,
@@ -157,6 +160,8 @@ pub struct PoliticalDistrictProgress {
     /// Economically qualified and independently staffed with a political delegate.
     pub qualifies: bool,
     pub own_influence: u16,
+    pub grassroots_support: u16,
+    pub institutional_support: u16,
     pub rival_influence: u16,
     pub majority_held_days: u64,
     pub mayoral_ready: bool,
@@ -492,6 +497,8 @@ pub fn political_district_progress(
                 .organization(organization)
                 .and_then(|campaign| campaign.district(district));
             let own_influence = office.map_or(0, |office| office.influence());
+            let grassroots_support = office.map_or(0, |office| office.grassroots());
+            let institutional_support = office.map_or(0, |office| office.institutions());
             let rival_influence = rival_pressure(state, organization, district);
             let majority_held_days = office
                 .and_then(|office| office.leading_since())
@@ -516,6 +523,8 @@ pub fn political_district_progress(
                 economically_qualified,
                 qualifies: economically_qualified && steward.is_some(),
                 own_influence,
+                grassroots_support,
+                institutional_support,
                 rival_influence,
                 majority_held_days,
                 mayoral_ready: economically_qualified
@@ -722,6 +731,15 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .politics()
         .organization(organization)
         .map_or(0, |campaign| campaign.spent_cents());
+    let mayoral_nominated_for_day = state
+        .politics()
+        .organization(organization)
+        .and_then(|campaign| campaign.candidacy())
+        .map(|candidacy| candidacy.election_day);
+    let latest_election = state
+        .politics()
+        .organization(organization)
+        .and_then(|campaign| campaign.latest_election());
     let mayoral_leader_eligible = state
         .world()
         .characters_in_organization(organization)
@@ -910,6 +928,9 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         required_campaign_spent_cents: MAYORAL_CAMPAIGN_SPEND_REQUIRED,
         required_mayoral_reserve_cents: MAYORAL_LIQUID_RESERVE_REQUIRED,
         mayoral_leader_eligible,
+        mayoral_nominated_for_day,
+        latest_election_day: latest_election.map(|election| election.election_day),
+        latest_election_won: latest_election.is_some_and(|election| election.elected),
         required_underboss_districts,
         own_active_racket_districts,
         established_racket_districts: established_racket_districts.len(),
@@ -944,6 +965,21 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
     })
 }
 
+/// Campaign readiness is tested at the municipal ballot, not rewarded as an
+/// immediate victory. The election owner uses this same threshold snapshot.
+pub(crate) fn mayoral_ballot_ready(standing: &VictoryProgress) -> bool {
+    standing.established_political_contacts > 0
+        && standing.total_districts > 0
+        && standing.established_business_districts >= standing.required_political_districts
+        && standing.key_personnel >= standing.required_political_personnel
+        && standing.staffed_political_districts >= standing.required_political_districts
+        && standing.mayoral_majority_districts >= standing.required_political_districts
+        && standing.campaign_spent_cents >= MAYORAL_CAMPAIGN_SPEND_REQUIRED
+        && standing.accounted_net.cents() >= MAYORAL_LIQUID_RESERVE_REQUIRED
+        && standing.mayoral_leader_eligible
+        && standing.legitimate_self_sufficient
+}
+
 fn ensure_eligible(
     registry: &Registry,
     state: &AppState,
@@ -959,17 +995,20 @@ fn ensure_eligible(
     let standing = progress(registry, state)?;
     match path {
         VictoryPath::PoliticalPower
-            if standing.established_political_contacts == 0
-                || standing.total_districts == 0
-                || standing.established_business_districts
-                    < standing.required_political_districts
-                || standing.key_personnel < standing.required_political_personnel
-                || standing.staffed_political_districts < standing.required_political_districts
-                || standing.mayoral_majority_districts < standing.required_political_districts
-                || standing.campaign_spent_cents < MAYORAL_CAMPAIGN_SPEND_REQUIRED
-                || standing.accounted_net.cents() < MAYORAL_LIQUID_RESERVE_REQUIRED
-                || !standing.mayoral_leader_eligible
-                || !standing.legitimate_self_sufficient =>
+            if !state
+                .politics()
+                .organization(owner)
+                .and_then(|campaign| campaign.latest_election())
+                .is_some_and(|election| {
+                    election.elected
+                        && state
+                            .world()
+                            .get_character(election.candidate)
+                            .is_some_and(|person| {
+                                person.organization() == Some(owner)
+                                    && person.supervisor().is_none()
+                            })
+                }) =>
         {
             Err(VictoryError::PoliticalNotReady)
         }

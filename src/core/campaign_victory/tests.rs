@@ -773,10 +773,15 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     use crate::politics::SpecialistKind;
     use crate::politics::political_system::{
         apply_due_political_campaigns, validate_hire_specialist, validate_invest_influence,
+        validate_nominate_mayor,
     };
     fund(&mut city.state, city.player, 30_000_000);
     for (&district, &manager) in districts.iter().zip(managers.iter()) {
         validate_hire_specialist(&city.state, district, manager, SpecialistKind::Strategist)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        validate_hire_specialist(&city.state, district, manager, SpecialistKind::Organizer)
             .unwrap()
             .commit(&mut city.state)
             .unwrap();
@@ -789,12 +794,16 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         .commit(&mut city.state)
         .unwrap();
     }
-    // An instant majority does not mean the office has been won.
+    validate_nominate_mayor(&city.state, city.boss)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    // Even a funded nomination does not elect anyone before the next actual ballot.
     assert_eq!(
         validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
         Some(VictoryError::PoliticalNotReady)
     );
-    for _ in 0..=crate::politics::MAYORAL_SUSTAINED_DAYS {
+    for _ in VICTORY_ESTABLISHMENT_DAYS..crate::politics::MUNICIPAL_ELECTION_INTERVAL_DAYS {
         city.state
             .advance_clock(crate::core::time::SimDuration::from_minutes(
                 DAY_MINUTES as u32,
@@ -813,7 +822,7 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
                     .unwrap();
             }
         }
-        apply_due_political_campaigns(&mut city.state);
+        apply_due_political_campaigns(&registry, &mut city.state);
     }
     let elected = progress(&registry, &city.state).unwrap();
     assert_eq!(
@@ -822,6 +831,14 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     );
     assert!(elected.campaign_spent_cents >= MAYORAL_CAMPAIGN_SPEND_REQUIRED);
     assert!(elected.accounted_net.cents() >= MAYORAL_LIQUID_RESERVE_REQUIRED);
+    assert_eq!(
+        elected.latest_election_day,
+        Some(crate::politics::MUNICIPAL_ELECTION_INTERVAL_DAYS)
+    );
+    assert!(
+        elected.latest_election_won,
+        "actual municipal ballot failed: {elected:?}"
+    );
     let outcome = validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower)
         .unwrap()
         .commit(&registry, &mut city.state)

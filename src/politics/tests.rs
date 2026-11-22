@@ -60,7 +60,7 @@ fn fund(state: &mut crate::AppState, owner: OrganizationId, cents: i64) {
 fn advance_day(registry: &crate::Registry, state: &mut crate::AppState) {
     state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
     crate::opportunities::opportunity_system::apply_opportunity_expiry(registry, state).unwrap();
-    apply_due_political_campaigns(state);
+    apply_due_political_campaigns(registry, state);
 }
 
 #[test]
@@ -185,7 +185,17 @@ fn specialist_requires_delegated_political_manager_and_paid_salary_to_grow() {
     );
     advance_day(&registry, &mut city.state);
     let campaign = city.state.politics().organization(city.player).unwrap();
-    assert_eq!(campaign.district(district).unwrap().influence(), 129);
+    let output =
+        political_system::specialist_output(&city.state, manager, SpecialistKind::Strategist);
+    assert_eq!(
+        campaign.district(district).unwrap().influence(),
+        95 + output.0
+    );
+    assert_eq!(campaign.district(district).unwrap().grassroots(), output.1);
+    assert_eq!(
+        campaign.district(district).unwrap().institutions(),
+        output.2
+    );
     assert_eq!(campaign.spent_cents(), 1_116_000);
     let saved = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(saved.politics(), city.state.politics());
@@ -200,7 +210,7 @@ fn specialist_requires_delegated_political_manager_and_paid_salary_to_grow() {
             .district(district)
             .unwrap()
             .influence(),
-        124
+        90 + output.0
     );
     dismiss_specialist(&mut city.state, district, SpecialistKind::Strategist).unwrap();
     advance_day(&registry, &mut city.state);
@@ -212,7 +222,7 @@ fn specialist_requires_delegated_political_manager_and_paid_salary_to_grow() {
             .district(district)
             .unwrap()
             .influence(),
-        119
+        85 + output.0
     );
     assert_eq!(
         city.state
@@ -226,7 +236,7 @@ fn specialist_requires_delegated_political_manager_and_paid_salary_to_grow() {
 }
 
 #[test]
-fn rival_spending_can_break_an_electoral_majority_and_persists_on_reload() {
+fn purchased_machine_influence_alone_cannot_win_a_ward_and_rivals_can_contest_it() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(6_217)).unwrap();
     let rival = city
@@ -251,7 +261,10 @@ fn rival_spending_can_break_an_electoral_majority_and_persists_on_reload() {
         .unwrap()
         .commit(&mut city.state)
         .unwrap();
-    assert!(controls_district(&city.state, city.player, district));
+    assert!(
+        !controls_district(&city.state, city.player, district),
+        "purchased machine influence cannot replace grassroots and institutional constituencies"
+    );
     political_system::validate_invest_for(&city.state, rival, district, 5_000_000)
         .unwrap()
         .commit(&mut city.state)

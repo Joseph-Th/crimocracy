@@ -3,10 +3,12 @@ use super::*;
 use crimocracy::core::campaign_victory::{
     VICTORY_PROFITABLE_CYCLES, political_business_progress, political_district_progress,
 };
-use crimocracy::politics::SpecialistKind;
 use crimocracy::politics::political_system::{
-    dismiss_specialist, validate_hire_specialist, validate_invest_influence,
+    dismiss_specialist, initiative_available, next_municipal_election_day, specialist_output,
+    validate_civic_initiative, validate_hire_specialist, validate_invest_influence,
+    validate_nominate_mayor,
 };
+use crimocracy::politics::{CivicInitiative, SpecialistKind};
 
 fn specialist_kind(raw: &str) -> Result<SpecialistKind, String> {
     match raw {
@@ -26,6 +28,16 @@ fn pressure_label(score: u16) -> &'static str {
     }
 }
 
+fn initiative_kind(raw: &str) -> Result<CivicInitiative, String> {
+    match raw {
+        "meetings" => Ok(CivicInitiative::PublicMeetings),
+        "services" => Ok(CivicInitiative::NeighborhoodServices),
+        "labor" => Ok(CivicInitiative::LaborCoalition),
+        "press" => Ok(CivicInitiative::LocalPress),
+        _ => Err("initiative must be meetings, services, labor or press".to_owned()),
+    }
+}
+
 impl Session<'_> {
     pub(super) fn campaign_readiness(&self) -> Result<String, String> {
         let progress = crimocracy::core::campaign_victory::progress(self.registry, &self.state)
@@ -41,6 +53,15 @@ impl Session<'_> {
             progress.mayoral_majority_districts,
             progress.required_political_districts,
         );
+        writeln!(
+            out,
+            "Next election day {} | nomination {:?} | latest election {:?}, won {}",
+            next_municipal_election_day(self.state.now()),
+            progress.mayoral_nominated_for_day,
+            progress.latest_election_day,
+            progress.latest_election_won
+        )
+        .unwrap();
         for district in self.state.world().neighborhoods() {
             let own = self
                 .state
@@ -57,25 +78,95 @@ impl Session<'_> {
                 continue;
             }
             writeln!(out,
-                "  district-{} {} | influence {}/1000 | rival activity {} | majority held {} day(s) | election-ready {}",
+                "  district-{} {} | machine {}/1000 | grassroots {}/1000 | institutions {}/1000 | rival activity {} | majority held {} day(s) | election-ready {}",
                 district.id().raw(), district.name(),
                 own.map_or(0, |office| office.influence()),
+                own.map_or(0, |office| office.grassroots()),
+                own.map_or(0, |office| office.institutions()),
                 pressure_label(rival),
                 row.map_or(0, |row| row.majority_held_days),
                 row.is_some_and(|row| row.mayoral_ready),
             ).unwrap();
             if let Some(office) = own {
                 for (kind, manager) in office.specialists() {
-                    writeln!(out, "    {:?} under char-{} | salary {} cents/day | influence +{} per funded day",
-                        kind, manager.raw(), kind.daily_salary(), kind.daily_growth()).unwrap();
+                    let (machine, grassroots, institutions) =
+                        specialist_output(&self.state, *manager, *kind);
+                    writeln!(out, "    {:?} under char-{} | salary {} cents/day | funded daily +{} machine, +{} grassroots, +{} institutions",
+                        kind, manager.raw(), kind.daily_salary(), machine, grassroots, institutions).unwrap();
                 }
             }
         }
-        out.push_str("Influence loses at least five points daily (or 2.5% when higher); funded specialists rebuild it. Rival criminal organizations spend accounted money to challenge contested wards. A local majority must remain above 800 and ahead of rival pressure for 30 consecutive days.");
+        out.push_str("A ward needs 800 machine, 300 grassroots and 300 institutional support, plus a 3:2 lead over rival machine influence for 30 days. All three erode daily. Filing costs 2000000 cents, requires an established political contact and must precede a municipal ballot by 30 days. Elections occur every 180 days; resident fear and active local rackets cost votes.");
+        Ok(out)
+    }
+
+    pub(super) fn election_brief(&self) -> Result<String, String> {
+        let Some(result) = self
+            .state
+            .politics()
+            .organization(self.player)
+            .and_then(|campaign| campaign.latest_election())
+        else {
+            return Ok(format!(
+                "No mayoral ballot yet. Next election day {}. File your leader at least 30 days in advance using 'nominate-mayor char-N'.",
+                next_municipal_election_day(self.state.now())
+            ));
+        };
+        let mut out = format!(
+            "Municipal election day {} | nominee char-{} | qualified {} | wards won {}/{} | elected {}\n",
+            result.election_day,
+            result.candidate.raw(),
+            result.eligible,
+            result.wards_won,
+            result.wards_needed,
+            result.elected
+        );
+        for ballot in &result.ballots {
+            let ward = self
+                .state
+                .world()
+                .get_neighborhood(ballot.district)
+                .map_or("unknown", |record| record.name());
+            writeln!(
+                out,
+                "  district-{} {} | candidate {} votes | incumbent {} votes | rival {} votes | {}",
+                ballot.district.raw(),
+                ward,
+                ballot.candidate_votes,
+                ballot.incumbent_votes,
+                ballot.rival_votes,
+                if ballot.ward_won { "won" } else { "lost" }
+            )
+            .unwrap();
+        }
         Ok(out)
     }
 
     pub(super) fn execute_campaign_order(&mut self, words: &[&str]) -> Result<String, String> {
+        if words[0] == "nominate-mayor" {
+            let raw = parse_number(words[1], "char")?;
+            let candidate = self
+                .state
+                .world()
+                .characters_in_organization(self.player)
+                .find(|person| person.id().raw() == raw)
+                .ok_or("candidate must be a named member")?
+                .id();
+            validate_nominate_mayor(&self.state, candidate)
+                .map_err(|e| e.to_string())?
+                .commit(&mut self.state)
+                .map_err(|e| e.to_string())?;
+            let day = self
+                .state
+                .politics()
+                .organization(self.player)
+                .and_then(|campaign| campaign.candidacy())
+                .expect("nomination was recorded")
+                .election_day;
+            return Ok(format!(
+                "char-{raw} nominated for the mayoral election on day {day}. Filing fee: 2000000 accounted cents."
+            ));
+        }
         let raw = parse_number(words[1], "district")?;
         let district = self
             .state
@@ -124,6 +215,27 @@ impl Session<'_> {
                     "Released {kind:?} from district-{raw}; future salary ended."
                 ))
             }
+            "campaign-event" => {
+                let manager_raw = parse_number(words[2], "char")?;
+                let manager = self
+                    .state
+                    .world()
+                    .characters_in_organization(self.player)
+                    .find(|person| person.id().raw() == manager_raw)
+                    .ok_or("campaign organizer must be a named member")?
+                    .id();
+                let kind = initiative_kind(words[3])?;
+                validate_civic_initiative(&self.state, district, manager, kind)
+                    .map_err(|e| e.to_string())?
+                    .commit(&mut self.state)
+                    .map_err(|e| e.to_string())?;
+                let (machine, grassroots, institutions) = kind.boosts();
+                Ok(format!(
+                    "{:?} in district-{raw}: {} cents paid; +{machine} machine, +{grassroots} grassroots, +{institutions} institutions.",
+                    kind,
+                    kind.cost_cents()
+                ))
+            }
             _ => Err("unknown campaign order".to_owned()),
         }
     }
@@ -157,10 +269,45 @@ impl Session<'_> {
             ).unwrap();
             writeln!(
                 out,
-                "Electoral contest: own influence {}/1000 | rival pressure {} | majority held {} day(s) / 30 | mayoral-ready {}",
-                local.own_influence, pressure_label(local.rival_influence),
-                local.majority_held_days, local.mayoral_ready,
+                "Electoral contest: machine {}/1000 | grassroots {}/1000 | institutions {}/1000 | rival pressure {} | majority held {} day(s) / 30 | mayoral-ready {}",
+                local.own_influence, local.grassroots_support, local.institutional_support,
+                pressure_label(local.rival_influence), local.majority_held_days, local.mayoral_ready,
             ).unwrap();
+            for (kind, command) in [
+                (CivicInitiative::PublicMeetings, "meetings"),
+                (CivicInitiative::NeighborhoodServices, "services"),
+                (CivicInitiative::LaborCoalition, "labor"),
+                (CivicInitiative::LocalPress, "press"),
+            ] {
+                let office = self
+                    .state
+                    .politics()
+                    .organization(self.player)
+                    .and_then(|campaign| campaign.district(district.id()));
+                let last = office.and_then(|office| office.initiative_last_held(kind));
+                let days_left = last.map_or(0, |at| {
+                    (7 * DAY_MINUTES)
+                        .saturating_sub(
+                            self.state
+                                .now()
+                                .as_minutes()
+                                .saturating_sub(at.as_minutes()),
+                        )
+                        .div_ceil(DAY_MINUTES)
+                });
+                writeln!(
+                    out,
+                    "  {command}: {} | cost {} cents | cooldown {} day(s)",
+                    if initiative_available(&self.state, self.player, district.id(), kind) {
+                        "venue/contact ready"
+                    } else {
+                        "needs compatible venue or labor contact"
+                    },
+                    kind.cost_cents(),
+                    days_left
+                )
+                .unwrap();
+            }
         }
         let political_mandates = self
             .state
