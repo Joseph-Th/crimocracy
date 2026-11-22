@@ -121,6 +121,10 @@ const HELP: &str = "Commands:
                          Hire or release rank-and-file racket workers within the local staffing limit
   attention [exception|crisis on|off]  Inspect or configure optional auto-pauses
   people                 Your current organization members
+  population             Total persistent named city population and public population
+  freelancers            Freelance criminals personally known to current crew members
+  contract <char-N> <char-M> <days>
+                         Pay a known freelancer for 1-14 days under crew member char-M
   civics [district-N]     Public civic professions, shopkeepers and municipal offices
   civic-person <char-N>   Public work history and individually held business titles
   known-people           Your members, identified people, and approach-ready prospects
@@ -494,11 +498,11 @@ fn parse_account_kind(raw: &str) -> Result<AccountKind, String> {
 fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
     let range = match command {
         "help" | "quit" | "exit" | "brief" | "victory" | "campaign" | "election" | "people"
-        | "known-people" | "prospects" | "directory" | "market" | "businesses" | "enterprises"
-        | "racket-kinds" | "finances" | "accounts" | "opportunities" | "operations"
-        | "decisions" | "connections" | "contacts" | "policies" | "mandates"
-        | "operation-kinds" | "districts" | "turf" | "known-targets" | "debriefs"
-        | "case-brief" => 1..=1,
+        | "population" | "freelancers" | "known-people" | "prospects" | "directory" | "market"
+        | "businesses" | "enterprises" | "racket-kinds" | "finances" | "accounts"
+        | "opportunities" | "operations" | "decisions" | "connections" | "contacts"
+        | "policies" | "mandates" | "operation-kinds" | "districts" | "turf" | "known-targets"
+        | "debriefs" | "case-brief" => 1..=1,
         "counsel" => 1..=2,
         "recovery" => 1..=1,
         "political" | "civic-person" => 2..=2,
@@ -512,7 +516,9 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "burgle" => 2..=5,
         "racket" | "reassign-racket" | "staff-racket" | "launder" | "sweep" | "decide"
         | "business" => 3..=3,
-        "move" | "deposit" | "fund-street" | "hire-specialist" | "campaign-event" => 4..=4,
+        "move" | "deposit" | "fund-street" | "hire-specialist" | "campaign-event" | "contract" => {
+            4..=4
+        }
         "dispose" => 5..=5,
         "reports" | "treasury" => 1..=2,
         "intelligence" => 1..=4,

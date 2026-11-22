@@ -243,6 +243,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // evaluate the roster and delegated authorities.
     let payroll_departures =
         crate::world::payroll_departures::apply_payroll_departures(registry, state, &payrolls);
+    // Fixed-term freelancers leave via canonical membership release. Active
+    // operation bookings and custody defer their exit rather than deleting
+    // a participant mid-mission.
+    crate::world::freelance_contracts::apply_due_freelance_expirations(state);
     // Named civilians and institutional officers independently work, rest and
     // gain experience after today's actual cases and storefront settlements.
     // Updates do not invalidate held organizational authorization tokens.

@@ -3,12 +3,122 @@
 //! property titles, not assigned in a parallel roster that can drift from world
 //! ownership. This subsystem owns only the personal work/condition snapshot.
 
-use super::{CharacterLife, CivicActivity, CivicProfession, OrganizationKind, WorldState};
-use crate::core::id::CharacterId;
+use super::{
+    CharacterLife, CivicActivity, CivicProfession, IndependentVocation, OrganizationKind,
+    WorldState,
+};
+use crate::core::id::{BusinessId, CharacterId, NeighborhoodId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, is_day_boundary};
+use crate::core::version::ensure_version_can_advance;
 use crate::economy::BusinessOperatingStatus;
 use crate::legal::{InvestigationStatus, PatrolDeploymentStatus};
+use thiserror::Error;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum CivicPersonError {
+    #[error("character {0} does not exist")]
+    MissingCharacter(CharacterId),
+    #[error("neighborhood {0} does not exist")]
+    MissingNeighborhood(NeighborhoodId),
+    #[error("business {0} is not a workplace in this neighborhood")]
+    InvalidWorkplace(BusinessId),
+    #[error("character {0} is not an unaffiliated non-owner")]
+    NotIndependent(CharacterId),
+    #[error("character {0} already has this occupation and home")]
+    Unchanged(CharacterId),
+    #[error("character {0} changed after occupation validation")]
+    StaleCharacter(CharacterId),
+    #[error(transparent)]
+    Version(#[from] crate::core::version::VersionCapacityError),
+}
+
+#[derive(Debug)]
+pub struct ValidatedCivicOccupation {
+    character: CharacterId,
+    home: NeighborhoodId,
+    vocation: IndependentVocation,
+    expected_version: u32,
+}
+
+impl ValidatedCivicOccupation {
+    pub fn commit(self, state: &mut AppState) -> Result<(), CivicPersonError> {
+        let current = state
+            .world()
+            .get_character(self.character)
+            .ok_or(CivicPersonError::MissingCharacter(self.character))?;
+        if current.version() != self.expected_version {
+            return Err(CivicPersonError::StaleCharacter(self.character));
+        }
+        validate_occupation(state, self.character, self.home, self.vocation, false)?;
+        state
+            .world
+            .set_character_vocation(self.character, self.home, self.vocation);
+        Ok(())
+    }
+}
+
+pub fn validate_set_civic_occupation(
+    state: &AppState,
+    character: CharacterId,
+    home: NeighborhoodId,
+    vocation: IndependentVocation,
+) -> Result<ValidatedCivicOccupation, CivicPersonError> {
+    validate_occupation(state, character, home, vocation, true)?;
+    Ok(ValidatedCivicOccupation {
+        character,
+        home,
+        vocation,
+        expected_version: state
+            .world()
+            .get_character(character)
+            .expect("validated person exists")
+            .version(),
+    })
+}
+
+fn validate_occupation(
+    state: &AppState,
+    character: CharacterId,
+    home: NeighborhoodId,
+    vocation: IndependentVocation,
+    reject_unchanged: bool,
+) -> Result<(), CivicPersonError> {
+    let person = state
+        .world()
+        .get_character(character)
+        .ok_or(CivicPersonError::MissingCharacter(character))?;
+    if (person.organization().is_some() && vocation != IndependentVocation::Resident)
+        || (person.supervisor().is_some() && vocation != IndependentVocation::Resident)
+        || (state
+            .world()
+            .businesses_owned_by_character(character)
+            .next()
+            .is_some()
+            && vocation != IndependentVocation::Resident)
+    {
+        return Err(CivicPersonError::NotIndependent(character));
+    }
+    if state.world().get_neighborhood(home).is_none() {
+        return Err(CivicPersonError::MissingNeighborhood(home));
+    }
+    if let IndependentVocation::BusinessEmployee(workplace) = vocation
+        && !state
+            .world()
+            .get_business(workplace)
+            .is_some_and(|business| business.neighborhood() == home)
+    {
+        return Err(CivicPersonError::InvalidWorkplace(workplace));
+    }
+    if reject_unchanged
+        && person.life().home() == Some(home)
+        && person.life().vocation() == vocation
+    {
+        return Err(CivicPersonError::Unchanged(character));
+    }
+    ensure_version_can_advance(person.version(), "character")?;
+    Ok(())
+}
 
 impl WorldState {
     /// A person who changes jobs or acquires a storefront changes profession
@@ -38,7 +148,13 @@ impl WorldState {
                     OrganizationKind::Criminal => CivicProfession::Criminal,
                 })
         });
-        Some(profession.unwrap_or(CivicProfession::Resident))
+        Some(profession.unwrap_or(match person.life().vocation() {
+            IndependentVocation::Resident => CivicProfession::Resident,
+            IndependentVocation::FreelanceCriminal => CivicProfession::FreelanceCriminal,
+            IndependentVocation::BusinessEmployee(_) => CivicProfession::BusinessEmployee,
+            IndependentVocation::Journalist => CivicProfession::Journalist,
+            IndependentVocation::IndependentLawyer => CivicProfession::IndependentLawyer,
+        }))
     }
 
     /// Public appointments and registered sole proprietors; this is not an
@@ -54,6 +170,13 @@ impl WorldState {
                     .is_some_and(|organization| {
                         !matches!(organization.kind(), OrganizationKind::Criminal)
                     })
+                || (person.organization().is_none()
+                    && matches!(
+                        person.life().vocation(),
+                        IndependentVocation::BusinessEmployee(_)
+                            | IndependentVocation::Journalist
+                            | IndependentVocation::IndependentLawyer
+                    ))
         })
     }
 }
@@ -145,11 +268,13 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
                         })
                         .map(|ward| ward.id())
                         .collect();
-                    let position =
-                        (day + u64::from(character.raw())) % districts.len().max(1) as u64;
-                    districts
-                        .get(position as usize)
-                        .copied()
+                    let assigned = person.life().home().filter(|home| districts.contains(home));
+                    assigned
+                        .or_else(|| {
+                            let position =
+                                (day + u64::from(character.raw())) % districts.len().max(1) as u64;
+                            districts.get(position as usize).copied()
+                        })
                         .map(CivicActivity::PolicePatrol)
                 }
             }
@@ -164,6 +289,25 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
             }
             OrganizationKind::Criminal => None, // Already acts through crews and enterprises.
         });
+    let action = action.or_else(|| {
+        if person.organization().is_some() {
+            return None;
+        }
+        let home = person.life().home()?;
+        match person.life().vocation() {
+            IndependentVocation::Resident => Some(CivicActivity::Community),
+            IndependentVocation::FreelanceCriminal => Some(CivicActivity::FreelanceWork(home)),
+            IndependentVocation::BusinessEmployee(workplace) => state
+                .economy()
+                .get_business_economy(workplace)
+                .filter(|economy| economy.status() == BusinessOperatingStatus::Active)
+                .map(|_| CivicActivity::BusinessShift(workplace)),
+            IndependentVocation::Journalist => Some(CivicActivity::Journalism(home)),
+            IndependentVocation::IndependentLawyer => {
+                Some(CivicActivity::IndependentLegalPractice(home))
+            }
+        }
+    });
     DayWork {
         action,
         business_profit: 0,
@@ -194,6 +338,10 @@ fn finish_day(
                 | CivicActivity::LaborAdvocacy(_)
                 | CivicActivity::CommercialAdvocacy(_) => 1,
                 CivicActivity::Community => 0,
+                CivicActivity::BusinessShift(_)
+                | CivicActivity::Journalism(_)
+                | CivicActivity::IndependentLegalPractice(_) => 1,
+                CivicActivity::FreelanceWork(_) => 0,
             };
             life.professional_standing =
                 (i16::from(life.professional_standing) + standing_change).clamp(0, 100) as u8;
@@ -209,7 +357,11 @@ fn finish_day(
                     | CivicActivity::Prosecution(_)
                     | CivicActivity::LaborAdvocacy(_)
                     | CivicActivity::CommercialAdvocacy(_)
-                    | CivicActivity::Community => 2,
+                    | CivicActivity::Community
+                    | CivicActivity::BusinessShift(_)
+                    | CivicActivity::Journalism(_)
+                    | CivicActivity::IndependentLegalPractice(_) => 2,
+                    CivicActivity::FreelanceWork(_) => 4,
                 })
                 .min(100);
         }
@@ -283,7 +435,28 @@ pub(crate) fn valid_character_lives(state: &AppState) -> bool {
                             state.world().get_organization(id).is_some()
                         }
                         CivicActivity::Community => true,
+                        CivicActivity::BusinessShift(id) => {
+                            state.world().get_business(id).is_some()
+                        }
+                        CivicActivity::FreelanceWork(id)
+                        | CivicActivity::Journalism(id)
+                        | CivicActivity::IndependentLegalPractice(id) => {
+                            state.world().get_neighborhood(id).is_some()
+                        }
                     }
             })
+            && life
+                .home()
+                .is_none_or(|home| state.world().get_neighborhood(home).is_some())
+            && match life.vocation() {
+                IndependentVocation::BusinessEmployee(business) => state
+                    .world()
+                    .get_business(business)
+                    .is_some_and(|record| Some(record.neighborhood()) == life.home()),
+                IndependentVocation::Resident
+                | IndependentVocation::FreelanceCriminal
+                | IndependentVocation::Journalist
+                | IndependentVocation::IndependentLawyer => true,
+            }
     })
 }

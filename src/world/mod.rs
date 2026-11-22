@@ -8,8 +8,11 @@
 pub mod character_life;
 #[cfg(test)]
 mod civic_tests;
+pub mod freelance_contracts;
 pub(crate) mod payroll_departures;
 pub mod payroll_execution;
+#[cfg(test)]
+mod population_tests;
 pub mod rating;
 pub mod territory_conflict;
 pub mod territory_influence;
@@ -127,6 +130,10 @@ pub enum CivicActivity {
     LaborAdvocacy(OrganizationId),
     CommercialAdvocacy(OrganizationId),
     Community,
+    BusinessShift(BusinessId),
+    FreelanceWork(NeighborhoodId),
+    Journalism(NeighborhoodId),
+    IndependentLegalPractice(NeighborhoodId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +147,19 @@ pub enum CivicProfession {
     MerchantRepresentative,
     Criminal,
     Resident,
+    FreelanceCriminal,
+    BusinessEmployee,
+    Journalist,
+    IndependentLawyer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IndependentVocation {
+    Resident,
+    FreelanceCriminal,
+    BusinessEmployee(BusinessId),
+    Journalist,
+    IndependentLawyer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +168,8 @@ pub struct CharacterLife {
     fatigue: u8,
     career_days: u32,
     last_activity: Option<(SimTime, CivicActivity)>,
+    home: Option<NeighborhoodId>,
+    vocation: IndependentVocation,
 }
 
 impl Default for CharacterLife {
@@ -157,6 +179,8 @@ impl Default for CharacterLife {
             fatigue: 0,
             career_days: 0,
             last_activity: None,
+            home: None,
+            vocation: IndependentVocation::Resident,
         }
     }
 }
@@ -173,6 +197,12 @@ impl CharacterLife {
     }
     pub fn last_activity(self) -> Option<(SimTime, CivicActivity)> {
         self.last_activity
+    }
+    pub fn home(self) -> Option<NeighborhoodId> {
+        self.home
+    }
+    pub fn vocation(self) -> IndependentVocation {
+        self.vocation
     }
 }
 

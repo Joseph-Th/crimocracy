@@ -26,6 +26,8 @@ pub enum StateValidationError {
     InvalidPoliticalCampaign,
     #[error("a character has invalid personal career, strain, or activity chronology")]
     InvalidCharacterLife,
+    #[error("persisted freelance-contract chronology or payment is invalid")]
+    InvalidFreelanceContract,
     #[error("{kind} state contains reserved persistent ID 0")]
     InvalidPersistentId { kind: &'static str },
     #[error(
@@ -447,6 +449,9 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     }
     if !crate::world::character_life::valid_character_lives(state) {
         return Err(StateValidationError::InvalidCharacterLife);
+    }
+    if !crate::world::freelance_contracts::valid_freelance_contracts(state) {
+        return Err(StateValidationError::InvalidFreelanceContract);
     }
     validate_id_allocators(state)?;
     validate_indexes(state)?;

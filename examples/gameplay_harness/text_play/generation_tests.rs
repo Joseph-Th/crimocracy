@@ -58,7 +58,11 @@ fn generated_city_runs_real_operations_and_restores_its_identical_world_and_labe
     assert_eq!(session.district_variant, "PROCEDURAL");
     assert_eq!(session.state.world().neighborhoods().count(), 4);
     assert_eq!(session.known_opportunities().len(), 2);
-    assert_eq!(session.player_prospects().unwrap().len(), 2);
+    assert_eq!(
+        session.player_prospects().unwrap().len(),
+        6,
+        "two established opening prospects plus one real freelance contact in each ward"
+    );
     assert!(
         session
             .execute("connections")

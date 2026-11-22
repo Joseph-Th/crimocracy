@@ -1,4 +1,136 @@
 use super::*;
+use crimocracy::world::IndependentVocation;
+
+#[test]
+fn generated_city_has_hundreds_of_real_people_and_hires_a_freelancer_for_a_fixed_term() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new_generated(
+        &registry,
+        EvaluationSeeds::new(562365, 562365),
+        CityScale::Small,
+    )
+    .unwrap();
+    let census = session.execute("population").unwrap().0;
+    assert!(session.state.world().population_size() >= 200, "{census}");
+    assert!(
+        census.contains("Persistently simulated named people:"),
+        "{census}"
+    );
+    let listing = session.execute("freelancers").unwrap().0;
+    assert!(listing.contains("contract char-"), "{listing}");
+    let boss = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|person| person.supervisor().is_none())
+        .unwrap()
+        .id();
+    let freelancer = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find_map(|member| {
+            session
+                .state
+                .social()
+                .relationships_to(member.id())
+                .find(|relationship| {
+                    session
+                        .state
+                        .world()
+                        .get_character(relationship.from())
+                        .is_some_and(|person| {
+                            person.organization().is_none()
+                                && person.life().vocation()
+                                    == IndependentVocation::FreelanceCriminal
+                        })
+                })
+                .map(|relationship| (relationship.from(), member.id()))
+        })
+        .unwrap();
+    let (worker, recruiter) = freelancer;
+    assert_eq!(recruiter, boss);
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(
+        session
+            .execute(&format!(
+                "contract char-{} char-{} 0",
+                worker.raw(),
+                recruiter.raw()
+            ))
+            .is_err()
+    );
+    assert!(session.execute("contract char-999999 char-8 3").is_err());
+    assert!(session.execute("freelancers extra").is_err());
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    let outcome = session
+        .execute(&format!(
+            "contract char-{} char-{} 2",
+            worker.raw(),
+            recruiter.raw()
+        ))
+        .unwrap()
+        .0;
+    assert!(outcome.contains("Contracted"), "{outcome}");
+    assert_eq!(
+        session
+            .state
+            .world()
+            .get_character(worker)
+            .unwrap()
+            .organization(),
+        Some(session.player)
+    );
+    assert!(
+        session
+            .state
+            .world()
+            .active_freelance_contract(worker)
+            .is_some()
+    );
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .world()
+            .active_freelance_contract(worker)
+            .unwrap()
+            .fee_cents(),
+        session
+            .state
+            .world()
+            .active_freelance_contract(worker)
+            .unwrap()
+            .fee_cents()
+    );
+    session.execute("advance 2d uninterrupted").unwrap();
+    assert!(
+        session
+            .state
+            .world()
+            .active_freelance_contract(worker)
+            .is_none()
+    );
+    assert_eq!(
+        session
+            .state
+            .world()
+            .get_character(worker)
+            .unwrap()
+            .organization(),
+        None
+    );
+    assert!(
+        session
+            .execute("freelancers")
+            .unwrap()
+            .0
+            .contains(&format!("char-{}", worker.raw()))
+    );
+    restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+}
 
 #[test]
 fn public_civic_people_are_real_and_private_cases_remain_hidden_after_work_and_restore() {

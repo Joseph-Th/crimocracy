@@ -407,9 +407,12 @@ impl ValidatedCharacterReassignment {
     }
 
     pub(crate) fn commit_preflighted(self, state: &mut AppState) {
-        state
-            .world
-            .reassign_character(self.character, self.organization, self.supervisor);
+        state.world.reassign_character(
+            self.character,
+            self.organization,
+            self.supervisor,
+            state.now(),
+        );
     }
 }
 

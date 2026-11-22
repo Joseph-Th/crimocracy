@@ -31,6 +31,8 @@ pub(super) fn terminal_command_is_read_only(verb: &str) -> bool {
             | "political"
             | "campaign"
             | "election"
+            | "population"
+            | "freelancers"
             | "civics"
             | "civic-person"
             | "save"
@@ -111,6 +113,9 @@ impl Session<'_> {
             "election" => out = self.election_brief()?,
             "civics" => out = self.civic_directory(words.get(1).copied())?,
             "civic-person" => out = self.civic_character(words[1])?,
+            "population" => out = self.population_dossier(),
+            "freelancers" => out = self.freelancer_directory(),
+            "contract" => out = self.execute_freelance_contract(&words)?,
             "buy-influence" | "hire-specialist" | "fire-specialist" | "nominate-mayor"
             | "campaign-event" => {
                 out = self.execute_campaign_order(&words)?;

@@ -3,7 +3,8 @@
 //! assignments and unknown criminal membership are never exposed.
 
 use super::*;
-use crimocracy::world::{CivicActivity, CivicProfession, OrganizationKind};
+use crimocracy::world::freelance_contracts::validate_hire_freelancer;
+use crimocracy::world::{CivicActivity, CivicProfession, IndependentVocation, OrganizationKind};
 use std::collections::BTreeMap;
 
 impl Session<'_> {
@@ -64,6 +65,30 @@ impl Session<'_> {
             }
         }
         for person in self.state.world().public_civic_people() {
+            if person.organization().is_none() {
+                if person.life().home() == Some(ward)
+                    && matches!(
+                        person.life().vocation(),
+                        IndependentVocation::BusinessEmployee(_)
+                            | IndependentVocation::Journalist
+                            | IndependentVocation::IndependentLawyer
+                    )
+                {
+                    writeln!(
+                        out,
+                        "  char-{} {} | {:?} | independent local career {} day(s)",
+                        person.id().raw(),
+                        person.name(),
+                        self.state
+                            .world()
+                            .civic_profession(person.id())
+                            .unwrap_or(CivicProfession::Resident),
+                        person.life().career_days()
+                    )
+                    .unwrap();
+                }
+                continue;
+            }
             let Some(organization) = person
                 .organization()
                 .and_then(|id| self.state.world().get_organization(id))
@@ -85,7 +110,7 @@ impl Session<'_> {
                 | OrganizationKind::Prosecutor => true,
                 OrganizationKind::Criminal => false,
             };
-            if serves_ward {
+            if serves_ward && person.life().home().is_none_or(|home| home == ward) {
                 writeln!(
                     out,
                     "  char-{} {} | {:?} | {} | career {} day(s)",
@@ -116,6 +141,12 @@ impl Session<'_> {
                     .world()
                     .characters_in_organization(self.player)
                     .find(|person| person.id().raw() == raw)
+            })
+            .or_else(|| {
+                self.known_freelancers()
+                    .into_iter()
+                    .find(|(id, _)| id.raw() == raw)
+                    .and_then(|(id, _)| self.state.world().get_character(id))
             })
             .ok_or("person is not publicly registered or known as one of your members")?;
         let profession = self
@@ -164,6 +195,12 @@ impl Session<'_> {
                 CivicActivity::LaborAdvocacy(_) => "represented organized labor".to_owned(),
                 CivicActivity::CommercialAdvocacy(_) => "represented local commerce".to_owned(),
                 CivicActivity::Community => "participated in neighborhood affairs".to_owned(),
+                CivicActivity::BusinessShift(_) => "worked at a local business".to_owned(),
+                CivicActivity::FreelanceWork(_) => "pursued independent assignments".to_owned(),
+                CivicActivity::Journalism(_) => "worked as a local journalist".to_owned(),
+                CivicActivity::IndependentLegalPractice(_) => {
+                    "served independent legal clients".to_owned()
+                }
             };
             writeln!(
                 out,
@@ -186,5 +223,113 @@ impl Session<'_> {
             out.push_str("  Private condition and personal finances are not disclosed.\n");
         }
         Ok(out)
+    }
+
+    fn known_freelancers(&self) -> BTreeMap<CharacterId, Vec<CharacterId>> {
+        let mut available = BTreeMap::new();
+        for member in self.state.world().characters_in_organization(self.player) {
+            if self
+                .state
+                .legal()
+                .active_arrest_for_character(member.id())
+                .is_some()
+            {
+                continue;
+            }
+            for relationship in self.state.social().relationships_to(member.id()) {
+                let Some(person) = self.state.world().get_character(relationship.from()) else {
+                    continue;
+                };
+                if person.organization().is_none()
+                    && person.life().vocation() == IndependentVocation::FreelanceCriminal
+                    && self
+                        .state
+                        .legal()
+                        .active_arrest_for_character(person.id())
+                        .is_none()
+                    && relationship.dimensions().trust.value() >= 30
+                {
+                    available
+                        .entry(person.id())
+                        .or_insert_with(Vec::new)
+                        .push(member.id());
+                }
+            }
+        }
+        available
+    }
+
+    pub(super) fn population_dossier(&self) -> String {
+        let population = self.state.world().population_size();
+        let public = self.state.world().public_civic_people().count();
+        let wards = self.state.world().neighborhoods().count();
+        format!(
+            "Persistently simulated named people: {population} in {wards} districts.\nPublic registered proprietors and civic professionals: {public}.\nOther people include residents, unaffiliated workers, criminal crews and private freelance contacts; identities require actual relationships or intelligence.\nUse 'civics', 'civics district-N' and 'freelancers'.\n"
+        )
+    }
+
+    pub(super) fn freelancer_directory(&self) -> String {
+        let known = self.known_freelancers();
+        let mut out = format!(
+            "Personally known, currently available freelancers: {}\n",
+            known.len()
+        );
+        for (id, contacts) in known {
+            let person = self
+                .state
+                .world()
+                .get_character(id)
+                .expect("known freelance relationship has a real person");
+            let names: Vec<_> = contacts
+                .iter()
+                .map(|manager| format!("char-{}", manager.raw()))
+                .collect();
+            let skills: Vec<_> = crimocracy::world::ALL_CAPABILITY_KINDS
+                .iter()
+                .filter(|kind| person.capability(**kind).is_some())
+                .map(|kind| format!("{kind:?}"))
+                .collect();
+            writeln!(out, "  char-{} {} | district-{} | {} | contacts {}\n    contract char-{} {} <days> (1-14)",
+                id.raw(), person.name(), person.life().home().map_or(0, |home| home.raw()),
+                skills.join(", "), names.join(", "), id.raw(), names[0]).unwrap();
+        }
+        out
+    }
+
+    pub(super) fn execute_freelance_contract(&mut self, words: &[&str]) -> Result<String, String> {
+        let freelancer_raw = parse_number(words[1], "char")?;
+        let manager_raw = parse_number(words[2], "char")?;
+        let days = words[3]
+            .parse::<u8>()
+            .map_err(|_| "contract days must be an integer between 1 and 14")?;
+        let freelancer = self
+            .known_freelancers()
+            .into_iter()
+            .find(|(person, contacts)| {
+                person.raw() == freelancer_raw
+                    && contacts.iter().any(|manager| manager.raw() == manager_raw)
+            })
+            .map(|(person, _)| person)
+            .ok_or("freelancer is not a current personal acquaintance of that crew member")?;
+        let manager = self
+            .state
+            .world()
+            .characters_in_organization(self.player)
+            .find(|member| member.id().raw() == manager_raw)
+            .map(|member| member.id())
+            .ok_or("contract manager does not belong to your crew")?;
+        let token = validate_hire_freelancer(&self.state, self.player, freelancer, manager, days)
+            .map_err(|error| error.to_string())?;
+        let fee = token.fee_cents();
+        token
+            .commit(&mut self.state)
+            .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "Contracted char-{} under char-{} for {} days, paid {} street cents to the freelancer's own account. Normal operation and payroll rules apply.\n",
+            freelancer.raw(),
+            manager.raw(),
+            days,
+            fee
+        ))
     }
 }

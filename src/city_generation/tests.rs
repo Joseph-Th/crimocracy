@@ -29,7 +29,8 @@ fn generated_organizations_have_real_reporting_relationships_and_manager_contact
         find_recruitment_candidates(&registry, &city.state, city.player, city.boss)
             .unwrap()
             .len(),
-        2
+        2 + usize::from(CityScale::Small.config(12).districts),
+        "the two original prospects are now joined by one local freelancer per ward"
     );
     let manager = city
         .state
@@ -63,9 +64,13 @@ fn generated_executive_prospects_offer_complementary_roles() {
         let city = generate_city(&registry, CityScale::Small.config(seed)).unwrap();
         let candidates =
             find_recruitment_candidates(&registry, &city.state, city.player, city.boss).unwrap();
-        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates.len(),
+            2 + usize::from(CityScale::Small.config(seed).districts)
+        );
         let skill_sets = candidates
             .iter()
+            .take(2)
             .map(|id| {
                 let person = city.state.world().get_character(*id).unwrap();
                 crate::world::ALL_CAPABILITY_KINDS

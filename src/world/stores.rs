@@ -201,6 +201,8 @@ pub struct WorldState {
     characters: CharacterStore,
     neighborhoods: BTreeMap<NeighborhoodId, NeighborhoodRecord>,
     businesses: BusinessStore,
+    pub(super) freelance_contracts:
+        BTreeMap<CharacterId, Vec<super::freelance_contracts::FreelanceContractRecord>>,
 }
 impl WorldState {
     pub(crate) fn new() -> Self {
@@ -541,6 +543,11 @@ impl WorldState {
     pub(crate) fn characters(&self) -> impl Iterator<Item = &CharacterRecord> {
         self.characters.records.values()
     }
+    /// Authoritative count of persistent individual people, including
+    /// civilians, gangsters and personnel not yet known to the player.
+    pub fn population_size(&self) -> usize {
+        self.characters.records.len()
+    }
     pub(crate) fn businesses(&self) -> impl Iterator<Item = &BusinessRecord> {
         self.businesses.records.values()
     }
@@ -564,6 +571,22 @@ impl WorldState {
             .get_mut(&character)
             .expect("civic work plan references an existing character")
             .life = life;
+    }
+    pub(super) fn set_character_vocation(
+        &mut self,
+        character: CharacterId,
+        home: NeighborhoodId,
+        vocation: super::IndependentVocation,
+    ) {
+        let record = self
+            .characters
+            .records
+            .get_mut(&character)
+            .expect("validated independent resident exists");
+        record.life.home = Some(home);
+        record.life.vocation = vocation;
+        record.runtime.version =
+            crate::core::version::advance_version_preflighted(record.runtime.version);
     }
     pub(super) fn insert_neighborhood(&mut self, record: NeighborhoodRecord) {
         let previous = self.neighborhoods.insert(record.id(), record);
@@ -604,8 +627,19 @@ impl WorldState {
         id: CharacterId,
         organization: Option<OrganizationId>,
         supervisor: Option<CharacterId>,
+        at: SimTime,
     ) {
+        let old_organization = self
+            .get_character(id)
+            .and_then(super::CharacterRecord::organization);
         self.characters.reassign(id, organization, supervisor);
+        if old_organization != organization
+            && self
+                .active_freelance_contract(id)
+                .is_some_and(|contract| Some(contract.sponsor()) == old_organization)
+        {
+            self.end_freelance_contract(id, at);
+        }
     }
     pub(super) fn set_character_autonomy(&mut self, id: CharacterId, autonomy: AutonomyLevel) {
         let record = self
