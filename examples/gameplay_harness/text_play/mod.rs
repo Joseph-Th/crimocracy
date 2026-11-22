@@ -97,12 +97,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const SAVE_DIR: &str = "target/text-play";
-const MAX_ADVANCE: u64 = DAY_MINUTES * 7;
+const MAX_ADVANCE: u64 = DAY_MINUTES * 30;
 static NEXT_SAVE_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 const HELP: &str = "Commands:
   brief                  Leadership's current situation
   victory                View optional political, retirement, and city-underboss ending requirements
+  political <district-N>  Inspect own commercial title ages, settlement proof and local coalition blockers
   claim-victory <political|retirement|underboss>
                          Choose an eligible permanent campaign ending
   staff-racket <enterprise-id> <associate-count>
@@ -219,7 +220,8 @@ const HELP: &str = "Commands:
   decide <id> <continue|abort|approve|reject>
                          Resolve a pending decision
   sweep <business-id> <cents>  Withdraw earned storefront surplus to clean books
-  advance <minutes|Nh|Nd>     Advance up to seven days, stopping for decisions, crew custody, and critical reports
+  advance <minutes|Nh|Nd> [uninterrupted]
+                         Advance up to 30 days; uninterrupted skips optional pauses, never decisions or terminal outcomes, and summarizes deferred alerts
   save <slot>            Write a validated current-schema campaign save
   quit                   End this session
 
@@ -451,7 +453,7 @@ fn parse_advance(raw: &str) -> Result<u64, String> {
         .ok()
         .and_then(|n| n.checked_mul(factor))
         .filter(|minutes| (1..=MAX_ADVANCE).contains(minutes))
-        .ok_or_else(|| "advance requires 1 to 10080 minutes (e.g. 45m, 6h, 2d)".to_owned())
+        .ok_or_else(|| "advance requires 1 to 43200 minutes (e.g. 45m, 6h, 30d)".to_owned())
 }
 
 fn parse_enterprise_kind(raw: &str) -> Result<EnterpriseKind, String> {
@@ -485,6 +487,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         | "districts" | "turf" | "known-targets" | "debriefs" | "case-brief" => 1..=1,
         "counsel" => 1..=2,
         "recovery" => 1..=1,
+        "political" => 2..=2,
+        "advance" => 2..=3,
         "launder-all" => 2..=2,
         "resume-rackets" => 2..=32,
         "cover-rackets" => 3..=32,
@@ -500,7 +504,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "attention" => 1..=3,
         "ledger" => 1..=2,
         "business-cycles" | "racket-cycles" => 2..=3,
-        "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
+        "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss"
         | "claim-victory" | "save" | "transaction" | "cancel" | "debrief" | "intel"
         | "racket-outlook" | "business-outlook" | "contest" | "preview-contest" => 2..=2,
         "policy" | "delegate" | "autonomy" | "supervise" | "offer" => 3..=3,
@@ -1164,6 +1168,7 @@ mod legal_play;
 mod planning;
 #[cfg(test)]
 mod planning_options_tests;
+mod political_play;
 mod racket_play;
 mod reconnaissance;
 #[cfg(test)]

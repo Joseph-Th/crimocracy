@@ -417,6 +417,18 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     );
     assert!(early_districts.iter().all(|row| !row.qualifies));
     assert!(early_districts.iter().all(|row| row.mature_active == 0));
+    for district in &early_districts {
+        let titles = political_business_progress(&city.state, district.district).unwrap();
+        assert_eq!(
+            titles.len(),
+            district.active_owned + district.suspended_owned
+        );
+        for title in titles {
+            assert_eq!(title.owned_days, 0);
+            assert_eq!(title.days_until_mature, VICTORY_ESTABLISHMENT_DAYS);
+            assert!(!title.established);
+        }
+    }
     let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(
         validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
@@ -499,6 +511,21 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     assert!(established.legitimate_self_sufficient);
     assert!(established.legitimate_daily_net >= established.daily_payroll);
     let mature_districts = political_district_progress(&registry, &city.state).unwrap();
+    for district in &mature_districts {
+        let titles = political_business_progress(&city.state, district.district).unwrap();
+        assert_eq!(
+            titles.iter().filter(|title| title.established).count(),
+            district.established_active
+        );
+        assert!(titles.iter().all(|title| title.days_until_mature == 0));
+        assert!(
+            titles
+                .iter()
+                .filter(|title| title.established)
+                .all(|title| title.profitable_cycles >= VICTORY_PROFITABLE_CYCLES
+                    && title.last_owned_settlement.is_some())
+        );
+    }
     assert_eq!(established.staffed_political_districts, 0);
     assert_eq!(
         validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
@@ -742,6 +769,26 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         .unwrap();
     assert_eq!(outcome.path, VictoryPath::PoliticalPower);
     assert!(outcome.settlement.is_none());
+    let victory_report = city.state.reports().get_report(outcome.report).unwrap();
+    assert_eq!(victory_report.kind(), ReportKind::CampaignVictory);
+    assert!(victory_report.entries().len() >= districts.len() + 2);
+    let summary = victory_report
+        .entries()
+        .iter()
+        .map(|entry| entry.summary.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(summary.contains("governing coalition formed"), "{summary}");
+    assert!(summary.contains("Political sponsor:"), "{summary}");
+    for district in &districts {
+        let district_name = city
+            .state
+            .world()
+            .get_neighborhood(*district)
+            .unwrap()
+            .name();
+        assert!(summary.contains(district_name), "{summary}");
+    }
     assert!(matches!(
         run_tick(&registry, &mut city.state),
         Err(TickError::CampaignWon {

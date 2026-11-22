@@ -387,7 +387,9 @@ impl Session<'_> {
             }
             if key == "delay" {
                 let minutes = parse_advance(value)
-                    .map_err(|_| "delay must be 1m to 7d (e.g. delay=2h)".to_owned())?;
+                    .ok()
+                    .filter(|minutes| *minutes <= DAY_MINUTES * 7)
+                    .ok_or_else(|| "delay must be 1m to 7d (e.g. delay=2h)".to_owned())?;
                 if requested_delay.replace(minutes).is_some() {
                     return Err("delay may only be specified once".to_owned());
                 }
@@ -395,7 +397,9 @@ impl Session<'_> {
             }
             if key == "deadline" {
                 let minutes = parse_advance(value)
-                    .map_err(|_| "deadline must be 1m to 7d after the current time".to_owned())?;
+                    .ok()
+                    .filter(|minutes| *minutes <= DAY_MINUTES * 7)
+                    .ok_or_else(|| "deadline must be 1m to 7d after the current time".to_owned())?;
                 if requested_deadline.replace(minutes).is_some() {
                     return Err("deadline may only be specified once".to_owned());
                 }

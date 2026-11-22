@@ -3,6 +3,127 @@
 use super::*;
 
 #[test]
+fn political_dossier_exposes_title_countdown_without_mutating_or_exposing_rivals() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new_generated(
+        &registry,
+        EvaluationSeeds::new(203768, 203768),
+        CityScale::Small,
+    )
+    .unwrap();
+    let district = session.state.world().neighborhoods().next().unwrap().id();
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let dossier = session
+        .execute(&format!("political district-{}", district.raw()))
+        .unwrap()
+        .0;
+    assert!(dossier.contains("Political dossier:"), "{dossier}");
+    assert!(dossier.contains("title age 0 full day(s)"), "{dossier}");
+    assert!(dossier.contains("title matures in 90 day(s)"), "{dossier}");
+    assert!(dossier.contains("profitable settlements"), "{dossier}");
+    assert!(!dossier.contains("rival influence"), "{dossier}");
+    assert!(session.execute("political district-99999").is_err());
+    assert!(session.execute("political 1 ignored").is_err());
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        dossier,
+        session
+            .execute(&format!("political district-{}", district.raw()))
+            .unwrap()
+            .0
+    );
+    assert!(dossier.contains("No local Political-function mandate"));
+    let candidate = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|person| {
+            person.supervisor().is_some()
+                && session
+                    .state
+                    .delegation()
+                    .active_for_manager(person.id())
+                    .is_none()
+        })
+        .unwrap()
+        .id();
+    session
+        .execute(&format!("autonomy {} delegated", candidate.raw()))
+        .unwrap();
+    session
+        .execute(&format!(
+            "delegate {} district-{}",
+            candidate.raw(),
+            district.raw()
+        ))
+        .unwrap();
+    let mandate = session
+        .state
+        .delegation()
+        .active_for_manager(candidate)
+        .unwrap()
+        .id();
+    session
+        .execute(&format!("mandate {} add political", mandate.raw()))
+        .unwrap();
+    let appointed = session
+        .execute(&format!("political district-{}", district.raw()))
+        .unwrap()
+        .0;
+    assert!(
+        appointed.contains(&format!("Local Political-function mandate {}", mandate)),
+        "{appointed}"
+    );
+    assert!(
+        appointed.contains("counted only when local commerce qualifies"),
+        "{appointed}"
+    );
+    assert!(
+        appointed.contains("title matures in 90 day(s)"),
+        "{appointed}"
+    );
+}
+
+#[test]
+fn uninterrupted_advance_runs_real_ticks_and_skips_optional_pauses_only() {
+    let registry = crimocracy::build_registry();
+    let seeds = EvaluationSeeds::new(12, 12);
+    let mut manual = Session::new(&registry, seeds).unwrap();
+    let mut played = Session::new(&registry, seeds).unwrap();
+    manual.execute("burgle 1 abort").unwrap();
+    played.execute("burgle 1 abort").unwrap();
+    let before = bincode::serialize(&build_save(&registry, &played.state).unwrap()).unwrap();
+    assert!(played.execute("advance 2d mistaken").is_err());
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &played.state).unwrap()).unwrap()
+    );
+    assert_eq!(parse_advance("30d").unwrap(), MAX_ADVANCE);
+    assert!(parse_advance("31d").is_err());
+    let result = played.execute("advance 3h uninterrupted").unwrap().0;
+    assert!(result.contains("Advanced 180 minute(s)"), "{result}");
+    assert!(result.contains("Uninterrupted review:"), "{result}");
+    for _ in 0..180 {
+        run_tick(&registry, &mut manual.state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &played.state).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &manual.state).unwrap()).unwrap(),
+        "skipping UI pauses may not skip or change simulation work"
+    );
+    let restored = restore_save(&registry, build_save(&registry, &played.state).unwrap()).unwrap();
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &played.state).unwrap()).unwrap(),
+    );
+}
+
+#[test]
 fn dissolved_campaign_rejects_mutation_but_preserves_read_only_history_after_restore() {
     use crimocracy::world::world_system::{
         designate_player_organization, insert_character, insert_organization,

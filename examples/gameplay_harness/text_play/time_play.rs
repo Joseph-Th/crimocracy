@@ -17,7 +17,11 @@ fn bounded_advance_span(
 }
 
 impl Session<'_> {
-    pub(super) fn execute_advance(&mut self, duration: &str) -> Result<String, String> {
+    pub(super) fn execute_advance(
+        &mut self,
+        duration: &str,
+        uninterrupted: bool,
+    ) -> Result<String, String> {
         let requested = parse_advance(duration)?;
         if self.state.player_organization_defeated() {
             return Err("Campaign over: your organization dissolved".to_owned());
@@ -38,6 +42,13 @@ impl Session<'_> {
         let mut advanced = 0;
         let mut new_reports = 0;
         let mut reason = None;
+        let mut deferred_custody = 0_u32;
+        let mut deferred_releases = 0_u32;
+        let mut deferred_shutdowns = 0_u32;
+        let mut deferred_losses = 0_u32;
+        let mut deferred_payroll = 0_u32;
+        let mut deferred_operations = 0_u32;
+        let mut deferred_urgent = 0_u32;
         for _ in 0..span {
             let previous = self
                 .state
@@ -135,6 +146,17 @@ impl Session<'_> {
                 .state
                 .attention_settings()
                 .is_auto_pause_enabled(crimocracy::core::attention::AttentionClass::Exception);
+            if uninterrupted {
+                deferred_custody += u32::from(own_arrest);
+                deferred_releases += u32::from(own_release);
+                deferred_shutdowns += u32::from(
+                    own_business_suspended || own_managerial_shutdown || own_racket_suspended,
+                );
+                deferred_losses += u32::from(own_new_racket_loss);
+                deferred_payroll += u32::from(own_payroll_shortfall);
+                deferred_operations += u32::from(operation_ended);
+                deferred_urgent += u32::from(urgent);
+            }
             if self.state.player_organization_defeated() {
                 reason = Some("Campaign over: your organization dissolved");
             } else if self.state.campaign_victory().is_some() {
@@ -147,29 +169,29 @@ impl Session<'_> {
                 .is_some()
             {
                 reason = Some("leadership decision pending");
-            } else if own_arrest {
+            } else if !uninterrupted && own_arrest {
                 reason = Some("your member entered custody; review 'counsel' and 'contacts'");
-            } else if own_release {
+            } else if !uninterrupted && own_release {
                 reason = Some("your member was released from custody; review 'counsel'");
-            } else if pause_exceptions && own_payroll_shortfall {
+            } else if !uninterrupted && pause_exceptions && own_payroll_shortfall {
                 reason = Some("payroll ran short; review 'treasury', 'businesses' and 'accounts'");
-            } else if pause_exceptions && own_business_suspended {
+            } else if !uninterrupted && pause_exceptions && own_business_suspended {
                 reason = Some(
                     "your storefront has suspended operations; review 'businesses' and 'enterprises'",
                 );
-            } else if pause_exceptions && own_managerial_shutdown {
+            } else if !uninterrupted && pause_exceptions && own_managerial_shutdown {
                 reason = Some(
                     "a captain cannot supervise the current racket workload; review 'people', 'delegate', 'enterprises' and 'prospects'",
                 );
-            } else if pause_exceptions && own_racket_suspended {
+            } else if !uninterrupted && pause_exceptions && own_racket_suspended {
                 reason = Some("your racket has suspended operations; review 'enterprises'");
-            } else if pause_exceptions && own_new_racket_loss {
+            } else if !uninterrupted && pause_exceptions && own_new_racket_loss {
                 reason = Some(
                     "your racket has entered a losing cycle; review 'enterprises' and 'racket-outlook'",
                 );
-            } else if urgent {
+            } else if !uninterrupted && urgent {
                 reason = Some("high-priority report");
-            } else if operation_ended {
+            } else if !uninterrupted && operation_ended {
                 reason = Some("your operation reached a terminal outcome");
             }
             if reason.is_some() {
@@ -185,6 +207,13 @@ impl Session<'_> {
         .unwrap();
         if let Some(reason) = reason {
             writeln!(out, "Paused: {reason}.").unwrap();
+        }
+        if uninterrupted {
+            writeln!(
+                out,
+                "Uninterrupted review: {deferred_custody} custody event(s), {deferred_releases} release(s), {deferred_shutdowns} shutdown event(s), {deferred_losses} new loss streak(s), {deferred_payroll} payroll shortfall(s), {deferred_operations} completed/aborted operation minute(s), {deferred_urgent} priority-report minute(s). All events were simulated. Review 'reports', 'counsel', 'recovery' and 'accounts'."
+            )
+            .unwrap();
         }
         if self.state.now() == crimocracy::core::time::SimTime::MAX {
             writeln!(

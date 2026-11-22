@@ -27,7 +27,20 @@ fn validate_report(state: &AppState, report: &ReportRecord) -> Result<(), StateV
                 if report.title() == format!("Campaign victory: {}", path.label()))
                 && event.occurred_at() == report.generated_at()
         });
-        if !linked || report.entries().len() != 1 {
+        // Historical victory reports have one entry. Political coalition reports may
+        // additionally name the sponsoring contact and at most one organizer per
+        // district; all entries still pass normal entity/source validation.
+        let political = report.title()
+            == format!(
+                "Campaign victory: {}",
+                crate::core::campaign_victory::VictoryPath::PoliticalPower.label()
+            );
+        let entries = report.entries().len();
+        if !linked
+            || entries == 0
+            || (!political && entries != 1)
+            || entries > state.world.neighborhoods().count().saturating_add(2).max(1)
+        {
             return Err(StateValidationError::InvalidCampaignVictoryReport {
                 report: report.id(),
             });

@@ -150,6 +150,20 @@ pub struct PoliticalDistrictProgress {
     pub qualifies: bool,
 }
 
+/// Player-owned title and settlement evidence behind political readiness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoliticalBusinessProgress {
+    pub business: BusinessId,
+    pub kind: BusinessKind,
+    pub active: bool,
+    pub owned_days: u64,
+    pub days_until_mature: u64,
+    pub profitable_cycles: usize,
+    pub last_owned_settlement: Option<SimTime>,
+    pub recent_net: Money,
+    pub established: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum VictoryError {
     #[error("no player organization is designated")]
@@ -305,9 +319,6 @@ fn mature_business_title(state: &AppState, business: BusinessId, owner: Organiza
 /// current title prevent an instant acquisition from inheriting the seller's
 /// political standing.
 fn established_business(state: &AppState, business: BusinessId, owner: OrganizationId) -> bool {
-    let Some(record) = state.world().get_business(business) else {
-        return false;
-    };
     if !mature_business_title(state, business, owner)
         || !state.economy().latest_cycle(business).is_some_and(|cycle| {
             cycle.owner() == BusinessOwner::Organization(owner)
@@ -316,6 +327,17 @@ fn established_business(state: &AppState, business: BusinessId, owner: Organizat
     {
         return false;
     }
+    profitable_business_cycles(state, business, owner) >= VICTORY_PROFITABLE_CYCLES
+}
+
+fn profitable_business_cycles(
+    state: &AppState,
+    business: BusinessId,
+    owner: OrganizationId,
+) -> usize {
+    let Some(record) = state.world().get_business(business) else {
+        return 0;
+    };
     state
         .economy()
         .cycles_for(business)
@@ -329,7 +351,6 @@ fn established_business(state: &AppState, business: BusinessId, owner: Organizat
         })
         .take(VICTORY_PROFITABLE_CYCLES)
         .count()
-        == VICTORY_PROFITABLE_CYCLES
 }
 
 #[derive(Clone, Debug, Default)]
@@ -472,6 +493,61 @@ pub fn political_district_progress(
                 economically_qualified,
                 qualifies: economically_qualified && steward.is_some(),
             }
+        })
+        .collect())
+}
+
+/// Exact own-books evidence behind each district's commercial readiness.
+pub fn political_business_progress(
+    state: &AppState,
+    district: NeighborhoodId,
+) -> Result<Vec<PoliticalBusinessProgress>, VictoryError> {
+    let owner = state.player_organization().ok_or(VictoryError::NoPlayer)?;
+    Ok(state
+        .world()
+        .businesses_owned_by_organization(owner)
+        .filter(|business| business.neighborhood() == district)
+        .filter_map(|business| {
+            let economy = state.economy().get_business_economy(business.id())?;
+            let active = economy.status() == BusinessOperatingStatus::Active;
+            let owned_minutes = state
+                .world()
+                .get_business_ownership_change_for_version(business.id(), business.version())
+                .filter(|change| change.new_owner() == BusinessOwner::Organization(owner))
+                .map_or(0, |change| {
+                    state
+                        .now()
+                        .as_minutes()
+                        .saturating_sub(change.changed_at().as_minutes())
+                });
+            let owned_days = owned_minutes / DAY_MINUTES;
+            let days_until_mature = (VICTORY_ESTABLISHMENT_DAYS * DAY_MINUTES)
+                .saturating_sub(owned_minutes)
+                .div_ceil(DAY_MINUTES);
+            let last_owned_settlement = state
+                .economy()
+                .latest_cycle(business.id())
+                .filter(|cycle| {
+                    cycle.owner() == BusinessOwner::Organization(owner)
+                        && cycle.business_version() == business.version()
+                        && cycle.occurred_at() <= state.now()
+                })
+                .map(|cycle| cycle.occurred_at());
+            Some(PoliticalBusinessProgress {
+                business: business.id(),
+                kind: business.kind(),
+                active,
+                owned_days,
+                days_until_mature,
+                profitable_cycles: profitable_business_cycles(state, business.id(), owner),
+                last_owned_settlement,
+                recent_net: Money::from_cents(
+                    recent_business_net(state, business.id(), owner)
+                        .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+                        as i64,
+                ),
+                established: active && established_business(state, business.id(), owner),
+            })
         })
         .collect())
 }
@@ -994,25 +1070,108 @@ pub fn validate_claim_victory(
         .as_ref()
         .map(|_| LedgerTransactionId::from_raw(state.ids.next_raw(IdKind::LedgerTransaction)));
     let history = validate_campaign_victory_event(state, owner, path, settlement_id)?;
-    let report = validate_report_draft(state, ReportDraft {
-        recipient: owner,
-        kind: ReportKind::CampaignVictory,
-        title: format!("Campaign victory: {}", path.label()),
-        entries: vec![ReportEntry {
-            attention: AttentionClass::Crisis,
-            summary: match path {
-                VictoryPath::PoliticalPower =>
-                    "Distinct district organizers, diversified established businesses, and a live political sponsor secured a governing coalition.".to_owned(),
-                VictoryPath::FundedRetirement =>
-                    "The leader retired with a funded nest egg; each subordinate received 180 days of wages in an accounted personal account.".to_owned(),
-                VictoryPath::CityUnderboss =>
-                    "Uncontested economic influence across the city's districts and superior underworld strength secured the underboss position.".to_owned(),
-            },
-            sources: Vec::new(),
-            entities: BTreeSet::from([EntityRef::Organization(owner)]),
-            decision: None,
-        }],
-    })?;
+    let mut entries = vec![ReportEntry {
+        attention: AttentionClass::Crisis,
+        summary: match path {
+            VictoryPath::PoliticalPower =>
+                "Distinct district organizers, diversified established businesses, and a live political sponsor secured a governing coalition.".to_owned(),
+            VictoryPath::FundedRetirement =>
+                "The leader retired with a funded nest egg; each subordinate received 180 days of wages in an accounted personal account.".to_owned(),
+            VictoryPath::CityUnderboss =>
+                "Uncontested economic influence across the city's districts and superior underworld strength secured the underboss position.".to_owned(),
+        },
+        sources: Vec::new(),
+        entities: BTreeSet::from([EntityRef::Organization(owner)]),
+        decision: None,
+    }];
+    if path == VictoryPath::PoliticalPower {
+        let standing = progress(registry, state)?;
+        entries[0].summary = format!(
+            "A governing coalition formed across {} independently organized districts. Established legitimate business income is {} cents/day against {} cents/day in named-member wages.",
+            standing.staffed_political_districts,
+            standing.legitimate_daily_net.cents(),
+            standing.daily_payroll.cents(),
+        );
+        if let Some(sponsor) = state
+            .contacts()
+            .contacts_for_sponsor(owner)
+            .find(|contact| {
+                contact.kind() == ContactKind::Political
+                    && contact.status() == ContactStatus::Active
+                    && established_for(
+                        state.now(),
+                        contact.established_at(),
+                        POLITICAL_CONTACT_DAYS,
+                    )
+                    && state
+                        .world()
+                        .get_organization(contact.institution())
+                        .is_some_and(|organization| {
+                            organization.kind() == OrganizationKind::Political
+                        })
+                    && state
+                        .world()
+                        .get_character(contact.handler())
+                        .is_some_and(|handler| handler.organization() == Some(owner))
+            })
+        {
+            let contact = state
+                .world()
+                .get_character(sponsor.contact())
+                .expect("established institutional contact has a real person");
+            entries.push(ReportEntry {
+                attention: AttentionClass::Notable,
+                summary: format!(
+                    "Political sponsor: {} (contact {}), kept through {} days of working relations.",
+                    contact.name(), sponsor.id(), POLITICAL_CONTACT_DAYS,
+                ),
+                sources: Vec::new(),
+                entities: BTreeSet::from([EntityRef::Character(contact.id())]),
+                decision: None,
+            });
+        }
+        for district in political_district_progress(registry, state)?
+            .into_iter()
+            .filter(|district| district.qualifies)
+        {
+            let organizer = district.steward.expect("qualifying district has organizer");
+            let manager = state
+                .world()
+                .get_character(organizer)
+                .expect("assigned political organizer exists");
+            let name = state
+                .world()
+                .get_neighborhood(district.district)
+                .expect("qualifying district exists")
+                .name();
+            entries.push(ReportEntry {
+                attention: AttentionClass::Notable,
+                summary: format!(
+                    "{}: {} organized {} established business sectors, with {} cents of mature local net income over the past {} days.",
+                    name,
+                    manager.name(),
+                    district.established_kinds,
+                    district.mature_window_net.cents(),
+                    VICTORY_INCOME_WINDOW_DAYS,
+                ),
+                sources: Vec::new(),
+                entities: BTreeSet::from([
+                    EntityRef::Neighborhood(district.district),
+                    EntityRef::Character(organizer),
+                ]),
+                decision: None,
+            });
+        }
+    }
+    let report = validate_report_draft(
+        state,
+        ReportDraft {
+            recipient: owner,
+            kind: ReportKind::CampaignVictory,
+            title: format!("Campaign victory: {}", path.label()),
+            entries,
+        },
+    )?;
     let mut budget = vec![(IdKind::HistoryEvent, 1), (IdKind::Report, 1)];
     if let Some(payment) = &settlement {
         budget.extend(payment.id_budget());

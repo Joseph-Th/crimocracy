@@ -28,6 +28,7 @@ pub(super) fn terminal_command_is_read_only(verb: &str) -> bool {
             | "exit"
             | "brief"
             | "victory"
+            | "political"
             | "save"
             | "people"
             | "known-people"
@@ -101,6 +102,7 @@ impl Session<'_> {
                 ));
             }
             "brief" => out = self.brief(),
+            "political" => out = self.political_readiness(words[1])?,
             "victory" => {
                 let standing =
                     crimocracy::core::campaign_victory::progress(self.registry, &self.state)
@@ -142,10 +144,14 @@ impl Session<'_> {
                         "locally qualified"
                     } else if district.active_owned == 0 {
                         "no active storefronts; check 'recovery'"
-                    } else if district.mature_active == 0 {
-                        "needs an active storefront continuously owned for 90 days"
-                    } else if district.established_active == 0 {
-                        "needs a mature storefront with 20 profitable cycles in 30 days and a recent settlement"
+                    } else if district.mature_active
+                        < crimocracy::core::campaign_victory::POLITICAL_BUSINESS_KINDS_PER_DISTRICT
+                    {
+                        "needs two storefront titles held for 90 days (inspect 'political district-N')"
+                    } else if district.established_active
+                        < crimocracy::core::campaign_victory::POLITICAL_BUSINESS_KINDS_PER_DISTRICT
+                    {
+                        "needs two mature storefronts with 20 profitable cycles in 30 days and recent settlements"
                     } else if district.established_kinds
                         < crimocracy::core::campaign_victory::POLITICAL_BUSINESS_KINDS_PER_DISTRICT
                     {
@@ -175,6 +181,7 @@ impl Session<'_> {
                     )
                     .unwrap();
                 }
+                out.push_str("    Inspect 'political district-N' for owned title ages, remaining maturation days and profitable settlements.\n");
                 writeln!(out, "  Retirement: {} cents net accounted funds; {} cents required ({} dollars for the leader plus {} days' severance per subordinate)",
                     standing.accounted_net.cents(), standing.retirement_total.cents(),
                     crimocracy::core::campaign_victory::RETIREMENT_NEST_EGG.cents() / 100,
@@ -1388,7 +1395,14 @@ impl Session<'_> {
                     writeln!(out, "  {}", information.summary()).unwrap();
                 }
             }
-            "advance" => out = self.execute_advance(words[1])?,
+            "advance" => {
+                let uninterrupted = match words.get(2).copied() {
+                    None => false,
+                    Some("uninterrupted") => true,
+                    _ => return Err("advance <duration> [uninterrupted]".to_owned()),
+                };
+                out = self.execute_advance(words[1], uninterrupted)?;
+            }
             "save" => out = self.save(words.get(1).ok_or("save needs a slot name")?)?,
             _ => return Err(format!("unknown command '{verb}'; type 'help'")),
         }
