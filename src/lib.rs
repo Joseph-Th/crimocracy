@@ -27,6 +27,7 @@ pub mod intelligence;
 pub mod legal;
 pub mod operations;
 pub mod opportunities;
+pub mod politics;
 pub mod recruitment;
 pub mod registry;
 pub mod reports;

@@ -21,6 +21,7 @@ use crate::intelligence::IntelligenceState;
 use crate::legal::LegalState;
 use crate::operations::OperationState;
 use crate::opportunities::OpportunityState;
+use crate::politics::PoliticsState;
 use crate::recruitment::RecruitmentState;
 use crate::reports::ReportState;
 use crate::reputation::ReputationState;
@@ -30,7 +31,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 120;
+pub const CURRENT_STATE_SCHEMA_VERSION: u16 = 121;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StateMetadata {
@@ -70,6 +71,7 @@ pub struct AppState {
     pub(crate) intelligence: IntelligenceState,
     pub(crate) operations: OperationState,
     pub(crate) opportunities: OpportunityState,
+    pub(crate) politics: PoliticsState,
     pub(crate) recruitment: RecruitmentState,
     pub(crate) reputation: ReputationState,
     pub(crate) legal: LegalState,
@@ -103,6 +105,7 @@ impl AppState {
             intelligence: IntelligenceState::new(),
             operations: OperationState::new(),
             opportunities: OpportunityState::new(),
+            politics: PoliticsState::default(),
             recruitment: RecruitmentState::new(),
             reputation: ReputationState::new(),
             legal: LegalState::new(),
@@ -145,6 +148,10 @@ impl AppState {
 
     pub fn contacts(&self) -> &ContactState {
         &self.contacts
+    }
+
+    pub fn politics(&self) -> &PoliticsState {
+        &self.politics
     }
 
     pub fn decisions(&self) -> &DecisionState {

@@ -25,6 +25,8 @@ use crate::finance::{
 use crate::history::history_system::{
     HistoryError, ValidatedHistoryEvent, validate_campaign_victory_event,
 };
+use crate::politics::political_system::{held_electoral_majority, rival_pressure};
+use crate::politics::{MAYORAL_CAMPAIGN_SPEND_REQUIRED, MAYORAL_LIQUID_RESERVE_REQUIRED};
 use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_report_draft};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
@@ -50,7 +52,7 @@ pub enum VictoryPath {
 impl VictoryPath {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::PoliticalPower => "legitimate political power",
+            Self::PoliticalPower => "mayor of the city",
             Self::FundedRetirement => "funded retirement",
             Self::CityUnderboss => "city underboss",
         }
@@ -104,6 +106,12 @@ pub struct VictoryProgress {
     pub established_business_districts: usize,
     /// Economically qualified districts with distinct, active political organizers.
     pub staffed_political_districts: usize,
+    /// Qualified local constituencies with sustained, actively defended electoral majorities.
+    pub mayoral_majority_districts: usize,
+    pub campaign_spent_cents: i64,
+    pub required_campaign_spent_cents: i64,
+    pub required_mayoral_reserve_cents: i64,
+    pub mayoral_leader_eligible: bool,
     pub required_underboss_districts: usize,
     pub own_active_racket_districts: usize,
     pub established_racket_districts: usize,
@@ -148,6 +156,10 @@ pub struct PoliticalDistrictProgress {
     pub economically_qualified: bool,
     /// Economically qualified and independently staffed with a political delegate.
     pub qualifies: bool,
+    pub own_influence: u16,
+    pub rival_influence: u16,
+    pub majority_held_days: u64,
+    pub mayoral_ready: bool,
 }
 
 /// Player-owned title and settlement evidence behind political readiness.
@@ -173,7 +185,7 @@ pub enum VictoryError {
     #[error("Campaign over: victory has already been claimed")]
     AlreadyWon,
     #[error(
-        "legitimate political power requires a 30-day political contact, two distinct kinds of 90-day profitable businesses and one independent delegated political organizer in each of three quarters of city districts, two headquarters personnel, and mature legitimate income covering total payroll"
+        "becoming mayor requires a 30-day political contact, three quarters of districts with mature profitable diverse businesses and independent political delegates, sustained competitive campaign majorities, major campaign expenditures, substantial remaining clean reserves and legitimate income covering payroll"
     )]
     PoliticalNotReady,
     #[error(
@@ -475,6 +487,17 @@ pub fn political_district_progress(
         .map(|(district, standing)| {
             let economically_qualified = standing.qualifies(local_income_floor);
             let steward = assigned.get(&district).copied();
+            let office = state
+                .politics()
+                .organization(organization)
+                .and_then(|campaign| campaign.district(district));
+            let own_influence = office.map_or(0, |office| office.influence());
+            let rival_influence = rival_pressure(state, organization, district);
+            let majority_held_days = office
+                .and_then(|office| office.leading_since())
+                .map_or(0, |since| {
+                    state.now().as_minutes().saturating_sub(since.as_minutes()) / DAY_MINUTES
+                });
             PoliticalDistrictProgress {
                 district,
                 active_owned: standing.active,
@@ -492,6 +515,12 @@ pub fn political_district_progress(
                 ),
                 economically_qualified,
                 qualifies: economically_qualified && steward.is_some(),
+                own_influence,
+                rival_influence,
+                majority_held_days,
+                mayoral_ready: economically_qualified
+                    && steward.is_some()
+                    && held_electoral_majority(state, organization, district),
             }
         })
         .collect())
@@ -685,6 +714,26 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .collect();
     let (_, staffed_political_districts) =
         political_district_stewards(state, organization, &economically_ready);
+    let mayoral_majority_districts = political_district_progress(registry, state)?
+        .iter()
+        .filter(|district| district.mayoral_ready)
+        .count();
+    let campaign_spent_cents = state
+        .politics()
+        .organization(organization)
+        .map_or(0, |campaign| campaign.spent_cents());
+    let mayoral_leader_eligible = state
+        .world()
+        .characters_in_organization(organization)
+        .filter(|person| {
+            person.supervisor().is_none()
+                && state
+                    .legal()
+                    .active_arrest_for_character(person.id())
+                    .is_none()
+        })
+        .count()
+        == 1;
     let legitimate_window_net = business_standings
         .values()
         .map(|standing| standing.window_net)
@@ -856,6 +905,11 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         established_political_contacts,
         established_business_districts,
         staffed_political_districts: staffed_political_districts.len(),
+        mayoral_majority_districts,
+        campaign_spent_cents,
+        required_campaign_spent_cents: MAYORAL_CAMPAIGN_SPEND_REQUIRED,
+        required_mayoral_reserve_cents: MAYORAL_LIQUID_RESERVE_REQUIRED,
+        mayoral_leader_eligible,
         required_underboss_districts,
         own_active_racket_districts,
         established_racket_districts: established_racket_districts.len(),
@@ -911,6 +965,10 @@ fn ensure_eligible(
                     < standing.required_political_districts
                 || standing.key_personnel < standing.required_political_personnel
                 || standing.staffed_political_districts < standing.required_political_districts
+                || standing.mayoral_majority_districts < standing.required_political_districts
+                || standing.campaign_spent_cents < MAYORAL_CAMPAIGN_SPEND_REQUIRED
+                || standing.accounted_net.cents() < MAYORAL_LIQUID_RESERVE_REQUIRED
+                || !standing.mayoral_leader_eligible
                 || !standing.legitimate_self_sufficient =>
         {
             Err(VictoryError::PoliticalNotReady)
@@ -1074,7 +1132,7 @@ pub fn validate_claim_victory(
         attention: AttentionClass::Crisis,
         summary: match path {
             VictoryPath::PoliticalPower =>
-                "Distinct district organizers, diversified established businesses, and a live political sponsor secured a governing coalition.".to_owned(),
+                "The organization won the mayoral election through sustained local influence, professional campaign staff, funded operations and established civic alliances.".to_owned(),
             VictoryPath::FundedRetirement =>
                 "The leader retired with a funded nest egg; each subordinate received 180 days of wages in an accounted personal account.".to_owned(),
             VictoryPath::CityUnderboss =>
@@ -1087,8 +1145,13 @@ pub fn validate_claim_victory(
     if path == VictoryPath::PoliticalPower {
         let standing = progress(registry, state)?;
         entries[0].summary = format!(
-            "A governing coalition formed across {} independently organized districts. Established legitimate business income is {} cents/day against {} cents/day in named-member wages.",
-            standing.staffed_political_districts,
+            "{} was elected mayor after securing sustained competitive majorities in {} independently organized districts. Established legitimate business income is {} cents/day against {} cents/day in named-member wages.",
+            state
+                .world()
+                .characters_in_organization(owner)
+                .find(|person| person.supervisor().is_none())
+                .map_or("The leader", |person| person.name()),
+            standing.mayoral_majority_districts,
             standing.legitimate_daily_net.cents(),
             standing.daily_payroll.cents(),
         );
@@ -1132,7 +1195,7 @@ pub fn validate_claim_victory(
         }
         for district in political_district_progress(registry, state)?
             .into_iter()
-            .filter(|district| district.qualifies)
+            .filter(|district| district.mayoral_ready)
         {
             let organizer = district.steward.expect("qualifying district has organizer");
             let manager = state
@@ -1147,7 +1210,7 @@ pub fn validate_claim_victory(
             entries.push(ReportEntry {
                 attention: AttentionClass::Notable,
                 summary: format!(
-                    "{}: {} organized {} established business sectors, with {} cents of mature local net income over the past {} days.",
+                    "{}: {} secured {} established business sectors, {} cents in mature local earnings over {} days, and a sustained electoral majority.",
                     name,
                     manager.name(),
                     district.established_kinds,

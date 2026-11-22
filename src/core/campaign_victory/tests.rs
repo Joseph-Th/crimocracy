@@ -763,6 +763,65 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         validate_claim_victory(&registry, &stale, VictoryPath::PoliticalPower).err(),
         Some(VictoryError::PoliticalNotReady)
     );
+    // Commercial districts and delegates alone cannot elect a mayor. The
+    // candidate must buy real electoral support, retain paid specialists,
+    // defeat rival pressure, and hold the majority for a sustained period.
+    assert_eq!(
+        validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
+        Some(VictoryError::PoliticalNotReady)
+    );
+    use crate::politics::SpecialistKind;
+    use crate::politics::political_system::{
+        apply_due_political_campaigns, validate_hire_specialist, validate_invest_influence,
+    };
+    fund(&mut city.state, city.player, 30_000_000);
+    for (&district, &manager) in districts.iter().zip(managers.iter()) {
+        validate_hire_specialist(&city.state, district, manager, SpecialistKind::Strategist)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        validate_invest_influence(
+            &city.state,
+            district,
+            810 * crate::politics::INFLUENCE_COST_PER_POINT,
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    }
+    // An instant majority does not mean the office has been won.
+    assert_eq!(
+        validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
+        Some(VictoryError::PoliticalNotReady)
+    );
+    for _ in 0..=crate::politics::MAYORAL_SUSTAINED_DAYS {
+        city.state
+            .advance_clock(crate::core::time::SimDuration::from_minutes(
+                DAY_MINUTES as u32,
+            ));
+        for business in city
+            .state
+            .world()
+            .businesses_owned_by_organization(city.player)
+            .map(|business| business.id())
+            .collect::<Vec<_>>()
+        {
+            if let Ok(plan) = decide_business_cycle(&registry, &city.state, business, 0) {
+                validate_business_cycle_plan(&city.state, plan)
+                    .unwrap()
+                    .commit(&mut city.state)
+                    .unwrap();
+            }
+        }
+        apply_due_political_campaigns(&mut city.state);
+    }
+    let elected = progress(&registry, &city.state).unwrap();
+    assert_eq!(
+        elected.mayoral_majority_districts,
+        elected.required_political_districts
+    );
+    assert!(elected.campaign_spent_cents >= MAYORAL_CAMPAIGN_SPEND_REQUIRED);
+    assert!(elected.accounted_net.cents() >= MAYORAL_LIQUID_RESERVE_REQUIRED);
     let outcome = validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower)
         .unwrap()
         .commit(&registry, &mut city.state)
@@ -778,7 +837,7 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         .map(|entry| entry.summary.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(summary.contains("governing coalition formed"), "{summary}");
+    assert!(summary.contains("was elected mayor"), "{summary}");
     assert!(summary.contains("Political sponsor:"), "{summary}");
     for district in &districts {
         let district_name = city

@@ -1391,7 +1391,7 @@ Influence can come from:
 - Family ties.
 - Reciprocal favors.
 
-Political power should become an alternative to raw violence rather than another resource bar.
+Political power should become an alternative to raw violence. Local influence is a costly, decaying and contested campaign resource, never a permanent territorial flag. The player can purchase district support with accounted money and contract specialist organizers, publicists or strategists through trusted local delegates. Each specialist needs an initial payment and a continuous, funded daily salary; losing the delegate or the ability to pay interrupts growth. Independent rivals can purchase and maintain their own competing support, resetting the player's local majority tenure if they overtake it.\n\nThe legitimate political victory is an explicit election of the organization's leader as **mayor**, not a generic civic coalition. It requires mature diversified, staffed and profitable district institutions; an established council relationship; very substantial documented campaign expenditures and retained reserves; a sustained, overwhelming influence lead against real rival organizations in three quarters of city districts; and a sole eligible leader. A dominant ward's influence must remain maintained for thirty days before it counts toward the election. Property alone, one-time spending, or freshly appointed delegates cannot immediately deliver the mayoralty. The present simulation models paid political competition and the election threshold, not individual ballot casting, polling, press campaigns, voter identities or legislation; these remain potential deeper mechanics.
 
 ---
 

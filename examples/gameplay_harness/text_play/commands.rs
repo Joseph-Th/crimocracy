@@ -29,6 +29,7 @@ pub(super) fn terminal_command_is_read_only(verb: &str) -> bool {
             | "brief"
             | "victory"
             | "political"
+            | "campaign"
             | "save"
             | "people"
             | "known-people"
@@ -103,6 +104,10 @@ impl Session<'_> {
             }
             "brief" => out = self.brief(),
             "political" => out = self.political_readiness(words[1])?,
+            "campaign" => out = self.campaign_readiness()?,
+            "buy-influence" | "hire-specialist" | "fire-specialist" => {
+                out = self.execute_campaign_order(&words)?;
+            }
             "victory" => {
                 let standing =
                     crimocracy::core::campaign_victory::progress(self.registry, &self.state)
@@ -112,7 +117,7 @@ impl Session<'_> {
                     "Optional endings (claim-victory <political|retirement|underboss>):"
                 )
                 .unwrap();
-                writeln!(out, "  Political: {}/{} contacts held for 30 days; owned businesses in {} districts, {} productive mature districts ({} required of {} city districts)",
+                writeln!(out, "  Mayoral election: {}/{} contacts held for 30 days; owned businesses in {} districts, {} productive mature districts ({} required of {} city districts)",
                     standing.established_political_contacts, standing.active_political_contacts,
                     standing.owned_operating_business_districts, standing.established_business_districts,
                     standing.required_political_districts, standing.total_districts).unwrap();
@@ -124,6 +129,13 @@ impl Session<'_> {
                 writeln!(out, "    Mature legitimate income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.legitimate_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
+                writeln!(out, "    Sustained contested electoral majorities: {} / {} districts (800/1000 local influence, stronger than rivals for 30 days)",
+                    standing.mayoral_majority_districts, standing.required_political_districts).unwrap();
+                writeln!(out, "    Campaign spending: {} / {} cents; remaining clean reserve: {} / {} cents; leader eligible: {}",
+                    standing.campaign_spent_cents, standing.required_campaign_spent_cents,
+                    standing.accounted_net.cents(), standing.required_mayoral_reserve_cents,
+                    standing.mayoral_leader_eligible).unwrap();
+                out.push_str("    Use 'campaign', 'buy-influence', 'hire-specialist' and 'fire-specialist' to build and maintain contested local support. Influence decays every day; rivals buy it too.\n");
                 let local_floor = i128::from(self.registry.upkeep().per_member_daily().cents())
                     * i128::from(crimocracy::core::campaign_victory::VICTORY_INCOME_WINDOW_DAYS);
                 let districts = crimocracy::core::campaign_victory::political_district_progress(

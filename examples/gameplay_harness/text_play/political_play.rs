@@ -3,8 +3,131 @@ use super::*;
 use crimocracy::core::campaign_victory::{
     VICTORY_PROFITABLE_CYCLES, political_business_progress, political_district_progress,
 };
+use crimocracy::politics::SpecialistKind;
+use crimocracy::politics::political_system::{
+    dismiss_specialist, validate_hire_specialist, validate_invest_influence,
+};
+
+fn specialist_kind(raw: &str) -> Result<SpecialistKind, String> {
+    match raw {
+        "organizer" => Ok(SpecialistKind::Organizer),
+        "publicist" => Ok(SpecialistKind::Publicist),
+        "strategist" => Ok(SpecialistKind::Strategist),
+        _ => Err("specialist must be organizer, publicist, or strategist".to_owned()),
+    }
+}
+
+fn pressure_label(score: u16) -> &'static str {
+    match score {
+        0 => "none observed",
+        1..=249 => "limited",
+        250..=599 => "organized",
+        _ => "intense",
+    }
+}
 
 impl Session<'_> {
+    pub(super) fn campaign_readiness(&self) -> Result<String, String> {
+        let progress = crimocracy::core::campaign_victory::progress(self.registry, &self.state)
+            .map_err(|e| e.to_string())?;
+        let rows =
+            political_district_progress(self.registry, &self.state).map_err(|e| e.to_string())?;
+        let mut out = format!(
+            "Mayoral campaign | lifetime spend {} / {} cents | clean reserve {} / {} cents | sustained electoral districts {} / {}\n",
+            progress.campaign_spent_cents,
+            progress.required_campaign_spent_cents,
+            progress.accounted_net.cents(),
+            progress.required_mayoral_reserve_cents,
+            progress.mayoral_majority_districts,
+            progress.required_political_districts,
+        );
+        for district in self.state.world().neighborhoods() {
+            let own = self
+                .state
+                .politics()
+                .organization(self.player)
+                .and_then(|campaign| campaign.district(district.id()));
+            let row = rows.iter().find(|row| row.district == district.id());
+            let rival = crimocracy::politics::political_system::rival_pressure(
+                &self.state,
+                self.player,
+                district.id(),
+            );
+            if own.is_none() && row.is_none() {
+                continue;
+            }
+            writeln!(out,
+                "  district-{} {} | influence {}/1000 | rival activity {} | majority held {} day(s) | election-ready {}",
+                district.id().raw(), district.name(),
+                own.map_or(0, |office| office.influence()),
+                pressure_label(rival),
+                row.map_or(0, |row| row.majority_held_days),
+                row.is_some_and(|row| row.mayoral_ready),
+            ).unwrap();
+            if let Some(office) = own {
+                for (kind, manager) in office.specialists() {
+                    writeln!(out, "    {:?} under char-{} | salary {} cents/day | influence +{} per funded day",
+                        kind, manager.raw(), kind.daily_salary(), kind.daily_growth()).unwrap();
+                }
+            }
+        }
+        out.push_str("Influence loses at least five points daily (or 2.5% when higher); funded specialists rebuild it. Rival criminal organizations spend accounted money to challenge contested wards. A local majority must remain above 800 and ahead of rival pressure for 30 consecutive days.");
+        Ok(out)
+    }
+
+    pub(super) fn execute_campaign_order(&mut self, words: &[&str]) -> Result<String, String> {
+        let raw = parse_number(words[1], "district")?;
+        let district = self
+            .state
+            .world()
+            .neighborhoods()
+            .find(|district| district.id().raw() == raw)
+            .ok_or("unknown public city district")?
+            .id();
+        match words[0] {
+            "buy-influence" => {
+                let cents = words[2]
+                    .parse::<i64>()
+                    .map_err(|_| "investment must be an integer number of accounted cents")?;
+                validate_invest_influence(&self.state, district, cents)
+                    .map_err(|e| e.to_string())?
+                    .commit(&mut self.state)
+                    .map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "Spent {cents} clean cents on district-{raw} political influence."
+                ))
+            }
+            "hire-specialist" => {
+                let manager_raw = parse_number(words[2], "char")?;
+                let manager = self
+                    .state
+                    .world()
+                    .characters_in_organization(self.player)
+                    .find(|person| person.id().raw() == manager_raw)
+                    .ok_or("manager must be an existing named member")?
+                    .id();
+                let kind = specialist_kind(words[3])?;
+                validate_hire_specialist(&self.state, district, manager, kind)
+                    .map_err(|e| e.to_string())?
+                    .commit(&mut self.state)
+                    .map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "Hired {kind:?} in district-{raw} under char-{manager_raw} for {} cents; daily salary {} cents.",
+                    kind.signing_cost(),
+                    kind.daily_salary()
+                ))
+            }
+            "fire-specialist" => {
+                let kind = specialist_kind(words[2])?;
+                dismiss_specialist(&mut self.state, district, kind).map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "Released {kind:?} from district-{raw}; future salary ended."
+                ))
+            }
+            _ => Err("unknown campaign order".to_owned()),
+        }
+    }
+
     pub(super) fn political_readiness(&self, raw: &str) -> Result<String, String> {
         let id = parse_number(raw, "district")?;
         let district = self
@@ -31,6 +154,12 @@ impl Session<'_> {
                 local.established_active,
                 local.established_kinds,
                 local.steward.map_or("not assigned".to_owned(), |id| format!("char-{}", id.raw())),
+            ).unwrap();
+            writeln!(
+                out,
+                "Electoral contest: own influence {}/1000 | rival pressure {} | majority held {} day(s) / 30 | mayoral-ready {}",
+                local.own_influence, pressure_label(local.rival_influence),
+                local.majority_held_days, local.mayoral_ready,
             ).unwrap();
         }
         let political_mandates = self

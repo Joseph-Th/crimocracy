@@ -102,8 +102,15 @@ static NEXT_SAVE_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 const HELP: &str = "Commands:
   brief                  Leadership's current situation
-  victory                View optional political, retirement, and city-underboss ending requirements
-  political <district-N>  Inspect own commercial title ages, settlement proof and local coalition blockers
+  victory                View mayoral, retirement, and city-underboss ending requirements
+  political <district-N>  Inspect local property, influence, specialists and electoral challenges
+  campaign               Inspect own municipal campaign, spending and district influence
+  buy-influence <district-N> <accounted-cents>
+                         Pay clean campaign funds for influence (5000 cents per point)
+  hire-specialist <district-N> <char-N> <organizer|publicist|strategist>
+                         Hire a paid campaign specialist under a delegated local political manager
+  fire-specialist <district-N> <organizer|publicist|strategist>
+                         Terminate a specialist's ongoing daily salary
   claim-victory <political|retirement|underboss>
                          Choose an eligible permanent campaign ending
   staff-racket <enterprise-id> <associate-count>
@@ -480,7 +487,7 @@ fn parse_account_kind(raw: &str) -> Result<AccountKind, String> {
 /// Scripted commands reject extraneous arguments instead of silently ignoring them.
 fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
     let range = match command {
-        "help" | "quit" | "exit" | "brief" | "victory" | "people" | "known-people"
+        "help" | "quit" | "exit" | "brief" | "victory" | "campaign" | "people" | "known-people"
         | "prospects" | "directory" | "market" | "businesses" | "enterprises" | "racket-kinds"
         | "finances" | "accounts" | "opportunities" | "operations" | "decisions"
         | "connections" | "contacts" | "policies" | "mandates" | "operation-kinds"
@@ -497,7 +504,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "burgle" => 2..=5,
         "racket" | "reassign-racket" | "staff-racket" | "launder" | "sweep" | "decide"
         | "business" => 3..=3,
-        "move" | "deposit" | "fund-street" => 4..=4,
+        "move" | "deposit" | "fund-street" | "hire-specialist" => 4..=4,
         "dispose" => 5..=5,
         "reports" | "treasury" => 1..=2,
         "intelligence" => 1..=4,
@@ -507,7 +514,8 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss"
         | "claim-victory" | "save" | "transaction" | "cancel" | "debrief" | "intel"
         | "racket-outlook" | "business-outlook" | "contest" | "preview-contest" => 2..=2,
-        "policy" | "delegate" | "autonomy" | "supervise" | "offer" => 3..=3,
+        "policy" | "delegate" | "autonomy" | "supervise" | "offer" | "buy-influence"
+        | "fire-specialist" => 3..=3,
         "negotiate" => 3..=4,
         "mandate" => 3..=6,
         "plan" | "preview" => 3..=32,

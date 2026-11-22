@@ -1,0 +1,334 @@
+use super::*;
+use crate::build_registry;
+use crate::city_generation::{CityScale, generate_city};
+use crate::core::invariants::{validate_invariants, validate_state_against_registry};
+use crate::core::persistence::{build_save, restore_save};
+use crate::core::time::{DAY_MINUTES, SimDuration};
+use crate::delegation::delegation_system::{MandateRevisionDraft, validate_revise_mandate};
+use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
+use crate::finance::finance_system::{insert_account, validate_record_transaction};
+use crate::finance::{
+    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+    Money,
+};
+use crate::politics::political_system::{
+    PoliticalError, apply_due_political_campaigns, controls_district, dismiss_specialist,
+    rival_pressure, validate_hire_specialist, validate_invest_influence,
+};
+use crate::world::{AutonomyLevel, OrganizationKind};
+
+fn fund(state: &mut crate::AppState, owner: OrganizationId, cents: i64) {
+    let clean = insert_account(
+        state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .unwrap();
+    let clearing = insert_account(
+        state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Political fixture capitalization".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: clean,
+                    amount: Money::from_cents(cents),
+                },
+                LedgerPosting {
+                    account: clearing,
+                    amount: Money::from_cents(-cents),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(state)
+    .unwrap();
+}
+
+fn advance_day(registry: &crate::Registry, state: &mut crate::AppState) {
+    state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+    crate::opportunities::opportunity_system::apply_opportunity_expiry(registry, state).unwrap();
+    apply_due_political_campaigns(state);
+}
+
+#[test]
+fn political_investment_requires_clean_funds_and_loses_influence_without_staff() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(3_411)).unwrap();
+    let home = city.home;
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    assert!(matches!(
+        validate_invest_influence(&city.state, home, 500_000),
+        Err(PoliticalError::InsufficientFunds)
+    ));
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+    fund(&mut city.state, city.player, 2_000_000);
+    assert_eq!(
+        validate_invest_influence(&city.state, home, 500_001).err(),
+        Some(PoliticalError::InvalidInvestment)
+    );
+    validate_invest_influence(&city.state, home, 500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let campaign = city.state.politics().organization(city.player).unwrap();
+    assert_eq!(campaign.spent_cents(), 500_000);
+    assert_eq!(campaign.district(home).unwrap().influence(), 100);
+    advance_day(&registry, &mut city.state);
+    assert_eq!(
+        city.state
+            .politics()
+            .organization(city.player)
+            .unwrap()
+            .district(home)
+            .unwrap()
+            .influence(),
+        95
+    );
+    validate_invariants(&city.state);
+    validate_state_against_registry(&registry, &city.state).unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(restored.politics(), city.state.politics());
+}
+
+#[test]
+fn specialist_requires_delegated_political_manager_and_paid_salary_to_grow() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(5_611)).unwrap();
+    let district = city.home;
+    fund(&mut city.state, city.player, 1_116_000);
+    let manager = city
+        .state
+        .world()
+        .characters_in_organization(city.player)
+        .find(|person| {
+            person.supervisor().is_some()
+                && city
+                    .state
+                    .delegation()
+                    .active_for_manager(person.id())
+                    .is_some()
+        })
+        .unwrap()
+        .id();
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        validate_hire_specialist(&city.state, district, manager, SpecialistKind::Strategist).err(),
+        Some(PoliticalError::InvalidManager)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+    let mandate = city.state.delegation().active_for_manager(manager).unwrap();
+    let mut scopes = mandate.scopes().clone();
+    scopes.insert(ResponsibilityScope::Function(
+        ResponsibilityFunction::Political,
+    ));
+    scopes.insert(ResponsibilityScope::Neighborhood(district));
+    validate_revise_mandate(
+        &city.state,
+        mandate.id(),
+        MandateRevisionDraft {
+            scopes,
+            standing_orders: mandate.standing_orders().clone(),
+            budget: mandate.budget(),
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    if city
+        .state
+        .world()
+        .get_character(manager)
+        .unwrap()
+        .autonomy()
+        != AutonomyLevel::Delegated
+    {
+        crate::world::world_system::validate_set_character_autonomy(
+            &city.state,
+            city.player,
+            manager,
+            AutonomyLevel::Delegated,
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    }
+    validate_invest_influence(&city.state, district, 500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    validate_hire_specialist(&city.state, district, manager, SpecialistKind::Strategist)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert_eq!(
+        validate_hire_specialist(&city.state, district, manager, SpecialistKind::Strategist).err(),
+        Some(PoliticalError::SpecialistExists)
+    );
+    advance_day(&registry, &mut city.state);
+    let campaign = city.state.politics().organization(city.player).unwrap();
+    assert_eq!(campaign.district(district).unwrap().influence(), 129);
+    assert_eq!(campaign.spent_cents(), 1_116_000);
+    let saved = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(saved.politics(), city.state.politics());
+    // Payroll is exhausted. A retained specialist cannot manufacture free
+    // daily support; influence still erodes without its salary.
+    advance_day(&registry, &mut city.state);
+    assert_eq!(
+        city.state
+            .politics()
+            .organization(city.player)
+            .unwrap()
+            .district(district)
+            .unwrap()
+            .influence(),
+        124
+    );
+    dismiss_specialist(&mut city.state, district, SpecialistKind::Strategist).unwrap();
+    advance_day(&registry, &mut city.state);
+    assert_eq!(
+        city.state
+            .politics()
+            .organization(city.player)
+            .unwrap()
+            .district(district)
+            .unwrap()
+            .influence(),
+        119
+    );
+    assert_eq!(
+        city.state
+            .politics()
+            .organization(city.player)
+            .unwrap()
+            .spent_cents(),
+        1_116_000
+    );
+    validate_invariants(&city.state);
+}
+
+#[test]
+fn rival_spending_can_break_an_electoral_majority_and_persists_on_reload() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(6_217)).unwrap();
+    let rival = city
+        .state
+        .world()
+        .organizations()
+        .find(|organization| {
+            organization.kind() == OrganizationKind::Criminal && organization.id() != city.player
+        })
+        .unwrap()
+        .id();
+    let district = city
+        .state
+        .world()
+        .businesses_owned_by_organization(rival)
+        .next()
+        .unwrap()
+        .neighborhood();
+    fund(&mut city.state, city.player, 12_000_000);
+    fund(&mut city.state, rival, 12_000_000);
+    validate_invest_influence(&city.state, district, 4_500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert!(controls_district(&city.state, city.player, district));
+    political_system::validate_invest_for(&city.state, rival, district, 5_000_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert_eq!(rival_pressure(&city.state, city.player, district), 1_000);
+    assert!(!controls_district(&city.state, city.player, district));
+    advance_day(&registry, &mut city.state);
+    assert!(
+        city.state
+            .politics()
+            .organization(city.player)
+            .unwrap()
+            .district(district)
+            .unwrap()
+            .leading_since()
+            .is_none()
+    );
+    validate_invariants(&city.state);
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(restored.politics(), city.state.politics());
+}
+
+#[test]
+fn autonomous_rivals_spend_clean_money_weekly_in_the_players_contested_ward() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(6_218)).unwrap();
+    let rival = city
+        .state
+        .world()
+        .organizations()
+        .find(|organization| {
+            organization.kind() == OrganizationKind::Criminal && organization.id() != city.player
+        })
+        .unwrap()
+        .id();
+    let district = city
+        .state
+        .world()
+        .businesses_owned_by_organization(rival)
+        .next()
+        .unwrap()
+        .neighborhood();
+    fund(&mut city.state, city.player, 500_000);
+    validate_invest_influence(&city.state, district, 500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    for _ in 0..6 {
+        advance_day(&registry, &mut city.state);
+    }
+    assert_eq!(rival_pressure(&city.state, city.player, district), 0);
+    fund(&mut city.state, rival, 500_000);
+    advance_day(&registry, &mut city.state);
+    assert_eq!(rival_pressure(&city.state, city.player, district), 100);
+    assert_eq!(
+        city.state
+            .politics()
+            .organization(rival)
+            .unwrap()
+            .spent_cents(),
+        500_000
+    );
+    for _ in 0..7 {
+        advance_day(&registry, &mut city.state);
+    }
+    assert!(
+        rival_pressure(&city.state, city.player, district) < 100,
+        "an unfunded rival's influence must also decay"
+    );
+    assert_eq!(
+        city.state
+            .politics()
+            .organization(rival)
+            .unwrap()
+            .spent_cents(),
+        500_000
+    );
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(restored.politics(), city.state.politics());
+}
