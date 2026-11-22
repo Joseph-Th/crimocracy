@@ -45,6 +45,7 @@ impl Session<'_> {
         let mut deferred_custody = 0_u32;
         let mut deferred_releases = 0_u32;
         let mut deferred_contracts = 0_usize;
+        let mut deferred_departures = 0_usize;
         let mut deferred_shutdowns = 0_u32;
         let mut deferred_losses = 0_u32;
         let mut deferred_payroll = 0_u32;
@@ -110,6 +111,19 @@ impl Session<'_> {
             let own_payroll_shortfall = tick.payrolls.iter().any(|payroll| {
                 payroll.organization() == self.player && payroll.short() > Money::ZERO
             });
+            // Membership has already been released by the world owner. Associate each
+            // departure with the *original* player payroll rather than inspecting its
+            // new unaffiliated state or disclosing rival departures.
+            let own_payroll_departures = tick
+                .payrolls
+                .iter()
+                .find(|payroll| payroll.organization() == self.player)
+                .map_or(0, |payroll| {
+                    tick.payroll_departures
+                        .iter()
+                        .filter(|id| payroll.underpaid_members().contains(id))
+                        .count()
+                });
             let own_business_suspended = tick.business_cycles.iter().any(|id| {
                 let cycle = self.state.economy().get_cycle(*id).expect("settled cycle");
                 cycle.owner() == crimocracy::world::BusinessOwner::Organization(self.player)
@@ -161,6 +175,7 @@ impl Session<'_> {
                 deferred_custody += u32::from(own_arrest);
                 deferred_releases += u32::from(own_release);
                 deferred_contracts += own_contract_expirations;
+                deferred_departures += own_payroll_departures;
                 deferred_shutdowns += u32::from(
                     own_business_suspended || own_managerial_shutdown || own_racket_suspended,
                 );
@@ -187,6 +202,10 @@ impl Session<'_> {
                 reason = Some("your member was released from custody; review 'counsel'");
             } else if !uninterrupted && own_contract_expirations > 0 {
                 reason = Some("a freelance contract expired; review 'people' and 'freelancers'");
+            } else if !uninterrupted && pause_exceptions && own_payroll_departures > 0 {
+                reason = Some(
+                    "a member left after unpaid wages; review 'people', 'treasury' and 'reports'",
+                );
             } else if !uninterrupted && pause_exceptions && own_payroll_shortfall {
                 reason = Some("payroll ran short; review 'treasury', 'businesses' and 'accounts'");
             } else if !uninterrupted && pause_exceptions && own_business_suspended {
@@ -225,7 +244,7 @@ impl Session<'_> {
         if uninterrupted {
             writeln!(
                 out,
-                "Uninterrupted review: {deferred_custody} custody event(s), {deferred_releases} release(s), {deferred_contracts} freelance contract end(s), {deferred_shutdowns} shutdown event(s), {deferred_losses} new loss streak(s), {deferred_payroll} payroll shortfall(s), {deferred_operations} completed/aborted operation minute(s), {deferred_urgent} priority-report minute(s). All events were simulated. Review 'reports', 'people', 'freelancers', 'counsel', 'recovery' and 'accounts'."
+                "Uninterrupted review: {deferred_custody} custody event(s), {deferred_releases} release(s), {deferred_contracts} freelance contract end(s), {deferred_departures} unpaid-wage departure(s), {deferred_shutdowns} shutdown event(s), {deferred_losses} new loss streak(s), {deferred_payroll} payroll shortfall(s), {deferred_operations} completed/aborted operation minute(s), {deferred_urgent} priority-report minute(s). All events were simulated. Review 'reports', 'people', 'freelancers', 'counsel', 'recovery' and 'accounts'."
             )
             .unwrap();
         }
@@ -300,6 +319,12 @@ mod tests {
                 .brief()
                 .contains("covered from current treasury: 0 cents")
         );
+        assert!(
+            session
+                .brief()
+                .contains("Gross payroll runway: 0 full day(s)"),
+            "a completely unfunded crew must have zero current wage runway"
+        );
         let first = session.execute("advance 2d").unwrap().0;
         assert!(first.contains("Paused: payroll ran short"), "{first}");
         assert_eq!(session.state.now().as_minutes(), DAY_MINUTES);
@@ -322,6 +347,121 @@ mod tests {
         );
         assert!(!session.execute("advance 2d").unwrap().0.contains("Paused:"));
         assert_eq!(session.state.now().as_minutes(), 3 * DAY_MINUTES + 1);
+    }
+
+    #[test]
+    fn uninterrupted_advance_discloses_player_crew_departures_not_just_shortfalls() {
+        let registry = crimocracy::build_registry();
+        use crimocracy::world::world_system::{
+            designate_player_organization, insert_character, insert_organization,
+        };
+        use crimocracy::world::{
+            AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind,
+        };
+        let mut state = AppState::new(17);
+        let player = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Unpaid crew".to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .unwrap();
+        designate_player_organization(&mut state, player).unwrap();
+        let boss = insert_character(
+            &mut state,
+            CharacterDraft {
+                name: "Leader".to_owned(),
+                organization: Some(player),
+                supervisor: None,
+                autonomy: AutonomyLevel::Tight,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        insert_character(
+            &mut state,
+            CharacterDraft {
+                name: "Associate".to_owned(),
+                organization: Some(player),
+                supervisor: Some(boss),
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        // A second executive can keep the unfunded organization alive after the
+        // subordinate walks away; this distinguishes a departure alert from the
+        // higher-priority terminal dissolution of the entire organization.
+        insert_character(
+            &mut state,
+            CharacterDraft {
+                name: "Second leader".to_owned(),
+                organization: Some(player),
+                supervisor: None,
+                autonomy: AutonomyLevel::Tight,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        // All lead-up minutes use the production pipeline. The fifth wage boundary
+        // must reach the text client with a real departure event.
+        for _ in 0..5 * DAY_MINUTES - 1 {
+            let tick = run_tick(&registry, &mut state).unwrap();
+            assert!(tick.payroll_departures.is_empty());
+        }
+        let mut normal = Session {
+            registry: &registry,
+            state: state.clone(),
+            player,
+            seeds: EvaluationSeeds::new(17, 17),
+            district: "Test ward".to_owned(),
+            district_variant: "TEST",
+        };
+        let paused = normal.execute("advance 1m").unwrap().0;
+        assert!(
+            paused.contains("Paused: a member left after unpaid wages"),
+            "{paused}"
+        );
+        let mut session = Session {
+            registry: &registry,
+            state,
+            player,
+            seeds: EvaluationSeeds::new(17, 17),
+            district: "Test ward".to_owned(),
+            district_variant: "TEST",
+        };
+        let review = session.execute("advance 1m uninterrupted").unwrap().0;
+        let prior = review
+            .split("unpaid-wage departure(s)")
+            .next()
+            .expect("review must disclose crew departures");
+        let departures: usize = prior
+            .split_whitespace()
+            .last()
+            .expect("review must include a departure count")
+            .parse()
+            .expect("departure count must be numeric");
+        assert!(
+            departures > 0,
+            "crew attrition must appear in review: {review}"
+        );
+        assert!(review.contains("payroll shortfall(s)"), "{review}");
+        assert_eq!(
+            departures, 1,
+            "the unpaid associate should depart: {review}"
+        );
+        assert!(!session.state.player_organization_defeated());
+        let restored =
+            restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+        crimocracy::core::invariants::validate_state(&restored).unwrap();
     }
 
     #[test]

@@ -157,14 +157,68 @@ impl Session<'_> {
         let owner = person
             .organization()
             .and_then(|owner| self.state.world().get_organization(owner));
-        let mut out = format!(
-            "char-{} {} | {:?} | organization {} | workdays {}\n",
-            person.id().raw(),
-            person.name(),
-            profession,
-            owner.map_or("none", |organization| organization.name()),
-            person.life().career_days()
-        );
+        let criminal_member =
+            profession == CivicProfession::Criminal && person.organization() == Some(self.player);
+        let mut out = if criminal_member {
+            format!(
+                "char-{} {} | Criminal | organization {} | civilian workdays not applicable\n",
+                person.id().raw(),
+                person.name(),
+                owner.map_or("none", |organization| organization.name())
+            )
+        } else {
+            format!(
+                "char-{} {} | {:?} | organization {} | workdays {}\n",
+                person.id().raw(),
+                person.name(),
+                profession,
+                owner.map_or("none", |organization| organization.name()),
+                person.life().career_days()
+            )
+        };
+        if criminal_member {
+            let operations = self
+                .state
+                .operations()
+                .operations_for_organization(self.player)
+                .filter(|operation| {
+                    operation.leader() == person.id()
+                        || operation.roles().values().any(|id| *id == person.id())
+                });
+            let (completed, achieved) = operations.fold((0_usize, 0_usize), |(done, won), op| {
+                let resolution = op.resolution();
+                (
+                    done + usize::from(resolution.is_some()),
+                    won + usize::from(resolution.is_some_and(|result| {
+                        result.objective_outcome()
+                            == crimocracy::operations::OperationObjectiveOutcome::Achieved
+                    })),
+                )
+            });
+            let rackets = self
+                .state
+                .enterprises()
+                .enterprises_for_organization(self.player)
+                .filter(|racket| {
+                    racket.manager() == person.id()
+                        && racket.status() != crimocracy::enterprises::EnterpriseStatus::Retired
+                })
+                .count();
+            let channels = self
+                .state
+                .contacts()
+                .contacts_for_sponsor(self.player)
+                .filter(|contact| {
+                    contact.handler() == person.id()
+                        && contact.status() == crimocracy::contacts::ContactStatus::Active
+                })
+                .count();
+            writeln!(
+                out,
+                "  Recorded crew activity: {completed} completed operation(s), {achieved} objectives achieved; {rackets} currently managed racket(s); {channels} active institutional channel(s)"
+            )
+            .unwrap();
+        }
         for business in self
             .state
             .world()
@@ -208,8 +262,8 @@ impl Session<'_> {
                 time_label(at.as_minutes())
             )
             .unwrap();
-        } else {
-            out.push_str("  No recorded professional duty yet.\n");
+        } else if !criminal_member {
+            out.push_str("  No recorded civilian professional duty yet.\n");
         }
         if person.organization() == Some(self.player) {
             writeln!(

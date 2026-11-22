@@ -4,9 +4,9 @@ use crimocracy::core::campaign_victory::{
     VICTORY_PROFITABLE_CYCLES, political_business_progress, political_district_progress,
 };
 use crimocracy::politics::political_system::{
-    dismiss_specialist, initiative_available, next_municipal_election_day, specialist_output,
-    validate_civic_initiative, validate_hire_specialist, validate_invest_influence,
-    validate_nominate_mayor,
+    daily_campaign_erosion, dismiss_specialist, initiative_available, next_municipal_election_day,
+    specialist_output, validate_civic_initiative, validate_hire_specialist,
+    validate_invest_influence, validate_nominate_mayor,
 };
 use crimocracy::politics::{CivicInitiative, SpecialistKind};
 
@@ -88,6 +88,12 @@ impl Session<'_> {
                 row.is_some_and(|row| row.mayoral_ready),
             ).unwrap();
             if let Some(office) = own {
+                let (machine, grassroots, institutions) = daily_campaign_erosion(
+                    office.influence(),
+                    office.grassroots(),
+                    office.institutions(),
+                );
+                writeln!(out, "    Next daily erosion before specialist output: -{machine} machine, -{grassroots} grassroots, -{institutions} institutions").unwrap();
                 for (kind, manager) in office.specialists() {
                     let (machine, grassroots, institutions) =
                         specialist_output(&self.state, *manager, *kind);
@@ -96,7 +102,7 @@ impl Session<'_> {
                 }
             }
         }
-        out.push_str("A ward needs 800 machine, 300 grassroots and 300 institutional support, plus a 3:2 lead over rival machine influence for 30 days. All three erode daily. Filing costs 2000000 cents, requires an established political contact and must precede a municipal ballot by 30 days. Elections occur every 180 days; resident fear and active local rackets cost votes.");
+        out.push_str("A ward needs 800 machine, 300 grassroots and 300 institutional support, plus a 3:2 lead over rival machine influence for 30 days. Influence is bought with clean funds or sustained by paid specialists; meetings primarily raise grassroots support, labor coalitions raise institutional support, and local press supports both. All three scores erode daily. Filing costs 2000000 cents, requires an established political contact and must precede a municipal ballot by 30 days. Elections occur every 180 days; resident fear and active local rackets cost votes.");
         Ok(out)
     }
 

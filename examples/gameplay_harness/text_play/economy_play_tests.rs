@@ -624,6 +624,8 @@ fn enterprise_preview_and_explicit_manager_share_establishment_validation() {
     assert!(preview.contains("Preview only"));
     assert!(preview.contains(&format!("char-{}", manager.raw())));
     assert!(preview.contains("Conditional operating cost"));
+    assert!(preview.contains("New police inquiry risk per operating cycle"));
+    assert!(preview.contains("Suspending stops new racket-generated inquiry rolls"));
     assert_eq!(before, snapshot(&registry, &session));
     for suffix in [
         format!("manager=char-{}", manager.raw()),

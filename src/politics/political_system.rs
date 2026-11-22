@@ -683,17 +683,27 @@ pub fn held_electoral_majority(
             })
 }
 
+/// Actual standing lost on the next daily decay pass, before paid specialist work.
+/// The campaign reader uses the same arithmetic as the simulation, not a separate forecast.
+pub fn daily_campaign_erosion(machine: u16, grassroots: u16, institutions: u16) -> (u16, u16, u16) {
+    (
+        machine.min((machine / 40).max(5)),
+        grassroots.min((grassroots / 60).max(3)),
+        institutions.min((institutions / 50).max(4)),
+    )
+}
+
 fn apply_daily_decay(state: &mut AppState) {
     for campaign in state.politics.organizations.values_mut() {
         for district in campaign.districts.values_mut() {
-            let decay = (district.influence / 40).max(5);
-            district.influence = district.influence.saturating_sub(decay);
-            district.grassroots = district
-                .grassroots
-                .saturating_sub((district.grassroots / 60).max(3));
-            district.institutions = district
-                .institutions
-                .saturating_sub((district.institutions / 50).max(4));
+            let (machine, grassroots, institutions) = daily_campaign_erosion(
+                district.influence,
+                district.grassroots,
+                district.institutions,
+            );
+            district.influence -= machine;
+            district.grassroots -= grassroots;
+            district.institutions -= institutions;
         }
     }
 }

@@ -58,6 +58,9 @@ pub struct EnterpriseOutlook {
     pub estimated_operating_cost: Money,
     pub estimated_net_cash: Money,
     pub observed_pressure: Option<(SimTime, u32)>,
+    /// Authored chance of a fresh police inquiry per cycle with no active district case.
+    /// A current inquiry suppresses duplicates; actual case pressure is deliberately private.
+    pub inquiry_risk_basis_points_per_source: u16,
     pub shared_cash_balance: Money,
     pub shared_spendable_cash: Money,
 }
@@ -183,6 +186,10 @@ fn resolve_configuration_outlook(
         estimated_operating_cost,
         estimated_net_cash,
         observed_pressure: observation.map(|value| (value.observed_at, value.case_count)),
+        inquiry_risk_basis_points_per_source: registry
+            .get_enterprise(configuration.kind)
+            .economics()
+            .enforcement_attention_basis_points_per_exposure_source(),
         shared_cash_balance: account.balance(),
         shared_spendable_cash: account.spendable_balance(),
     })

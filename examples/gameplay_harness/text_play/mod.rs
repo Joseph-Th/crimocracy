@@ -1082,6 +1082,14 @@ impl<'a> Session<'a> {
         .expect("valid player payroll estimate");
         let payroll = payroll.cents();
         let covered = covered.cents();
+        // Snapshot only: all three spendable treasury kinds can pay wages, but suspended
+        // rackets, future shop earnings, counsel fees and fines make forecasts uncertain.
+        let wage_liquidity = street_spendable + concealed_spendable + clean_spendable;
+        let wage_runway = if payroll > 0 {
+            format!("{} full day(s)", wage_liquidity / i128::from(payroll))
+        } else {
+            "no current wage obligation".to_owned()
+        };
         // Actual owner-settled cycles, not a forecast or an extrapolation of held cash.
         // The truncated opening window uses its real elapsed duration so a new campaign
         // doesn't pretend to have already earned 30 days of income.
@@ -1164,6 +1172,7 @@ impl<'a> Session<'a> {
             });
         format!(
             "{name} | {} | {} ({})\nPeople: {members} named | Associates: {active_associates} active, {inactive_associates} suspended | Venues: {venues} ({suspended_venues} suspended) | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nAssigned racket captains: {active_captains} | all-chain command duties: {command_required}/{command_available} available | direct reporting lines: {command_lines} | overloaded leaders: {overstretched_leaders} (see 'people' for individual workloads)\nNamed-member daily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)
+Gross payroll runway: {wage_runway} at current headcount and accessible funds, ignoring new income and other spending
 Additional associate wages: {incremental_labor_wages} cents/day through racket operating expenses (baseline workers included in fixed racket costs)\nRealized operating net (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs payroll {payroll_gap:+} cents/day (excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | suspended storefronts: {suspended_venues} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
             time_label(state.now().as_minutes()),
             self.district,

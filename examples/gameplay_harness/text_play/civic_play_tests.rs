@@ -186,6 +186,18 @@ fn public_civic_people_are_real_and_private_cases_remain_hidden_after_work_and_r
         boss_result.contains("Own member condition"),
         "{boss_result}"
     );
+    assert!(
+        boss_result.contains("civilian workdays not applicable"),
+        "{boss_result}"
+    );
+    assert!(
+        boss_result.contains("Recorded crew activity:"),
+        "{boss_result}"
+    );
+    assert!(
+        !boss_result.contains("No recorded professional duty yet"),
+        "{boss_result}"
+    );
     assert!(session.execute("civic-person char-999999").is_err());
     assert!(session.execute("civics district-999999").is_err());
     assert!(session.execute("civics one two").is_err());

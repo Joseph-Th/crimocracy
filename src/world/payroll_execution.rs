@@ -112,7 +112,9 @@ impl PayrollOutcome {
     pub fn short(&self) -> Money {
         self.short
     }
-    pub(crate) fn underpaid_members(&self) -> &[CharacterId] {
+    /// Exact participants owed more wages than they received in this payroll.
+    /// Player adapters must scope the enclosing outcome by its organization first.
+    pub fn underpaid_members(&self) -> &[CharacterId] {
         &self.underpaid_members
     }
     /// Canonical ledger transaction that paid this payroll. `None` means the organization

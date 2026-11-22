@@ -96,6 +96,12 @@ fn real_text_campaign_orders_expose_funded_civic_work_and_official_election_sche
         "{district}"
     );
     assert!(district.contains("cooldown 7 day(s)"), "{district}");
+    let campaign_after_meetings = session.execute("campaign").unwrap().0;
+    assert!(
+        campaign_after_meetings.contains("Next daily erosion before specialist output: -5 machine, -3 grassroots, -0 institutions"),
+        "{campaign_after_meetings}"
+    );
+    assert!(campaign_after_meetings.contains("meetings primarily raise grassroots support"));
     let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
     assert!(
         session

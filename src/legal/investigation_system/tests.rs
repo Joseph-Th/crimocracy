@@ -667,6 +667,120 @@ fn resumed_incident_rejects_duplicate_witness_registration_before_mutation() {
 }
 
 #[test]
+fn unrelated_incident_with_existing_shelf_witness_opens_separate_case() {
+    let registry = build_registry();
+    let mut state = AppState::new(0xD091_7A1F);
+    let police = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Repeat Witness Precinct".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .unwrap();
+    let crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Repeat Witness Crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let witness = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Shop owner witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let (suspect, first_origin) =
+        insert_test_surveillance_origin(&registry, &mut state, crew, "First incident");
+    let (_, second_origin) =
+        insert_test_surveillance_origin(&registry, &mut state, crew, "Second incident");
+    let intake = |state: &AppState, origin| {
+        validate_incident_intake(
+            state,
+            IncidentIntakeDraft {
+                owner: police,
+                title: "Same eyewitness at another incident".to_owned(),
+                subjects: BTreeSet::from([
+                    EntityRef::Operation(origin),
+                    EntityRef::Character(suspect),
+                ]),
+                evidence: vec![crate::legal::IncidentEvidenceDraft {
+                    subject: EntityRef::Character(suspect),
+                    origin: Some(EntityRef::Operation(origin)),
+                    kind: EvidenceKind::Surveillance,
+                    strength: EvidenceStrength::Strong,
+                    reliability: EvidenceReliability::HighlyReliable,
+                    admissibility: Admissibility::Unknown,
+                    discovered_at: state.now(),
+                }],
+                origin: Some(EntityRef::Operation(origin)),
+                witness: Some(crate::legal::IncidentWitnessDraft {
+                    character: witness,
+                    subject: EntityRef::Character(suspect),
+                    cooperation: crate::legal::WitnessCooperation::Reluctant,
+                }),
+            },
+        )
+    };
+    let first = intake(&state, first_origin)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    validate_transition_investigation(
+        &state,
+        first.investigation,
+        InvestigationTransition::Suspend,
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+
+    let second = intake(&state, second_origin)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    assert_ne!(second.investigation, first.investigation);
+    assert!(!second.resumed_shelf);
+    assert_eq!(
+        state
+            .legal()
+            .case_witnesses_for_investigation(first.investigation)
+            .count(),
+        1
+    );
+    assert_eq!(
+        state
+            .legal()
+            .case_witnesses_for_investigation(second.investigation)
+            .count(),
+        1
+    );
+    assert_eq!(
+        state
+            .legal()
+            .get_investigation(first.investigation)
+            .unwrap()
+            .status(),
+        InvestigationStatus::Suspended
+    );
+    validate_state(&state).unwrap();
+    validate_invariants(&state);
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    validate_invariants(&restored);
+}
+
+#[test]
 fn resumed_incident_rejects_witness_already_tracked_as_subject_on_the_shelf() {
     let registry = build_registry();
     let mut state = AppState::new(0xD091_5E1F);

@@ -34,8 +34,11 @@ uses the normal attention rules and can pause before the requested end.
 `advance 30d uninterrupted` explicitly suppresses optional event pauses for
 long-term planning, but **does not skip simulation minutes** and still stops at
 pending decisions or a terminal campaign outcome. It reports the actual elapsed
-minutes and a digest of deferred alerts; inspect `reports`, `counsel`, and
-`recovery` after using it. Operation scheduling delays and deadlines remain
+minutes and a digest of deferred alerts, including player-crew departures after
+wage shortfalls; normal advancement pauses for an enabled exception when members
+walk away. The `brief` command shows gross full-day payroll runway based on
+presently accessible wages, without assuming new income or other expenditures.
+Inspect `reports`, `people`, `counsel`, and `recovery` after advancing. Operation scheduling delays and deadlines remain
 limited to seven days.
 
 ```powershell
@@ -64,7 +67,7 @@ A generated city gives individually simulated characters to private business pro
 
 Every daily boundary assigns named civic characters a real duty or time off. Shopkeepers attend an active business, police cover existing precinct patrols or lead assigned cases, and institutional officials work in their own organizations. Career experience, fatigue and professional standing persist in saves, affect detective allocation, and alter the strength of a named mayoral incumbent and candidate at election time. Detention interrupts work. The game simulates this named professional population rather than all residents or per-minute walking routes.
 
-Use `civics` for public profession counts, `civics district-N` for people in a ward, and `civic-person char-N` for one person's registered business ownership and public work history. Confidential investigation assignments, outsider fatigue and personal bank balances remain private.
+Use `civics` for public profession counts, `civics district-N` for people in a ward, and `civic-person char-N` for one person's registered business ownership and civilian professional history. Own criminal members instead show their actual completed crew operations, achieved objectives, current racket management and personally maintained institutional channels; the civilian workday count is not applicable to their criminal leadership. Confidential investigation assignments, outsider fatigue and personal bank balances remain private.
 
 A city is not just a handful of special NPCs. Each generated district adds **42 more individually persisted people**, including 12 storefront employees with actual workplaces, nine independent criminal freelancers, eight other residents, four additional precinct officers, two politicians, two defense lawyers, a prosecutor, labor and merchant representatives, a journalist and independent counsel. Additional rival gang members also have real organization membership, supervisors, relationships and payroll. A small city now contains more than 200 named people, a medium city more than 400, and a large city more than 800. The largest supported custom cities exceed 1,100. Each individual has their own skills, motives, personality, district home and daily professional history; this does not simulate every anonymous customer or voter as a character.
 
@@ -94,6 +97,8 @@ The underlying coalition still needs two mature, distinct profitable business ki
 `buy-influence district-N cents` purchases machine influence for **5,000 cents per point**. That purchase does not buy voters or endorsements. `hire-specialist district-N char-N organizer|publicist|strategist` hires staff with signing fees of 150,000, 350,000, or 600,000 cents and daily salaries of 3,000, 8,000, or 16,000 cents. Organizers concentrate on grassroots work, publicists mix both civic constituencies, and strategists build institutional networks. All also maintain some machine influence. Their actual output scales with their assigned delegate's SocialAccess, Negotiation, or Management capability; an idle or detained manager cannot produce influence. `fire-specialist` ends that wage. Every support axis decays daily and unfunded salaries yield no gains.
 
 Campaign operations additionally use `campaign-event district-N char-N meetings|services|labor|press`. **Meetings** require an owned active gathering/customer venue and cost 150,000 cents; **services** require an owned active soup kitchen, pharmacy, or laundry and cost 450,000 cents; **labor** requires local union infrastructure or an established labor contact and costs 350,000 cents; **press** requires an owned printing press or news service and costs 300,000 cents. Each action builds a different mix of grassroots and institutional support, requires a delegated local Political/Neighborhood manager, and has a **seven-day cooldown per district and initiative**. All campaign transactions use real clean funds and move expenditures to the city's political institution; fragmented clean accounts can fund a single approved payment atomically.
+
+The `campaign` dashboard uses the simulation's exact daily erosion rule to show each district's next machine, grassroots and institutional standing losses before specialist output. This makes the effect and maintenance cost of small civic initiatives visible before committing further clean funds.
 
 Each election resolves public ward-by-ward vote totals for the nominee, incumbent political opposition, and rival influence. Voter blocs, the local commercial coalition, maintained majority tenure, citywide campaign financing, **resident fear** from actual criminal reputation, and active neighborhood rackets affect whether a ward is won. `campaign` shows available capital and staffing; `political district-N` shows the local coalition and initiative blockers; `election` gives official ballots and ward totals. Only a certified **winning election** permits `claim-victory political`, which records the elected mayor and terminates the campaign. This simulates ward elections and institutional campaigning, not individual voter identities or post-election governance.
 

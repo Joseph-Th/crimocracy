@@ -332,11 +332,7 @@ fn find_active_identified_file(
             if case_origin_responsible_organization(state, case_origin) != Some(organization) { return false; }
             // Avoid creating a second registration for the same named witness, or taking a
             // witness already assigned to casework. A separate file is valid in either case.
-            if draft.witness.as_ref().is_some_and(|witness| {
-                record.subjects().contains(&EntityRef::Character(witness.character))
-                    || state.legal.case_witness_for(record.id(), witness.character).is_some()
-                    || crate::legal::witness_system::case_witness_role_conflict(state, record.id(), witness.character).is_some()
-            }) { return false; }
+            if !case_can_accept_incident_witness(state, record, draft) { return false; }
             // Reserve the append plus declared-subject update without stealing revisions from
             // an already scheduled investigator task. No existing evidence is copied or upgraded.
             let advances = 2 + u32::from(draft.witness.is_some());
@@ -368,6 +364,16 @@ fn find_resumable_shelf(
         .legal
         .suspended_originated_investigations_for_owner(draft.owner)
         .filter_map(|record| {
+            // A distinct incident cannot continue a shelf on which its eyewitness is
+            // already a witness, case subject, or officer of the case. In that case,
+            // opening a separate case preserves both real incidents and their testimony.
+            // Re-intake of the identical origin still reaches the explicit duplicate
+            // witness rejection in canonical validation.
+            if record.origin() != draft.origin
+                && !case_can_accept_incident_witness(state, record, draft)
+            {
+                return None;
+            }
             let overlap = record.subjects().intersection(&draft.subjects).count();
             (overlap > 0).then_some((record, overlap))
         })
@@ -380,6 +386,28 @@ fn find_resumable_shelf(
             )
         })
         .map(|(record, _)| (record.id(), record.version()))
+}
+
+fn case_can_accept_incident_witness(
+    state: &AppState,
+    case: &InvestigationRecord,
+    draft: &IncidentIntakeDraft,
+) -> bool {
+    draft.witness.as_ref().is_none_or(|witness| {
+        !case
+            .subjects()
+            .contains(&EntityRef::Character(witness.character))
+            && state
+                .legal
+                .case_witness_for(case.id(), witness.character)
+                .is_none()
+            && crate::legal::witness_system::case_witness_role_conflict(
+                state,
+                case.id(),
+                witness.character,
+            )
+            .is_none()
+    })
 }
 
 fn validate_incident_intake_dependencies(
