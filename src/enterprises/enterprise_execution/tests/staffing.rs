@@ -415,7 +415,7 @@ fn executive_command_is_a_real_bottleneck_until_an_underboss_delegates_the_crews
     let executive = fixture.authority.manager;
     let first_district = match fixture.location {
         EnterpriseLocation::Neighborhood(id) => id,
-        _ => unreachable!(),
+        EnterpriseLocation::Business(_) => unreachable!(),
     };
     let profile = fixture
         .state
@@ -542,9 +542,7 @@ fn executive_command_is_a_real_bottleneck_until_an_underboss_delegates_the_crews
     );
     let before = bincode::serialize(&fixture.state).unwrap();
     assert_eq!(
-        validate_establish_enterprise(&registry, &fixture.state, second_draft.clone())
-            .err()
-            .map(|error| error),
+        validate_establish_enterprise(&registry, &fixture.state, second_draft.clone()).err(),
         Some(EnterpriseError::ManagerWorkloadExceeded {
             manager: executive,
             required: 2,

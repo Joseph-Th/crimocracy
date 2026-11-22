@@ -773,6 +773,98 @@ fn negotiated_standstill_is_symmetric_durable_and_expires_without_changing_exist
 }
 
 #[test]
+fn bilateral_standstill_does_not_disarm_either_gang_against_a_third_party() {
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::world::territory_conflict::{TerritoryConflictError, validate_territory_clash};
+    let registry = build_registry();
+    let mut fixture = make_influence_fixture();
+    let third = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Unaffiliated Third Gang".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .expect("third gang must exist");
+    let (second_manager, second_mandate) = assign_district_authority(
+        &mut fixture.state,
+        fixture.challenger,
+        fixture.neighborhood,
+        "Ceasefire Counterparty",
+    );
+    let (third_manager, third_mandate) = assign_district_authority(
+        &mut fixture.state,
+        third,
+        fixture.neighborhood,
+        "Unaffiliated Captain",
+    );
+    let mut rackets = Vec::new();
+    for (organization, manager, mandate, name) in [
+        (
+            fixture.dominant,
+            fixture.manager,
+            fixture.mandate,
+            "First Club",
+        ),
+        (
+            fixture.challenger,
+            second_manager,
+            second_mandate,
+            "Second Club",
+        ),
+        (third, third_manager, third_mandate, "Third Club"),
+    ] {
+        let venue = insert_venue(
+            &registry,
+            &mut fixture.state,
+            name,
+            fixture.neighborhood,
+            BusinessOwner::Organization(organization),
+            hospitality_functions(),
+        );
+        rackets.push(establish_gambling_at_venue(
+            &registry,
+            &mut fixture.state,
+            organization,
+            mandate,
+            manager,
+            venue,
+        ));
+    }
+    validate_negotiate_standstill(
+        &fixture.state,
+        fixture.dominant,
+        fixture.challenger,
+        fixture.neighborhood,
+    )
+    .expect("first two gangs can negotiate")
+    .commit(&mut fixture.state)
+    .expect("bilateral ceasefire must commit");
+    assert!(matches!(
+        validate_territory_clash(&fixture.state, fixture.dominant, rackets[1]),
+        Err(TerritoryConflictError::Standstill(district)) if district == fixture.neighborhood
+    ));
+    validate_territory_clash(&fixture.state, fixture.dominant, rackets[2])
+        .expect("a gang can still confront an unrelated third party");
+    let attack = validate_territory_clash(&fixture.state, third, rackets[0])
+        .expect("the unaffiliated third gang must remain able to attack a signatory");
+    let outcome = attack
+        .commit(&mut fixture.state)
+        .expect("third-party clash must commit");
+    assert!(!outcome.attacker_won);
+    assert_eq!(outcome.suspended_racket, rackets[2]);
+    assert!(active_standstill(&fixture.state, fixture.dominant, fixture.neighborhood).is_some());
+    validate_invariants(&fixture.state);
+    let saved = build_save(&registry, &fixture.state).expect("third-party clash must save");
+    let restored = restore_save(&registry, saved).expect("third-party clash must restore");
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap(),
+    );
+}
+
+#[test]
 fn a_failed_turf_challenge_closes_the_attacker_and_recovers_after_seven_days() {
     use crate::core::persistence::{build_save, restore_save};
     use crate::core::time::{DAY_MINUTES, SimDuration};
@@ -1379,6 +1471,127 @@ fn tribute_can_draw_from_multiple_spendable_cash_accounts_atomically() {
         Money::ZERO
     );
     assert!(active_standstill(&restored, fixture.dominant, fixture.neighborhood).is_some());
+}
+
+#[test]
+fn independent_wars_in_one_district_can_each_reach_autonomous_peace() {
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::core::time::{DAY_MINUTES, SimDuration};
+    use crate::world::territory_conflict::validate_territory_clash;
+
+    let registry = build_registry();
+    let mut fixture = make_influence_fixture();
+    let third = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Third Gang".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let fourth = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Fourth Gang".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let (second_manager, second_mandate) = assign_district_authority(
+        &mut fixture.state,
+        fixture.challenger,
+        fixture.neighborhood,
+        "Second Captain",
+    );
+    let (third_manager, third_mandate) = assign_district_authority(
+        &mut fixture.state,
+        third,
+        fixture.neighborhood,
+        "Third Captain",
+    );
+    let (fourth_manager, fourth_mandate) = assign_district_authority(
+        &mut fixture.state,
+        fourth,
+        fixture.neighborhood,
+        "Fourth Captain",
+    );
+    let mut rackets = Vec::new();
+    for (organization, manager, mandate, name) in [
+        (
+            fixture.dominant,
+            fixture.manager,
+            fixture.mandate,
+            "First Venue",
+        ),
+        (
+            fixture.challenger,
+            second_manager,
+            second_mandate,
+            "Second Venue",
+        ),
+        (third, third_manager, third_mandate, "Third Venue"),
+        (fourth, fourth_manager, fourth_mandate, "Fourth Venue"),
+    ] {
+        let venue = insert_venue(
+            &registry,
+            &mut fixture.state,
+            name,
+            fixture.neighborhood,
+            BusinessOwner::Organization(organization),
+            hospitality_functions(),
+        );
+        rackets.push(establish_gambling_at_venue(
+            &registry,
+            &mut fixture.state,
+            organization,
+            mandate,
+            manager,
+            venue,
+        ));
+    }
+    let day = SimDuration::from_minutes(u32::try_from(DAY_MINUTES).unwrap());
+    fixture.state.advance_clock(day);
+    for (attacker, target, expected_loser) in [
+        (fixture.dominant, rackets[1], rackets[0]),
+        (third, rackets[3], rackets[2]),
+    ] {
+        let result = validate_territory_clash(&fixture.state, attacker, target)
+            .expect("independent gangs can fight on the same day")
+            .commit(&mut fixture.state)
+            .expect("independent clash commits");
+        assert_eq!(result.suspended_racket, expected_loser);
+    }
+    assert!(apply_due_autonomous_territory_standstills(&mut fixture.state).is_empty());
+    fixture.state.advance_clock(day);
+    let agreements = apply_due_autonomous_territory_standstills(&mut fixture.state);
+    assert_eq!(
+        agreements.len(),
+        2,
+        "both unrelated defeated gangs should seek a separate ceasefire"
+    );
+    for (organization, counterparty) in [
+        (fixture.dominant, fixture.challenger),
+        (fixture.challenger, fixture.dominant),
+        (third, fourth),
+        (fourth, third),
+    ] {
+        assert_eq!(
+            active_standstill(&fixture.state, organization, fixture.neighborhood)
+                .expect("each gang must retain its own active peace")
+                .counterparty,
+            counterparty,
+        );
+    }
+    assert!(apply_due_autonomous_territory_standstills(&mut fixture.state).is_empty());
+    validate_invariants(&fixture.state);
+    let saved = build_save(&registry, &fixture.state).unwrap();
+    let restored = restore_save(&registry, saved).unwrap();
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap(),
+    );
 }
 
 #[test]

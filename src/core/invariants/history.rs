@@ -35,7 +35,7 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
             crate::core::id::NeighborhoodId,
             crate::core::id::OrganizationId,
         ),
-        u64,
+        (u64, crate::core::id::OrganizationId),
     >::new();
     let mut victory_seen = false;
     for event in state.history.events() {
@@ -120,13 +120,12 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
                 || previous_clashes
                     .get(&(district, attacker))
                     .is_some_and(|previous_end| *previous_end > event.occurred_at().as_minutes())
-                || [attacker, defender].into_iter().any(|organization| {
-                    previous_standstills
-                        .get(&(district, organization))
-                        .is_some_and(|previous_end| {
-                            *previous_end > event.occurred_at().as_minutes()
-                        })
-                })
+                || previous_standstills.get(&(district, attacker)).is_some_and(
+                    |(previous_end, counterparty)| {
+                        *previous_end > event.occurred_at().as_minutes()
+                            && *counterparty == defender
+                    },
+                )
             {
                 return Err(invalid());
             }
@@ -175,16 +174,15 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
                 || [initiator, counterparty].into_iter().any(|org| {
                     previous_standstills
                         .get(&(district, org))
-                        .is_some_and(|previous_end| {
+                        .is_some_and(|(previous_end, _)| {
                             *previous_end > event.occurred_at().as_minutes()
                         })
                 })
             {
                 return Err(invalid());
             }
-            for organization in [initiator, counterparty] {
-                previous_standstills.insert((district, organization), end);
-            }
+            previous_standstills.insert((district, initiator), (end, counterparty));
+            previous_standstills.insert((district, counterparty), (end, initiator));
         }
         if let HistoryEventKind::CampaignVictory {
             organization,

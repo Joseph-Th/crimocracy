@@ -192,6 +192,8 @@ additional local rackets or authorizing offensive business operations until
 expiry. Reconnaissance and legitimate acquisitions remain possible. These are
 non-lethal workforce confrontations and negotiated expansion restrictions, not
 a simulation of street-level shootouts, permanent land transfer or elections.
+The ceasefire bars clashes between the two signatories, not clashes with an
+unrelated third gang. A gang may hold only one such agreement per district at a time.
 
 Leadership decisions include `policies`, `policy`, `mandates`, `delegate`, and
 `mandate` for organization-level recruitment and legal-support rules, managerial

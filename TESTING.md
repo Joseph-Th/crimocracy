@@ -44,7 +44,10 @@ the edit. A useful diagnostic changes where you read, what you test, or what you
 None of these replaces `.\scripts\verify.cmd` or a focused behavioral proof. Mutation execution stays in its isolated copy; do not use `--in-place` on a dirty/concurrent repository to bypass scratch-copy problems, and do not reuse another run's output directory.
 
 Territory owner tests cover symmetric standstills, genuine balanced-ledger
-street-cash tribute and insufficient funds, a failed assault that shuts down
+street-cash tribute and insufficient funds, third-party clashes despite an
+unrelated bilateral peace, independent postwar accords for disjoint gangs in
+one district, and persisted history validation after those outcomes. They also cover
+a failed assault that shuts down
 the attacking racket, a strong autonomous rival displacing a player holding,
 an actual crisis report, multi-day cooldown and suspension expiry, and
 deterministic save/restore. A post-clash agreement must remain negotiable after

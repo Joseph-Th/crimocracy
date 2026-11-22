@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn capitalization_is_funded_one_way_and_survives_save_restore() {
         let registry = build_registry();
-        let mut state = AppState::new(0xCA71_7A1);
+        let mut state = AppState::new(0x0CA7_17A1);
         let organization = insert_organization(
             &registry,
             &mut state,

@@ -374,7 +374,10 @@ pub(crate) fn apply_due_autonomous_territory_standstills(
     }
     let current = state.now().as_minutes();
     let player = state.player_organization();
-    let mut recent = BTreeMap::<NeighborhoodId, (OrganizationId, OrganizationId)>::new();
+    let mut recent = BTreeMap::<
+        (NeighborhoodId, OrganizationId, OrganizationId),
+        (OrganizationId, OrganizationId),
+    >::new();
     // History IDs follow campaign chronology. Only the recent seven-day tail can produce
     // new peace offers; a reverse walk stops as soon as it reaches older history.
     for event in state.history().events().rev().take_while(|event| {
@@ -407,11 +410,16 @@ pub(crate) fn apply_due_autonomous_territory_standstills(
         } else {
             attacker
         };
-        // The first eligible clash encountered is the latest one in this district.
-        recent.entry(district).or_insert((defeated, victor));
+        // Independent feuds in the same district can each settle. Keep only the
+        // newest clash for each unordered pair, so repeat fights do not yield
+        // duplicate offers while unrelated parties are never discarded.
+        let pair = (attacker.min(defender), attacker.max(defender));
+        recent
+            .entry((district, pair.0, pair.1))
+            .or_insert((defeated, victor));
     }
     let mut agreements = Vec::new();
-    for (district, (initiator, counterparty)) in recent {
+    for ((district, _, _), (initiator, counterparty)) in recent {
         let plan = match validate_negotiate_standstill(state, initiator, counterparty, district) {
             Ok(plan) => Ok(plan),
             Err(TerritoryNegotiationError::TributeRequired { required_cents, .. }) => {

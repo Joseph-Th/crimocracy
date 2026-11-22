@@ -208,8 +208,12 @@ fn validate_clash_terms(
     }
     let district = district_of_racket(state, enemy.location())
         .ok_or(TerritoryConflictError::MissingRacket(target))?;
-    if active_standstill(state, attacker, district).is_some()
-        || active_standstill(state, defender, district).is_some()
+    // A bilateral ceasefire forbids fighting the named counterparty, not defending
+    // against an unrelated gang or challenging a third party in the same district.
+    // The separate expansion and business-operation restrictions still apply to
+    // either signatory throughout the agreement.
+    if active_standstill(state, attacker, district)
+        .is_some_and(|standstill| standstill.counterparty == defender)
     {
         return Err(TerritoryConflictError::Standstill(district));
     }
