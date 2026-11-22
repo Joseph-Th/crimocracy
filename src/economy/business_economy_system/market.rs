@@ -5,12 +5,12 @@
 //! the calculation. Losing a competitor's capacity leaves additional custom for the others.
 
 use super::BusinessEconomyError;
-use crate::core::id::BusinessId;
+use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::DAY_MINUTES;
 use crate::economy::{BusinessOperatingStatus, MarketSnapshot};
 use crate::registry::Registry;
-use crate::world::{BusinessKind, BusinessRecord};
+use crate::world::{BusinessKind, BusinessOwner, BusinessRecord};
 
 /// Sixty percent of potential is venue-specific; forty percent is contested. A related trade
 /// counts as half a direct competitor. These are city-wide market structure assumptions,
@@ -143,7 +143,7 @@ pub(super) fn owner_reopening_daily_displacement(
     candidate: BusinessId,
 ) -> Result<i128, BusinessEconomyError> {
     let business = super::validate_business(state, candidate)?;
-    if business.owner() == crate::world::BusinessOwner::Independent {
+    if business.owner() == BusinessOwner::Independent {
         return Ok(0);
     }
     let economy = state
@@ -153,11 +153,54 @@ pub(super) fn owner_reopening_daily_displacement(
     if economy.status() != BusinessOperatingStatus::Suspended {
         return Err(BusinessEconomyError::EconomyNotSuspended(candidate));
     }
-    let incoming_damaged = economy.is_disrupted(state.now());
+    activating_owner_daily_displacement(
+        registry,
+        state,
+        business,
+        economy.is_disrupted(state.now()),
+        business.owner(),
+    )
+}
+
+/// A suspended property bought by a new owner is restarted, not kept dormant. Estimate the
+/// lost sales of that buyer's *existing* operating stores before deciding to purchase. An
+/// already-active target has already competed for those customers, so changing its owner does
+/// not create new market pressure. This read-only calculation only affects an internal NPC
+/// purchasing decision; no foreign operating details are disclosed to another organization.
+pub(crate) fn acquisition_owner_daily_displacement(
+    registry: &Registry,
+    state: &AppState,
+    candidate: BusinessId,
+    buyer: OrganizationId,
+) -> Result<i128, BusinessEconomyError> {
+    let economy = state
+        .economy()
+        .get_business_economy(candidate)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(candidate))?;
+    if economy.status() == BusinessOperatingStatus::Active {
+        return Ok(0);
+    }
+    let business = super::validate_business(state, candidate)?;
+    activating_owner_daily_displacement(
+        registry,
+        state,
+        business,
+        economy.is_disrupted(state.now()),
+        BusinessOwner::Organization(buyer),
+    )
+}
+
+fn activating_owner_daily_displacement(
+    registry: &Registry,
+    state: &AppState,
+    business: &BusinessRecord,
+    incoming_damaged: bool,
+    owner: BusinessOwner,
+) -> Result<i128, BusinessEconomyError> {
     let damage_weight = registry.business_disruption().gross_basis_points();
     let mut lost_daily_net = 0_i128;
     for (peer, relationship) in local_peers(state, business) {
-        if peer.owner() != business.owner() {
+        if peer.owner() != owner {
             continue;
         }
         let Some(peer_economy) = state.economy().get_business_economy(peer.id()) else {

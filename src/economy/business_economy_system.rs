@@ -54,6 +54,7 @@ pub use lifecycle::{
     ValidatedBusinessEconomyStatusChange, validate_resume_business_economy,
     validate_suspend_business_economy,
 };
+pub(crate) use market::acquisition_owner_daily_displacement;
 pub use profit_sweep::{
     BusinessProfitSweepDraft, BusinessProfitSweepError, ValidatedBusinessProfitSweep,
     resolve_available_business_profit, validate_sweep_business_profits,

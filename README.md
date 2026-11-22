@@ -125,7 +125,11 @@ can justify selling sooner. Rival executives still offer only the ordinary
 90-day appraisal, preventing constant weekly flips. Refusal alone does not
 reveal the reason.
 Rivals invest across the city and submit voluntary offers themselves, but cannot
-purchase your properties without your consent. Accepted offers pay the actual seller, transfer the existing
+purchase your properties without your consent. Before buying a closed storefront,
+executives account for the lost custom at their existing local shops and decline
+purchases whose restarted operating income would not offset that loss. They also
+avoid assets too exhausted to schedule another operating cycle. Accepted offers
+pay the actual seller, transfer the existing
 books, and restart the acquired operating cycle. `business-outlook <id>` identifies whether a property is independently listed, already yours, or not available for direct purchase without disclosing foreign title, and clearly labels its normal-business forecast as *standalone*, not profit added to your portfolio. `launder` converts street cash within an owned front's
 real capacity, `launder <business-id> max` fills the affordable remaining capacity of a chosen front, and `launder-all <street-reserve-cents>` issues a **one-time**, ID-ordered conversion through eligible owned fronts while preserving the requested total spendable street reserve. Each front settles as its own canonical ledger transaction; unsuccessful fronts are explicitly reported, and successful earlier postings are not rolled back. Neither command is an unattended laundering policy. `businesses` shows owned infrastructure and earned owner-withdrawal headroom, `treasury daily` authorizes daily profit distributions before payroll (protected working capital stays in the storefront), `treasury manual` restores explicit withdrawals, and
 `racket-kinds` lists enterprise requirements. `open-account`, `move`,

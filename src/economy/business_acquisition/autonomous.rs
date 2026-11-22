@@ -10,6 +10,7 @@ use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, is_recurring_boundary};
 use crate::economy::BusinessOperatingStatus;
+use crate::economy::business_economy_system::acquisition_owner_daily_displacement;
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
@@ -128,7 +129,14 @@ fn invest(
         // Rival investors buy operating businesses, not empty premises. Both listings
         // and negotiated offers need existing books: filter before appraisal and bidding
         // rather than sending impossible offers through the canonical seller validator.
-        if state.economy.get_business_economy(id).is_none() {
+        let Some(economy) = state.economy.get_business_economy(id) else {
+            continue;
+        };
+        // A purchased property is restarted under the buyer. At the final economy version,
+        // that restart cannot schedule another operating cycle: autonomous investors must
+        // not spend capital on a permanently inert asset merely because its public appraisal
+        // still looks profitable.
+        if economy.version() >= u32::MAX - 1 {
             continue;
         }
         // Market listing availability and standard appraisals are public. In the
@@ -150,21 +158,28 @@ fn invest(
         if price <= Money::ZERO || i128::from(price.cents()) > budget {
             continue;
         }
-        let net = appraisal.expected_cycle_net;
-        if net <= Money::ZERO {
+        let cycle = appraisal.cycle_minutes;
+        let daily_net = i128::from(appraisal.expected_cycle_net.cents()) * i128::from(DAY_MINUTES)
+            / i128::from(cycle);
+        // An operating foreign shop already participates in the district market. By
+        // contrast, purchasing a suspended shop reopens another competitor and can cost
+        // the buyer's current shops more than the incoming shop earns. Rank the actual
+        // incremental portfolio benefit, not the target's isolated headline earnings.
+        let Ok(displaced_daily_net) =
+            acquisition_owner_daily_displacement(registry, state, id, organization)
+        else {
+            continue;
+        };
+        let incremental_daily_net = daily_net - displaced_daily_net;
+        if incremental_daily_net <= 0 {
             continue;
         }
-        let cycle = appraisal.cycle_minutes;
-        let return_score = i128::from(net.cents()) * 1_000_000_000_000_i128
-            / i128::from(price.cents())
-            / i128::from(cycle);
+        let return_score = incremental_daily_net * 1_000_000_000_i128 / i128::from(price.cents());
         // Prefer extending an existing foothold, but do not strand capital after
         // local inventory is exhausted. Offers rank behind independent listings.
-        let daily_contribution =
-            i128::from(net.cents()) * i128::from(DAY_MINUTES) / i128::from(cycle);
         candidates.push((
             !listed,
-            std::cmp::Reverse(daily_contribution.min(wage_gap)),
+            std::cmp::Reverse(incremental_daily_net.min(wage_gap)),
             !districts.contains(&district),
             std::cmp::Reverse(return_score),
             price,
