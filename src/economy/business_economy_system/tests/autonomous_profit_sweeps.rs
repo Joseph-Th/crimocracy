@@ -30,24 +30,18 @@ fn player_daily_distribution_survives_restore_and_funds_payroll() {
                 && payroll.paid() > Money::ZERO)
     );
     assert_eq!(
-        remaining_owner_distribution_capacity(&fixture.state, fixture.organization),
-        Money::ZERO,
-        "the single boss exhausted today's distribution bandwidth"
-    );
-    assert!(
         fixture
             .state
             .finance()
             .get_account(fixture.operating)
             .unwrap()
-            .balance()
-            >= fixture
-                .state
-                .economy()
-                .get_business_economy(fixture.business)
-                .unwrap()
-                .operating_capital_floor(),
-        "undistributed surplus remains invested"
+            .balance(),
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .unwrap()
+            .operating_capital_floor()
     );
     assert_eq!(
         bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap(),
@@ -60,7 +54,6 @@ fn player_daily_distribution_survives_restore_and_funds_payroll() {
     validate_invariants(&restored);
 }
 
-use super::super::profit_sweep::remaining_owner_distribution_capacity;
 use super::*;
 use crate::core::id::{BusinessId, IdKind, NeighborhoodId, OrganizationId};
 use crate::world::world_system::{designate_player_organization, insert_character};
@@ -120,7 +113,6 @@ fn accounted_treasury_with_headroom(
 fn automatic_owner_distribution_fills_combined_partial_treasury_headroom_without_new_accounts() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
-    add_crew_members(&mut fixture, 2);
     establish_business_economy(&registry, &mut fixture);
     fixture
         .state
@@ -203,7 +195,6 @@ fn automatic_owner_distribution_fills_combined_partial_treasury_headroom_without
 fn automatic_owner_distribution_opens_only_the_unallocated_remainder() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
-    add_crew_members(&mut fixture, 2);
     establish_business_economy(&registry, &mut fixture);
     fixture
         .state
@@ -268,7 +259,6 @@ fn automatic_owner_distribution_opens_only_the_unallocated_remainder() {
 fn automatic_owner_distribution_prefers_one_large_receiver_over_several_small_postings() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
-    add_crew_members(&mut fixture, 2);
     establish_business_economy(&registry, &mut fixture);
     fixture
         .state
@@ -340,33 +330,6 @@ fn add_boss(fixture: &mut BusinessEconomyFixture) {
         },
     )
     .expect("rival boss should validate");
-}
-
-fn add_crew_members(fixture: &mut BusinessEconomyFixture, members: usize) {
-    assert!(members > 0);
-    add_boss(fixture);
-    let boss = fixture
-        .state
-        .world()
-        .characters_in_organization(fixture.organization)
-        .find(|member| member.supervisor().is_none())
-        .expect("boss was just created")
-        .id();
-    for index in 1..members {
-        insert_character(
-            &mut fixture.state,
-            CharacterDraft {
-                name: format!("Treasury assistant {index}"),
-                organization: Some(fixture.organization),
-                supervisor: Some(boss),
-                autonomy: AutonomyLevel::Guided,
-                capabilities: BTreeMap::new(),
-                traits: BTreeSet::new(),
-                drives: BTreeMap::new(),
-            },
-        )
-        .expect("named administrator should join");
-    }
 }
 
 fn add_organized_business(
@@ -495,15 +458,15 @@ fn npc_business_profit_reaches_payroll_without_a_prefunded_treasury() {
         .get_business_economy(fixture.business)
         .expect("business economy must persist");
     assert_eq!(business_record.operating_capital_floor(), opening_capital);
-    assert!(
+    assert_eq!(
         fixture
             .state
             .finance()
             .get_account(fixture.operating)
             .expect("business till must persist")
-            .balance()
-            >= opening_capital,
-        "the sweep cannot consume retained capital or excess today's crew throughput"
+            .balance(),
+        opening_capital,
+        "the sweep cannot consume retained working capital"
     );
     let transaction = fixture
         .state
@@ -571,7 +534,6 @@ fn player_business_profits_remain_under_explicit_owner_control() {
 fn multiple_businesses_for_one_owner_share_one_balanced_distribution() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
-    add_crew_members(&mut fixture, 3);
     establish_business_economy(&registry, &mut fixture);
     let neighborhood = fixture
         .state
@@ -654,131 +616,6 @@ fn multiple_businesses_for_one_owner_share_one_balanced_distribution() {
     );
     validate_state_against_registry(&registry, &fixture.state)
         .expect("multi-business owner distribution must remain registry-valid");
-}
-
-#[test]
-fn one_employee_cannot_extract_unlimited_business_profit_or_reset_the_daily_limit() {
-    let registry = build_registry();
-    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
-    add_crew_members(&mut fixture, 1);
-    establish_business_economy(&registry, &mut fixture);
-    fixture
-        .state
-        .advance_clock(SimDuration::from_minutes(ONE_DAY));
-    let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0).unwrap();
-    validate_business_cycle_plan(&fixture.state, plan)
-        .unwrap()
-        .commit(&mut fixture.state)
-        .unwrap();
-    let cap = Money::from_cents(6_000);
-    let earned = fixture
-        .state
-        .finance()
-        .get_account(fixture.operating)
-        .unwrap()
-        .balance();
-    assert!(earned > cap);
-    let destination = insert_account(
-        &mut fixture.state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Organization(fixture.organization),
-            kind: AccountKind::AccountedFunds,
-        },
-    )
-    .unwrap();
-    let held = validate_sweep_business_profits(
-        &fixture.state,
-        BusinessProfitSweepDraft {
-            organization: fixture.organization,
-            business: fixture.business,
-            destination,
-            amount: Money::from_cents(1),
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        remaining_owner_distribution_capacity(&fixture.state, fixture.organization),
-        cap
-    );
-    assert!(
-        apply_due_autonomous_profit_sweeps(&mut fixture.state)
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(
-        fixture
-            .state
-            .finance()
-            .get_account(destination)
-            .unwrap()
-            .balance(),
-        cap
-    );
-    assert_eq!(
-        fixture
-            .state
-            .finance()
-            .get_account(fixture.operating)
-            .unwrap()
-            .balance(),
-        earned.checked_sub(cap).unwrap()
-    );
-    let before = bincode::serialize(&fixture.state).unwrap();
-    assert_eq!(
-        held.commit(&mut fixture.state).err(),
-        Some(BusinessProfitSweepError::InsufficientDistributionCapacity {
-            available_cents: 0,
-            requested_cents: 1,
-        })
-    );
-    assert_eq!(
-        apply_due_autonomous_profit_sweeps(&mut fixture.state).unwrap(),
-        None
-    );
-    assert_eq!(before, bincode::serialize(&fixture.state).unwrap());
-    let mut restored =
-        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
-    assert_eq!(
-        remaining_owner_distribution_capacity(&restored, fixture.organization),
-        Money::ZERO
-    );
-    let leader = restored
-        .world()
-        .characters_in_organization(fixture.organization)
-        .next()
-        .unwrap()
-        .id();
-    insert_character(
-        &mut restored,
-        CharacterDraft {
-            name: "Second administrator".to_owned(),
-            organization: Some(fixture.organization),
-            supervisor: Some(leader),
-            autonomy: AutonomyLevel::Guided,
-            capabilities: BTreeMap::new(),
-            traits: BTreeSet::new(),
-            drives: BTreeMap::new(),
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        remaining_owner_distribution_capacity(&restored, fixture.organization),
-        cap
-    );
-    assert!(
-        apply_due_autonomous_profit_sweeps(&mut restored)
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(
-        restored
-            .finance()
-            .get_account(fixture.operating)
-            .unwrap()
-            .balance(),
-        Money::ZERO
-    );
-    validate_state_against_registry(&registry, &restored).unwrap();
 }
 
 #[test]

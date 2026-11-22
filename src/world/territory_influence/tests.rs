@@ -17,8 +17,8 @@ use crate::world::world_system::{
     insert_business, insert_character, insert_neighborhood, insert_organization,
 };
 use crate::world::{
-    AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
-    NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
+    AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CapabilityKind,
+    CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
     NeighborhoodProfile, OrganizationDraft, OrganizationKind, Rating,
 };
 use std::collections::BTreeSet;
@@ -46,7 +46,7 @@ fn assign_district_authority(
             organization: Some(organization),
             supervisor: None,
             autonomy: AutonomyLevel::Delegated,
-            capabilities: BTreeMap::new(),
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
             traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
@@ -117,7 +117,7 @@ fn make_influence_fixture() -> InfluenceFixture {
             organization: Some(dominant),
             supervisor: None,
             autonomy: AutonomyLevel::Delegated,
-            capabilities: BTreeMap::new(),
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
             traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },

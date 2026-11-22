@@ -1152,7 +1152,17 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         })
         .unwrap()
         .id();
-    let first_captain = managers[0];
+    let first_captain = concentrated
+        .enterprises()
+        .get_enterprise(second_venue_racket)
+        .unwrap()
+        .manager();
+    let district_protection = concentrated
+        .enterprises()
+        .enterprises_for_organization(city.player)
+        .find(|racket| racket.location() == EnterpriseLocation::Neighborhood(empty_districts[0]))
+        .unwrap()
+        .id();
     let captain_mandate = concentrated
         .delegation()
         .active_for_manager(first_captain)
@@ -1160,7 +1170,7 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         .id();
     crate::enterprises::enterprise_execution::validate_reassign_enterprise(
         &concentrated,
-        second_venue_racket,
+        district_protection,
         MandateAuthority {
             mandate: captain_mandate,
             manager: first_captain,

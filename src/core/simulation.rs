@@ -71,8 +71,9 @@ pub struct TickOutcome {
     pub payrolls: Vec<crate::world::payroll_execution::PayrollOutcome>,
     /// Members who voluntarily left following unresolved wage shortfalls.
     pub payroll_departures: Vec<CharacterId>,
-    /// Active rackets suspended after real crew losses exceeded field capacity.
-    pub understaffed_racket_suspensions: Vec<crate::core::id::EnterpriseId>,
+    /// Operational rackets suspended because their assigned captain cannot
+    /// supervise the current workforce and geographic command load.
+    pub managerial_overstretch_suspensions: Vec<crate::core::id::EnterpriseId>,
     /// Number of individual reputation dimensions that actually moved this tick, including
     /// day-boundary decay and current operation/racket consequences. This makes reputation-only
     /// persistent ticks observable to validation/adapters instead of hiding them behind phases
@@ -249,12 +250,13 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         .expect("valid state should resolve every due autonomous recruitment action");
     let recruitment_attempts = recruitment.attempts;
     decision_requests.extend(recruitment.approval_requests);
-    // Apply the real organization's operating capacity after personnel losses
-    // and the same day's recruitment, before rival reopening and expansion.
-    // Canonical enterprise suspension ensures excess sites stop trading next
-    // cycle without fabricating management capacity or corrupting save history.
-    let understaffed_racket_suspensions =
-        crate::enterprises::enterprise_execution::apply_due_understaffing_suspensions(state);
+    // Current command bandwidth is determined by assigned captains' actual
+    // management skills and workloads. Apply losses/recruitment before checking
+    // it, and suspend overstretched rackets through the canonical lifecycle.
+    let managerial_overstretch_suspensions =
+        crate::enterprises::enterprise_execution::apply_due_overstretched_manager_suspensions(
+            state,
+        );
     // Weekly rival investment follows payroll and recruitment, so the reserve covers
     // the current roster. New commercial infrastructure can support subsequent racket expansion.
     let autonomous_business_acquisitions =
@@ -332,7 +334,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         autonomous_profit_sweeps,
         payrolls,
         payroll_departures,
-        understaffed_racket_suspensions,
+        managerial_overstretch_suspensions,
         reputation_changes,
         recruitment_attempts,
         resumed_enterprises,

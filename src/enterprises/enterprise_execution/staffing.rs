@@ -1,143 +1,185 @@
 //! Canonical rank-and-file enterprise staffing adjustments.
 
 use super::*;
+
 use crate::core::time::is_day_boundary;
+use crate::world::CapabilityKind;
 
-/// A named captain can direct only so many independently operated rackets and
-/// rank-and-file associates at once. This is an organizational constraint,
-/// not a secret NPC modifier. It applies equally to autonomous and player moves.
-pub const MAX_RACKETS_PER_MANAGER: u16 = 6;
-pub const MAX_ASSOCIATES_PER_MANAGER: u16 = 24;
-/// Existing small crews can run the first local set of rackets with their
-/// baseline workers. Expansion beyond that requires paid named leadership,
-/// even when all new rackets are delegated to a single prolific captain.
-pub const BASE_ORGANIZATION_RACKET_CAPACITY: usize = 6;
-pub const RACKETS_PER_AVAILABLE_MEMBER: usize = 2;
-pub const BASE_ORGANIZATION_ASSOCIATE_CAPACITY: u32 = 24;
-pub const ASSOCIATES_PER_AVAILABLE_MEMBER: u32 = 10;
-
-pub fn organization_operating_capacity(
-    state: &AppState,
-    organization: OrganizationId,
-) -> (usize, u32) {
-    let available = state
-        .world()
-        .characters_in_organization(organization)
-        .filter(|member| {
-            state
-                .legal()
-                .active_arrest_for_character(member.id())
-                .is_none()
-        })
-        .count();
-    (
-        BASE_ORGANIZATION_RACKET_CAPACITY
-            .max(available.saturating_mul(RACKETS_PER_AVAILABLE_MEMBER)),
-        BASE_ORGANIZATION_ASSOCIATE_CAPACITY
-            .max((available as u32).saturating_mul(ASSOCIATES_PER_AVAILABLE_MEMBER)),
-    )
+/// A unit of responsibility is one active associate, one independently operating
+/// racket, one supporting storefront, or one additional district in the captain's
+/// portfolio. These are things a captain must actually supervise, not arbitrary
+/// dollars of legal business revenue. Management aptitude determines how many
+/// simultaneous responsibilities they can take on. Anyone can personally run
+/// one operation; a second operation requires demonstrable managerial skill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ManagerWorkload {
+    pub required: u32,
+    pub available: u32,
+    pub rackets: u32,
+    pub associates: u32,
+    pub districts: u32,
 }
 
-pub(crate) fn organization_racket_overextension(
+#[derive(Clone, Copy)]
+struct ManagedJob {
+    location: EnterpriseLocation,
+    associates: u16,
+    supporting_businesses: usize,
+}
+
+fn resolve_management_workload(
     state: &AppState,
     organization: OrganizationId,
-) -> Vec<EnterpriseId> {
-    let (limit_rackets, limit_associates) = organization_operating_capacity(state, organization);
-    let active = state
+    manager: crate::core::id::CharacterId,
+    proposal: Option<ManagedJob>,
+    excluding: Option<EnterpriseId>,
+) -> Result<ManagerWorkload, EnterpriseError> {
+    let person = state
+        .world()
+        .get_character(manager)
+        .ok_or(EnterpriseError::InvalidManager(manager))?;
+    let mut required = 0_u32;
+    let mut largest_job = 0_u32;
+    let mut rackets = 0_u32;
+    let mut associates = 0_u32;
+    let mut districts = BTreeSet::new();
+    let mut visit = |job: ManagedJob| -> Result<(), EnterpriseError> {
+        let district = resolve_location_neighborhood(state, job.location)?;
+        districts.insert(district);
+        let workers = u32::from(job.associates);
+        // A separate site, each actual worker, and each support arrangement
+        // needs one recurring coordination task, irrespective of how much money
+        // happens to pass through that operation.
+        let work = workers
+            .saturating_add(1)
+            .saturating_add(job.supporting_businesses.min(u32::MAX as usize) as u32);
+        required = required.saturating_add(work);
+        largest_job = largest_job.max(work);
+        rackets = rackets.saturating_add(1);
+        associates = associates.saturating_add(workers);
+        Ok(())
+    };
+    for active in state
         .enterprises()
         .active_for_organization(organization)
-        .collect::<Vec<_>>();
-    let mut count = active.len();
-    let mut associates = active
-        .iter()
-        .map(|racket| u32::from(racket.associates()))
-        .sum::<u32>();
-    let mut suspend = Vec::new();
-    for racket in active.into_iter().rev() {
-        if count <= limit_rackets && associates <= limit_associates {
-            break;
-        }
-        count -= 1;
-        associates -= u32::from(racket.associates());
-        suspend.push(racket.id());
+        .filter(|record| record.manager() == manager && Some(record.id()) != excluding)
+    {
+        visit(ManagedJob {
+            location: active.location(),
+            associates: active.associates(),
+            supporting_businesses: active.supporting_businesses().len(),
+        })?;
     }
-    suspend
+    if let Some(job) = proposal {
+        visit(job)?;
+    }
+    let distinct_districts = districts.len().min(u32::MAX as usize) as u32;
+    required = required.saturating_add(distinct_districts.saturating_sub(1));
+    let skill = person
+        .capability(CapabilityKind::Management)
+        .map_or(0_u32, |value| u32::from(value.value()));
+    // Aptitude is a 0..100 rating, while the workload counts concrete daily
+    // responsibilities. The skill-to-task scale is a tuning parameter, not
+    // a fixed limit on sites, workers, districts, or the organization's roster.
+    let available = if person.organization() != Some(organization)
+        || state.legal().active_arrest_for_character(manager).is_some()
+    {
+        0
+    } else {
+        skill.div_ceil(3).max(largest_job)
+    };
+    Ok(ManagerWorkload {
+        required,
+        available,
+        rackets,
+        associates,
+        districts: distinct_districts,
+    })
 }
 
-/// Departures and arrests can leave an existing empire larger than its live
-/// command structure. At each day boundary, suspend newest rackets until the
-/// remaining ones fit the actual available workforce. Established operations
-/// retain their identities and can resume through normal recovery.
-pub(crate) fn apply_due_understaffing_suspensions(state: &mut AppState) -> Vec<EnterpriseId> {
-    if !is_day_boundary(state.now()) {
-        return Vec::new();
-    }
-    let organizations = state
-        .world()
-        .organizations()
-        .filter(|organization| organization.kind() == OrganizationKind::Criminal)
-        .map(|organization| organization.id())
-        .collect::<Vec<_>>();
-    let mut suspended = Vec::new();
-    for organization in organizations {
-        for enterprise in organization_racket_overextension(state, organization) {
-            if let Ok(token) = validate_suspend_enterprise(state, enterprise)
-                && token.commit(state).is_ok()
-            {
-                suspended.push(enterprise);
-            }
-        }
-    }
-    suspended
+/// Current real workload for an assigned captain, without manufacturing
+/// organization-wide capacity from unassigned recruits.
+pub fn manager_workload(
+    state: &AppState,
+    manager: crate::core::id::CharacterId,
+) -> Option<ManagerWorkload> {
+    let organization = state.world().get_character(manager)?.organization()?;
+    resolve_management_workload(state, organization, manager, None, None).ok()
 }
 
 pub(crate) fn ensure_manager_capacity(
     state: &AppState,
     organization: OrganizationId,
     manager: crate::core::id::CharacterId,
+    location: EnterpriseLocation,
     additional_associates: u16,
+    supporting_businesses: usize,
     excluding: Option<EnterpriseId>,
 ) -> Result<(), EnterpriseError> {
-    let mut rackets = 1_u16;
-    let mut associates = u32::from(additional_associates);
-    for active in state
-        .enterprises()
-        .active_for_organization(organization)
-        .filter(|record| record.manager() == manager && Some(record.id()) != excluding)
-    {
-        rackets = rackets.saturating_add(1);
-        associates += u32::from(active.associates());
-    }
-    if rackets > MAX_RACKETS_PER_MANAGER || associates > u32::from(MAX_ASSOCIATES_PER_MANAGER) {
-        return Err(EnterpriseError::ManagerCapacityExceeded {
+    let workload = resolve_management_workload(
+        state,
+        organization,
+        manager,
+        Some(ManagedJob {
+            location,
+            associates: additional_associates,
+            supporting_businesses,
+        }),
+        excluding,
+    )?;
+    if workload.required > workload.available {
+        return Err(EnterpriseError::ManagerWorkloadExceeded {
             manager,
-            rackets,
-            associates,
-            max_rackets: MAX_RACKETS_PER_MANAGER,
-            max_associates: MAX_ASSOCIATES_PER_MANAGER,
-        });
-    }
-    let (max_active, max_associates) = organization_operating_capacity(state, organization);
-    let mut total_rackets = 1_usize;
-    let mut total_associates = u32::from(additional_associates);
-    for active in state
-        .enterprises()
-        .active_for_organization(organization)
-        .filter(|record| Some(record.id()) != excluding)
-    {
-        total_rackets += 1;
-        total_associates += u32::from(active.associates());
-    }
-    if total_rackets > max_active || total_associates > max_associates {
-        return Err(EnterpriseError::OrganizationCapacityExceeded {
-            organization,
-            rackets: total_rackets,
-            associates: total_associates,
-            max_rackets: max_active,
-            max_associates,
+            required: workload.required,
+            available: workload.available,
         });
     }
     Ok(())
+}
+
+/// Existing active portfolios can become unmanageable after arrests, departures
+/// or a changed command structure. Suspend newest rackets until each captain's
+/// surviving portfolio is within their current workload. Recovery/reassignment
+/// remains a player choice and uses canonical enterprise lifecycle operations.
+pub(crate) fn apply_due_overstretched_manager_suspensions(
+    state: &mut AppState,
+) -> Vec<EnterpriseId> {
+    if !is_day_boundary(state.now()) {
+        return Vec::new();
+    }
+    let managers = state
+        .enterprises()
+        .enterprises()
+        .filter(|record| record.status() == EnterpriseStatus::Active)
+        .map(|record| record.manager())
+        .collect::<BTreeSet<_>>();
+    let mut suspended = Vec::new();
+    for manager in managers {
+        while let Some(load) = manager_workload(state, manager) {
+            if load.required <= load.available {
+                break;
+            }
+            let Some(racket) = state
+                .enterprises()
+                .enterprises()
+                .filter(|record| {
+                    record.status() == EnterpriseStatus::Active && record.manager() == manager
+                })
+                .map(|record| record.id())
+                .max()
+            else {
+                break;
+            };
+            let Ok(token) = validate_suspend_enterprise(state, racket) else {
+                break;
+            };
+            if token.commit(state).is_err() {
+                break;
+            }
+            suspended.push(racket);
+        }
+    }
+    suspended
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -182,7 +224,9 @@ pub fn validate_staff_enterprise(
             state,
             record.organization(),
             record.manager(),
+            record.location(),
             associates,
+            record.supporting_businesses().len(),
             Some(enterprise),
         )?;
     }

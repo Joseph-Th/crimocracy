@@ -114,12 +114,13 @@ impl Session<'_> {
                             && racket.status() == EnterpriseStatus::Suspended
                     })
             });
-            let own_understaffed_racket = tick.understaffed_racket_suspensions.iter().any(|id| {
-                self.state
-                    .enterprises()
-                    .get_enterprise(*id)
-                    .is_some_and(|racket| racket.organization() == self.player)
-            });
+            let own_managerial_shutdown =
+                tick.managerial_overstretch_suspensions.iter().any(|id| {
+                    self.state
+                        .enterprises()
+                        .get_enterprise(*id)
+                        .is_some_and(|racket| racket.organization() == self.player)
+                });
             // A first loss is an actionable change, not a routine daily settlement. Do not
             // repeatedly interrupt an acknowledged losing streak or reveal rival results.
             let own_new_racket_loss = tick.enterprise_cycles.iter().any(|id| {
@@ -156,9 +157,9 @@ impl Session<'_> {
                 reason = Some(
                     "your storefront has suspended operations; review 'businesses' and 'enterprises'",
                 );
-            } else if pause_exceptions && own_understaffed_racket {
+            } else if pause_exceptions && own_managerial_shutdown {
                 reason = Some(
-                    "crew losses suspended overextended rackets; review 'people', 'enterprises' and 'prospects'",
+                    "a captain cannot supervise the current racket workload; review 'people', 'delegate', 'enterprises' and 'prospects'",
                 );
             } else if pause_exceptions && own_racket_suspended {
                 reason = Some("your racket has suspended operations; review 'enterprises'");

@@ -39,13 +39,9 @@ pub use lifecycle::{
     validate_suspend_enterprise,
 };
 pub use staffing::{
-    ASSOCIATES_PER_AVAILABLE_MEMBER, BASE_ORGANIZATION_ASSOCIATE_CAPACITY,
-    BASE_ORGANIZATION_RACKET_CAPACITY, RACKETS_PER_AVAILABLE_MEMBER,
-    organization_operating_capacity,
+    ManagerWorkload, ValidatedEnterpriseStaffing, manager_workload, validate_staff_enterprise,
 };
-pub(crate) use staffing::{MAX_ASSOCIATES_PER_MANAGER, MAX_RACKETS_PER_MANAGER};
-pub use staffing::{ValidatedEnterpriseStaffing, validate_staff_enterprise};
-pub(crate) use staffing::{apply_due_understaffing_suspensions, ensure_manager_capacity};
+pub(crate) use staffing::{apply_due_overstretched_manager_suspensions, ensure_manager_capacity};
 pub use succession::{ValidatedEnterpriseReassignment, validate_reassign_enterprise};
 
 use crate::core::attention::AttentionClass;
@@ -97,15 +93,15 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum EnterpriseError {
+    #[error("manager {0} does not exist")]
+    InvalidManager(crate::core::id::CharacterId),
     #[error(
-        "organization {organization} lacks named crew to operate {rackets} rackets ({associates} associates); current capacity is {max_rackets} rackets and {max_associates} associates"
+        "manager {manager} has {required} recurring coordination duties but can currently supervise only {available}; assign a new captain, reduce field staffing, or consolidate the command portfolio"
     )]
-    OrganizationCapacityExceeded {
-        organization: OrganizationId,
-        rackets: usize,
-        associates: u32,
-        max_rackets: usize,
-        max_associates: u32,
+    ManagerWorkloadExceeded {
+        manager: crate::core::id::CharacterId,
+        required: u32,
+        available: u32,
     },
     #[error("district {0} is under a binding territorial standstill; no new rackets may open")]
     TerritoryStandstill(NeighborhoodId),
@@ -222,16 +218,6 @@ pub enum EnterpriseError {
     EnterpriseStaffingUnchanged(EnterpriseId),
     #[error("racket {0} has a settlement due; settle or suspend it before changing staffing")]
     EnterpriseStaffingCycleDue(EnterpriseId),
-    #[error(
-        "manager {manager} cannot oversee {rackets} active rackets and {associates} associates (limits {max_rackets} rackets, {max_associates} associates)"
-    )]
-    ManagerCapacityExceeded {
-        manager: crate::core::id::CharacterId,
-        rackets: u16,
-        associates: u32,
-        max_rackets: u16,
-        max_associates: u16,
-    },
     #[error("enterprise {0} is not active")]
     EnterpriseNotActive(EnterpriseId),
     #[error("enterprise {0} is not suspended")]

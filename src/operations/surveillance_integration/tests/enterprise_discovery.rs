@@ -31,7 +31,7 @@ fn make_test_rival(fixture: &mut Fixture) -> (OrganizationId, MandateAuthority) 
             organization: Some(rival),
             supervisor: None,
             autonomy: AutonomyLevel::Delegated,
-            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(100))]),
             traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
@@ -291,17 +291,25 @@ fn achieved_organization_surveillance_discovers_three_active_enterprises_and_unl
         "Xenia Ward",
         "Alpha Ward",
     ];
-    let enterprises = names.map(|name| make_test_enterprise(&mut fixture, rival, authority, name));
-    for enterprise in [enterprises[0], enterprises[2]] {
-        validate_suspend_enterprise(&fixture.state, enterprise)
-            .unwrap()
-            .commit(&mut fixture.state)
-            .unwrap();
-    }
-    validate_retire_enterprise(&fixture.state, enterprises[2])
-        .unwrap()
-        .commit(&mut fixture.state)
-        .unwrap();
+    // Retire/suspend the intended inactive records immediately. A single
+    // captain cannot validly establish six simultaneous district workloads
+    // just to close two of them after the fact.
+    let enterprises: [EnterpriseId; 6] = std::array::from_fn(|index| {
+        let enterprise = make_test_enterprise(&mut fixture, rival, authority, names[index]);
+        if index == 0 || index == 2 {
+            validate_suspend_enterprise(&fixture.state, enterprise)
+                .unwrap()
+                .commit(&mut fixture.state)
+                .unwrap();
+        }
+        if index == 2 {
+            validate_retire_enterprise(&fixture.state, enterprise)
+                .unwrap()
+                .commit(&mut fixture.state)
+                .unwrap();
+        }
+        enterprise
+    });
     for enterprise in enterprises {
         assert_unknown_enterprise(&fixture, enterprise);
     }

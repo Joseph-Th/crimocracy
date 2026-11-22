@@ -16,6 +16,8 @@ cockpit routing is in [`AGENTS.md`](AGENTS.md).
 | Persistence, invariants, or cross-domain | Owning module's focused test plus a save/restore round-trip | `.\scripts\verify.cmd` (broad gate) |
 | Mixed-state stress | `cargo soak` (always explicit, never part of a gate) | same command |
 
+Managerial span regression evidence lives in `src/enterprises/enterprise_execution/tests/staffing.rs`: workload is derived from the actual manager's capability, active rackets, headcount and geographic spread; idle hires do not enlarge existing captains' authority, stronger appointed captains can take additional work, custody suspends actual managed rackets, and save/restore preserves the resulting lifecycle. Other owners' tests cover multi-district territorial, espionage and victory scenarios with capable managers rather than constructing implausible unskilled one-person empires. Legitimate owner withdrawals retain their capital-floor and ledger invariants without any fixed per-person dollar allowance.
+
 The columns are not a required sequence. Use focused feedback while iterating or
 isolating a failure; go directly to the completion lane once it compiles and
 exercises the same owner coverage. Never rerun the broad gate after a passing
@@ -306,7 +308,7 @@ Start with `cargo text-play --generate --seed 12 --city-size small`
 or `cargo text-play --seed 12` for reproducibility and use `help` for
 the available actions. `advance` is the sole time-advance command. It stops at
 player attention events or the finite clock, reporting actual minutes advanced
-instead of rejecting after partial progress. Enterprise succession tests exercise active and suspended transfers, stale tokens, mandate indexes, historical settlement attribution and exact save restoration. The text client exercises reassignment and preserves the same settlement account and cycle IDs. Crew-span tests exercise organization-wide maximum racket/associate capacity, increased capacity after real hiring, typed rejection without mutation, automatic suspension after departure, save/restore consistency, one-person business distribution limits, and shared ledger consumption between manual and automatic withdrawal modes. The management-concentration test checks read-only warnings before investment, after establishment, and after suspension. The leadership brief distinguishes active and suspended rackets, excluding retired
+instead of rejecting after partial progress. Enterprise succession tests exercise active and suspended transfers, stale tokens, mandate indexes, historical settlement attribution and exact save restoration. The text client exercises reassignment and preserves the same settlement account and cycle IDs. The management-concentration test checks read-only warnings before investment, after establishment, and after suspension. The leadership brief distinguishes active and suspended rackets, excluding retired
 history still visible in `enterprises`. Treasury tests cover explicit daily
 distribution, retained capital, payroll funding, disabling the order, and
 deterministic save/restore. Contact briefing tests exercise the canonical per-source

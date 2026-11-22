@@ -106,7 +106,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             Err(EnterpriseError::Delegation(DelegationError::DetainedManager { .. }))
             | Err(EnterpriseError::HostBusinessSuspended { .. })
             | Err(EnterpriseError::SupportingBusinessSuspended { .. })
-            | Err(EnterpriseError::ManagerCapacityExceeded { .. })
+            | Err(EnterpriseError::ManagerWorkloadExceeded { .. })
             | Err(EnterpriseError::TerritorySuppressed { .. })
             | Err(EnterpriseError::VersionCapacity(_))
             | Err(EnterpriseError::SimulationTimeOverflow) => continue,

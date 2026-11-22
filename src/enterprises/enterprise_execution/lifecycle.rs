@@ -120,7 +120,9 @@ impl ValidatedEnterpriseStatusChange {
                 state,
                 record.organization(),
                 record.manager(),
+                record.location(),
                 record.associates(),
+                record.supporting_businesses().len(),
                 Some(record.id()),
             )?;
             validate_enterprise_environment(
@@ -245,7 +247,9 @@ pub fn validate_resume_enterprise(
         state,
         record.organization(),
         record.manager(),
+        record.location(),
         record.associates(),
+        record.supporting_businesses().len(),
         Some(record.id()),
     )?;
     validate_enterprise_environment(

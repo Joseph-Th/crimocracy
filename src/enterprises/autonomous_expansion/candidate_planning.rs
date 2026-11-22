@@ -198,7 +198,9 @@ fn build_ranked_candidate(
         economics.state,
         economics.organization,
         economics.manager,
+        location,
         kind.baseline_associates(),
+        supporting_businesses.len(),
         None,
     )
     .is_err()

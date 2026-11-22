@@ -414,61 +414,6 @@ impl FinanceState {
             .collect()
     }
 
-    /// Accounted owner distributions from business tills in the current day.
-    /// Both manual and batched automatic sweeps use the same underlying ledger
-    /// postings; switching policies or accounts cannot reset extraction throughput.
-    pub(crate) fn business_draws_for_organization_since(
-        &self,
-        organization: OrganizationId,
-        since: SimTime,
-        through: SimTime,
-    ) -> i128 {
-        let mut seen = BTreeSet::new();
-        let mut total = 0_i128;
-        for account in self.accounts_for(FinancialOwner::Organization(organization)) {
-            if account.kind() != AccountKind::AccountedFunds {
-                continue;
-            }
-            if let Some(transactions) = self.transactions_by_account.get(&account.id()) {
-                for &(_, id) in transactions.range(
-                    (since, LedgerTransactionId::from_raw(0))
-                        ..=(through, LedgerTransactionId::from_raw(u32::MAX)),
-                ) {
-                    if !seen.insert(id) {
-                        continue;
-                    }
-                    let transaction = self
-                        .transactions
-                        .get(&id)
-                        .expect("account chronology references a live transaction");
-                    let source_is_business_till = transaction.postings().iter().any(|posting| {
-                        posting.amount < Money::ZERO
-                            && self.accounts.get(&posting.account).is_some_and(|source| {
-                                source.kind() == AccountKind::LegitimateOperating
-                                    && matches!(source.owner(), FinancialOwner::Business(_))
-                            })
-                    });
-                    if source_is_business_till {
-                        total += transaction
-                            .postings()
-                            .iter()
-                            .filter(|posting| {
-                                posting.amount > Money::ZERO
-                                    && self.accounts.get(&posting.account).is_some_and(|target| {
-                                        target.kind() == AccountKind::AccountedFunds
-                                            && target.owner()
-                                                == FinancialOwner::Organization(organization)
-                                    })
-                            })
-                            .map(|posting| i128::from(posting.amount.cents()))
-                            .sum::<i128>();
-                    }
-                }
-            }
-        }
-        total
-    }
-
     pub(crate) fn transactions_for_account_through(
         &self,
         account: FinancialAccountId,

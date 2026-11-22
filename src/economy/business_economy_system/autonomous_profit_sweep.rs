@@ -6,8 +6,7 @@
 
 use super::profit_sweep::{
     BusinessProfitSweepDraft, BusinessProfitSweepError, available_business_profit,
-    remaining_owner_distribution_capacity, resolve_business_profit_sweep_context,
-    validate_business_profit_sweep_capacity,
+    resolve_business_profit_sweep_context, validate_business_profit_sweep_capacity,
 };
 use crate::core::id::{
     BusinessId, FinancialAccountId, IdKind, LedgerTransactionId, OrganizationId,
@@ -207,15 +206,6 @@ fn plan_available_profit_sources(
         return Ok(BTreeMap::new());
     }
 
-    let remaining_capacity = eligible_organizations
-        .iter()
-        .map(|&organization| {
-            (
-                organization,
-                remaining_owner_distribution_capacity(state, organization),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
     let mut groups = BTreeMap::new();
     for business in state.world.businesses() {
         let BusinessOwner::Organization(organization) = business.owner() else {
@@ -241,29 +231,20 @@ fn plan_available_profit_sources(
             continue;
         }
 
-        let already_planned = groups
-            .get(&organization)
-            .map_or(Money::ZERO, |group: &OrganizationProfitPlan| group.total);
-        // A destination can hold at most i64::MAX cents. A wealthy owner with several tills
-        // withdraws the first representable portion today and keeps the remainder invested
-        // rather than overflowing the money model or bricking every later daily tick.
-        let remaining_headroom = Money::from_cents(i64::MAX - already_planned.cents());
-        let remaining_staff_capacity = remaining_capacity[&organization]
-            .checked_sub(already_planned)
-            .unwrap_or(Money::ZERO)
-            .max(Money::ZERO);
-        let amount = surplus
-            .min(remaining_headroom)
-            .min(remaining_staff_capacity);
-        if amount == Money::ZERO {
-            continue;
-        }
         let group = groups
             .entry(organization)
             .or_insert_with(|| OrganizationProfitPlan {
                 total: Money::ZERO,
                 sources: Vec::new(),
             });
+        // A destination can hold at most i64::MAX cents. A wealthy owner with several tills
+        // withdraws the first representable portion today and keeps the remainder invested
+        // rather than overflowing the money model or bricking every later daily tick.
+        let remaining_headroom = Money::from_cents(i64::MAX - group.total.cents());
+        let amount = surplus.min(remaining_headroom);
+        if amount == Money::ZERO {
+            continue;
+        }
         group.total = group
             .total
             .checked_add(amount)

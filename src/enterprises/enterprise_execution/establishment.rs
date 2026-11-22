@@ -80,7 +80,9 @@ impl ValidatedEnterpriseEstablishment {
             state,
             self.draft.organization,
             self.draft.authority.manager,
+            self.draft.location,
             self.draft.kind.baseline_associates(),
+            self.draft.supporting_businesses.len(),
             None,
         )?;
         match &self.account_openings {
@@ -184,7 +186,9 @@ fn validate_establish_enterprise_with_optional_openings(
         state,
         draft.organization,
         draft.authority.manager,
+        draft.location,
         draft.kind.baseline_associates(),
+        draft.supporting_businesses.len(),
         None,
     )?;
     validate_enterprise_environment(

@@ -1,216 +1,4 @@
-use super::super::staffing::organization_racket_overextension;
 use super::*;
-
-#[test]
-fn operating_empire_requires_live_named_crew_and_suspends_excess_after_departures() {
-    let registry = build_registry();
-    let mut fixture = make_test_enterprise_fixture();
-    let owner = fixture.organization;
-    let executive = fixture.authority.manager;
-    let neighborhood = match fixture.location {
-        EnterpriseLocation::Neighborhood(id) => id,
-        _ => unreachable!(),
-    };
-    let profile = fixture
-        .state
-        .world()
-        .get_neighborhood(neighborhood)
-        .unwrap()
-        .profile();
-    let scope = ResponsibilityScope::Function(ResponsibilityFunction::Enterprise);
-    validate_revise_mandate(
-        &fixture.state,
-        fixture.authority.mandate,
-        MandateRevisionDraft {
-            scopes: BTreeSet::from([fixture.authority.scope, scope]),
-            standing_orders: BTreeMap::new(),
-            budget: None,
-        },
-    )
-    .unwrap()
-    .commit(&mut fixture.state)
-    .unwrap();
-    let first_authority = MandateAuthority {
-        scope,
-        ..fixture.authority
-    };
-    let second_manager = insert_character(
-        &mut fixture.state,
-        CharacterDraft {
-            name: "District Captain".to_owned(),
-            organization: Some(owner),
-            supervisor: Some(executive),
-            autonomy: AutonomyLevel::Delegated,
-            capabilities: BTreeMap::new(),
-            traits: BTreeSet::new(),
-            drives: BTreeMap::new(),
-        },
-    )
-    .unwrap();
-    let second_mandate = validate_assign_mandate(
-        &fixture.state,
-        MandateDraft {
-            organization: owner,
-            manager: second_manager,
-            scopes: BTreeSet::from([scope]),
-            standing_orders: BTreeMap::new(),
-            budget: None,
-        },
-    )
-    .unwrap()
-    .commit(&mut fixture.state)
-    .unwrap();
-    let second_authority = MandateAuthority {
-        mandate: second_mandate,
-        manager: second_manager,
-        scope,
-    };
-    let mut districts = vec![neighborhood];
-    for index in 1..7 {
-        districts.push(
-            insert_neighborhood(
-                &mut fixture.state,
-                NeighborhoodDraft {
-                    name: format!("Expansion District {index}"),
-                    profile,
-                },
-            )
-            .unwrap(),
-        );
-    }
-    let mut rackets = Vec::new();
-    for (index, &district) in districts.iter().enumerate().take(6) {
-        let settlement = if index == 0 {
-            fixture.settlement
-        } else {
-            insert_account(
-                &mut fixture.state,
-                FinancialAccountDraft {
-                    owner: FinancialOwner::Organization(owner),
-                    kind: AccountKind::Settlement,
-                },
-            )
-            .unwrap()
-        };
-        let token = validate_establish_enterprise(
-            &registry,
-            &fixture.state,
-            EnterpriseDraft {
-                kind: EnterpriseKind::Protection,
-                organization: owner,
-                authority: first_authority,
-                location: EnterpriseLocation::Neighborhood(district),
-                supporting_businesses: BTreeSet::new(),
-                cash_account: fixture.cash,
-                settlement_account: settlement,
-            },
-        )
-        .unwrap();
-        rackets.push(token.commit(&mut fixture.state).unwrap());
-    }
-    assert_eq!(
-        organization_operating_capacity(&fixture.state, owner),
-        (6, 24)
-    );
-    let seventh_settlement = insert_account(
-        &mut fixture.state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Organization(owner),
-            kind: AccountKind::Settlement,
-        },
-    )
-    .unwrap();
-    let seventh = EnterpriseDraft {
-        kind: EnterpriseKind::Protection,
-        organization: owner,
-        authority: second_authority,
-        location: EnterpriseLocation::Neighborhood(districts[6]),
-        supporting_businesses: BTreeSet::new(),
-        cash_account: fixture.cash,
-        settlement_account: seventh_settlement,
-    };
-    let before = bincode::serialize(&fixture.state).unwrap();
-    assert!(matches!(
-        validate_establish_enterprise(&registry, &fixture.state, seventh.clone()),
-        Err(EnterpriseError::OrganizationCapacityExceeded {
-            rackets: 7,
-            associates: 28,
-            max_rackets: 6,
-            max_associates: 24,
-            ..
-        })
-    ));
-    assert_eq!(before, bincode::serialize(&fixture.state).unwrap());
-    let mut extra = Vec::new();
-    for index in 0..2 {
-        extra.push(
-            insert_character(
-                &mut fixture.state,
-                CharacterDraft {
-                    name: format!("Additional Executive {index}"),
-                    organization: Some(owner),
-                    supervisor: Some(executive),
-                    autonomy: AutonomyLevel::Guided,
-                    capabilities: BTreeMap::new(),
-                    traits: BTreeSet::new(),
-                    drives: BTreeMap::new(),
-                },
-            )
-            .unwrap(),
-        );
-    }
-    assert_eq!(
-        organization_operating_capacity(&fixture.state, owner),
-        (8, 40)
-    );
-    let seventh_id = validate_establish_enterprise(&registry, &fixture.state, seventh)
-        .unwrap()
-        .commit(&mut fixture.state)
-        .unwrap();
-    for member in extra {
-        validate_reassign_character(&fixture.state, member, None, None)
-            .unwrap()
-            .commit(&mut fixture.state)
-            .unwrap();
-    }
-    assert_eq!(
-        organization_operating_capacity(&fixture.state, owner),
-        (6, 24)
-    );
-    assert!(organization_racket_overextension(&fixture.state, owner).contains(&seventh_id));
-    assert!(
-        apply_due_understaffing_suspensions(&mut fixture.state).is_empty(),
-        "staffing maintenance only changes live rackets at the day boundary"
-    );
-    fixture
-        .state
-        .advance_clock(SimDuration::from_minutes(1_440));
-    assert_eq!(
-        apply_due_understaffing_suspensions(&mut fixture.state),
-        vec![seventh_id]
-    );
-    assert_eq!(
-        fixture
-            .state
-            .enterprises()
-            .get_enterprise(seventh_id)
-            .unwrap()
-            .status(),
-        EnterpriseStatus::Suspended
-    );
-    assert!(rackets.iter().all(|id| {
-        fixture
-            .state
-            .enterprises()
-            .get_enterprise(*id)
-            .unwrap()
-            .status()
-            == EnterpriseStatus::Active
-    }));
-    let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
-    assert!(organization_racket_overextension(&restored, owner).is_empty());
-    validate_state_against_registry(&registry, &restored).unwrap();
-}
 
 #[test]
 fn rank_and_file_staffing_changes_operating_books_and_preserves_historical_payroll() {
@@ -363,14 +151,20 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
     let enterprise = establish_protection(&registry, &mut fixture);
     let manager = fixture.authority.manager;
     let baseline = fixture.state.clone();
-    assert_eq!(MAX_RACKETS_PER_MANAGER, 6);
-    assert_eq!(MAX_ASSOCIATES_PER_MANAGER, 24);
+    let location = fixture.location;
+    let initial_load = manager_workload(&fixture.state, manager).unwrap();
+    assert_eq!(initial_load.rackets, 1);
+    assert_eq!(initial_load.associates, 4);
+    assert_eq!(initial_load.required, 5);
+    assert_eq!(initial_load.available, 27);
     assert!(
         ensure_manager_capacity(
             &fixture.state,
             fixture.organization,
             manager,
-            24,
+            location,
+            20,
+            0,
             Some(enterprise)
         )
         .is_ok()
@@ -380,24 +174,86 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
             &fixture.state,
             fixture.organization,
             manager,
+            location,
             25,
+            0,
             Some(enterprise)
         ),
-        Err(EnterpriseError::ManagerCapacityExceeded {
-            max_associates: 24,
-            ..
-        })
+        Ok(())
     ));
     validate_staff_enterprise(&fixture.state, enterprise, 12)
         .unwrap()
         .commit(&mut fixture.state)
         .unwrap();
     assert!(matches!(
-        ensure_manager_capacity(&fixture.state, fixture.organization, manager, 13, None),
-        Err(EnterpriseError::ManagerCapacityExceeded { associates: 25, .. })
+        ensure_manager_capacity(
+            &fixture.state,
+            fixture.organization,
+            manager,
+            location,
+            14,
+            0,
+            None
+        ),
+        Err(EnterpriseError::ManagerWorkloadExceeded {
+            required: 28,
+            available: 27,
+            ..
+        })
     ));
     assert!(
-        ensure_manager_capacity(&fixture.state, fixture.organization, manager, 12, None).is_ok()
+        ensure_manager_capacity(
+            &fixture.state,
+            fixture.organization,
+            manager,
+            location,
+            13,
+            0,
+            None
+        )
+        .is_ok()
+    );
+    // Idle hires are not phantom management bandwidth. Only reassigning
+    // operational responsibility to a capable captain increases real coverage.
+    let additional_captain = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Additional Captain".to_owned(),
+            organization: Some(fixture.organization),
+            supervisor: Some(manager),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(90).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        ensure_manager_capacity(
+            &fixture.state,
+            fixture.organization,
+            manager,
+            location,
+            14,
+            0,
+            None
+        ),
+        Err(EnterpriseError::ManagerWorkloadExceeded { .. })
+    ));
+    assert!(
+        ensure_manager_capacity(
+            &fixture.state,
+            fixture.organization,
+            additional_captain,
+            location,
+            14,
+            0,
+            None
+        )
+        .is_ok()
     );
     assert_eq!(
         baseline
@@ -408,6 +264,98 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
         4
     );
     validate_state_against_registry(&registry, &fixture.state).unwrap();
+}
+
+#[test]
+fn arrested_captain_forces_real_racket_shutdown_without_a_magic_staffing_buffer() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let racket = establish_protection(&registry, &mut fixture);
+    let captain = fixture.authority.manager;
+    let police = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Command Disruption Police".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .unwrap();
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Captain custody case".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(captain)]),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let mut evidence = BTreeSet::new();
+    for (kind, strength) in [
+        (EvidenceKind::FinancialRecord, EvidenceStrength::Strong),
+        (EvidenceKind::Document, EvidenceStrength::Corroborating),
+    ] {
+        evidence.insert(
+            validate_add_evidence(
+                &fixture.state,
+                EvidenceDraft {
+                    investigation,
+                    custodian: police,
+                    subject: EntityRef::Character(captain),
+                    origin: None,
+                    kind,
+                    strength,
+                    reliability: EvidenceReliability::HighlyReliable,
+                    admissibility: Admissibility::Admissible,
+                    discovered_at: fixture.state.now(),
+                },
+            )
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap(),
+        );
+    }
+    validate_arrest(
+        &registry,
+        &fixture.state,
+        ArrestDraft {
+            character: captain,
+            investigation,
+            evidence,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let workload = manager_workload(&fixture.state, captain).unwrap();
+    assert_eq!(workload.required, 0);
+    assert_eq!(workload.available, 0);
+    assert!(apply_due_overstretched_manager_suspensions(&mut fixture.state).is_empty());
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    assert!(apply_due_overstretched_manager_suspensions(&mut fixture.state).is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(racket)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Suspended
+    );
+    let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .enterprises()
+            .get_enterprise(racket)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Suspended
+    );
+    validate_state_against_registry(&registry, &restored).unwrap();
 }
 
 #[test]

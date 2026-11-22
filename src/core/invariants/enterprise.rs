@@ -5,9 +5,6 @@ use crate::core::entity::EntityRef;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::delegation::{MandateRecord, MandateStatus};
-use crate::enterprises::enterprise_execution::{
-    MAX_ASSOCIATES_PER_MANAGER, MAX_RACKETS_PER_MANAGER,
-};
 use crate::enterprises::{
     EnterpriseCycleRecord, EnterpriseLocation, EnterpriseRecord, EnterpriseStatus,
 };
@@ -29,19 +26,8 @@ struct EnterpriseAuthorityRefs<'a> {
 
 pub(super) fn validate_enterprises(state: &AppState) -> Result<(), StateValidationError> {
     let mut occupied = BTreeMap::new();
-    let mut manager_load = BTreeMap::<crate::core::id::CharacterId, (u16, u32)>::new();
     for enterprise in state.enterprises.enterprises() {
         validate_enterprise_record(state, enterprise)?;
-        if enterprise.status() == EnterpriseStatus::Active {
-            let load = manager_load.entry(enterprise.manager()).or_default();
-            load.0 = load.0.saturating_add(1);
-            load.1 += u32::from(enterprise.associates());
-            if load.0 > MAX_RACKETS_PER_MANAGER || load.1 > u32::from(MAX_ASSOCIATES_PER_MANAGER) {
-                return Err(StateValidationError::InvalidEnterpriseRuntime {
-                    enterprise: enterprise.id(),
-                });
-            }
-        }
         if enterprise.status() != EnterpriseStatus::Retired
             && let Some(existing) =
                 occupied.insert((enterprise.kind(), enterprise.location()), enterprise.id())

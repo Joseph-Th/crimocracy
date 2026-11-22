@@ -56,8 +56,7 @@ pub use lifecycle::{
 };
 pub use profit_sweep::{
     BusinessProfitSweepDraft, BusinessProfitSweepError, ValidatedBusinessProfitSweep,
-    remaining_owner_distribution_capacity, resolve_available_business_profit,
-    validate_sweep_business_profits,
+    resolve_available_business_profit, validate_sweep_business_profits,
 };
 
 #[cfg(test)]

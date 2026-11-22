@@ -450,20 +450,21 @@ redundant leadership instead of one manager nominally directing every district.
 Expansion therefore brings both wage obligations and a real need to recruit and
 delegate, not merely to open another profitable racket.
 
-**Crew size must constrain the operating empire continuously**, not only the
-victory checklist. Ownership of many legitimate establishments does not imply
-the executive can personally supervise every till and withdraw all daily profits.
-Named available members provide limited trusted distribution throughput; when
-staffing is insufficient, real earned profits remain at their individual
-businesses rather than becoming instantly spendable organization cash.
-Running criminal rackets consumes leadership attention that would otherwise
-support legitimate business collection. Likewise, expanding active rackets and
-the number of rank-and-file workers they command must eventually require more
-named staff, beyond existing per-captain limits. When members are detained or
-leave, the empire loses immediate usable capacity and some active rackets shut
-down, rather than keeping an implausibly profitable footprint. Hiring or
-recruiting restores capacity. These everyday economic consequences must create
-recruitment decisions before the player reaches a victory screen.
+**The real constraint is managerial workload versus actual assigned people.**
+Every active racket requires a trusted named captain plus a rank-and-file crew.
+That captain's work increases with the number of separate venues, associates,
+supporting businesses, and districts they oversee. Their Management competence
+and availability determine how much they can actually handle; additional named
+staff help only when given genuine assignments, not merely because they appear
+on the payroll. Overextension disrupts or prevents operations, while delegation
+to skilled captains restores control. Legal stores have ordinary employees and
+can distribute lawful dividends regardless of the criminal organization's
+headcount; control of street operations and cash transfer are different jobs.
+
+These are continuous constraints during gameplay, not thresholds applied only
+at the victory screen. Tunable skill-to-work conversion is part of balancing;
+fixed numbers of rackets per member or dollar caps per employee should not
+stand in for the operational model.
 
 Each manager has:
 
