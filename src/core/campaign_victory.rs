@@ -11,6 +11,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current};
+use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
 use crate::economy::BusinessOperatingStatus;
 use crate::enterprises::EnterpriseStatus;
 use crate::finance::finance_system::{
@@ -30,7 +31,7 @@ use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::territory_influence::{
     NeighborhoodInfluenceSummary, resolve_neighborhood_influence,
 };
-use crate::world::{BusinessOwner, OrganizationKind};
+use crate::world::{AutonomyLevel, BusinessKind, BusinessOwner, OrganizationKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -62,6 +63,11 @@ pub const RETIREMENT_SEVERANCE_DAYS: i64 = 180;
 /// Economic and territorial coalitions must prove they can sustain operations.
 pub const VICTORY_ESTABLISHMENT_DAYS: u64 = 90;
 pub const POLITICAL_CONTACT_DAYS: u64 = 30;
+/// A civic coalition needs its own district organizers plus two headquarters
+/// personnel; a business portfolio cannot substitute for a real leadership team.
+pub const POLITICAL_HEADQUARTERS_PERSONNEL: usize = 2;
+/// Local civic support must span multiple established kinds of commerce.
+pub const POLITICAL_BUSINESS_KINDS_PER_DISTRICT: usize = 2;
 pub const VICTORY_PROFITABLE_CYCLES: usize = 20;
 pub const VICTORY_INCOME_WINDOW_DAYS: u64 = 30;
 const VICTORY_FRESH_SETTLEMENT_DAYS: u64 = 7;
@@ -89,12 +95,15 @@ pub struct VictoryProgress {
     pub total_districts: usize,
     /// Current named leadership, not an estimate of unnamed racket employees.
     pub key_personnel: usize,
+    pub required_political_personnel: usize,
     pub required_underboss_personnel: usize,
     pub required_political_districts: usize,
     pub owned_operating_business_districts: usize,
     pub active_political_contacts: usize,
     pub established_political_contacts: usize,
     pub established_business_districts: usize,
+    /// Economically qualified districts with distinct, active political organizers.
+    pub staffed_political_districts: usize,
     pub required_underboss_districts: usize,
     pub own_active_racket_districts: usize,
     pub established_racket_districts: usize,
@@ -127,9 +136,17 @@ pub struct PoliticalDistrictProgress {
     pub mature_active: usize,
     /// Mature businesses with fresh settlements and at least 20 profitable cycles in 30 days.
     pub established_active: usize,
+    /// Distinct business sectors with 20 profitable recent settlements each.
+    pub established_kinds: usize,
+    /// Possible local political delegates, prior to citywide one-person-one-district matching.
+    pub available_stewards: usize,
+    /// Assigned organizer, not reusable in another qualifying district.
+    pub steward: Option<CharacterId>,
     /// Last 30 days' net from all mature, active owned storefronts in this district.
     pub mature_window_net: Money,
-    /// Has an established storefront and enough combined mature net to fund one member for 30 days.
+    /// Mature diversified commerce and sufficient realized local earnings.
+    pub economically_qualified: bool,
+    /// Economically qualified and independently staffed with a political delegate.
     pub qualifies: bool,
 }
 
@@ -142,7 +159,7 @@ pub enum VictoryError {
     #[error("Campaign over: victory has already been claimed")]
     AlreadyWon,
     #[error(
-        "legitimate political power requires a 30-day political contact and 90-day businesses earning at least one member's wages per district across three quarters of the city, with a mature legitimate portfolio covering total payroll"
+        "legitimate political power requires a 30-day political contact, two distinct kinds of 90-day profitable businesses and one independent delegated political organizer in each of three quarters of city districts, two headquarters personnel, and mature legitimate income covering total payroll"
     )]
     PoliticalNotReady,
     #[error(
@@ -315,19 +332,103 @@ fn established_business(state: &AppState, business: BusinessId, owner: Organizat
         == VICTORY_PROFITABLE_CYCLES
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct BusinessDistrictStanding {
     active: usize,
     suspended: usize,
     mature: usize,
     established: usize,
+    established_kinds: BTreeSet<BusinessKind>,
     window_net: i128,
 }
 
 impl BusinessDistrictStanding {
-    fn qualifies(self, local_income_floor: i128) -> bool {
-        self.established > 0 && self.window_net >= local_income_floor && self.window_net > 0
+    fn qualifies(&self, local_income_floor: i128) -> bool {
+        self.established_kinds.len() >= POLITICAL_BUSINESS_KINDS_PER_DISTRICT
+            && self.window_net >= local_income_floor
+            && self.window_net > 0
     }
+}
+
+/// Returns local delegate candidates and a maximum independent assignment to
+/// economically qualified districts. Reusing one broadly mandated lieutenant
+/// in six districts is not a six-district political organization.
+fn political_district_stewards(
+    state: &AppState,
+    owner: OrganizationId,
+    economically_ready: &BTreeSet<NeighborhoodId>,
+) -> (
+    BTreeMap<NeighborhoodId, BTreeSet<CharacterId>>,
+    BTreeMap<NeighborhoodId, CharacterId>,
+) {
+    let mut candidates = BTreeMap::<NeighborhoodId, BTreeSet<CharacterId>>::new();
+    for &district in economically_ready {
+        let members = state
+            .delegation()
+            .active_for_scope(ResponsibilityScope::Neighborhood(district))
+            .filter(|mandate| {
+                mandate.organization() == owner
+                    && mandate.scopes().contains(&ResponsibilityScope::Function(
+                        ResponsibilityFunction::Political,
+                    ))
+            })
+            .filter_map(|mandate| {
+                let member = state.world().get_character(mandate.manager())?;
+                (member.organization() == Some(owner)
+                    && member.supervisor().is_some()
+                    && matches!(
+                        member.autonomy(),
+                        AutonomyLevel::Delegated | AutonomyLevel::Broad
+                    )
+                    && state
+                        .legal()
+                        .active_arrest_for_character(member.id())
+                        .is_none())
+                .then_some(member.id())
+            })
+            .collect();
+        candidates.insert(district, members);
+    }
+
+    // Standard augmenting-path matching. Every matched district consumes an
+    // actual, distinct named person; an alternate local appointment can free a
+    // shared organizer for a district with fewer choices.
+    fn augment(
+        district: NeighborhoodId,
+        candidates: &BTreeMap<NeighborhoodId, BTreeSet<CharacterId>>,
+        visited: &mut BTreeSet<CharacterId>,
+        assigned: &mut BTreeMap<CharacterId, NeighborhoodId>,
+    ) -> bool {
+        for &manager in candidates
+            .get(&district)
+            .expect("matching only traverses economically eligible districts")
+        {
+            if !visited.insert(manager) {
+                continue;
+            }
+            if assigned
+                .get(&manager)
+                .copied()
+                .is_none_or(|previous| augment(previous, candidates, visited, assigned))
+            {
+                assigned.insert(manager, district);
+                return true;
+            }
+        }
+        false
+    }
+
+    let mut assigned = BTreeMap::<CharacterId, NeighborhoodId>::new();
+    for &district in economically_ready {
+        augment(district, &candidates, &mut BTreeSet::new(), &mut assigned);
+    }
+    (
+        candidates,
+        assigned
+            .into_iter()
+            .map(|(manager, district)| (district, manager))
+            .collect(),
+    )
 }
 
 /// Own-books political readiness by district. This excludes unknown rival
@@ -340,20 +441,37 @@ pub fn political_district_progress(
     let organization = state.player_organization().ok_or(VictoryError::NoPlayer)?;
     let local_income_floor = i128::from(registry.upkeep().per_member_daily().cents())
         * i128::from(VICTORY_INCOME_WINDOW_DAYS);
-    Ok(business_district_standings(state, organization)
+    let standings = business_district_standings(state, organization);
+    let economically_ready = standings
+        .iter()
+        .filter(|(_, standing)| standing.qualifies(local_income_floor))
+        .map(|(&district, _)| district)
+        .collect();
+    let (candidates, assigned) =
+        political_district_stewards(state, organization, &economically_ready);
+    Ok(standings
         .into_iter()
-        .map(|(district, standing)| PoliticalDistrictProgress {
-            district,
-            active_owned: standing.active,
-            suspended_owned: standing.suspended,
-            mature_active: standing.mature,
-            established_active: standing.established,
-            mature_window_net: Money::from_cents(
-                standing
-                    .window_net
-                    .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
-            ),
-            qualifies: standing.qualifies(local_income_floor),
+        .map(|(district, standing)| {
+            let economically_qualified = standing.qualifies(local_income_floor);
+            let steward = assigned.get(&district).copied();
+            PoliticalDistrictProgress {
+                district,
+                active_owned: standing.active,
+                suspended_owned: standing.suspended,
+                mature_active: standing.mature,
+                established_active: standing.established,
+                established_kinds: standing.established_kinds.len(),
+                available_stewards: candidates.get(&district).map_or(0, BTreeSet::len),
+                steward,
+                mature_window_net: Money::from_cents(
+                    standing
+                        .window_net
+                        .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+                        as i64,
+                ),
+                economically_qualified,
+                qualifies: economically_qualified && steward.is_some(),
+            }
         })
         .collect())
 }
@@ -381,6 +499,7 @@ fn business_district_standings(
             entry.window_net += recent_business_net(state, business.id(), owner);
             if established_business(state, business.id(), owner) {
                 entry.established += 1;
+                entry.established_kinds.insert(business.kind());
             }
         }
     }
@@ -462,6 +581,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .characters_in_organization(organization)
         .count();
     let required_political_districts = (total_districts * 3).div_ceil(4);
+    let required_political_personnel =
+        required_political_districts.saturating_add(POLITICAL_HEADQUARTERS_PERSONNEL);
     let required_underboss_districts = (total_districts * 3).div_ceil(4);
     let required_underboss_personnel = required_underboss_personnel(required_underboss_districts);
     let per_member_wage = i128::from(registry.upkeep().per_member_daily().cents());
@@ -481,6 +602,13 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .values()
         .filter(|standing| standing.qualifies(local_income_floor))
         .count();
+    let economically_ready = business_standings
+        .iter()
+        .filter(|(_, standing)| standing.qualifies(local_income_floor))
+        .map(|(&district, _)| district)
+        .collect();
+    let (_, staffed_political_districts) =
+        political_district_stewards(state, organization, &economically_ready);
     let legitimate_window_net = business_standings
         .values()
         .map(|standing| standing.window_net)
@@ -644,12 +772,14 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
     Ok(VictoryProgress {
         total_districts,
         key_personnel,
+        required_political_personnel,
         required_underboss_personnel,
         required_political_districts,
         owned_operating_business_districts,
         active_political_contacts,
         established_political_contacts,
         established_business_districts,
+        staffed_political_districts: staffed_political_districts.len(),
         required_underboss_districts,
         own_active_racket_districts,
         established_racket_districts: established_racket_districts.len(),
@@ -703,6 +833,8 @@ fn ensure_eligible(
                 || standing.total_districts == 0
                 || standing.established_business_districts
                     < standing.required_political_districts
+                || standing.key_personnel < standing.required_political_personnel
+                || standing.staffed_political_districts < standing.required_political_districts
                 || !standing.legitimate_self_sufficient =>
         {
             Err(VictoryError::PoliticalNotReady)
@@ -870,7 +1002,7 @@ pub fn validate_claim_victory(
             attention: AttentionClass::Crisis,
             summary: match path {
                 VictoryPath::PoliticalPower =>
-                    "Legitimate businesses across the city and a live political sponsor secured a governing coalition.".to_owned(),
+                    "Distinct district organizers, diversified established businesses, and a live political sponsor secured a governing coalition.".to_owned(),
                 VictoryPath::FundedRetirement =>
                     "The leader retired with a funded nest egg; each subordinate received 180 days of wages in an accounted personal account.".to_owned(),
                 VictoryPath::CityUnderboss =>

@@ -117,6 +117,29 @@ fn hire_additional_staff(
 }
 
 #[test]
+fn political_business_coalition_requires_distinct_profitable_industries() {
+    let mut standing = BusinessDistrictStanding {
+        active: 2,
+        mature: 2,
+        established: 2,
+        window_net: 250_000,
+        ..BusinessDistrictStanding::default()
+    };
+    standing.established_kinds.insert(BusinessKind::Pawnshop);
+    assert!(
+        !standing.qualifies(120_000),
+        "two pawnshops are still a single local commercial constituency"
+    );
+    standing.established_kinds.insert(BusinessKind::Hospitality);
+    assert!(standing.qualifies(120_000));
+    standing.window_net = 119_999;
+    assert!(
+        !standing.qualifies(120_000),
+        "diversity cannot replace income"
+    );
+}
+
+#[test]
 fn retirement_rejects_unfunded_settlement_without_mutating_books() {
     let (registry, mut state, owner, _, _) = retirement_fixture();
     fund(&mut state, owner, RETIREMENT_NEST_EGG.cents());
@@ -283,10 +306,15 @@ fn victory_token_rejects_clock_drift_without_paying_anyone() {
 fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaign() {
     use crate::city_generation::{CityScale, generate_city};
     use crate::contacts::contact_system::{InstitutionalContactDraft, validate_establish_contact};
+    use crate::delegation::delegation_system::{
+        MandateRevisionDraft, validate_assign_mandate, validate_revise_mandate,
+    };
+    use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
     use crate::economy::business_acquisition::{
         BusinessAcquisitionDraft, validate_acquire_business,
     };
     use crate::world::BusinessOwner;
+    use crate::world::world_system::validate_set_character_autonomy;
 
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(104)).unwrap();
@@ -471,17 +499,198 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     assert!(established.legitimate_self_sufficient);
     assert!(established.legitimate_daily_net >= established.daily_payroll);
     let mature_districts = political_district_progress(&registry, &city.state).unwrap();
+    assert_eq!(established.staffed_political_districts, 0);
     assert_eq!(
-        mature_districts.iter().filter(|row| row.qualifies).count(),
+        validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
+        Some(VictoryError::PoliticalNotReady),
+        "passive real estate must not create a citywide political coalition"
+    );
+    assert_eq!(
+        mature_districts
+            .iter()
+            .filter(|row| row.economically_qualified)
+            .count(),
         established.established_business_districts,
-        "district-level view must agree with the victory validator"
+        "district-level financial view must agree with the victory validator"
     );
     assert!(
         mature_districts
             .iter()
-            .filter(|row| row.qualifies)
-            .all(|row| row.established_active > 0 && row.mature_window_net > Money::ZERO)
+            .filter(|row| row.economically_qualified)
+            .all(
+                |row| row.established_kinds >= POLITICAL_BUSINESS_KINDS_PER_DISTRICT
+                    && row.mature_window_net > Money::ZERO
+            )
     );
+    assert!(mature_districts.iter().all(|row| !row.qualifies));
+
+    // Even a broad political mandate covering every profitable district is
+    // just one person. It can staff only one district, not a civic coalition.
+    let districts = mature_districts
+        .iter()
+        .filter(|row| row.economically_qualified)
+        .map(|row| row.district)
+        .collect::<Vec<_>>();
+    let managers = city
+        .state
+        .world()
+        .characters_in_organization(city.player)
+        .filter(|member| member.supervisor().is_some())
+        .map(|member| member.id())
+        .take(districts.len())
+        .collect::<Vec<_>>();
+    assert_eq!(managers.len(), districts.len());
+    assert!(established.key_personnel >= established.required_political_personnel);
+    for &manager in &managers {
+        if !matches!(
+            city.state
+                .world()
+                .get_character(manager)
+                .unwrap()
+                .autonomy(),
+            AutonomyLevel::Delegated | AutonomyLevel::Broad
+        ) {
+            validate_set_character_autonomy(
+                &city.state,
+                city.player,
+                manager,
+                AutonomyLevel::Delegated,
+            )
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        }
+    }
+    let first = managers[0];
+    let wide_scopes = districts
+        .iter()
+        .map(|district| ResponsibilityScope::Neighborhood(*district))
+        .chain(std::iter::once(ResponsibilityScope::Function(
+            ResponsibilityFunction::Political,
+        )))
+        .collect::<BTreeSet<_>>();
+    if let Some(mandate) = city.state.delegation().active_for_manager(first) {
+        validate_revise_mandate(
+            &city.state,
+            mandate.id(),
+            MandateRevisionDraft {
+                scopes: mandate.scopes().union(&wide_scopes).copied().collect(),
+                standing_orders: mandate.standing_orders().clone(),
+                budget: mandate.budget(),
+            },
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    } else {
+        validate_assign_mandate(
+            &city.state,
+            MandateDraft {
+                organization: city.player,
+                manager: first,
+                scopes: wide_scopes,
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    }
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .staffed_political_districts,
+        1
+    );
+    assert_eq!(
+        validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
+        Some(VictoryError::PoliticalNotReady)
+    );
+    for (&manager, &district) in managers.iter().skip(1).zip(districts.iter().skip(1)) {
+        let scope = ResponsibilityScope::Neighborhood(district);
+        if let Some(mandate) = city.state.delegation().active_for_manager(manager) {
+            let mut scopes = mandate.scopes().clone();
+            scopes.insert(scope);
+            scopes.insert(ResponsibilityScope::Function(
+                ResponsibilityFunction::Political,
+            ));
+            validate_revise_mandate(
+                &city.state,
+                mandate.id(),
+                MandateRevisionDraft {
+                    scopes,
+                    standing_orders: mandate.standing_orders().clone(),
+                    budget: mandate.budget(),
+                },
+            )
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        } else {
+            validate_assign_mandate(
+                &city.state,
+                MandateDraft {
+                    organization: city.player,
+                    manager,
+                    scopes: BTreeSet::from([
+                        scope,
+                        ResponsibilityScope::Function(ResponsibilityFunction::Political),
+                    ]),
+                    standing_orders: BTreeMap::new(),
+                    budget: None,
+                },
+            )
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        }
+    }
+    let staffed = progress(&registry, &city.state).unwrap();
+    assert_eq!(staffed.staffed_political_districts, districts.len());
+    assert_eq!(
+        political_district_progress(&registry, &city.state)
+            .unwrap()
+            .iter()
+            .filter(|row| row.qualifies)
+            .count(),
+        staffed.staffed_political_districts
+    );
+    assert!(staffed.legitimate_self_sufficient);
+    assert!(staffed.key_personnel >= staffed.required_political_personnel);
+    // A political delegate needs current independent authority, not a name
+    // in a historical mandate or a dormant member's payroll record.
+    validate_set_character_autonomy(&city.state, city.player, managers[1], AutonomyLevel::Tight)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .staffed_political_districts,
+        districts.len() - 1
+    );
+    assert_eq!(
+        validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
+        Some(VictoryError::PoliticalNotReady)
+    );
+    validate_set_character_autonomy(
+        &city.state,
+        city.player,
+        managers[1],
+        AutonomyLevel::Delegated,
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .staffed_political_districts,
+        districts.len()
+    );
+    let established = staffed;
+    let mature_districts = political_district_progress(&registry, &city.state).unwrap();
     let restored_before_claim =
         restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(

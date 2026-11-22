@@ -114,6 +114,11 @@ impl Session<'_> {
                     standing.established_political_contacts, standing.active_political_contacts,
                     standing.owned_operating_business_districts, standing.established_business_districts,
                     standing.required_political_districts, standing.total_districts).unwrap();
+                writeln!(out, "    Named political staff: {} / {} required ({} headquarters and one independent local delegate per required district); staffed mature districts: {} / {}",
+                    standing.key_personnel, standing.required_political_personnel,
+                    crimocracy::core::campaign_victory::POLITICAL_HEADQUARTERS_PERSONNEL,
+                    standing.staffed_political_districts, standing.required_political_districts).unwrap();
+                out.push_str("    Each district needs two distinct kinds of mature profitable businesses and its own active, undetained delegate with both a neighborhood mandate and Political function scope, at Delegated or Broad autonomy. One manager cannot count for two districts; the leader cannot serve as a district delegate.\n");
                 writeln!(out, "    Mature legitimate income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.legitimate_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
@@ -141,17 +146,30 @@ impl Session<'_> {
                         "needs an active storefront continuously owned for 90 days"
                     } else if district.established_active == 0 {
                         "needs a mature storefront with 20 profitable cycles in 30 days and a recent settlement"
-                    } else {
+                    } else if district.established_kinds
+                        < crimocracy::core::campaign_victory::POLITICAL_BUSINESS_KINDS_PER_DISTRICT
+                    {
+                        "needs two different established business kinds"
+                    } else if !district.economically_qualified {
                         "mature storefront income below one member's 30-day wages"
+                    } else if district.steward.is_none() {
+                        "needs an independent eligible political district delegate"
+                    } else {
+                        "not locally qualified"
                     };
+                    let steward = district
+                        .steward
+                        .map_or("none".to_owned(), |id| format!("char-{}", id.raw()));
                     writeln!(
                         out,
-                        "      district-{} {name}: {reason} | {} active, {} suspended, {} mature, {} settlement-qualified | mature 30d net {} / {} cents required",
+                        "      district-{} {name}: {reason} | {} active, {} suspended, {} mature, {} settlement-qualified, {} kinds | {} available delegates, assigned {steward} | mature 30d net {} / {} cents required",
                         district.district.raw(),
                         district.active_owned,
                         district.suspended_owned,
                         district.mature_active,
                         district.established_active,
+                        district.established_kinds,
+                        district.available_stewards,
                         district.mature_window_net.cents(),
                         local_floor
                     )
