@@ -57,6 +57,19 @@ pub(crate) fn resolve_objective_blocker(
     state: &AppState,
     operation: &OperationRecord,
 ) -> Option<OperationObjectiveBlocker> {
+    if operation.kind().business_target_ownership()
+        == Some(OperationBusinessTargetOwnership::Foreign)
+        && let Some(business) = operation.objective().business_target()
+        && let Some(venue) = state.world().get_business(business)
+        && crate::world::territory_influence::active_standstill(
+            state,
+            operation.responsible_organization(),
+            venue.neighborhood(),
+        )
+        .is_some()
+    {
+        return Some(OperationObjectiveBlocker::TerritorialStandstill);
+    }
     if operation.kind().business_target_ownership().is_some()
         && let Some(business) = operation.objective().business_target()
         && business_target_ownership_mismatch(state, operation, business)
@@ -131,6 +144,9 @@ pub(crate) fn blocker_clause(
     blocker: OperationObjectiveBlocker,
 ) -> &'static str {
     match blocker {
+        OperationObjectiveBlocker::TerritorialStandstill => {
+            "A binding territorial standstill was signed before the crew began this hostile business operation. Leadership cancelled the attack rather than breaching the agreement."
+        }
         OperationObjectiveBlocker::TargetBusinessOwnershipMismatch
             if kind == OperationKind::GamblingEvent =>
         {
@@ -229,6 +245,11 @@ pub(crate) fn blocker_matches_objective(
     blocker: OperationObjectiveBlocker,
 ) -> bool {
     match blocker {
+        OperationObjectiveBlocker::TerritorialStandstill => {
+            operation.kind().business_target_ownership()
+                == Some(OperationBusinessTargetOwnership::Foreign)
+                && operation.objective().business_target().is_some()
+        }
         OperationObjectiveBlocker::TargetBusinessOwnershipMismatch => {
             operation.kind().business_target_ownership().is_some()
                 && operation.objective().business_target().is_some()

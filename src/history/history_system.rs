@@ -1,7 +1,9 @@
 //! Campaign-history validation and insertion; sibling history state owns the record map.
 
 use crate::core::entity::{EntityRef, is_entity_present};
-use crate::core::id::{CharacterId, HistoryEventId, IdExhaustionError, OrganizationId};
+use crate::core::id::{
+    CharacterId, EnterpriseId, HistoryEventId, IdExhaustionError, NeighborhoodId, OrganizationId,
+};
 use crate::core::state::AppState;
 use crate::core::time::{SimTime, ensure_time_current};
 use crate::finance::Money;
@@ -23,6 +25,10 @@ pub enum HistoryError {
     ReservedPayrollDeparture,
     #[error("campaign victories must be recorded through the campaign victory owner")]
     ReservedCampaignVictory,
+    #[error("territorial standstills must be recorded through the territory owner")]
+    ReservedTerritoryStandstill,
+    #[error("territorial clashes must be recorded through the territory owner")]
+    ReservedTerritoryClash,
     #[error("payroll departure does not agree with member {0}'s current membership transition")]
     InvalidPayrollDeparture(CharacterId),
     #[error(transparent)]
@@ -73,6 +79,12 @@ pub fn validate_record_event(
         HistoryEventKind::CampaignVictory { .. } => {
             return Err(HistoryError::ReservedCampaignVictory);
         }
+        HistoryEventKind::TerritoryStandstill { .. } => {
+            return Err(HistoryError::ReservedTerritoryStandstill);
+        }
+        HistoryEventKind::TerritoryClash { .. } => {
+            return Err(HistoryError::ReservedTerritoryClash);
+        }
         HistoryEventKind::Operation | HistoryEventKind::Recruitment => {}
     }
     validate_event(state, draft)
@@ -94,6 +106,73 @@ pub(crate) fn validate_campaign_victory_event(
             },
             summary: format!("Campaign victory: {}", path.label()),
             entities: BTreeSet::from([EntityRef::Organization(organization)]),
+        },
+    )
+}
+
+pub(crate) fn validate_territory_standstill_event(
+    state: &AppState,
+    district: NeighborhoodId,
+    initiator: OrganizationId,
+    counterparty: OrganizationId,
+) -> Result<ValidatedHistoryEvent, HistoryError> {
+    let name = state
+        .world()
+        .get_neighborhood(district)
+        .ok_or(HistoryError::MissingEntity(EntityRef::Neighborhood(
+            district,
+        )))?
+        .name();
+    validate_event(
+        state,
+        HistoryEventDraft {
+            kind: HistoryEventKind::TerritoryStandstill {
+                district,
+                initiator,
+                counterparty,
+            },
+            summary: format!(
+                "Thirty-day territorial standstill in {name} between {initiator} and {counterparty}."
+            ),
+            entities: BTreeSet::from([
+                EntityRef::Neighborhood(district),
+                EntityRef::Organization(initiator),
+                EntityRef::Organization(counterparty),
+            ]),
+        },
+    )
+}
+
+pub(crate) fn validate_territory_clash_event(
+    state: &AppState,
+    district: NeighborhoodId,
+    attacker: OrganizationId,
+    defender: OrganizationId,
+    assault: EnterpriseId,
+    target: EnterpriseId,
+    loser: EnterpriseId,
+) -> Result<ValidatedHistoryEvent, HistoryError> {
+    validate_event(
+        state,
+        HistoryEventDraft {
+            kind: HistoryEventKind::TerritoryClash {
+                district,
+                attacker,
+                defender,
+                assault,
+                target,
+                loser,
+            },
+            summary: format!(
+                "Territorial clash in {district}: {attacker} challenged {defender}; {loser} lost the confrontation."
+            ),
+            entities: BTreeSet::from([
+                EntityRef::Neighborhood(district),
+                EntityRef::Organization(attacker),
+                EntityRef::Organization(defender),
+                EntityRef::Enterprise(assault),
+                EntityRef::Enterprise(target),
+            ]),
         },
     )
 }

@@ -79,6 +79,51 @@ owns it. Each `src/*/mod.rs` `//!` header names the canonical mutation path.
 
 Optional campaign conclusions live in `core::campaign_victory`, which derives eligibility from continuous business title history, positive settled business cycles, established institutional contacts, enterprise age and cycle history, available accounted-funds balances, current staff payroll, and the read-only world territory influence resolver. Political and underboss claims require 90-day productive presence in three quarters of districts; political sponsorship has a separate 30-day tenure. A rolling 30-day window of actual net settlements (including negative cycles) qualifies each mature business or racket with at least 20 positive cycles, seven-day settlement freshness, and district income sufficient to cover one registry-authored crew wage. Mature legitimate or criminal income from the relevant victory route must separately cover the entire 30-day payroll obligation, without substituting laundering or held cash. Underboss districts must also have a strict **mature** racket majority over all rival active rackets combined, preventing last-minute establishments from counting as durable control; total active citywide rackets must exceed any rival. Underboss eligibility additionally requires a scaled named command roster (at least ten, otherwise four headquarters posts plus two named personnel per district required for three-quarters territorial control), and two separately managed mature active rackets per qualifying district. A deterministic augmenting-path matching assigns actual mature-racket managers to two command posts per district, so one person cannot be counted as simultaneous captains across districts. The current captain must have personally commanded 20 profitable cycles within the most recent 30 days, checked against the racket's persisted historical authority timeline; a same-day reassignment does not inherit the predecessor's standing. The entire expanded named roster still counts against payroll; unnamed operational workers are presently abstracted in each racket's operating expenses, not fabricated as persistent characters. These aggregate views use existing persisted ownership, enterprise and settlement records, plus reconstructed indexes, without modifying save format. Claims are explicit player operations, not autonomous ticks. The retirement path uses the finance owner's balanced ledger and planned personal-account openings; every outcome is recorded through the history and report owners. A `CampaignVictory` event and report have closed, release-safe provenance checks, and the history owner's `serde(skip)` victory index rebuilds on load. `run_tick` checks for a recorded conclusion before modifying the clock. Appending enum variants and reconstructing the derived index retain compatibility with existing serialized campaign states. A text-play read-only victory progress view never discloses private rival counts or locations.
 
+Territorial influence is a read-only economic projection in
+`world::territory_influence`: active hosted and district-hosted rackets establish
+district presence; ties have no leader. `world::territory_conflict` owns direct
+confrontations between gangs already operating in the same district. Their
+current rank-and-file staffing sets local strength, with a two-associate defender
+advantage. The attacker's strongest local active racket risks suspension if the
+challenge fails; a successful challenge suspends the identified rival racket.
+The defeated racket cannot reopen for seven days through either manual or NPC
+enterprise lifecycle paths, and each attacker has a seven-day cooldown per
+district. A non-player gang with enough local strength may autonomously contest
+another gang at the day boundary. It creates a crisis report when the player's
+operation is displaced, without revealing unrelated private rival information.
+One outcome suspends one racket through the canonical enterprise owner.
+
+The territory owner also validates bilateral 30-day standstills. Competing
+active rackets or a racket displaced by a recent territorial clash establish
+standing to negotiate. A stronger counterparty may require street-cash tribute,
+graduated by its local racket advantage; any offered tribute is a single
+balanced, preflighted inter-organization ledger payment, never invented cash.
+The history owner commits a typed `TerritoryStandstill` or `TerritoryClash`
+event. The restriction and expiry are derived from typed durable history with
+no redundant persistent territory map; history validates parties, chronology,
+typed entity linkage and clash cooldown across save/restore. The enterprise
+owner checks a standstill when validating and committing new rackets, but not
+when restarting an existing one. The operations owner forbids new offensive
+foreign-business orders; investigation and normal commercial acquisition remain
+allowed. Previously authorized hostile operations that have not yet started
+abort through the canonical objective-unavailable path with a typed territorial
+blocker, durable history and report; already-in-progress missions cannot achieve
+their prohibited business objective. NPC expansion candidate planning excludes
+treaty districts before constructing its projected commit cohort, matching
+the enterprise validator and preventing a prohibited planned establishment.
+The text client requires discovered rival rackets before contesting or
+negotiating and does not expose the rival's secret staff count. Rival autonomous
+planners inherit the same canonical restrictions.
+
+Autonomous gang-war planning uses its own active manpower but estimates
+opponent force from the visible baseline crew sizes of their local racket
+types. Secretly hired additional defenders can repel an otherwise confident
+attack. An NPC that was repulsed avoids another challenge in that district
+for 30 days. After real NPC-on-NPC fighting, the defeated gang may negotiate
+a standstill at the next daily boundary, paying a required concession from
+its actual street-cash account when it can afford it. Player organizations
+are never automatically bound by an NPC-signed treaty.
+
 The player-driven text adapter lives in `examples/gameplay_harness/text_play/`
 and can start from either the generated authoritative city or a canonical
 authored opening without running a scripted evaluator. It owns parsing,

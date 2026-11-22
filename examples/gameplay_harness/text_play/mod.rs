@@ -130,6 +130,12 @@ const HELP: &str = "Commands:
   policy <recruitment|legal> <approve|delegate|case|automatic>
                          Change organization-level governance
   districts              Public district names and IDs for delegated scopes
+  turf                   Your active rackets and negotiated district standstills
+  contest <enterprise-N>  Challenge an identified rival racket using local associates; the loser closes for seven days
+  preview-contest <enterprise-N>
+                         Inspect your local fighting strength without revealing enemy staffing
+  negotiate <district-N> <org-N> [tribute=cents]
+                         Propose a 30-day ceasefire; stronger rivals may demand actual street-cash tribute
   mandates               Current manager scopes, standing orders, and budgets
   delegate <member-id> <scope>  Assign a manager with delegated authority
   autonomy <member-id> <tight|guided|delegated|broad>  Set freedom to act independently
@@ -475,7 +481,7 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         | "prospects" | "directory" | "market" | "businesses" | "enterprises" | "racket-kinds"
         | "finances" | "accounts" | "opportunities" | "operations" | "decisions"
         | "connections" | "contacts" | "policies" | "mandates" | "operation-kinds"
-        | "districts" | "known-targets" | "debriefs" | "case-brief" => 1..=1,
+        | "districts" | "turf" | "known-targets" | "debriefs" | "case-brief" => 1..=1,
         "counsel" => 1..=2,
         "recovery" => 1..=1,
         "launder-all" => 2..=2,
@@ -494,8 +500,9 @@ fn validate_command_arity(command: &str, words: usize) -> Result<(), String> {
         "business-cycles" | "racket-cycles" => 2..=3,
         "buy" | "open-account" | "discover" | "operation" | "report" | "dismiss" | "advance"
         | "claim-victory" | "save" | "transaction" | "cancel" | "debrief" | "intel"
-        | "racket-outlook" | "business-outlook" => 2..=2,
+        | "racket-outlook" | "business-outlook" | "contest" | "preview-contest" => 2..=2,
         "policy" | "delegate" | "autonomy" | "supervise" | "offer" => 3..=3,
+        "negotiate" => 3..=4,
         "mandate" => 3..=6,
         "plan" | "preview" => 3..=32,
         "connect" => 3..=3,

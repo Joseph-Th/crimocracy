@@ -670,6 +670,9 @@ pub(crate) fn build_abort_summary(
                 OperationObjectiveBlocker::ExtractionCustodyEnded => {
                     "the target was no longer detained"
                 }
+                OperationObjectiveBlocker::TerritorialStandstill => {
+                    "the sponsoring gang signed a territorial standstill covering the target district"
+                }
             };
             Ok(format!(
                 "{} was cancelled before execution because {reason}. Objective resolution was not attempted.",

@@ -37,6 +37,7 @@ pub(super) fn terminal_command_is_read_only(verb: &str) -> bool {
             | "counsel"
             | "policies"
             | "districts"
+            | "turf"
             | "mandates"
             | "prospects"
             | "directory"
@@ -272,6 +273,148 @@ impl Session<'_> {
                         district.name()
                     )
                     .unwrap();
+                }
+            }
+            "turf" => {
+                use crimocracy::world::territory_influence::{
+                    active_standstill, resolve_neighborhood_influence,
+                };
+                for district in state.world().neighborhoods() {
+                    let summary = resolve_neighborhood_influence(state, district.id())
+                        .map_err(|error| error.to_string())?;
+                    let own = summary
+                        .standings
+                        .iter()
+                        .find(|entry| entry.organization == self.player)
+                        .map_or(0, |entry| entry.active_enterprises);
+                    let associates = crimocracy::world::territory_conflict::active_district_force(
+                        state,
+                        self.player,
+                        district.id(),
+                    );
+                    writeln!(out, "district-{} {} | own active rackets: {} | active associates: {} | rival influence requires reconnaissance",
+                        district.id().raw(), district.name(), own, associates).unwrap();
+                    if let Some(standstill) = active_standstill(state, self.player, district.id()) {
+                        let rival = state
+                            .world()
+                            .get_organization(standstill.counterparty)
+                            .expect("agreed counterpart exists");
+                        writeln!(out, "  Standstill with {} (org-{}) until {} | no new rackets or offensive business operations",
+                            rival.name(), rival.id().raw(), time_label(standstill.expires_at.as_minutes())).unwrap();
+                    }
+                    for rival in self.known_enterprise_ids().into_iter().filter_map(|id| {
+                        let record = state.enterprises().get_enterprise(id)?;
+                        if record.organization() == self.player {
+                            return None;
+                        }
+                        let location = match record.location() {
+                            EnterpriseLocation::Neighborhood(ward) => Some(ward),
+                            EnterpriseLocation::Business(venue) => state
+                                .world()
+                                .get_business(venue)
+                                .map(|business| business.neighborhood()),
+                        };
+                        (location == Some(district.id())).then_some((record.organization(), id))
+                    }) {
+                        if let Some(organization) = state.world().get_organization(rival.0) {
+                            writeln!(out, "  Identified rival: {} (org-{}) at enterprise-{} | current status and staffing unconfirmed",
+                                organization.name(), organization.id().raw(), rival.1.raw()).unwrap();
+                        }
+                    }
+                }
+            }
+            "negotiate" => {
+                use crimocracy::world::territory_influence::validate_negotiate_standstill_with_tribute;
+                let district_number = parse_number(words[1], "district")?;
+                let district = state
+                    .world()
+                    .neighborhoods()
+                    .find(|item| item.id().raw() == district_number)
+                    .ok_or("unknown district")?
+                    .id();
+                let rival_number = parse_number(words[2], "org")?;
+                let rival = self
+                    .known_organization_ids()
+                    .into_iter()
+                    .find(|id| id.raw() == rival_number && *id != self.player)
+                    .ok_or("rival organization is not identified; use reconnaissance")?;
+                if !self.known_enterprise_ids().into_iter().any(|id| {
+                    state
+                        .enterprises()
+                        .get_enterprise(id)
+                        .is_some_and(|record| {
+                            let racket_district = match record.location() {
+                                EnterpriseLocation::Neighborhood(id) => Some(id),
+                                EnterpriseLocation::Business(id) => state
+                                    .world()
+                                    .get_business(id)
+                                    .map(|business| business.neighborhood()),
+                            };
+                            record.organization() == rival && racket_district == Some(district)
+                        })
+                }) {
+                    return Err(
+                        "no identified rival racket in this district; surveil its operations first"
+                            .to_owned(),
+                    );
+                }
+                let tribute_cents = if let Some(raw) = words.get(3) {
+                    raw.strip_prefix("tribute=")
+                        .ok_or("optional fourth argument must be tribute=<positive cents>")?
+                        .parse::<i64>()
+                        .ok()
+                        .filter(|amount| *amount > 0)
+                        .ok_or("tribute must be a positive whole number of cents")?
+                } else {
+                    0
+                };
+                let history = validate_negotiate_standstill_with_tribute(
+                    state,
+                    self.player,
+                    rival,
+                    district,
+                    crimocracy::finance::Money::from_cents(tribute_cents),
+                )
+                .map_err(|error| error.to_string())?
+                .commit(&mut self.state)
+                .map_err(|error| error.to_string())?;
+                writeln!(out, "Agreed a 30-day district standstill with org-{rival_number}. {}Recorded as {history}. Existing rackets continue; both gangs refrain from new rackets and offensive business operations until expiry.",
+                    if tribute_cents > 0 { format!("Transferred {tribute_cents} cents street-cash tribute. ") } else { String::new() }).unwrap();
+            }
+            "contest" | "preview-contest" => {
+                use crimocracy::world::territory_conflict::{
+                    active_district_force, district_of_racket, validate_territory_clash,
+                };
+                let number = parse_number(words[1], "enterprise")?;
+                let target = self
+                    .known_enterprise_ids()
+                    .into_iter()
+                    .find(|id| id.raw() == number)
+                    .ok_or("rival racket not identified; surveil the district first")?;
+                let racket = state
+                    .enterprises()
+                    .get_enterprise(target)
+                    .ok_or("racket no longer exists")?;
+                if racket.organization() == self.player {
+                    return Err(
+                        "contest needs an identified rival racket, not one of your own".to_owned(),
+                    );
+                }
+                let district = district_of_racket(state, racket.location())
+                    .ok_or("racket location no longer exists")?;
+                let own_force = active_district_force(state, self.player, district);
+                let prepared = validate_territory_clash(state, self.player, target)
+                    .map_err(|error| error.to_string())?;
+                if verb == "preview-contest" {
+                    writeln!(out, "Challenge enterprise-{number} in district-{} | active associates: {own_force}. Defenders have a positional advantage; their current force is unverified. Defeat suspends your leading racket for seven days. No action committed.", district.raw()).unwrap();
+                } else {
+                    let result = prepared
+                        .commit(&mut self.state)
+                        .map_err(|error| error.to_string())?;
+                    writeln!(out, "District-{} confrontation: {}. Racket {} suspended for seven days; next challenge allowed in seven days. History: {}. Review 'reports'.",
+                        district.raw(),
+                        if result.attacker_won { "your gang displaced a rival operation" } else { "your assault was repelled" },
+                        result.suspended_racket, result.history).unwrap();
                 }
             }
             "operation-kinds" | "known-targets" | "plan" | "preview" => {

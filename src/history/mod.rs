@@ -4,7 +4,7 @@ pub mod history_system;
 
 use crate::core::entity::EntityRef;
 use crate::core::id::IdKeyedBounds;
-use crate::core::id::{CharacterId, HistoryEventId, OrganizationId};
+use crate::core::id::{CharacterId, HistoryEventId, NeighborhoodId, OrganizationId};
 use crate::core::time::SimTime;
 use crate::finance::Money;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,20 @@ pub enum HistoryEventKind {
         organization: OrganizationId,
         path: crate::core::campaign_victory::VictoryPath,
         settlement: Option<crate::core::id::LedgerTransactionId>,
+    },
+    // Append new variants, preserving ordinal serialization of existing current-schema saves.
+    TerritoryStandstill {
+        district: NeighborhoodId,
+        initiator: OrganizationId,
+        counterparty: OrganizationId,
+    },
+    TerritoryClash {
+        district: NeighborhoodId,
+        attacker: OrganizationId,
+        defender: OrganizationId,
+        assault: crate::core::id::EnterpriseId,
+        target: crate::core::id::EnterpriseId,
+        loser: crate::core::id::EnterpriseId,
     },
 }
 
@@ -116,6 +130,8 @@ impl HistoryState {
                 } => Some(((member, organization), record.id())),
                 HistoryEventKind::Operation
                 | HistoryEventKind::Recruitment
+                | HistoryEventKind::TerritoryStandstill { .. }
+                | HistoryEventKind::TerritoryClash { .. }
                 | HistoryEventKind::CampaignVictory { .. } => None,
             })
             .collect()

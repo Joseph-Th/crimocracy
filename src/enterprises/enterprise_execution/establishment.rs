@@ -27,6 +27,16 @@ impl ValidatedEnterpriseEstablishment {
             self.draft.location,
             &self.draft.supporting_businesses,
         )?;
+        let district = resolve_location_neighborhood(state, self.draft.location)?;
+        if crate::world::territory_influence::active_standstill(
+            state,
+            self.draft.organization,
+            district,
+        )
+        .is_some()
+        {
+            return Err(EnterpriseError::TerritoryStandstill(district));
+        }
         // One racket of a kind per spot is re-checked at commit: a second token validated
         // before an identical establishment committed (or held across one) must reject here
         // rather than double-book the location.
@@ -163,6 +173,12 @@ fn validate_establish_enterprise_with_optional_openings(
     account_openings: Option<ValidatedFinancialAccountOpenings>,
 ) -> Result<ValidatedEnterpriseEstablishment, EnterpriseError> {
     let definition = registry.get_enterprise(draft.kind);
+    let district = resolve_location_neighborhood(state, draft.location)?;
+    if crate::world::territory_influence::active_standstill(state, draft.organization, district)
+        .is_some()
+    {
+        return Err(EnterpriseError::TerritoryStandstill(district));
+    }
     let authority = resolve_mandate_authority(state, draft.authority)?;
     ensure_manager_capacity(
         state,

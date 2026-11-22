@@ -594,7 +594,8 @@ fn validate_resolution_objective_blocker(
         // without complete historical timelines. Their blocker is the persisted validated
         // resolution snapshot; objective compatibility above is the release-safe proof.
         OperationObjectiveBlocker::TargetEconomyInactive
-        | OperationObjectiveBlocker::NoPressureableWitnessCase => {}
+        | OperationObjectiveBlocker::NoPressureableWitnessCase
+        | OperationObjectiveBlocker::TerritorialStandstill => {}
     }
     Ok(())
 }

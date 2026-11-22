@@ -56,6 +56,10 @@ pub enum OperationTransition {
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum OperationError {
+    #[error(
+        "district {0} is under a binding territorial standstill; offensive business operations are barred"
+    )]
+    TerritoryStandstill(crate::core::id::NeighborhoodId),
     #[error("operation title must not be empty")]
     EmptyTitle,
     #[error("organization {0} does not exist")]

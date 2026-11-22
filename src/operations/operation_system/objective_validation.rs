@@ -574,5 +574,35 @@ pub(super) fn validate_operation_objective(
         responsible_organization,
         kind,
         objective,
-    )
+    )?;
+    // Reconnaissance remains permitted, but neither party can exploit a settlement
+    // with an offensive business operation. This is checked again at commit.
+    if kind.business_target_ownership()
+        == Some(crate::operations::OperationBusinessTargetOwnership::Foreign)
+    {
+        let target = match objective {
+            OperationObjective::AcquireProperty { target }
+            | OperationObjective::ObtainCash { target }
+            | OperationObjective::DisruptBusiness { target }
+            | OperationObjective::GatherInformation { target } => Some(*target),
+            OperationObjective::Frighten { .. } | OperationObjective::FreeDetainee { .. } => None,
+        };
+        if let Some(EntityRef::Business(business)) = target {
+            let district = state
+                .world()
+                .get_business(business)
+                .ok_or(OperationError::MissingEntity(EntityRef::Business(business)))?
+                .neighborhood();
+            if crate::world::territory_influence::active_standstill(
+                state,
+                responsible_organization,
+                district,
+            )
+            .is_some()
+            {
+                return Err(OperationError::TerritoryStandstill(district));
+            }
+        }
+    }
+    Ok(())
 }

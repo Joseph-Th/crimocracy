@@ -428,6 +428,7 @@ pub enum OperationObjectiveBlocker {
     TargetEconomyInactive,
     NoPressureableWitnessCase,
     ExtractionCustodyEnded,
+    TerritorialStandstill,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -47,6 +47,10 @@ pub enum StateValidationError {
     InvalidPayrollDeparture { event: HistoryEventId },
     #[error("campaign victory event {event} has inconsistent outcome or provenance")]
     InvalidCampaignVictory { event: HistoryEventId },
+    #[error("history event {event} contains an invalid or overlapping territorial standstill")]
+    InvalidTerritoryStandstill { event: HistoryEventId },
+    #[error("history event {event} contains invalid or overlapping territorial fighting")]
+    InvalidTerritoryClash { event: HistoryEventId },
     #[error("campaign victory report {report} has no matching outcome")]
     InvalidCampaignVictoryReport { report: ReportId },
     #[error("non-criminal organization {organization} stores a criminal reputation record")]

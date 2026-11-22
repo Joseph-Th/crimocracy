@@ -41,6 +41,27 @@ the edit. A useful diagnostic changes where you read, what you test, or what you
 
 None of these replaces `.\scripts\verify.cmd` or a focused behavioral proof. Mutation execution stays in its isolated copy; do not use `--in-place` on a dirty/concurrent repository to bypass scratch-copy problems, and do not reuse another run's output directory.
 
+Territory owner tests cover symmetric standstills, genuine balanced-ledger
+street-cash tribute and insufficient funds, a failed assault that shuts down
+the attacking racket, a strong autonomous rival displacing a player holding,
+an actual crisis report, multi-day cooldown and suspension expiry, and
+deterministic save/restore. A post-clash agreement must remain negotiable after
+the loser is disabled, and the treaty must not forbid reopening a preexisting
+racket when the seven-day clash penalty ends. The generated text-play tests
+`generated_rival_clash_then_postwar_negotiation_uses_actual_player_orders`
+and `generated_rival_turf_agreement_requires_sighting_and_blocks_both_types_of_escalation`
+exercise player-only discovery gates, preview immutability, recruitment of
+local force, direct conflict, treaty acceptance and signed-treaty restrictions
+through the actual production operations.
+The generated treaty test pre-authorizes a delayed hostile sabotage,
+signs a standstill before it becomes due, and advances through the canonical
+minute/day tick to prove the sabotage aborts and NPC expansion does not
+plan a prohibited racket.
+The tests `autonomous_gangs_can_negotiate_a_real_postwar_standstill`
+and `extra_defenders_can_repulse_an_optimistic_rival_ai_and_deter_repeat_raids`
+verify NPC-led reconciliation, defensive surprises caused by extra hires,
+and tactical memory after a failed autonomous challenge.
+
 ## Adversarial pressure checks
 
 `operations::operation_system::autonomous::tests` exercises mandate and police-fear constraints, a real rival reconnaissance that acquires usable knowledge, deterministic continuation through save/restore, then a canonical strike and disrupted player-owned business settlement. `detained_enterprise_manager_suspends_cycles_until_owner_resumes` verifies custody invalidates previously planned cycles and closes the detainee's enterprise until lawful recovery; release alone does not settle missed cycles. The rival pressure test compares matched business RNG branches to prove a successful strike improves the attacker’s own realized earnings while harming the target. Held cycle tokens reject stale local market capacity without mutation. `autonomous_prosecution_*` tests cover bounded intake, defendant-specific supplements, own-member notifications, release with live review, screening, and save/restore continuation. `vice_inquiry_observes_distinct_operating_cycles_then_detains_and_refers_manager` follows weak initial exposure through staffed observations of separate actual cycles, independent custody, racket suspension and prosecutorial intake; matches save/restore continuation and a branch that suspends the racket after the first observation, and rejects duplicate evidence. `foreign_case_raises_discovery_risk_but_not_own_racket_cost` distinguishes ambient discovery probability from attributable operating surcharges using the same authored exposure threshold and canonical originated-case intake. `business_acquisition::tests::strategic_investment` proves expansion to a previously unowned district, voluntary purchases when public listings end, player property protection, preservation of the seller's earning base, held-offer rejection when a replacement disappears, and reinvestment of actual sale proceeds without a prior foothold. `court_hearing_distinguishes_conviction_from_acquittal_and_collects_only_personal_funds` compares a screened case with and without actual retained counsel, verifies adjudication after preparation and release, checks personal debt against actual ledger collection and excludes concealed and employer funds, and verifies deterministic save/load. `later_review_cannot_impose_second_fine_from_already_adjudicated_evidence` verifies old evidence cannot support another judicial disposition and leaves the first sentence intact. `last_player_member_defection_ends_campaign_after_restore` proves that accepted rival recruitment of the final player member produces terminal campaign state across save/restore and rejects subsequent ticks without mutation. These proofs establish concrete pressure mechanisms, not late-game balance.

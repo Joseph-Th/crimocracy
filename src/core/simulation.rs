@@ -82,6 +82,8 @@ pub struct TickOutcome {
     pub autonomous_enterprises: Vec<crate::core::id::EnterpriseId>,
     pub autonomous_business_acquisitions: Vec<crate::core::id::BusinessId>,
     pub autonomous_operations: Vec<OperationId>,
+    pub territorial_clashes: Vec<crate::world::territory_conflict::TerritoryClashOutcome>,
+    pub territorial_standstills: Vec<crate::core::id::HistoryEventId>,
     pub expired_opportunities: Vec<OpportunityId>,
     pub cold_case_suspensions: Vec<InvestigationId>,
     pub executive_brief: Option<ReportId>,
@@ -272,6 +274,17 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
             &enterprise_lifecycle.resumed_mandates,
         )
         .expect("valid state should resolve every due autonomous enterprise expansion");
+    // Territorial challenges follow expansion so the latest local workforce is visible,
+    // and precede rival covert operations. They use canonical enterprise suspension,
+    // durable history and a crisis report when the player's holdings are displaced.
+    let territorial_clashes =
+        crate::world::territory_conflict::apply_due_autonomous_territory_clashes(state);
+    // Non-player gangs can also reach peace without executive intervention.
+    // A losing outfit may seek a negotiated stop after the first day of an
+    // actual feud, and must fund any required concession from real street cash.
+    // The player never signs an NPC-proposed treaty automatically.
+    let territorial_standstills =
+        crate::world::territory_influence::apply_due_autonomous_territory_standstills(state);
     // Rival operational planning follows economic decisions and reputation updates so current
     // commercial stakes, lawful staffing, and enforcement risk govern the next day's action.
     let autonomous_operations =
@@ -318,6 +331,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         autonomous_enterprises,
         autonomous_business_acquisitions,
         autonomous_operations,
+        territorial_clashes,
+        territorial_standstills,
         expired_opportunities,
         cold_case_suspensions: cold_case_decay,
         executive_brief,

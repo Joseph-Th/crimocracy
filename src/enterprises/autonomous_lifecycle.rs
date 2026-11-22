@@ -107,6 +107,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             | Err(EnterpriseError::HostBusinessSuspended { .. })
             | Err(EnterpriseError::SupportingBusinessSuspended { .. })
             | Err(EnterpriseError::ManagerCapacityExceeded { .. })
+            | Err(EnterpriseError::TerritorySuppressed { .. })
             | Err(EnterpriseError::VersionCapacity(_))
             | Err(EnterpriseError::SimulationTimeOverflow) => continue,
             Err(error) => return Err(error.into()),

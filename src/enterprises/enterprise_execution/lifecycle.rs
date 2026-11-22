@@ -107,6 +107,14 @@ impl ValidatedEnterpriseStatusChange {
         }
         ensure_version_can_advance(record.version(), "enterprise")?;
         if let Some(authority) = self.authority {
+            if let Some(until) =
+                crate::world::territory_conflict::suppression_ends_at(state, self.enterprise)
+            {
+                return Err(EnterpriseError::TerritorySuppressed {
+                    enterprise: self.enterprise,
+                    until,
+                });
+            }
             ensure_mandate_authority_current(state, authority)?;
             ensure_manager_capacity(
                 state,
@@ -229,6 +237,9 @@ pub fn validate_resume_enterprise(
         EnterpriseStatus::Retired => return Err(EnterpriseError::EnterpriseRetired(enterprise)),
     }
     ensure_version_can_advance(record.version(), "enterprise")?;
+    if let Some(until) = crate::world::territory_conflict::suppression_ends_at(state, enterprise) {
+        return Err(EnterpriseError::TerritorySuppressed { enterprise, until });
+    }
     let authority = resolve_mandate_authority(state, record.authority())?;
     ensure_manager_capacity(
         state,

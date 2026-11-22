@@ -158,6 +158,38 @@ settlements earned under player ownership;
 `racket-cycles enterprise-N [count]` reports gross, operating costs, net cash, enforcement costs, and the manager responsible for each historical settlement.
 All histories are read-only and survive save/load.
 
+Territory is contested by active rackets rather than an independently owned
+district token. `turf` lists your active rackets and associates per district,
+identified rivals and any binding agreements. Unknown rival holdings and exact
+staff numbers remain private; district surveillance identifies active rival
+rackets. `preview-contest enterprise-N` inspects the legal opening and your
+available manpower without revealing the opponent's current strength.
+`contest enterprise-N` then challenges that rival with your actual local
+associates. The defender receives a two-associate positional advantage. The
+loser has one racket suspended for seven days and cannot reopen it early;
+the attacker must also wait seven days before another district challenge.
+Stronger rivals autonomously contest overlapping territory and can shut down
+player holdings, triggering an actionable crisis report. The resulting lost
+enterprise income and district influence are real.
+NPC challengers estimate opponents' baseline crews rather than reading their
+secret extra hires. Reinforcements can reverse the outcome, and a repelled
+NPC avoids repeating the same district attack for 30 days. Non-player gangs
+may also negotiate ceasefires with each other after actual clashes, with
+treasury-backed tribute when appropriate. They never sign for the player.
+
+`negotiate district-N org-N [tribute=cents]` proposes a bilateral thirty-day
+standstill. Both parties must currently operate there, or have a racket recently
+displaced in a territorial clash. Near-even rivals can settle without paying;
+a rival with a greater racket advantage demands 25,000 cents for each active
+racket beyond a one-racket lead. Tribute is paid immediately in real street
+cash into the other gang's treasury, which can finance its future expansion.
+An accepted standstill protects existing rackets, including a suspended
+racket's right to resume after a clash, but stops both parties from opening
+additional local rackets or authorizing offensive business operations until
+expiry. Reconnaissance and legitimate acquisitions remain possible. These are
+non-lethal workforce confrontations and negotiated expansion restrictions, not
+a simulation of street-level shootouts, permanent land transfer or elections.
+
 Leadership decisions include `policies`, `policy`, `mandates`, `delegate`, and
 `mandate` for organization-level recruitment and legal-support rules, managerial
 territory/functions, standing orders, budgets, and revocation. `districts` and

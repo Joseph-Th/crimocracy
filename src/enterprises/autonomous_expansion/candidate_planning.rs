@@ -170,6 +170,28 @@ fn build_ranked_candidate(
     if economics.occupied_locations.contains(&(kind, location)) {
         return Ok(None);
     }
+    // A gang cannot offer a planned expansion on a district it just agreed
+    // to freeze. The production establishment owner independently checks the
+    // same rule, so projected cohorts never select an impossible pact-breaking
+    // candidate and cannot panic during commit.
+    let district = match location {
+        EnterpriseLocation::Neighborhood(district) => Some(district),
+        EnterpriseLocation::Business(business) => economics
+            .state
+            .world()
+            .get_business(business)
+            .map(|venue| venue.neighborhood()),
+    };
+    if district.is_some_and(|district| {
+        crate::world::territory_influence::active_standstill(
+            economics.state,
+            economics.organization,
+            district,
+        )
+        .is_some()
+    }) {
+        return Ok(None);
+    }
     // Managerial span is an operational constraint for rivals as well as
     // players. Do not propose an enterprise its delegated captain cannot run.
     if ensure_manager_capacity(

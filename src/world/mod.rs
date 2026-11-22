@@ -1,11 +1,14 @@
 //! Persistent city and organization records; `world_system` owns their canonical mutation paths.
 //!
 //! `stores` owns the record collections; `payroll_execution` owns the daily wage pass;
-//! `territory_influence`, `rating`, and `vocabulary` are read-only derivation.
+//! `territory_influence` derives district control and validates bilateral
+//! standstills, and `territory_conflict` resolves contested criminal pressure
+//! through canonical enterprise lifecycle. `rating` and `vocabulary` are read-only.
 
 pub(crate) mod payroll_departures;
 pub mod payroll_execution;
 pub mod rating;
+pub mod territory_conflict;
 pub mod territory_influence;
 pub mod vocabulary;
 pub mod world_system;

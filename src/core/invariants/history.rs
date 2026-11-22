@@ -23,6 +23,20 @@ pub(super) fn validate_history_against_registry(
 
 pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationError> {
     let mut previous_departures = BTreeMap::new();
+    let mut previous_clashes = BTreeMap::<
+        (
+            crate::core::id::NeighborhoodId,
+            crate::core::id::OrganizationId,
+        ),
+        u64,
+    >::new();
+    let mut previous_standstills = BTreeMap::<
+        (
+            crate::core::id::NeighborhoodId,
+            crate::core::id::OrganizationId,
+        ),
+        u64,
+    >::new();
     let mut victory_seen = false;
     for event in state.history.events() {
         if event.summary().trim().is_empty() {
@@ -42,6 +56,134 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
                     context: "history event",
                     entity: *entity,
                 });
+            }
+        }
+        if let HistoryEventKind::TerritoryClash {
+            district,
+            attacker,
+            defender,
+            assault,
+            target,
+            loser,
+        } = event.kind()
+        {
+            let invalid = || StateValidationError::InvalidTerritoryClash { event: event.id() };
+            let end = event
+                .occurred_at()
+                .as_minutes()
+                .checked_add(
+                    crate::world::territory_conflict::CLASH_COOLDOWN_DAYS
+                        * crate::core::time::DAY_MINUTES,
+                )
+                .ok_or_else(invalid)?;
+            let assault_record = state
+                .enterprises()
+                .get_enterprise(assault)
+                .ok_or_else(invalid)?;
+            let target_record = state
+                .enterprises()
+                .get_enterprise(target)
+                .ok_or_else(invalid)?;
+            let criminal = |organization| {
+                state
+                    .world()
+                    .get_organization(organization)
+                    .is_some_and(|record| record.kind() == crate::world::OrganizationKind::Criminal)
+            };
+            if attacker == defender
+                || !criminal(attacker)
+                || !criminal(defender)
+                || assault == target
+                || (loser != assault && loser != target)
+                || assault_record.organization() != attacker
+                || target_record.organization() != defender
+                || crate::world::territory_conflict::district_of_racket(
+                    state,
+                    assault_record.location(),
+                ) != Some(district)
+                || crate::world::territory_conflict::district_of_racket(
+                    state,
+                    target_record.location(),
+                ) != Some(district)
+                || event.summary()
+                    != format!(
+                        "Territorial clash in {district}: {attacker} challenged {defender}; {loser} lost the confrontation."
+                    )
+                || event.entities()
+                    != &BTreeSet::from([
+                        EntityRef::Neighborhood(district),
+                        EntityRef::Organization(attacker),
+                        EntityRef::Organization(defender),
+                        EntityRef::Enterprise(assault),
+                        EntityRef::Enterprise(target),
+                    ])
+                || previous_clashes
+                    .get(&(district, attacker))
+                    .is_some_and(|previous_end| *previous_end > event.occurred_at().as_minutes())
+                || [attacker, defender].into_iter().any(|organization| {
+                    previous_standstills
+                        .get(&(district, organization))
+                        .is_some_and(|previous_end| {
+                            *previous_end > event.occurred_at().as_minutes()
+                        })
+                })
+            {
+                return Err(invalid());
+            }
+            previous_clashes.insert((district, attacker), end);
+        }
+        if let HistoryEventKind::TerritoryStandstill {
+            district,
+            initiator,
+            counterparty,
+        } = event.kind()
+        {
+            let invalid = || StateValidationError::InvalidTerritoryStandstill { event: event.id() };
+            let end = event
+                .occurred_at()
+                .as_minutes()
+                .checked_add(
+                    crate::world::territory_influence::STANDSTILL_DAYS
+                        * crate::core::time::DAY_MINUTES,
+                )
+                .ok_or_else(invalid)?;
+            let criminal = |organization| {
+                state
+                    .world()
+                    .get_organization(organization)
+                    .is_some_and(|owner| owner.kind() == crate::world::OrganizationKind::Criminal)
+            };
+            if initiator == counterparty
+                || !criminal(initiator)
+                || !criminal(counterparty)
+                || state.world().get_neighborhood(district).is_none()
+                || event.entities()
+                    != &BTreeSet::from([
+                        EntityRef::Neighborhood(district),
+                        EntityRef::Organization(initiator),
+                        EntityRef::Organization(counterparty),
+                    ])
+                || event.summary()
+                    != format!(
+                        "Thirty-day territorial standstill in {} between {initiator} and {counterparty}.",
+                        state
+                            .world()
+                            .get_neighborhood(district)
+                            .ok_or_else(invalid)?
+                            .name()
+                    )
+                || [initiator, counterparty].into_iter().any(|org| {
+                    previous_standstills
+                        .get(&(district, org))
+                        .is_some_and(|previous_end| {
+                            *previous_end > event.occurred_at().as_minutes()
+                        })
+                })
+            {
+                return Err(invalid());
+            }
+            for organization in [initiator, counterparty] {
+                previous_standstills.insert((district, organization), end);
             }
         }
         if let HistoryEventKind::CampaignVictory {
