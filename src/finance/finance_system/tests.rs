@@ -21,7 +21,7 @@ use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
 };
 use crate::world::world_system::{
-    WorldError, insert_character, insert_organization, validate_reassign_character,
+    insert_character, insert_organization, validate_reassign_character,
     validate_transfer_business_ownership,
 };
 use crate::world::{
@@ -1357,7 +1357,7 @@ fn rejected_transaction_over_planned_account_consumes_no_account_id() {
 }
 
 #[test]
-fn validated_budget_transaction_remains_valid_when_hierarchy_change_is_blocked() {
+fn budget_authorization_stales_when_an_active_manager_changes_supervisor() {
     let (mut state, authorization, funding, destination) = make_test_budget();
     let mandate = authorization.mandate;
     let transaction = validate_record_transaction(
@@ -1397,30 +1397,36 @@ fn validated_budget_transaction_remains_valid_when_hierarchy_change_is_blocked()
         },
     )
     .expect("supervisor fixture should validate");
-    let error = validate_reassign_character(
+    let manager_version = state
+        .world()
+        .get_character(authorization.manager)
+        .unwrap()
+        .version();
+    validate_reassign_character(
         &state,
         authorization.manager,
         Some(organization),
         Some(supervisor),
     )
-    .expect_err("active mandate must prevent same-organization supervisor reassignment");
+    .expect("manager can reorganize without revoking an unrelated active mandate")
+    .commit(&mut state)
+    .expect("same-organization reporting changes preserve the mandate");
     assert_eq!(
-        error,
-        WorldError::ActiveMandateAssignment {
-            character: authorization.manager,
-            mandate,
-        }
+        transaction.commit(&mut state).err(),
+        Some(FinanceError::Delegation(DelegationError::StaleManager {
+            manager: authorization.manager,
+            expected: manager_version,
+            found: manager_version + 1,
+        })),
+        "a held financial token must revalidate the manager's real version before posting"
     );
-    transaction
-        .commit(&mut state)
-        .expect("blocked hierarchy change leaves mandate snapshot still valid");
     assert_eq!(
         state
             .finance()
             .get_account(funding)
             .expect("funding account should exist")
             .balance(),
-        Money::from_cents(2_000)
+        Money::from_cents(2_500)
     );
     assert_eq!(
         state
@@ -1428,7 +1434,7 @@ fn validated_budget_transaction_remains_valid_when_hierarchy_change_is_blocked()
             .get_account(destination)
             .expect("destination account should exist")
             .balance(),
-        Money::from_cents(500)
+        Money::ZERO
     );
     validate_invariants(&state);
 }

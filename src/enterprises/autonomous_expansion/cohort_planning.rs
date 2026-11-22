@@ -19,7 +19,9 @@ use crate::enterprises::autonomous_planning::{
     AutonomousEnterpriseError, reserve_working_capital, resolve_committed_working_capital,
     resolve_observed_district_pressure,
 };
-use crate::enterprises::enterprise_execution::resolve_location_neighborhood;
+use crate::enterprises::enterprise_execution::{
+    ProjectedCommandJob, projected_command_jobs_fit, resolve_location_neighborhood,
+};
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseStatus};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
@@ -131,6 +133,7 @@ pub(super) fn plan_due_autonomous_expansions(
             &occupied_locations,
             &mandates,
             &available_venues,
+            &actions,
         )?
         else {
             break;
@@ -197,8 +200,20 @@ fn select_phase_expansion_candidate(
     occupied_locations: &BTreeSet<(EnterpriseKind, EnterpriseLocation)>,
     mandates: &BTreeMap<OrganizationId, Vec<MandateRecord>>,
     available_venues: &BTreeMap<OrganizationId, BTreeMap<BusinessId, &BusinessRecord>>,
+    planned_actions: &[PlannedAutonomousExpansionAction],
 ) -> Result<Option<PhaseExpansionCandidate>, AutonomousEnterpriseError> {
     let mut winner: Option<PhaseExpansionCandidate> = None;
+    let planned_jobs = planned_actions
+        .iter()
+        .map(|action| ProjectedCommandJob {
+            organization: action.organization,
+            captain: action.mandate.manager(),
+            kind: action.plan.kind,
+            location: action.plan.location,
+            associates: action.plan.kind.baseline_associates(),
+            supporting_businesses: action.plan.supporting_businesses.len(),
+        })
+        .collect::<Vec<_>>();
     for (organization, organization_mandates) in mandates {
         let Some(available_working_capital) = resolve_max_autonomous_working_capital(
             iteration.state,
@@ -225,6 +240,23 @@ fn select_phase_expansion_candidate(
             else {
                 continue;
             };
+            // The current-state validator sees one captain at a time; the
+            // cohort may contain multiple captains reporting to one superior.
+            // Project *all* prior selections before accepting a candidate
+            // rather than discovering a shared executive overload halfway
+            // through the nominally preflighted commit batch.
+            let mut prospective_jobs = planned_jobs.clone();
+            prospective_jobs.push(ProjectedCommandJob {
+                organization: *organization,
+                captain: mandate.manager(),
+                kind: plan.kind,
+                location: plan.location,
+                associates: plan.kind.baseline_associates(),
+                supporting_businesses: plan.supporting_businesses.len(),
+            });
+            if !projected_command_jobs_fit(iteration.state, &prospective_jobs) {
+                continue;
+            }
             let neighborhood = resolve_location_neighborhood(iteration.state, plan.location)
                 .expect("autonomous candidate location must resolve to a live neighborhood");
             let district_leader = iteration

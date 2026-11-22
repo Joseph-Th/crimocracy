@@ -36,9 +36,12 @@ pub fn validate_reassign_enterprise(
             state,
             record.organization(),
             authority.manager,
-            record.location(),
-            record.associates(),
-            record.supporting_businesses().len(),
+            ManagedJob {
+                kind: record.kind(),
+                location: record.location(),
+                associates: record.associates(),
+                supporting_businesses: record.supporting_businesses().len(),
+            },
             Some(enterprise),
         )?;
     }

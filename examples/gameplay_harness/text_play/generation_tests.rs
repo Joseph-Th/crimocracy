@@ -303,22 +303,29 @@ fn generated_rival_clash_then_postwar_negotiation_uses_actual_player_orders() {
         .unwrap();
     session.execute("advance 3h").unwrap();
     assert!(session.known_enterprise_ids().contains(&target));
+    // The starting enforcer knows violence but not command. The existing
+    // experienced lieutenant can handle the additional field associates when
+    // given real authority over the neighboring district. Use the public
+    // mandate-revision command rather than bypassing the supervision model.
     let manager = session
         .state
         .world()
         .characters_in_organization(session.player)
-        .nth(2)
-        .expect("generated deputy exists")
+        .nth(1)
+        .expect("generated lieutenant exists")
+        .id();
+    let mandate = session
+        .state
+        .delegation()
+        .active_for_manager(manager)
+        .expect("the lieutenant already commands the home racket")
         .id();
     session
         .execute(&format!(
-            "delegate {} district-{}",
-            manager.raw(),
+            "mandate {} add district-{}",
+            mandate.raw(),
             district.raw()
         ))
-        .unwrap();
-    session
-        .execute(&format!("autonomy {} delegated", manager.raw()))
         .unwrap();
     let account_output = session.execute("open-account settlement").unwrap().0;
     let settlement_id = account_output

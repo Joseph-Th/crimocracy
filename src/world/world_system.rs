@@ -526,7 +526,6 @@ fn validate_reassignment_preconditions(
     }
 
     let organization_changed = organization != record.organization();
-    let supervisor_changed = supervisor != record.supervisor();
     if organization_changed {
         if let Some(organization) = organization
             && let Some(decision) = state
@@ -545,7 +544,13 @@ fn validate_reassignment_preconditions(
         }
         validate_organization_change_release(state, character, organization)?;
     }
-    if organization_changed || supervisor_changed {
+    // Changing a reporting line *within* an organization does not release
+    // the person's mandate, live investigation or operation assignment. Those
+    // roles still belong to the same person and organization, and the
+    // resulting character-version bump invalidates held stale tokens. Blocking
+    // supervisory restructuring whenever someone has a real job makes
+    // forming an underboss layer impossible in an operating organization.
+    if organization_changed {
         validate_role_change_release(state, character)?;
         if organization_changed
             && let Some(direct_report) = state.world.direct_reports(character).next()

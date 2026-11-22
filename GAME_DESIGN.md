@@ -454,10 +454,20 @@ delegate, not merely to open another profitable racket.
 Every active racket requires a trusted named captain plus a rank-and-file crew.
 That captain's work increases with the number of separate venues, associates,
 supporting businesses, and districts they oversee. Their Management competence
-and availability determine how much they can actually handle; additional named
-staff help only when given genuine assignments, not merely because they appear
-on the payroll. Overextension disrupts or prevents operations, while delegation
-to skilled captains restores control. Legal stores have ordinary employees and
+and availability determine how much they can actually handle. The basic labor
+required by the kind of racket sets a one-operation operating allowance, but
+extra hires must never inflate that allowance. Every supervisor also has to
+direct the active immediate command branches reporting to them. Supervising a
+captain with little discretion demands more attention than supervising one with
+broad delegated authority. A competent underboss can turn many direct reports
+to the boss into a single subordinate command branch, preserving separate
+captains' real accountability. Additional named staff help only when given
+genuine responsibilities in that tree, not merely because they appear on the
+payroll. Active captains must be movable between supervisors without destroying
+the operations they already manage; the ensuing excess workload should affect
+actual racket continuity. Overextension disrupts or prevents operations, while
+delegation to skilled captains and mid-level executives restores control. Rival
+simultaneous expansions must use the same combined workload calculation. Legal stores have ordinary employees and
 can distribute lawful dividends regardless of the criminal organization's
 headcount; control of street operations and cash transfer are different jobs.
 

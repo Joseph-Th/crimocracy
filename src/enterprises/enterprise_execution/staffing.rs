@@ -3,7 +3,7 @@
 use super::*;
 
 use crate::core::time::is_day_boundary;
-use crate::world::CapabilityKind;
+use crate::world::{AutonomyLevel, CapabilityKind};
 
 /// A unit of responsibility is one active associate, one independently operating
 /// racket, one supporting storefront, or one additional district in the captain's
@@ -18,13 +18,51 @@ pub struct ManagerWorkload {
     pub rackets: u32,
     pub associates: u32,
     pub districts: u32,
+    /// Active subordinate command branches reporting directly to this person.
+    pub command_lines: u32,
+    /// Recurring supervision duties for those branches; less autonomy means
+    /// more handholding by the immediate supervisor.
+    pub reporting_duties: u32,
 }
 
 #[derive(Clone, Copy)]
-struct ManagedJob {
-    location: EnterpriseLocation,
-    associates: u16,
-    supporting_businesses: usize,
+pub(crate) struct ManagedJob {
+    pub(crate) kind: EnterpriseKind,
+    pub(crate) location: EnterpriseLocation,
+    pub(crate) associates: u16,
+    pub(crate) supporting_businesses: usize,
+}
+
+/// A prospective racket in one same-minute autonomous cohort. The candidate
+/// belongs to a real existing captain and must contribute both their own
+/// duties and their supervisors' reporting-line obligations before any plan
+/// commits. This is not persisted, so the live enterprise remains the truth.
+#[derive(Clone, Copy)]
+pub(crate) struct ProjectedCommandJob {
+    pub(crate) organization: OrganizationId,
+    pub(crate) captain: crate::core::id::CharacterId,
+    pub(crate) kind: EnterpriseKind,
+    pub(crate) location: EnterpriseLocation,
+    pub(crate) associates: u16,
+    pub(crate) supporting_businesses: usize,
+}
+
+/// Find the *immediate* reporting line through which a descendant's operating
+/// crew is answerable to this supervisor. This lets an underboss absorb a
+/// dozen captains without charging every soldier to the organization leader.
+fn commanding_branch(
+    state: &AppState,
+    supervisor: crate::core::id::CharacterId,
+    descendant: crate::core::id::CharacterId,
+) -> Option<crate::core::id::CharacterId> {
+    let mut child = descendant;
+    loop {
+        let parent = state.world().get_character(child)?.supervisor()?;
+        if parent == supervisor {
+            return Some(child);
+        }
+        child = parent;
+    }
 }
 
 fn resolve_management_workload(
@@ -32,14 +70,16 @@ fn resolve_management_workload(
     organization: OrganizationId,
     manager: crate::core::id::CharacterId,
     proposal: Option<ManagedJob>,
+    proposing_captain: Option<crate::core::id::CharacterId>,
     excluding: Option<EnterpriseId>,
+    projected: &[ProjectedCommandJob],
 ) -> Result<ManagerWorkload, EnterpriseError> {
     let person = state
         .world()
         .get_character(manager)
         .ok_or(EnterpriseError::InvalidManager(manager))?;
     let mut required = 0_u32;
-    let mut largest_job = 0_u32;
+    let mut largest_baseline_job = 0_u32;
     let mut rackets = 0_u32;
     let mut associates = 0_u32;
     let mut districts = BTreeSet::new();
@@ -54,7 +94,15 @@ fn resolve_management_workload(
             .saturating_add(1)
             .saturating_add(job.supporting_businesses.min(u32::MAX as usize) as u32);
         required = required.saturating_add(work);
-        largest_job = largest_job.max(work);
+        // Baseline rank-and-file staffing is the work that necessarily comes
+        // with running this *kind* of racket. Extra associates increase the
+        // required work, but cannot also increase the manager's capacity.
+        // Otherwise an unskilled captain can make a job arbitrarily large and
+        // always qualify for it by construction.
+        let baseline = u32::from(job.kind.baseline_associates())
+            .saturating_add(1)
+            .saturating_add(job.supporting_businesses.min(u32::MAX as usize) as u32);
+        largest_baseline_job = largest_baseline_job.max(baseline);
         rackets = rackets.saturating_add(1);
         associates = associates.saturating_add(workers);
         Ok(())
@@ -65,6 +113,7 @@ fn resolve_management_workload(
         .filter(|record| record.manager() == manager && Some(record.id()) != excluding)
     {
         visit(ManagedJob {
+            kind: active.kind(),
             location: active.location(),
             associates: active.associates(),
             supporting_businesses: active.supporting_businesses().len(),
@@ -73,6 +122,57 @@ fn resolve_management_workload(
     if let Some(job) = proposal {
         visit(job)?;
     }
+    for candidate in projected
+        .iter()
+        .filter(|candidate| candidate.organization == organization && candidate.captain == manager)
+    {
+        visit(ManagedJob {
+            kind: candidate.kind,
+            location: candidate.location,
+            associates: candidate.associates,
+            supporting_businesses: candidate.supporting_businesses,
+        })?;
+    }
+    // The superior commands only their direct *operating* branches, not every
+    // associate several levels down. An idle hire is not a criminal command
+    // obligation. Granting less autonomy requires twice as many supervisory
+    // decisions, making genuine delegation and intermediate leadership useful.
+    let mut reporting_branches = BTreeSet::new();
+    for active in state
+        .enterprises()
+        .active_for_organization(organization)
+        .filter(|record| Some(record.id()) != excluding)
+    {
+        if let Some(branch) = commanding_branch(state, manager, active.manager()) {
+            reporting_branches.insert(branch);
+        }
+    }
+    if let Some(captain) = proposing_captain
+        && let Some(branch) = commanding_branch(state, manager, captain)
+    {
+        reporting_branches.insert(branch);
+    }
+    for candidate in projected
+        .iter()
+        .filter(|candidate| candidate.organization == organization)
+    {
+        if let Some(branch) = commanding_branch(state, manager, candidate.captain) {
+            reporting_branches.insert(branch);
+        }
+    }
+    let command_lines = reporting_branches.len().min(u32::MAX as usize) as u32;
+    let reporting_duties = reporting_branches.iter().fold(0_u32, |sum, &branch| {
+        let autonomy = state
+            .world()
+            .get_character(branch)
+            .expect("reporting branch is an actual subordinate")
+            .autonomy();
+        sum.saturating_add(match autonomy {
+            AutonomyLevel::Tight | AutonomyLevel::Guided => 2,
+            AutonomyLevel::Delegated | AutonomyLevel::Broad => 1,
+        })
+    });
+    required = required.saturating_add(reporting_duties);
     let distinct_districts = districts.len().min(u32::MAX as usize) as u32;
     required = required.saturating_add(distinct_districts.saturating_sub(1));
     let skill = person
@@ -86,7 +186,10 @@ fn resolve_management_workload(
     {
         0
     } else {
-        skill.div_ceil(3).max(largest_job)
+        skill
+            .div_ceil(3)
+            .max(largest_baseline_job)
+            .max(u32::from(command_lines > 0))
     };
     Ok(ManagerWorkload {
         required,
@@ -94,6 +197,8 @@ fn resolve_management_workload(
         rackets,
         associates,
         districts: distinct_districts,
+        command_lines,
+        reporting_duties,
     })
 }
 
@@ -104,28 +209,48 @@ pub fn manager_workload(
     manager: crate::core::id::CharacterId,
 ) -> Option<ManagerWorkload> {
     let organization = state.world().get_character(manager)?.organization()?;
-    resolve_management_workload(state, organization, manager, None, None).ok()
+    resolve_management_workload(state, organization, manager, None, None, None, &[]).ok()
+}
+
+/// Verify a complete same-minute expansion cohort against every real manager
+/// and superior affected by the proposed assignments. Checking each mandate
+/// independently misses competition for their common executive's bandwidth;
+/// a batch must not reach commit with individually valid but jointly
+/// impossible reporting lines. The projection reuses the *same* workload
+/// resolver as direct player staffing and the daily maintenance phase.
+pub(crate) fn projected_command_jobs_fit(state: &AppState, jobs: &[ProjectedCommandJob]) -> bool {
+    let mut impacted = BTreeSet::new();
+    for job in jobs {
+        let mut person = Some(job.captain);
+        while let Some(manager) = person {
+            impacted.insert((job.organization, manager));
+            person = state
+                .world()
+                .get_character(manager)
+                .and_then(|record| record.supervisor());
+        }
+    }
+    impacted.into_iter().all(|(organization, manager)| {
+        resolve_management_workload(state, organization, manager, None, None, None, jobs)
+            .is_ok_and(|load| load.required <= load.available)
+    })
 }
 
 pub(crate) fn ensure_manager_capacity(
     state: &AppState,
     organization: OrganizationId,
     manager: crate::core::id::CharacterId,
-    location: EnterpriseLocation,
-    additional_associates: u16,
-    supporting_businesses: usize,
+    job: ManagedJob,
     excluding: Option<EnterpriseId>,
 ) -> Result<(), EnterpriseError> {
     let workload = resolve_management_workload(
         state,
         organization,
         manager,
-        Some(ManagedJob {
-            location,
-            associates: additional_associates,
-            supporting_businesses,
-        }),
+        Some(job),
+        Some(manager),
         excluding,
+        &[],
     )?;
     if workload.required > workload.available {
         return Err(EnterpriseError::ManagerWorkloadExceeded {
@@ -133,6 +258,34 @@ pub(crate) fn ensure_manager_capacity(
             required: workload.required,
             available: workload.available,
         });
+    }
+    // A newly operating branch also consumes capacity up the actual command
+    // chain. Strong captains no longer permit an unskilled boss to personally
+    // supervise an unlimited number of independent crews.
+    let mut child = manager;
+    while let Some(supervisor) = state
+        .world()
+        .get_character(child)
+        .expect("validated reporting hierarchy references current members")
+        .supervisor()
+    {
+        let upstream = resolve_management_workload(
+            state,
+            organization,
+            supervisor,
+            None,
+            Some(manager),
+            excluding,
+            &[],
+        )?;
+        if upstream.required > upstream.available {
+            return Err(EnterpriseError::ManagerWorkloadExceeded {
+                manager: supervisor,
+                required: upstream.required,
+                available: upstream.available,
+            });
+        }
+        child = supervisor;
     }
     Ok(())
 }
@@ -147,27 +300,35 @@ pub(crate) fn apply_due_overstretched_manager_suspensions(
     if !is_day_boundary(state.now()) {
         return Vec::new();
     }
-    let managers = state
+    let captains = state
         .enterprises()
         .enterprises()
         .filter(|record| record.status() == EnterpriseStatus::Active)
         .map(|record| record.manager())
         .collect::<BTreeSet<_>>();
+    // Include the whole organizational reporting chain. Otherwise a captain
+    // can satisfy their local workload while an executive simultaneously
+    // claims infinitely many such captains as direct reports.
+    let mut managers = captains.clone();
+    for captain in captains {
+        let mut person = captain;
+        while let Some(supervisor) = state
+            .world()
+            .get_character(person)
+            .expect("a live racket captain belongs to a valid reporting tree")
+            .supervisor()
+        {
+            managers.insert(supervisor);
+            person = supervisor;
+        }
+    }
     let mut suspended = Vec::new();
     for manager in managers {
         while let Some(load) = manager_workload(state, manager) {
             if load.required <= load.available {
                 break;
             }
-            let Some(racket) = state
-                .enterprises()
-                .enterprises()
-                .filter(|record| {
-                    record.status() == EnterpriseStatus::Active && record.manager() == manager
-                })
-                .map(|record| record.id())
-                .max()
-            else {
+            let Some(racket) = select_overstretched_racket(state, manager, load) else {
                 break;
             };
             let Ok(token) = validate_suspend_enterprise(state, racket) else {
@@ -180,6 +341,45 @@ pub(crate) fn apply_due_overstretched_manager_suspensions(
         }
     }
     suspended
+}
+
+/// Prefer reducing the captain's own work if their own sites alone exceed
+/// capacity. Otherwise deactivate the smallest direct operating branch:
+/// this removes the fewest rackets to free a superior's reporting capacity.
+/// The newest establishment wins ties, preserving the oldest working crews.
+fn select_overstretched_racket(
+    state: &AppState,
+    manager: crate::core::id::CharacterId,
+    workload: ManagerWorkload,
+) -> Option<EnterpriseId> {
+    let own = state
+        .enterprises()
+        .enterprises()
+        .filter(|racket| racket.status() == EnterpriseStatus::Active && racket.manager() == manager)
+        .map(|racket| racket.id())
+        .max();
+    if workload.required.saturating_sub(workload.reporting_duties) > workload.available
+        && own.is_some()
+    {
+        return own;
+    }
+    let mut branches = BTreeMap::<crate::core::id::CharacterId, Vec<EnterpriseId>>::new();
+    for racket in state
+        .enterprises()
+        .enterprises()
+        .filter(|racket| racket.status() == EnterpriseStatus::Active)
+    {
+        if let Some(branch) = commanding_branch(state, manager, racket.manager()) {
+            branches.entry(branch).or_default().push(racket.id());
+        }
+    }
+    let smallest_branch = branches.values().min_by_key(|rackets| {
+        (
+            rackets.len(),
+            std::cmp::Reverse(rackets.iter().copied().max()),
+        )
+    })?;
+    smallest_branch.iter().copied().max().or(own)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -224,9 +424,12 @@ pub fn validate_staff_enterprise(
             state,
             record.organization(),
             record.manager(),
-            record.location(),
-            associates,
-            record.supporting_businesses().len(),
+            ManagedJob {
+                kind: record.kind(),
+                location: record.location(),
+                associates,
+                supporting_businesses: record.supporting_businesses().len(),
+            },
             Some(enterprise),
         )?;
     }

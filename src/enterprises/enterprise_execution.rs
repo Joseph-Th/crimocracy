@@ -38,9 +38,11 @@ pub use lifecycle::{
     ValidatedEnterpriseStatusChange, validate_resume_enterprise, validate_retire_enterprise,
     validate_suspend_enterprise,
 };
+pub(crate) use staffing::ManagedJob;
 pub use staffing::{
     ManagerWorkload, ValidatedEnterpriseStaffing, manager_workload, validate_staff_enterprise,
 };
+pub(crate) use staffing::{ProjectedCommandJob, projected_command_jobs_fit};
 pub(crate) use staffing::{apply_due_overstretched_manager_suspensions, ensure_manager_capacity};
 pub use succession::{ValidatedEnterpriseReassignment, validate_reassign_enterprise};
 

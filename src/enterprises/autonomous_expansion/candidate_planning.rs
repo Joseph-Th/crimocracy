@@ -198,9 +198,12 @@ fn build_ranked_candidate(
         economics.state,
         economics.organization,
         economics.manager,
-        location,
-        kind.baseline_associates(),
-        supporting_businesses.len(),
+        crate::enterprises::enterprise_execution::ManagedJob {
+            kind,
+            location,
+            associates: kind.baseline_associates(),
+            supporting_businesses: supporting_businesses.len(),
+        },
         None,
     )
     .is_err()

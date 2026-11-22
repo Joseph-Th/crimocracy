@@ -162,9 +162,12 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
             &fixture.state,
             fixture.organization,
             manager,
-            location,
-            20,
-            0,
+            ManagedJob {
+                kind: EnterpriseKind::Protection,
+                location,
+                associates: 20,
+                supporting_businesses: 0,
+            },
             Some(enterprise)
         )
         .is_ok()
@@ -174,9 +177,12 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
             &fixture.state,
             fixture.organization,
             manager,
-            location,
-            25,
-            0,
+            ManagedJob {
+                kind: EnterpriseKind::Protection,
+                location,
+                associates: 25,
+                supporting_businesses: 0,
+            },
             Some(enterprise)
         ),
         Ok(())
@@ -190,9 +196,12 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
             &fixture.state,
             fixture.organization,
             manager,
-            location,
-            14,
-            0,
+            ManagedJob {
+                kind: EnterpriseKind::Protection,
+                location,
+                associates: 14,
+                supporting_businesses: 0,
+            },
             None
         ),
         Err(EnterpriseError::ManagerWorkloadExceeded {
@@ -206,9 +215,12 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
             &fixture.state,
             fixture.organization,
             manager,
-            location,
-            13,
-            0,
+            ManagedJob {
+                kind: EnterpriseKind::Protection,
+                location,
+                associates: 13,
+                supporting_businesses: 0,
+            },
             None
         )
         .is_ok()
@@ -236,9 +248,12 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
             &fixture.state,
             fixture.organization,
             manager,
-            location,
-            14,
-            0,
+            ManagedJob {
+                kind: EnterpriseKind::Protection,
+                location,
+                associates: 14,
+                supporting_businesses: 0,
+            },
             None
         ),
         Err(EnterpriseError::ManagerWorkloadExceeded { .. })
@@ -248,9 +263,12 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
             &fixture.state,
             fixture.organization,
             additional_captain,
-            location,
-            14,
-            0,
+            ManagedJob {
+                kind: EnterpriseKind::Protection,
+                location,
+                associates: 14,
+                supporting_businesses: 0,
+            },
             None
         )
         .is_ok()
@@ -264,6 +282,385 @@ fn named_manager_cannot_supervise_unbounded_field_workers() {
         4
     );
     validate_state_against_registry(&registry, &fixture.state).unwrap();
+}
+
+#[test]
+fn an_unskilled_captain_cannot_grow_their_capacity_by_hiring_more_workers() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture_with_inputs(
+        OrganizationKind::Criminal,
+        AutonomyLevel::Delegated,
+        NeighborhoodProfile {
+            economy: NeighborhoodEconomyProfile {
+                wealth: rating(60),
+                commercial_activity: rating(70),
+                illicit_demand: rating(50),
+            },
+            institutions: NeighborhoodInstitutionProfile {
+                police_presence: rating(40),
+            },
+        },
+        None,
+    );
+    let racket = establish_protection(&registry, &mut fixture);
+    let boss = fixture.authority.manager;
+    let baseline = manager_workload(&fixture.state, boss).unwrap();
+    assert_eq!((baseline.required, baseline.available), (5, 5));
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        validate_staff_enterprise(&fixture.state, racket, 5).err(),
+        Some(EnterpriseError::ManagerWorkloadExceeded {
+            manager: boss,
+            required: 6,
+            available: 5,
+        })
+    );
+    assert_eq!(before, bincode::serialize(&fixture.state).unwrap());
+    // Recruiting an idle body still does nothing; actual reassignment to a
+    // skilled captain is what makes extra field workers manageable.
+    let captain = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Qualified district captain".to_owned(),
+            organization: Some(fixture.organization),
+            supervisor: Some(boss),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(80).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        validate_staff_enterprise(&fixture.state, racket, 5).err(),
+        Some(EnterpriseError::ManagerWorkloadExceeded {
+            manager: boss,
+            required: 6,
+            available: 5,
+        })
+    );
+    let mandate = validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: fixture.organization,
+            manager: captain,
+            scopes: BTreeSet::from([fixture.authority.scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    validate_reassign_enterprise(
+        &fixture.state,
+        racket,
+        MandateAuthority {
+            mandate,
+            manager: captain,
+            scope: fixture.authority.scope,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    validate_staff_enterprise(&fixture.state, racket, 9)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let boss_load = manager_workload(&fixture.state, boss).unwrap();
+    assert_eq!(
+        (
+            boss_load.command_lines,
+            boss_load.required,
+            boss_load.available
+        ),
+        (1, 1, 1)
+    );
+    let captain_load = manager_workload(&fixture.state, captain).unwrap();
+    assert_eq!(
+        (
+            captain_load.associates,
+            captain_load.required,
+            captain_load.available
+        ),
+        (9, 10, 27)
+    );
+    let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    assert_eq!(manager_workload(&restored, captain), Some(captain_load));
+    validate_state_against_registry(&registry, &restored).unwrap();
+}
+
+#[test]
+fn executive_command_is_a_real_bottleneck_until_an_underboss_delegates_the_crews() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture_with_inputs(
+        OrganizationKind::Criminal,
+        AutonomyLevel::Delegated,
+        NeighborhoodProfile {
+            economy: NeighborhoodEconomyProfile {
+                wealth: rating(60),
+                commercial_activity: rating(70),
+                illicit_demand: rating(50),
+            },
+            institutions: NeighborhoodInstitutionProfile {
+                police_presence: rating(40),
+            },
+        },
+        None,
+    );
+    let executive = fixture.authority.manager;
+    let first_district = match fixture.location {
+        EnterpriseLocation::Neighborhood(id) => id,
+        _ => unreachable!(),
+    };
+    let profile = fixture
+        .state
+        .world()
+        .get_neighborhood(first_district)
+        .unwrap()
+        .profile();
+    let second_district = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Second Command District".to_owned(),
+            profile,
+        },
+    )
+    .unwrap();
+    let mut captains = Vec::new();
+    for (index, district) in [first_district, second_district].into_iter().enumerate() {
+        let captain = insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: format!("District Captain {index}"),
+                organization: Some(fixture.organization),
+                supervisor: Some(executive),
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Management,
+                    Rating::try_new(80).unwrap(),
+                )]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let scope = ResponsibilityScope::Neighborhood(district);
+        let mandate = validate_assign_mandate(
+            &fixture.state,
+            MandateDraft {
+                organization: fixture.organization,
+                manager: captain,
+                scopes: BTreeSet::from([scope]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        captains.push(MandateAuthority {
+            mandate,
+            manager: captain,
+            scope,
+        });
+    }
+    let prospective = [
+        ProjectedCommandJob {
+            organization: fixture.organization,
+            captain: captains[0].manager,
+            kind: EnterpriseKind::Protection,
+            location: fixture.location,
+            associates: EnterpriseKind::Protection.baseline_associates(),
+            supporting_businesses: 0,
+        },
+        ProjectedCommandJob {
+            organization: fixture.organization,
+            captain: captains[1].manager,
+            kind: EnterpriseKind::Protection,
+            location: EnterpriseLocation::Neighborhood(second_district),
+            associates: EnterpriseKind::Protection.baseline_associates(),
+            supporting_businesses: 0,
+        },
+    ];
+    // Each same-minute NPC expansion is individually feasible. A combined
+    // batch must not book two direct command lines against one weak executive.
+    assert!(projected_command_jobs_fit(
+        &fixture.state,
+        &prospective[..1]
+    ));
+    assert!(projected_command_jobs_fit(
+        &fixture.state,
+        &prospective[1..]
+    ));
+    assert!(!projected_command_jobs_fit(&fixture.state, &prospective));
+    let first = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization: fixture.organization,
+            authority: captains[0],
+            location: fixture.location,
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: fixture.settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let second_settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    let second_draft = EnterpriseDraft {
+        kind: EnterpriseKind::Protection,
+        organization: fixture.organization,
+        authority: captains[1],
+        location: EnterpriseLocation::Neighborhood(second_district),
+        supporting_businesses: BTreeSet::new(),
+        cash_account: fixture.cash,
+        settlement_account: second_settlement,
+    };
+    let boss_load = manager_workload(&fixture.state, executive).unwrap();
+    assert_eq!(
+        (
+            boss_load.command_lines,
+            boss_load.required,
+            boss_load.available
+        ),
+        (1, 1, 1)
+    );
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        validate_establish_enterprise(&registry, &fixture.state, second_draft.clone())
+            .err()
+            .map(|error| error),
+        Some(EnterpriseError::ManagerWorkloadExceeded {
+            manager: executive,
+            required: 2,
+            available: 1,
+        })
+    );
+    assert_eq!(before, bincode::serialize(&fixture.state).unwrap());
+    // The extra member starts idle. Only real reporting-line reassignment
+    // lets one skilled underboss command both independent field captains.
+    let underboss = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Field Underboss".to_owned(),
+            organization: Some(fixture.organization),
+            supervisor: Some(executive),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(90).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        validate_establish_enterprise(&registry, &fixture.state, second_draft.clone()).err(),
+        Some(EnterpriseError::ManagerWorkloadExceeded {
+            manager: executive,
+            required: 2,
+            available: 1,
+        })
+    );
+    for captain in &captains {
+        crate::world::world_system::validate_set_character_supervisor(
+            &fixture.state,
+            captain.manager,
+            Some(underboss),
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    }
+    assert!(projected_command_jobs_fit(
+        &fixture.state,
+        &prospective[1..],
+    ));
+    let second = validate_establish_enterprise(&registry, &fixture.state, second_draft)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        manager_workload(&fixture.state, executive)
+            .unwrap()
+            .command_lines,
+        1
+    );
+    let underboss_load = manager_workload(&fixture.state, underboss).unwrap();
+    assert_eq!(
+        (
+            underboss_load.command_lines,
+            underboss_load.required,
+            underboss_load.available
+        ),
+        (2, 2, 30)
+    );
+
+    // A supervisor reshuffle can temporarily overload the boss between ticks.
+    // The following day closes the smallest excess reporting branch through
+    // the ordinary racket lifecycle, rather than retaining fictional control.
+    crate::world::world_system::validate_set_character_supervisor(
+        &fixture.state,
+        captains[1].manager,
+        Some(executive),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    assert_eq!(
+        manager_workload(&fixture.state, executive)
+            .unwrap()
+            .required,
+        2
+    );
+    assert!(apply_due_overstretched_manager_suspensions(&mut fixture.state).is_empty());
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    assert_eq!(
+        apply_due_overstretched_manager_suspensions(&mut fixture.state),
+        vec![second]
+    );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(first)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Active
+    );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(second)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Suspended
+    );
+    let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    assert_eq!(
+        manager_workload(&restored, executive),
+        manager_workload(&fixture.state, executive)
+    );
+    validate_state_against_registry(&registry, &restored).unwrap();
 }
 
 #[test]

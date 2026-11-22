@@ -1203,7 +1203,10 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
             organization: Some(city.player),
             supervisor: Some(city.boss),
             autonomy: AutonomyLevel::Delegated,
-            capabilities: BTreeMap::new(),
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(45).unwrap(),
+            )]),
             traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },

@@ -464,6 +464,30 @@ impl Session<'_> {
                     if !capabilities.is_empty() {
                         writeln!(out, "  Capabilities: {}", capabilities.join(", ")).unwrap();
                     }
+                    if let Some(load) =
+                        crimocracy::enterprises::enterprise_execution::manager_workload(
+                            state,
+                            person.id(),
+                        )
+                        && load.required > 0
+                    {
+                        writeln!(
+                            out,
+                            "  Command: {} / {} duties | {} directly managed rackets, {} associates, {} operating reporting lines ({} supervision duties), {} districts | {}",
+                            load.required,
+                            load.available,
+                            load.rackets,
+                            load.associates,
+                            load.command_lines,
+                            load.reporting_duties,
+                            load.districts,
+                            if load.required > load.available {
+                                "OVERSTRETCHED"
+                            } else {
+                                "within capacity"
+                            }
+                        ).unwrap();
+                    }
                 }
             }
             "known-people" => {
