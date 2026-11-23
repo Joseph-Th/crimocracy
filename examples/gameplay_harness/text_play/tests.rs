@@ -584,6 +584,126 @@ fn treasury_standing_order_is_explicit_and_persistent() {
 }
 
 #[test]
+fn owner_surplus_projection_rounds_portfolio_fee_per_storefront() {
+    let surpluses = [Money::from_cents(101), Money::from_cents(101)];
+    assert_eq!(estimate_owner_distribution(surpluses, 300), (202, 194));
+    assert_eq!(estimate_owner_distribution(surpluses, 0), (202, 202));
+}
+
+#[test]
+fn leadership_runway_counts_organization_operating_cash_eligible_for_payroll() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let before = session.brief();
+    let original_runway = before
+        .lines()
+        .find(|line| line.starts_with("Gross payroll runway:"))
+        .expect("opening brief must show the available wage runway");
+
+    let owner = FinancialOwner::Organization(session.player);
+    let wages = registry.upkeep().per_member_daily().cents()
+        * session
+            .state
+            .world()
+            .characters_in_organization(session.player)
+            .count() as i64;
+    let source = session
+        .state
+        .finance()
+        .accounts_for(owner)
+        .find(|account| {
+            account.kind() == AccountKind::StreetCash
+                && account.available_payment_balance().cents() >= wages
+        })
+        .expect("generated organization starts with an adequately funded street account")
+        .id();
+    let operating = insert_account(
+        &mut session.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("organization-owned operating account must open");
+    let amount = Money::from_cents(wages);
+    validate_record_transaction(
+        &session.state,
+        LedgerTransactionDraft {
+            occurred_at: session.state.now(),
+            memo: "Reallocate an existing wage reserve".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: source,
+                    amount: amount.checked_neg().unwrap(),
+                },
+                LedgerPosting {
+                    account: operating,
+                    amount,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("balanced transfer between organization accounts must validate")
+    .commit(&mut session.state)
+    .expect("reallocation must settle");
+
+    let after = session.brief();
+    assert!(
+        after.contains(&format!("operating {wages} cents")),
+        "{after}"
+    );
+    assert_eq!(
+        after
+            .lines()
+            .find(|line| line.starts_with("Gross payroll runway:")),
+        Some(original_runway),
+        "moving existing liquid wages between eligible account kinds cannot shorten runway"
+    );
+    assert!(
+        after.contains(&format!("covered from current treasury: {wages} cents")),
+        "{after}"
+    );
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        after,
+        session.brief(),
+        "a restored brief must retain the exact projection"
+    );
+}
+
+#[test]
+fn depleted_manual_treasury_warns_about_earned_but_unwithdrawn_payroll_cash() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    session.execute("advance 10d uninterrupted").unwrap();
+    let brief = session.brief();
+    assert!(
+        brief.contains("covered from current treasury: 0 cents"),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("Earned storefront cash cannot pay wages until withdrawn."),
+        "{brief}"
+    );
+    assert!(brief.contains("distribution: manual"), "{brief}");
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(session.brief(), brief);
+
+    session.execute("treasury daily").unwrap();
+    let updated = session.brief();
+    assert!(updated.contains("distribution: daily"), "{updated}");
+    assert!(
+        !updated.contains("Earned storefront cash cannot pay wages until withdrawn."),
+        "{updated}"
+    );
+}
+
+#[test]
 fn obsolete_wait_alias_is_not_a_second_time_mutation_path() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();

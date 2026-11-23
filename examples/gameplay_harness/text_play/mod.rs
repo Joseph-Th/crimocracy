@@ -100,6 +100,24 @@ const SAVE_DIR: &str = "target/text-play";
 const MAX_ADVANCE: u64 = DAY_MINUTES * 30;
 static NEXT_SAVE_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Keep the leadership estimate aligned with the finance owner's per-storefront
+/// rounding. Charging overhead once against an aggregate overstates the payout.
+fn estimate_owner_distribution(
+    surpluses: impl IntoIterator<Item = Money>,
+    basis_points: u16,
+) -> (i128, i128) {
+    surpluses.into_iter().fold((0, 0), |(gross, net), amount| {
+        let fee = crimocracy::economy::business_economy_system::portfolio_overhead_charge(
+            amount,
+            basis_points,
+        );
+        (
+            gross + i128::from(amount.cents()),
+            net + i128::from(amount.cents()) - i128::from(fee.cents()),
+        )
+    })
+}
+
 const HELP: &str = "Commands:
   brief                  Leadership's current situation
   victory                View mayoral, retirement, and city-underboss ending requirements
@@ -1029,22 +1047,30 @@ impl<'a> Session<'a> {
             .enterprises_for_organization(player)
             .filter(|enterprise| enterprise.status() == EnterpriseStatus::Active)
             .count();
-        let surplus: i128 = state
-            .world()
-            .businesses_owned_by_organization(player)
-            .filter(|business| state.economy().get_business_economy(business.id()).is_some())
-            .map(|business| {
-                i128::from(crimocracy::economy::business_economy_system::resolve_available_business_profit(
-                    state, player, business.id(),
-                ).expect("owned operating books must have a valid capital basis").cents())
-            })
-            .sum();
         let overhead_basis_points =
             crimocracy::economy::business_economy_system::portfolio_overhead_basis_points(
                 state, player,
             );
-        let estimated_owner_surplus =
-            surplus - (surplus * i128::from(overhead_basis_points) + 9_999) / 10_000;
+        let (surplus, estimated_owner_surplus) = estimate_owner_distribution(
+            state
+                .world()
+                .businesses_owned_by_organization(player)
+                .filter(|business| {
+                    state
+                        .economy()
+                        .get_business_economy(business.id())
+                        .is_some()
+                })
+                .map(|business| {
+                    crimocracy::economy::business_economy_system::resolve_available_business_profit(
+                        state,
+                        player,
+                        business.id(),
+                    )
+                    .expect("owned operating books must have a valid capital basis")
+                }),
+            overhead_basis_points,
+        );
         let distribution = if state.automatic_profit_sweeps() {
             "daily"
         } else {
@@ -1056,6 +1082,7 @@ impl<'a> Session<'a> {
         let mut street_spendable = 0_i128;
         let mut concealed_spendable = 0_i128;
         let mut clean_spendable = 0_i128;
+        let mut operating_spendable = 0_i128;
         let mut deficits = 0_i128;
         for account in state
             .finance()
@@ -1079,7 +1106,11 @@ impl<'a> Session<'a> {
                     clean_spendable += spendable;
                     deficits += (-amount).max(0);
                 }
-                AccountKind::LegitimateOperating | AccountKind::Settlement => {}
+                AccountKind::LegitimateOperating => {
+                    operating_spendable += spendable;
+                    deficits += (-amount).max(0);
+                }
+                AccountKind::Settlement => {}
             }
         }
         let (payroll, covered) = crimocracy::world::payroll_execution::payroll_funding_snapshot(
@@ -1090,9 +1121,10 @@ impl<'a> Session<'a> {
         .expect("valid player payroll estimate");
         let payroll = payroll.cents();
         let covered = covered.cents();
-        // Snapshot only: all three spendable treasury kinds can pay wages, but suspended
+        // Snapshot only: every organization-owned liquid account can pay wages, but suspended
         // rackets, future shop earnings, counsel fees and fines make forecasts uncertain.
-        let wage_liquidity = street_spendable + concealed_spendable + clean_spendable;
+        let wage_liquidity =
+            street_spendable + concealed_spendable + clean_spendable + operating_spendable;
         let wage_runway = if payroll > 0 {
             format!("{} full day(s)", wage_liquidity / i128::from(payroll))
         } else {
@@ -1114,6 +1146,14 @@ impl<'a> Session<'a> {
         ).expect("valid player enterprise financial history").totals.net_cash.cents();
         let avg_daily_net = (i128::from(business_net) + i128::from(racket_net)) / i128::from(days);
         let payroll_gap = avg_daily_net - i128::from(payroll);
+        let treasury_guidance = if !state.automatic_profit_sweeps()
+            && surplus > 0
+            && covered < payroll
+        {
+            "\nEarned storefront cash cannot pay wages until withdrawn. Use 'treasury daily' to distribute before payroll, or 'sweep' to withdraw from one storefront."
+        } else {
+            ""
+        };
         let detained_members = state
             .world()
             .characters_in_organization(player)
@@ -1179,9 +1219,9 @@ impl<'a> Session<'a> {
                 format!("Report {}: {}", report.id().raw(), report.title())
             });
         format!(
-            "{name} | {} | {} ({})\nPeople: {members} named | Associates: {active_associates} active, {inactive_associates} suspended | Venues: {venues} ({suspended_venues} suspended) | Rackets: {rackets} ({active_rackets} active, {} suspended)\nPublic prominence: tier {public_prominence}/6 | a wider commercial and political reach draws rival resistance and greater scrutiny of active rackets\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents gross | owner net estimate {estimated_owner_surplus} cents after {overhead_basis_points} bp portfolio administration | distribution: {distribution}\nAssigned racket captains: {active_captains} | all-chain command duties: {command_required}/{command_available} available | direct reporting lines: {command_lines} | overloaded leaders: {overstretched_leaders} (see 'people' for individual workloads)\nNamed-member daily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)
-Gross payroll runway: {wage_runway} at current headcount and accessible funds, ignoring new income and other spending
-Additional associate wages: {incremental_labor_wages} cents/day through racket operating expenses (baseline workers included in fixed racket costs)\nRealized operating net before owner-distribution overhead (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs payroll {payroll_gap:+} cents/day (excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | suspended storefronts: {suspended_venues} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
+            "{name} | {} | {} ({})\nPeople: {members} named | Associates: {active_associates} active, {inactive_associates} suspended | Venues: {venues} ({suspended_venues} suspended) | Rackets: {rackets} ({active_rackets} active, {} suspended)\nPublic prominence: tier {public_prominence}/6 | a wider commercial and political reach draws rival resistance and greater scrutiny of active rackets\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | operating {operating_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents gross | owner net estimate {estimated_owner_surplus} cents after {overhead_basis_points} bp portfolio administration | distribution: {distribution}\nAssigned racket captains: {active_captains} | all-chain command duties: {command_required}/{command_available} available | direct reporting lines: {command_lines} | overloaded leaders: {overstretched_leaders} (see 'people' for individual workloads)\nNamed-member daily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)
+Gross payroll runway: {wage_runway} at current headcount and accessible funds, ignoring new income and other spending{treasury_guidance}
+Additional associate wages: {incremental_labor_wages} cents/day through racket operating expenses (baseline workers included in fixed racket costs)\nRealized operating net before owner-distribution overhead (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs current payroll {payroll_gap:+} cents/day (historical income against today's wages; excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | suspended storefronts: {suspended_venues} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
             time_label(state.now().as_minutes()),
             self.district,
             self.district_variant,

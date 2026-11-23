@@ -786,10 +786,10 @@ pub(super) fn affordable_rival_campaign_points(
         let available = i128::from(account.available_payment_balance().cents());
         if account.kind() == AccountKind::AccountedFunds {
             clean += available;
-        } else if matches!(
-            account.kind(),
-            AccountKind::StreetCash | AccountKind::ConcealedCash
-        ) {
+        } else if account.kind().is_liquid() {
+            // A legitimate operating pocket owned by the gang can fund wages too.
+            // Only accounted funds can buy electoral influence, but every other
+            // spendable kind reduces how much clean liquidity must be reserved.
             other += available;
         }
     }

@@ -267,14 +267,24 @@ completeness, maximum score, stable ties, manual-role separation, and no
 fabricated trained crew. The matcher has at most nine roles and evaluates
 512 assignment masks per current member.
 
+`text_play::tests` verifies that owner-distribution previews round overhead per
+storefront, that moving wages into an organization-owned operating account does
+not reduce reported payable payroll runway, and that the brief survives save/load.
+The generated-session regression checks the manual-distribution warning when
+storefront earnings are retained during a treasury shortfall, its persistence,
+and its removal when daily distribution is explicitly enabled. The rival campaign
+reserve regression tests that organization-owned legitimate operating balances
+protect actual payroll while making existing accounted funds available for civic
+spending, including through save/restore.
+
 Leadership pauses for pending decisions, enabled urgent-report attention, and
 terminal outcomes of its own operations, plus player-member arrests and releases
 from the actual tick outcome. The world payroll outcome also identifies the exact
 members whose missed pay caused them to walk away: normal play pauses on an
 enabled exception, and uninterrupted review counts only departures associated
 with the player's payroll. The leadership brief derives gross full-day wage
-runway from the same spendable treasury kinds as payroll, never from protected
-shop operating balances. `time_play` includes a live five-day unfunded-crew
+runway from the same spendable organization-owned liquid accounts as payroll,
+including organization operating pockets but never protected business-owned tills. `time_play` includes a live five-day unfunded-crew
 regression for departure detection, original-organization scoping, and save
 validation; `political_play_tests`, `civic_play_tests` and `economy_play_tests`
 cover visible campaign erosion, real crew achievements and authored racket

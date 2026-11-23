@@ -15,9 +15,10 @@ use crate::politics::political_system::{
     PoliticalError, apply_due_political_campaigns, controls_district, dismiss_specialist,
     rival_pressure, validate_hire_specialist, validate_invest_influence,
 };
-use crate::world::world_system::insert_business;
+use crate::world::world_system::{insert_business, insert_character, insert_organization};
 use crate::world::{
-    AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, OrganizationKind,
+    AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, CharacterDraft,
+    OrganizationDraft, OrganizationKind,
 };
 
 fn fund(state: &mut crate::AppState, owner: OrganizationId, cents: i64) {
@@ -306,6 +307,101 @@ fn purchased_machine_influence_alone_cannot_win_a_ward_and_rivals_can_contest_it
     validate_invariants(&city.state);
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(restored.politics(), city.state.politics());
+}
+
+#[test]
+fn rival_campaign_reserve_counts_operating_cash_owned_by_the_organization() {
+    let registry = build_registry();
+    let mut state = crate::AppState::new(31);
+    let owner = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Cash-backed opposition".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Opposition executive".to_owned(),
+            organization: Some(owner),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: std::collections::BTreeMap::new(),
+            traits: std::collections::BTreeSet::new(),
+            drives: std::collections::BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let reserve = registry.upkeep().per_member_daily().cents() * 7;
+    let campaign_cash = reserve + INFLUENCE_COST_PER_POINT * 5;
+    fund(&mut state, owner, campaign_cash);
+    assert_eq!(
+        political_system::affordable_rival_campaign_points(&registry, &state, owner),
+        5,
+        "clean cash alone must preserve seven days of payroll"
+    );
+
+    let account_owner = FinancialOwner::Organization(owner);
+    let operating = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: account_owner,
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: account_owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Fund the organization's operating wage reserve".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: operating,
+                    amount: Money::from_cents(reserve),
+                },
+                LedgerPosting {
+                    account: settlement,
+                    amount: Money::from_cents(-reserve),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+
+    assert_eq!(
+        political_system::affordable_rival_campaign_points(&registry, &state, owner),
+        10,
+        "a separate real wage reserve frees clean cash for competitive political spending"
+    );
+    assert_eq!(
+        crate::world::payroll_execution::payroll_funding_snapshot(&registry, &state, owner)
+            .unwrap()
+            .1
+            .cents(),
+        registry.upkeep().per_member_daily().cents(),
+        "payroll itself recognizes that operating balance"
+    );
+    validate_state_against_registry(&registry, &state).unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(
+        political_system::affordable_rival_campaign_points(&registry, &restored, owner),
+        10
+    );
 }
 
 #[test]
