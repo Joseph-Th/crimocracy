@@ -995,6 +995,64 @@ pub fn apply_due_political_campaigns(registry: &Registry, state: &mut AppState) 
     apply_due_mayoral_elections(registry, state);
 }
 
+/// Proportional integer ballots using largest remainders. Truncated divisions cannot
+/// silently give all unallocated votes to the final competitor (including one with
+/// no support). Equal remainders favor stronger candidates, then the stable ballot
+/// order. Every vote is assigned once and zero-score contenders receive none.
+fn apportion_ward_votes(electorate: u32, scores: [u32; 3]) -> [u32; 3] {
+    let total: u64 = scores.iter().map(|&score| u64::from(score)).sum();
+    // The incumbent always has a positive base score in an actual election.
+    assert!(
+        total > 0,
+        "a ward ballot requires at least one supported contender"
+    );
+    let weighted = scores.map(|score| u64::from(electorate) * u64::from(score));
+    let mut votes = weighted.map(|count| (count / total) as u32);
+    let mut remainders = weighted.map(|count| count % total);
+    let remaining = electorate - votes.iter().sum::<u32>();
+    for _ in 0..remaining {
+        let index = (0..scores.len())
+            .max_by_key(|&index| (remainders[index], scores[index], std::cmp::Reverse(index)))
+            .expect("a ward always has three ballot contenders");
+        votes[index] += 1;
+        remainders[index] = 0;
+    }
+    votes
+}
+
+#[cfg(test)]
+mod ballot_apportionment_tests {
+    use super::apportion_ward_votes;
+
+    #[test]
+    fn unsupported_contenders_receive_no_rounding_votes() {
+        assert_eq!(apportion_ward_votes(11, [2, 3, 0]), [4, 7, 0]);
+        assert_eq!(apportion_ward_votes(9, [0, 4, 0]), [0, 9, 0]);
+        assert_eq!(apportion_ward_votes(1, [0, 0, 8]), [0, 0, 1]);
+    }
+
+    #[test]
+    fn proportional_rounding_allocates_every_vote_and_breaks_ties_stably() {
+        assert_eq!(apportion_ward_votes(5, [1, 1, 1]), [2, 2, 1]);
+        assert_eq!(apportion_ward_votes(1, [3, 3, 0]), [1, 0, 0]);
+        assert_eq!(
+            apportion_ward_votes(u32::MAX, [1, 1, 0]),
+            [u32::MAX / 2 + 1, u32::MAX / 2, 0]
+        );
+        for electorate in 0..=100 {
+            for scores in [[0, 1, 0], [1, 1, 0], [1, 2, 3], [97, 0, 4]] {
+                let votes = apportion_ward_votes(electorate, scores);
+                assert_eq!(votes.iter().sum::<u32>(), electorate);
+                for index in 0..scores.len() {
+                    if scores[index] == 0 {
+                        assert_eq!(votes[index], 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppState) {
     let day = state.now().as_minutes() / DAY_MINUTES;
     if day == 0 || !day.is_multiple_of(MUNICIPAL_ELECTION_INTERVAL_DAYS) {
@@ -1106,10 +1164,8 @@ fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppState) {
         let electorate = 5_000_u32
             + u32::from(ward.profile().economy.wealth.value()) * 30
             + u32::from(ward.profile().economy.commercial_activity.value()) * 20;
-        let total_score = (candidate_score + incumbent_score + rival_score).max(1);
-        let candidate_votes = electorate * candidate_score / total_score;
-        let incumbent_votes = electorate * incumbent_score / total_score;
-        let rival_votes = electorate - candidate_votes - incumbent_votes;
+        let [candidate_votes, incumbent_votes, rival_votes] =
+            apportion_ward_votes(electorate, [candidate_score, incumbent_score, rival_score]);
         let local_ready = districts
             .iter()
             .any(|entry| entry.district == district && entry.mayoral_ready);

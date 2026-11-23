@@ -224,7 +224,14 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
                 .is_some_and(|record| record.status() == BusinessOperatingStatus::Active)
         })
         .map(|business| {
-            let cycle = state.economy().cycles_for(business.id()).next_back();
+            // A sale starts a new ownership period. The predecessor's last
+            // settlement must not change the new proprietor's standing or
+            // workload before their own first operating cycle has closed.
+            let cycle = state
+                .economy()
+                .cycles_for(business.id())
+                .next_back()
+                .filter(|cycle| cycle.business_version() == business.version());
             let profit = cycle.map_or(0, |cycle| cycle.net_cash().cents());
             (business.id(), profit)
         })
@@ -469,4 +476,118 @@ pub(crate) fn valid_character_lives(state: &AppState) -> bool {
                 | IndependentVocation::IndependentLawyer => true,
             }
     })
+}
+
+#[cfg(test)]
+mod business_work_tests {
+    use super::*;
+    use crate::build_registry;
+    use crate::city_generation::{CityScale, generate_city};
+    use crate::core::invariants::validate_invariants;
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::core::time::SimDuration;
+    use crate::economy::business_economy_system::{
+        decide_business_cycle, validate_business_cycle_plan,
+    };
+    use crate::finance::Money;
+    use crate::world::BusinessOwner;
+    use crate::world::world_system::validate_transfer_business_ownership;
+
+    #[test]
+    fn new_proprietor_does_not_inherit_previous_owners_earnings_record() {
+        let registry = build_registry();
+        let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+        let (previous_owner, business) = city
+            .state
+            .world()
+            .businesses()
+            .find_map(|shop| {
+                let BusinessOwner::Character(owner) = shop.owner() else {
+                    return None;
+                };
+                city.state
+                    .economy()
+                    .get_business_economy(shop.id())
+                    .filter(|economy| economy.status() == BusinessOperatingStatus::Active)
+                    .map(|_| (owner, shop.id()))
+            })
+            .expect("generated city has an active private proprietor");
+        let successor = city
+            .state
+            .world()
+            .characters()
+            .find(|person| {
+                person.id() != previous_owner
+                    && person.organization().is_none()
+                    && city
+                        .state
+                        .world()
+                        .businesses_owned_by_character(person.id())
+                        .next()
+                        .is_none()
+            })
+            .expect("generated city has an independent non-owner")
+            .id();
+
+        // Settle a real prior owner's business cycle; its signed net is the
+        // historical signal that would otherwise be incorrectly inherited.
+        for _ in 0..45 {
+            city.state
+                .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+            crate::opportunities::opportunity_system::apply_opportunity_expiry(
+                &registry,
+                &mut city.state,
+            )
+            .unwrap();
+            if let Ok(plan) = decide_business_cycle(&registry, &city.state, business, 0) {
+                validate_business_cycle_plan(&city.state, plan)
+                    .unwrap()
+                    .commit(&mut city.state)
+                    .unwrap();
+            }
+            if city
+                .state
+                .economy()
+                .cycles_for(business)
+                .next_back()
+                .is_some_and(|cycle| cycle.net_cash() != Money::ZERO)
+            {
+                break;
+            }
+        }
+        let historical_cycle = city
+            .state
+            .economy()
+            .cycles_for(business)
+            .next_back()
+            .expect("private business should settle during the review horizon");
+        assert_ne!(historical_cycle.net_cash(), Money::ZERO);
+
+        validate_transfer_business_ownership(
+            &city.state,
+            business,
+            BusinessOwner::Character(successor),
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+
+        let day = city.state.now().as_minutes() / DAY_MINUTES;
+        let working_day = (day..day + 7)
+            .find(|&day| !(day + u64::from(successor.raw())).is_multiple_of(7))
+            .unwrap();
+        let work = choose_work(&city.state, successor, working_day);
+        assert_eq!(
+            work.action,
+            Some(CivicActivity::BusinessManagement(business))
+        );
+        assert_eq!(work.business_profit, 0);
+
+        validate_invariants(&city.state);
+        let restored =
+            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+        let restored_work = choose_work(&restored, successor, working_day);
+        assert_eq!(restored_work.action, work.action);
+        assert_eq!(restored_work.business_profit, work.business_profit);
+    }
 }
