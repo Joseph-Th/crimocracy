@@ -6,7 +6,8 @@
 
 use super::profit_sweep::{
     BusinessProfitSweepDraft, BusinessProfitSweepError, available_business_profit,
-    resolve_business_profit_sweep_context, validate_business_profit_sweep_capacity,
+    plan_accounted_receipts, resolve_business_profit_sweep_context,
+    validate_business_profit_sweep_capacity,
 };
 use crate::core::id::{
     BusinessId, FinancialAccountId, IdKind, LedgerTransactionId, OrganizationId,
@@ -58,32 +59,13 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
     let mut destinations = BTreeMap::new();
     let mut opening_owners = Vec::new();
     for (organization, group) in &groups {
-        let mut remaining = group.total.cents();
-        let mut allocations = Vec::new();
-        let mut receiving_accounts: Vec<_> = state
-            .finance
-            .accounts_for(FinancialOwner::Organization(*organization))
-            .filter(|account| {
-                account.kind() == AccountKind::AccountedFunds
-                    && account.can_receive_liquid_payment(Money::from_cents(1))
-            })
-            .map(|account| (i64::MAX - account.balance().cents(), account.id()))
-            .collect();
-        // Prefer the largest usable pocket. This preserves the previous single-account
-        // destination when one can take the entire draw, minimizing ledger postings and
-        // version advances; ID decides only equal-capacity ties.
-        receiving_accounts
-            .sort_unstable_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-        for (capacity, account) in receiving_accounts {
-            if remaining == 0 {
-                break;
-            }
-            let amount = remaining.min(capacity);
-            allocations.push((account, Money::from_cents(amount)));
-            remaining -= amount;
-        }
-        if remaining > 0 {
-            opening_owners.push((*organization, Money::from_cents(remaining)));
+        let (allocations, remaining) = plan_accounted_receipts(
+            state,
+            FinancialOwner::Organization(*organization),
+            group.total,
+        );
+        if remaining > Money::ZERO {
+            opening_owners.push((*organization, remaining));
         }
         destinations.insert(*organization, allocations);
     }

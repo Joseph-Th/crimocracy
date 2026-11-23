@@ -188,6 +188,164 @@ fn city_scales_create_hundreds_of_distinct_live_people_with_actual_professions()
 }
 
 #[test]
+fn freelancer_can_be_hired_from_combined_street_cash_without_a_single_funded_pocket() {
+    use crate::finance::finance_system::{insert_account, validate_record_transaction};
+    use crate::finance::{
+        AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+        Money,
+    };
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let freelancer = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            person.life().vocation() == IndependentVocation::FreelanceCriminal
+                && city
+                    .state
+                    .social()
+                    .get_relationship(person.id(), city.boss)
+                    .is_some()
+        })
+        .expect("the crew has a known freelancer")
+        .id();
+    let fee = validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 1)
+        .expect("the opening has sufficient cash to pay the fee")
+        .fee_cents();
+    let owner = FinancialOwner::Organization(city.player);
+    let sources: Vec<_> = city
+        .state
+        .finance()
+        .accounts_for(owner)
+        .filter(|account| account.kind() == AccountKind::StreetCash)
+        .filter_map(|account| {
+            (account.available_payment_balance() > Money::ZERO)
+                .then_some((account.id(), account.available_payment_balance().cents()))
+        })
+        .collect();
+    let total = sources.iter().map(|(_, cents)| *cents).sum::<i64>();
+    assert!(total > fee);
+    let first = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let second = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    let first_half = fee / 2;
+    let mut postings: Vec<_> = sources
+        .into_iter()
+        .map(|(account, cents)| LedgerPosting {
+            account,
+            amount: Money::from_cents(-cents),
+        })
+        .collect();
+    postings.extend([
+        LedgerPosting {
+            account: first,
+            amount: Money::from_cents(first_half),
+        },
+        LedgerPosting {
+            account: second,
+            amount: Money::from_cents(fee - first_half),
+        },
+        LedgerPosting {
+            account: settlement,
+            amount: Money::from_cents(total - fee),
+        },
+    ]);
+    validate_record_transaction(
+        &city.state,
+        LedgerTransactionDraft {
+            occurred_at: city.state.now(),
+            memo: "Split available street cash across two operational pockets".into(),
+            postings,
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    assert_eq!(
+        city.state
+            .finance()
+            .get_account(first)
+            .unwrap()
+            .balance()
+            .cents(),
+        first_half
+    );
+    assert_eq!(
+        city.state
+            .finance()
+            .get_account(second)
+            .unwrap()
+            .balance()
+            .cents(),
+        fee - first_half
+    );
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    let plan = validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 1)
+        .expect("all of the sponsor's street cash is available to fund a contract");
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap(),
+        "planning a payment cannot mutate accounts or member assignments"
+    );
+    plan.commit(&mut city.state).unwrap();
+    for account in [first, second] {
+        assert_eq!(
+            city.state.finance().get_account(account).unwrap().balance(),
+            Money::ZERO
+        );
+    }
+    let contract = city
+        .state
+        .world()
+        .active_freelance_contract(freelancer)
+        .expect("the signed person joined the organization");
+    let payment = city
+        .state
+        .finance()
+        .get_transaction(contract.transaction())
+        .unwrap();
+    assert_eq!(payment.postings().len(), 3);
+    assert_eq!(
+        payment
+            .postings()
+            .iter()
+            .filter(|posting| posting.amount < Money::ZERO)
+            .count(),
+        2,
+    );
+    validate_invariants(&city.state);
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn paid_freelance_contract_is_personal_temporary_and_recruitable_after_expiry() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(562365)).unwrap();

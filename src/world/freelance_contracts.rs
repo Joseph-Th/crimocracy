@@ -258,23 +258,38 @@ pub fn validate_hire_freelancer(
     .max()
     .unwrap_or(0);
     let fee_cents = 10_000_i64 + i64::from(days) * (3_000 + max_skill * 50);
-    let funding = state
+    // A crew's street cash belongs to the organization, not to whichever
+    // individual racket happened to retain the largest pocket. Assemble the
+    // full fee from spendable accounts, largest first to keep the ledger small.
+    let mut funding: Vec<_> = state
         .finance()
         .accounts_for(FinancialOwner::Organization(sponsor))
         .filter(|account| {
             account.kind() == AccountKind::StreetCash
-                && account.available_payment_balance().cents() >= fee_cents
+                && account.version() < u32::MAX
+                && account.available_payment_balance() > Money::ZERO
         })
-        .max_by_key(|account| {
-            (
-                account.available_payment_balance().cents(),
-                std::cmp::Reverse(account.id()),
-            )
-        })
-        .map(|account| account.id())
-        .ok_or(FreelanceError::Unfunded {
+        .map(|account| (account.available_payment_balance(), account.id()))
+        .collect();
+    funding.sort_unstable_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    let mut remaining = fee_cents;
+    let mut postings = Vec::new();
+    for (available, account) in funding {
+        if remaining == 0 {
+            break;
+        }
+        let debit = available.cents().min(remaining);
+        postings.push(LedgerPosting {
+            account,
+            amount: Money::from_cents(-debit),
+        });
+        remaining -= debit;
+    }
+    if remaining != 0 {
+        return Err(FreelanceError::Unfunded {
             required_cents: fee_cents,
-        })?;
+        });
+    }
     let recipient = state
         .finance()
         .accounts_for(FinancialOwner::Character(freelancer))
@@ -301,19 +316,14 @@ pub fn validate_hire_freelancer(
             .account_id(0)
             .expect("account ID predicted")
     });
+    postings.push(LedgerPosting {
+        account: recipient,
+        amount: Money::from_cents(fee_cents),
+    });
     let draft = LedgerTransactionDraft {
         occurred_at: state.now(),
         memo: format!("Fixed-term freelance services of {}", person.name()),
-        postings: vec![
-            LedgerPosting {
-                account: funding,
-                amount: Money::from_cents(-fee_cents),
-            },
-            LedgerPosting {
-                account: recipient,
-                amount: Money::from_cents(fee_cents),
-            },
-        ],
+        postings,
         authorization: None,
     };
     let payment = match openings {
@@ -391,6 +401,50 @@ pub fn apply_due_freelance_expirations(state: &mut AppState) -> Vec<CharacterId>
     ended
 }
 
+/// Historical contract validation must prove where the signing fee really went.
+/// A balanced transaction alone would permit an unrelated person to be paid or
+/// a different sponsor to finance a recorded hire. Traverse the real postings
+/// once, accepting any number of sponsor debit pockets and exactly one payee.
+fn valid_contract_payment(
+    state: &AppState,
+    freelancer: CharacterId,
+    contract: &FreelanceContractRecord,
+) -> bool {
+    let Some(transaction) = state.finance().get_transaction(contract.transaction) else {
+        return false;
+    };
+    if transaction.occurred_at() != contract.signed_at || transaction.postings().len() < 2 {
+        return false;
+    }
+    let mut received = false;
+    let mut debited = 0_i128;
+    for posting in transaction.postings() {
+        let Some(account) = state.finance().get_account(posting.account) else {
+            return false;
+        };
+        if posting.amount > Money::ZERO {
+            if received
+                || posting.amount.cents() != contract.fee_cents
+                || account.owner() != FinancialOwner::Character(freelancer)
+                || account.kind() != AccountKind::StreetCash
+            {
+                return false;
+            }
+            received = true;
+        } else if posting.amount < Money::ZERO {
+            if account.owner() != FinancialOwner::Organization(contract.sponsor)
+                || account.kind() != AccountKind::StreetCash
+            {
+                return false;
+            }
+            debited += -i128::from(posting.amount.cents());
+        } else {
+            return false;
+        }
+    }
+    received && debited == i128::from(contract.fee_cents)
+}
+
 pub(crate) fn valid_freelance_contracts(state: &AppState) -> bool {
     state
         .world()
@@ -403,7 +457,6 @@ pub(crate) fn valid_freelance_contracts(state: &AppState) -> bool {
                     let person = state.world().get_character(freelancer);
                     let sponsor = state.world().get_organization(record.sponsor);
                     let leader = state.world().get_character(record.manager);
-                    let transaction = state.finance().get_transaction(record.transaction);
                     record.freelancer == freelancer
                         // A vocation describes the person's current work, not their entire
                         // signed employment history. Ended contracts remain valid after a
@@ -429,29 +482,7 @@ pub(crate) fn valid_freelance_contracts(state: &AppState) -> bool {
                             || person.is_some_and(|person| {
                                 person.organization() == Some(record.sponsor)
                             }))
-                        && transaction.is_some_and(|transaction| {
-                            transaction.occurred_at() == record.signed_at
-                                && transaction.postings().len() == 2
-                                && transaction.postings().iter().any(|posting| {
-                                    posting.amount.cents() == record.fee_cents
-                                        && state.finance().get_account(posting.account).is_some_and(
-                                            |account| {
-                                                account.owner()
-                                                    == FinancialOwner::Character(freelancer)
-                                            },
-                                        )
-                                })
-                                && transaction.postings().iter().any(|posting| {
-                                    posting.amount.cents() == -record.fee_cents
-                                        && state.finance().get_account(posting.account).is_some_and(
-                                            |account| {
-                                                account.owner()
-                                                    == FinancialOwner::Organization(record.sponsor)
-                                                    && account.kind() == AccountKind::StreetCash
-                                            },
-                                        )
-                                })
-                        })
+                        && valid_contract_payment(state, freelancer, record)
                 })
         })
 }

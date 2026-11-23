@@ -11,6 +11,38 @@ use crate::finance::{
 };
 use thiserror::Error;
 
+/// Deterministic receiving allocation for both criminal treasuries and private
+/// proprietors. Combine existing accounted-funds capacity before opening another
+/// account; prefer the largest pocket to minimize ledger postings and version use.
+/// The caller opens at most one new account for any unpaid remainder.
+pub(super) fn plan_accounted_receipts(
+    state: &AppState,
+    owner: FinancialOwner,
+    total: Money,
+) -> (Vec<(FinancialAccountId, Money)>, Money) {
+    let mut accounts: Vec<_> = state
+        .finance()
+        .accounts_for(owner)
+        .filter(|account| {
+            account.kind() == AccountKind::AccountedFunds
+                && account.can_receive_liquid_payment(Money::from_cents(1))
+        })
+        .map(|account| (i64::MAX - account.balance().cents(), account.id()))
+        .collect();
+    accounts.sort_unstable_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    let mut remaining = total.cents();
+    let mut allocations = Vec::new();
+    for (capacity, account) in accounts {
+        if remaining == 0 {
+            break;
+        }
+        let amount = remaining.min(capacity);
+        allocations.push((account, Money::from_cents(amount)));
+        remaining -= amount;
+    }
+    (allocations, Money::from_cents(remaining))
+}
+
 /// An owner's draw on a business it owns: legitimate till cash becomes spendable organization
 /// wealth. Laundering fees are excluded because they settle into the business's non-liquid
 /// clearing account and are a real cost, not earned owner surplus.

@@ -30,6 +30,7 @@ use std::collections::BTreeSet;
 mod autonomous_profit_sweeps;
 mod autonomous_recovery;
 mod cycle_boundaries;
+mod personal_dividends;
 
 struct BusinessEconomyFixture {
     state: AppState,

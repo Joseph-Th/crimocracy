@@ -4,7 +4,9 @@
 //! One fully preflighted transaction covers the viable cohort without using
 //! shop ID order to select which individual gets paid.
 
-use super::profit_sweep::{BusinessProfitSweepError, available_business_profit};
+use super::profit_sweep::{
+    BusinessProfitSweepError, available_business_profit, plan_accounted_receipts,
+};
 use crate::core::id::{BusinessId, CharacterId, FinancialAccountId, IdKind, LedgerTransactionId};
 use crate::core::state::AppState;
 use crate::core::time::is_day_boundary;
@@ -78,18 +80,11 @@ pub(crate) fn apply_due_personal_owner_dividends(
     let mut destinations = BTreeMap::new();
     let mut missing = Vec::new();
     for (&character, group) in &owners {
-        let destination = state
-            .finance()
-            .accounts_for(FinancialOwner::Character(character))
-            .find(|account| {
-                account.kind() == AccountKind::AccountedFunds
-                    && account.can_receive_liquid_payment(group.total)
-            })
-            .map(|account| account.id());
-        if let Some(account) = destination {
-            destinations.insert(character, account);
-        } else {
-            missing.push(character);
+        let (allocations, remaining) =
+            plan_accounted_receipts(state, FinancialOwner::Character(character), group.total);
+        destinations.insert(character, allocations);
+        if remaining > Money::ZERO {
+            missing.push((character, remaining));
         }
     }
     if state
@@ -112,7 +107,7 @@ pub(crate) fn apply_due_personal_owner_dividends(
             state,
             missing
                 .iter()
-                .map(|character| FinancialAccountDraft {
+                .map(|(character, _)| FinancialAccountDraft {
                     owner: FinancialOwner::Character(*character),
                     kind: AccountKind::AccountedFunds,
                 })
@@ -120,13 +115,16 @@ pub(crate) fn apply_due_personal_owner_dividends(
         )?)
     };
     if let Some(openings) = &openings {
-        for (index, &owner) in missing.iter().enumerate() {
-            destinations.insert(
-                owner,
-                openings
-                    .account_id(index)
-                    .expect("prevalidated personal bank account has an ID"),
-            );
+        for (index, (owner, remaining)) in missing.iter().enumerate() {
+            destinations
+                .get_mut(owner)
+                .expect("private proprietor was included in the allocation")
+                .push((
+                    openings
+                        .account_id(index)
+                        .expect("prevalidated personal bank account has an ID"),
+                    *remaining,
+                ));
         }
     }
     let mut postings = Vec::new();
@@ -137,10 +135,11 @@ pub(crate) fn apply_due_personal_owner_dividends(
                 amount: amount.checked_neg().expect("private dividend is positive"),
             });
         }
-        postings.push(LedgerPosting {
-            account: destinations[&character],
-            amount: group.total,
-        });
+        postings.extend(
+            destinations[&character]
+                .iter()
+                .map(|&(account, amount)| LedgerPosting { account, amount }),
+        );
     }
     let draft = LedgerTransactionDraft {
         occurred_at: state.now(),
