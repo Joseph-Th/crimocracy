@@ -357,6 +357,20 @@ fn unguarded_criminal_commerce(
     attacker: OrganizationId,
     district: NeighborhoodId,
 ) -> bool {
+    // The most important opening is a legitimate-only commercial ward, even
+    // if its owner has never run a racket here. Requiring a *previously*
+    // suspended racket rewarded the player for skipping street security from
+    // the beginning. A gang that already established a local racket has
+    // already contested the opening and should look elsewhere for expansion.
+    if crate::world::territory_conflict::active_district_force(state, attacker, district) > 0 {
+        return false;
+    }
+    let projected_force = state
+        .enterprises()
+        .active_for_organization(attacker)
+        .map(|racket| u32::from(racket.associates()))
+        .max()
+        .unwrap_or(u32::from(EnterpriseKind::Protection.baseline_associates()));
     state
         .world()
         .public_business_directory()
@@ -369,28 +383,24 @@ fn unguarded_criminal_commerce(
                 return false;
             };
             owner != attacker
+                && state.player_organization() == Some(owner)
                 && state
                     .world()
                     .get_organization(owner)
                     .is_some_and(|org| org.kind() == crate::world::OrganizationKind::Criminal)
-                && state.economy().get_business_economy(business_id).is_some_and(|books| {
-                    books.status() == crate::economy::BusinessOperatingStatus::Active
-                })
-                // This is a genuine vacated criminal foothold, not simply a shop
-                // purchased in a district where its owner never operated a racket.
-                && state.enterprises().enterprises_for_organization(owner).any(|racket| {
-                    racket.status() != crate::enterprises::EnterpriseStatus::Active
-                        && crate::world::territory_conflict::district_of_racket(
-                            state,
-                            racket.location(),
-                        ) == Some(district)
-                })
-                && !state.enterprises().active_for_organization(owner).any(|racket| {
-                    crate::world::territory_conflict::district_of_racket(
-                        state,
-                        racket.location(),
-                    ) == Some(district)
-                })
+                && state
+                    .economy()
+                    .get_business_economy(business_id)
+                    .is_some_and(|books| {
+                        books.status() == crate::economy::BusinessOperatingStatus::Active
+                    })
+                && crate::world::territory_conflict::active_district_force(state, owner, district)
+                    == 0
+                && projected_force
+                    > crate::world::territory_conflict::local_defensive_force(
+                        state, owner, district,
+                    )
+                    .saturating_add(crate::world::territory_conflict::DEFENSIVE_ADVANTAGE)
         })
 }
 
@@ -484,10 +494,182 @@ mod tests {
     use crate::city_generation::{CityScale, generate_city};
     use crate::core::invariants::validate_invariants;
     use crate::core::persistence::{build_save, restore_save};
+    use crate::economy::BusinessEconomyDraft;
+    use crate::economy::business_economy_system::validate_establish_business_economy;
     use crate::finance::finance_system::{insert_account, validate_record_transaction};
-    use crate::finance::{LedgerPosting, LedgerTransactionDraft};
-    use crate::world::world_system::insert_organization;
-    use crate::world::{OrganizationDraft, OrganizationKind};
+    use crate::finance::{FinancialAccountDraft, LedgerPosting, LedgerTransactionDraft};
+    use crate::world::world_system::{insert_business, insert_organization};
+    use crate::world::{
+        BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, OrganizationDraft,
+        OrganizationKind,
+    };
+
+    #[test]
+    fn legitimate_only_new_districts_invite_actual_rival_territorial_expansion() {
+        let registry = build_registry();
+        let mut city = generate_city(&registry, CityScale::Small.config(82_734_113)).unwrap();
+        let all_districts: Vec<_> = city
+            .state
+            .world()
+            .neighborhoods()
+            .map(|ward| ward.id())
+            .collect();
+        let untouched = all_districts
+            .iter()
+            .copied()
+            .find(|district| {
+                *district != city.home
+                    && city.rivals.iter().all(|organization| {
+                        crate::world::territory_conflict::active_district_force(
+                            &city.state,
+                            *organization,
+                            *district,
+                        ) == 0
+                    })
+            })
+            .expect("generated city needs a ward without criminal rackets");
+        let mut added = Vec::new();
+        // Commercial expansion into new districts without ever constructing
+        // rackets must not be safer than the old suspended-racket fixture.
+        // Each establishment goes through its actual business economy owner.
+        for district in all_districts.into_iter().filter(|ward| *ward != city.home) {
+            let business = insert_business(
+                &registry,
+                &mut city.state,
+                BusinessDraft {
+                    name: format!("Unprotected Legitimate Venue {}", district.raw()),
+                    kind: BusinessKind::Retail,
+                    functions: BTreeSet::from([
+                        BusinessFunction::CustomerAccess,
+                        BusinessFunction::ProfessionalRecords,
+                    ]),
+                    neighborhood: district,
+                    owner: BusinessOwner::Organization(city.player),
+                },
+            )
+            .unwrap();
+            let operating_account = insert_account(
+                &mut city.state,
+                FinancialAccountDraft {
+                    owner: FinancialOwner::Business(business),
+                    kind: AccountKind::LegitimateOperating,
+                },
+            )
+            .unwrap();
+            let settlement_account = insert_account(
+                &mut city.state,
+                FinancialAccountDraft {
+                    owner: FinancialOwner::Business(business),
+                    kind: AccountKind::Settlement,
+                },
+            )
+            .unwrap();
+            validate_establish_business_economy(
+                &registry,
+                &city.state,
+                BusinessEconomyDraft {
+                    business,
+                    operating_account,
+                    settlement_account,
+                },
+            )
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+            added.push(district);
+        }
+        assert_eq!(
+            crate::world::territory_conflict::active_district_force(
+                &city.state,
+                city.player,
+                untouched
+            ),
+            0
+        );
+        assert!(
+            city.state
+                .enterprises()
+                .enterprises_for_organization(city.player)
+                .all(
+                    |racket| crate::world::territory_conflict::district_of_racket(
+                        &city.state,
+                        racket.location()
+                    ) != Some(untouched)
+                ),
+            "the player has never operated a criminal racket in the newly owned ward"
+        );
+        assert!(
+            city.rivals
+                .iter()
+                .any(|rival| { unguarded_criminal_commerce(&city.state, *rival, untouched) }),
+            "new commercial property without a historical failed racket must invite takeover"
+        );
+        let planned =
+            plan_due_autonomous_expansions(&registry, &city.state, &BTreeSet::new()).unwrap();
+        assert!(
+            planned.actions.iter().any(|action| {
+                added.contains(&match action.plan.location {
+                    EnterpriseLocation::Neighborhood(ward) => ward,
+                    EnterpriseLocation::Business(business) => city
+                        .state
+                        .world()
+                        .get_business(business)
+                        .unwrap()
+                        .neighborhood(),
+                }) && city.rivals.contains(&action.organization)
+            }),
+            "an eligible rival must actually prioritize a profitable racket in the exposed wards"
+        );
+        let mut restored =
+            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+        let replay =
+            plan_due_autonomous_expansions(&registry, &restored, &BTreeSet::new()).unwrap();
+        let locations = |actions: &Vec<PlannedAutonomousExpansionAction>| {
+            actions
+                .iter()
+                .map(|action| (action.organization, action.plan.location))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(locations(&planned.actions), locations(&replay.actions));
+        validate_invariants(&city.state);
+        let mut rival_entered_clean_ward = false;
+        for _ in 0..crate::core::time::DAY_MINUTES {
+            let live = crate::core::simulation::run_test_tick(&registry, &mut city.state);
+            let restored_tick = crate::core::simulation::run_test_tick(&registry, &mut restored);
+            assert_eq!(live, restored_tick);
+            rival_entered_clean_ward |= live.autonomous_enterprises.iter().any(|id| {
+                let racket = city.state.enterprises().get_enterprise(*id).unwrap();
+                city.rivals.contains(&racket.organization())
+                    && crate::world::territory_conflict::district_of_racket(
+                        &city.state,
+                        racket.location(),
+                    )
+                    .is_some_and(|district| added.contains(&district))
+            });
+        }
+        assert!(
+            rival_entered_clean_ward,
+            "the live daily phase must actually construct a rival racket in a newly commercial ward"
+        );
+        assert!(
+            city.state
+                .decisions()
+                .pending_for_recipient(city.player)
+                .any(|decision| {
+                    matches!(
+                        decision.context(),
+                        crate::decisions::DecisionContext::ProtectionDemand(_)
+                    )
+                }),
+            "the same canonical day must produce protection pressure after rival expansion"
+        );
+        assert_eq!(
+            bincode::serialize(&city.state).unwrap(),
+            bincode::serialize(&restored).unwrap(),
+            "territorial encroachment and coercion must replay identically"
+        );
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    }
 
     #[test]
     fn rival_enterprise_planning_prioritizes_abandoned_criminal_commerce() {

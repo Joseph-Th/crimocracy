@@ -355,8 +355,31 @@ impl Session<'_> {
                         self.player,
                         district.id(),
                     );
-                    writeln!(out, "district-{} {} | own active rackets: {} | active associates: {} | rival influence requires reconnaissance",
-                        district.id().raw(), district.name(), own, associates).unwrap();
+                    let defense = crimocracy::world::territory_conflict::local_defensive_force(
+                        state,
+                        self.player,
+                        district.id(),
+                    );
+                    let operating_shops = state
+                        .world()
+                        .businesses_owned_by_organization(self.player)
+                        .filter(|shop| shop.neighborhood() == district.id())
+                        .filter(|shop| {
+                            state
+                                .economy()
+                                .get_business_economy(shop.id())
+                                .is_some_and(|economy| {
+                                    economy.status()
+                                        == crimocracy::economy::BusinessOperatingStatus::Active
+                                })
+                        })
+                        .count();
+                    writeln!(out, "district-{} {} | own active rackets: {} | active associates: {} | operating shops: {} | local defense: {} (including {} distributed named enforcers) | rival influence requires reconnaissance",
+                        district.id().raw(), district.name(), own, associates,
+                        operating_shops, defense, defense.saturating_sub(associates)).unwrap();
+                    if operating_shops > 0 && defense == 0 {
+                        writeln!(out, "  Unprotected commercial holdings: vulnerable to rival rackets and protection demands.").unwrap();
+                    }
                     if let Some(standstill) = active_standstill(state, self.player, district.id()) {
                         let rival = state
                             .world()

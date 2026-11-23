@@ -21,27 +21,30 @@ use crate::finance::helpers::format_money_cents;
 use crate::finance::{AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money};
 use crate::registry::Registry;
 use crate::world::territory_conflict::{
-    DEFENSIVE_ADVANTAGE, active_district_force, district_of_racket,
+    DEFENSIVE_ADVANTAGE, active_district_force, district_of_racket, local_defensive_force,
 };
 use crate::world::territory_influence::active_standstill;
-use crate::world::{BusinessOwner, CapabilityKind, OrganizationKind};
+use crate::world::{BusinessOwner, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const PROTECTION_DAYS: u64 = 30;
 const REFUSAL_COOLDOWN_DAYS: u64 = 7;
+const NEGOTIATION_GRACE_DAYS: u64 = 1;
 
-/// The latest offer in a ward blocks a repeated demand until its response
-/// is old enough. Rejection deliberately gives rivals time to follow up.
+/// Per-ward cooldowns avoid overlapping demands. Per-gang histories preserve
+/// prior retaliation and paid agreements when another rival demands money.
 fn latest_demand(
     state: &AppState,
     district: NeighborhoodId,
+    attacker: Option<OrganizationId>,
 ) -> Option<&crate::decisions::DecisionRequestRecord> {
     state
         .decisions()
         .decisions()
         .filter(|record| {
             matches!(record.context(), DecisionContext::ProtectionDemand(context)
-                if context.district() == district)
+                if context.district() == district
+                    && attacker.is_none_or(|gang| context.attacker() == gang))
         })
         .max_by_key(|record| (record.requested_at(), record.id()))
 }
@@ -50,19 +53,26 @@ fn within_days(now: u64, at: u64, days: u64) -> bool {
     now.saturating_sub(at) < days * DAY_MINUTES
 }
 
-/// A pending offer pauses escalation from its author. Once paid, that gang
-/// respects the negotiated period, but unrelated rivals do not become allies.
+/// The demanding gang holds its crews for one day while leadership considers
+/// the offer, not indefinitely. Ignoring an unpaid demand must not become free
+/// protection in adapters that can advance time with pending decisions.
+/// Once paid, that gang respects the negotiated period; other rivals do not.
 pub(crate) fn rival_pressure_blocked(
     state: &AppState,
     attacker: OrganizationId,
     district: NeighborhoodId,
 ) -> bool {
-    latest_demand(state, district).is_some_and(|record| {
+    latest_demand(state, district, Some(attacker)).is_some_and(|record| {
         let DecisionContext::ProtectionDemand(context) = record.context() else {
             return false;
         };
         context.attacker() == attacker
-            && (record.status() == DecisionStatus::Pending
+            && ((record.status() == DecisionStatus::Pending
+                && within_days(
+                    state.now().as_minutes(),
+                    record.requested_at().as_minutes(),
+                    NEGOTIATION_GRACE_DAYS,
+                ))
                 || record.resolution().is_some_and(|resolution| {
                     resolution.response() == DecisionResponse::Approve
                         && within_days(
@@ -82,7 +92,7 @@ pub(crate) fn recently_refused_protection(
     attacker: OrganizationId,
     district: NeighborhoodId,
 ) -> bool {
-    latest_demand(state, district).is_some_and(|record| {
+    latest_demand(state, district, Some(attacker)).is_some_and(|record| {
         matches!(record.context(), DecisionContext::ProtectionDemand(context)
             if context.attacker() == attacker)
             && record.resolution().is_some_and(|resolution| {
@@ -94,33 +104,6 @@ pub(crate) fn recently_refused_protection(
                     )
             })
     })
-}
-
-/// A trained, undetained enforcer is some deterrence even when not assigned
-/// to a racket. Rank-and-file active local rackets supply the larger territorial
-/// defense. Nonviolent administrators never count as street muscle.
-fn defender_muscle(state: &AppState, defender: OrganizationId, district: NeighborhoodId) -> u32 {
-    let named = state
-        .world()
-        .characters_in_organization(defender)
-        .filter(|member| {
-            state
-                .legal()
-                .active_arrest_for_character(member.id())
-                .is_none()
-        })
-        .filter(|member| {
-            [CapabilityKind::Violence, CapabilityKind::Intimidation]
-                .into_iter()
-                .any(|skill| {
-                    member
-                        .capability(skill)
-                        .is_some_and(|rating| rating.value() >= 60)
-                })
-        })
-        .count();
-    active_district_force(state, defender, district)
-        .saturating_add(u32::try_from(named).unwrap_or(u32::MAX))
 }
 
 /// An owned commercial ward with no believable defense is a claimable
@@ -157,7 +140,7 @@ fn offer_cents(registry: &Registry, state: &AppState, shops: &[BusinessId]) -> i
     // Five percent of a public 30-day gross, not five percent of a
     // business's protected working capital or its private operating till.
     let monthly = daily_gross.saturating_mul(30) / 20;
-    i64::try_from(monthly.clamp(5_000, 150_000)).expect("bounded demand")
+    i64::try_from(monthly.clamp(5_000, 1_500_000)).expect("bounded demand")
 }
 
 struct Candidate {
@@ -195,7 +178,7 @@ pub(crate) fn apply_due_protection_demands(
         {
             continue;
         }
-        if let Some(previous) = latest_demand(state, district) {
+        if let Some(previous) = latest_demand(state, district, None) {
             let (since, interval) = match previous.resolution() {
                 Some(resolution) if resolution.response() == DecisionResponse::Approve => {
                     (resolution.resolved_at().as_minutes(), PROTECTION_DAYS)
@@ -207,7 +190,7 @@ pub(crate) fn apply_due_protection_demands(
                 continue;
             }
         }
-        let defense = defender_muscle(state, defender, district);
+        let defense = local_defensive_force(state, defender, district);
         let amount = Money::from_cents(offer_cents(registry, state, &holdings));
         let Some(business) = holdings.first().copied() else {
             continue;
@@ -279,11 +262,11 @@ pub(crate) fn apply_due_protection_demands(
         )),
         attention: AttentionClass::Exception,
         summary: format!(
-            "{} demands {} for 30 days of protection over your businesses in {}. Approve to pay from accounted funds, or reject and risk their crew's retaliation. Their local force is {}; your visible protection is weaker.",
+            "{} has established a local street presence and demands {} for 30 days of protection over your businesses in {}. You can currently muster {} local defenders across rackets and available muscle. Approve to pay from accounted funds, or reject and face attempts to displace your commercial foothold.",
             rival.name(),
             format_money_cents(offer.amount.cents()),
             ward.name(),
-            offer.force,
+            local_defensive_force(state, defender, offer.district),
         ),
     };
     if state
@@ -385,7 +368,8 @@ mod tests {
     use crate::finance::finance_system::insert_account;
     use crate::world::world_system::{insert_business, insert_character};
     use crate::world::{
-        AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, CharacterDraft, Rating,
+        AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, CapabilityKind,
+        CharacterDraft, Rating,
     };
 
     fn exposed_city() -> (Registry, GeneratedCity, NeighborhoodId) {
@@ -485,6 +469,171 @@ mod tests {
             unreachable!()
         };
         (request.id(), context)
+    }
+
+    #[test]
+    fn unanswered_protection_demand_only_suspends_rival_for_one_day() {
+        let (registry, mut city, district) = exposed_city();
+        let (request, terms) = first_demand(&registry, &mut city);
+        assert_eq!(terms.district(), district);
+        assert!(rival_pressure_blocked(
+            &city.state,
+            terms.attacker(),
+            district
+        ));
+        city.state.advance_clock(SimDuration::from_minutes(
+            u32::try_from(DAY_MINUTES - 1).unwrap(),
+        ));
+        assert!(rival_pressure_blocked(
+            &city.state,
+            terms.attacker(),
+            district
+        ));
+        city.state.advance_clock(SimDuration::ONE_MINUTE);
+        assert!(
+            !rival_pressure_blocked(&city.state, terms.attacker(), district),
+            "leaving a demand unanswered must not buy indefinite protection"
+        );
+        assert_eq!(
+            city.state
+                .decisions()
+                .get_decision(request)
+                .unwrap()
+                .status(),
+            DecisionStatus::Pending,
+            "the payment decision remains available, but the rival no longer waits"
+        );
+    }
+
+    #[test]
+    fn named_muscle_is_distributed_not_multiplied_across_legitimate_wards() {
+        let (_registry, city, exposed) = exposed_city();
+        let named = city
+            .state
+            .world()
+            .characters_in_organization(city.player)
+            .filter(|member| {
+                city.state
+                    .legal()
+                    .active_arrest_for_character(member.id())
+                    .is_none()
+            })
+            .filter(|member| {
+                [CapabilityKind::Violence, CapabilityKind::Intimidation]
+                    .into_iter()
+                    .any(|skill| {
+                        member
+                            .capability(skill)
+                            .is_some_and(|rating| rating.value() >= 60)
+                    })
+            })
+            .count() as u32;
+        let home_associates = active_district_force(&city.state, city.player, city.home);
+        let exposed_associates = active_district_force(&city.state, city.player, exposed);
+        assert_eq!(exposed_associates, 0);
+        let total_local = local_defensive_force(&city.state, city.player, city.home)
+            + local_defensive_force(&city.state, city.player, exposed);
+        assert_eq!(
+            total_local,
+            named + home_associates + exposed_associates,
+            "one violent member cannot defend multiple districts at full strength"
+        );
+        assert!(local_defensive_force(&city.state, city.player, exposed) < named);
+    }
+
+    #[test]
+    fn protection_quotes_scale_to_large_portfolios_without_a_token_fee_cap() {
+        let (registry, city, district) = exposed_city();
+        let shops = active_shops(&city.state, city.player);
+        let first = shops[&district][0];
+        assert!(offer_cents(&registry, &city.state, &shops[&district]) > 5_000);
+        assert_eq!(
+            offer_cents(&registry, &city.state, &vec![first; 1_000]),
+            1_500_000,
+            "a large commercial portfolio should not get a trivial flat-price protection contract"
+        );
+    }
+
+    #[test]
+    fn an_existing_rival_operation_cannot_run_through_a_new_protection_demand() {
+        use crate::operations::{OperationAbortCause, OperationObjectiveBlocker, OperationStatus};
+
+        let (registry, mut city, district) = exposed_city();
+        city.state
+            .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+        crate::opportunities::opportunity_system::apply_opportunity_expiry(
+            &registry,
+            &mut city.state,
+        )
+        .expect("expired generated leads must close before a save");
+        let already_authorized = crate::operations::operation_system::apply_due_rival_operations(
+            &registry,
+            &mut city.state,
+        );
+        let created = apply_due_protection_demands(&registry, &mut city.state);
+        let request = city
+            .state
+            .decisions()
+            .get_decision(
+                created
+                    .first()
+                    .expect("the rival must demand protection")
+                    .decision,
+            )
+            .unwrap();
+        let DecisionContext::ProtectionDemand(terms) = request.context() else {
+            unreachable!()
+        };
+        assert_eq!(terms.district(), district);
+        let target = already_authorized
+            .iter()
+            .copied()
+            .find(|id| {
+                let op = city.state.operations().get_operation(*id).unwrap();
+                op.responsible_organization() == terms.attacker()
+                    && op.objective().business_target().is_some_and(|business| {
+                        city.state
+                            .world()
+                            .get_business(business)
+                            .is_some_and(|shop| {
+                                shop.owner() == BusinessOwner::Organization(city.player)
+                                    && shop.neighborhood() == district
+                            })
+                    })
+            })
+            .expect("the same credible rival must have planned a coercive operation");
+        let operation = city.state.operations().get_operation(target).unwrap();
+        assert_eq!(operation.status(), OperationStatus::Authorized);
+        assert_eq!(
+            crate::operations::operation_objective::resolve_objective_blocker(
+                &city.state,
+                operation,
+            ),
+            Some(OperationObjectiveBlocker::ProtectionAgreement),
+            "already authorized operations must not bypass the protection decision"
+        );
+        let mut restored =
+            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+        assert_eq!(
+            bincode::serialize(&city.state).unwrap(),
+            bincode::serialize(&restored).unwrap()
+        );
+        let tick = run_test_tick(&registry, &mut city.state);
+        let replay = run_test_tick(&registry, &mut restored);
+        assert_eq!(tick, replay);
+        assert!(tick.aborted_operations.contains(&target));
+        let aborted = city.state.operations().get_operation(target).unwrap();
+        assert_eq!(aborted.status(), OperationStatus::Aborted);
+        assert_eq!(
+            aborted.abort_record().unwrap().cause(),
+            OperationAbortCause::ObjectiveUnavailable(
+                OperationObjectiveBlocker::ProtectionAgreement
+            )
+        );
+        assert_eq!(
+            bincode::serialize(&city.state).unwrap(),
+            bincode::serialize(&restored).unwrap()
+        );
     }
 
     #[test]
@@ -613,6 +762,26 @@ mod tests {
             context.attacker(),
             district
         ));
+        let mut renewal = restored.clone();
+        renewal.advance_clock(SimDuration::from_minutes(
+            u32::try_from(PROTECTION_DAYS * DAY_MINUTES - 1).unwrap(),
+        ));
+        assert!(rival_pressure_blocked(
+            &renewal,
+            context.attacker(),
+            district
+        ));
+        renewal.advance_clock(SimDuration::ONE_MINUTE);
+        assert!(
+            !rival_pressure_blocked(&renewal, context.attacker(), district),
+            "the protected gang cannot promise an indefinite ceasefire for one payment"
+        );
+        let next_offer = apply_due_protection_demands(&registry, &mut renewal);
+        assert_eq!(
+            next_offer.len(),
+            1,
+            "an exposed commercial holding must face renewed demands when coverage expires"
+        );
         let mut next = restored.clone();
         city.state.advance_clock(SimDuration::from_minutes(1));
         next.advance_clock(SimDuration::from_minutes(1));
@@ -663,7 +832,10 @@ mod tests {
             })
             .max()
             .unwrap_or(0);
-        for index in 0..attackers.saturating_add(2) {
+        // A mobile crew has to cover both the headquarters ward and the
+        // exposed commercial ward. Hiring just one person per threat point
+        // cannot magically defend every district at the same strength.
+        for index in 0..attackers.saturating_mul(2).saturating_add(8) {
             insert_character(
                 &mut protected.state,
                 CharacterDraft {
@@ -681,7 +853,7 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(defender_muscle(&protected.state, protected.player, district) >= attackers);
+        assert!(local_defensive_force(&protected.state, protected.player, district) >= attackers);
         protected.state.advance_clock(SimDuration::from_minutes(
             u32::try_from(DAY_MINUTES - 1).unwrap(),
         ));

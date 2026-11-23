@@ -7,6 +7,33 @@ fn snapshot(registry: &Registry, session: &Session<'_>) -> Vec<u8> {
 }
 
 #[test]
+fn generated_turf_explains_own_commercial_exposure_without_exposing_rival_staff() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let before = snapshot(&registry, &session);
+    let output = session.execute("turf").unwrap().0;
+    let wards = session.state.world().neighborhoods().count();
+    assert_eq!(
+        output.matches(" | local defense: ").count(),
+        wards,
+        "{output}"
+    );
+    assert_eq!(
+        output.matches(" | operating shops: ").count(),
+        wards,
+        "{output}"
+    );
+    assert!(output.contains("distributed named enforcers"));
+    assert!(output.contains("rival influence requires reconnaissance"));
+    assert_eq!(
+        before,
+        snapshot(&registry, &session),
+        "turf inspection must never change the protection or territory simulation"
+    );
+}
+
+#[test]
 fn generated_brief_exposes_derived_public_reach_without_changing_campaign_state() {
     let registry = crimocracy::build_registry();
     let session =

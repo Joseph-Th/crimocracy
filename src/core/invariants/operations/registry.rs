@@ -595,7 +595,8 @@ fn validate_resolution_objective_blocker(
         // resolution snapshot; objective compatibility above is the release-safe proof.
         OperationObjectiveBlocker::TargetEconomyInactive
         | OperationObjectiveBlocker::NoPressureableWitnessCase
-        | OperationObjectiveBlocker::TerritorialStandstill => {}
+        | OperationObjectiveBlocker::TerritorialStandstill
+        | OperationObjectiveBlocker::ProtectionAgreement => {}
     }
     Ok(())
 }

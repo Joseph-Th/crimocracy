@@ -29,7 +29,9 @@ use crate::operations::{
 use crate::registry::Registry;
 use crate::reputation::{AudienceKind, reputation_system::resolve_score};
 use crate::world::organization_pressure::public_prominence_tier;
-use crate::world::territory_conflict::{DEFENSIVE_ADVANTAGE, district_of_racket};
+use crate::world::territory_conflict::{
+    DEFENSIVE_ADVANTAGE, district_of_racket, local_defensive_force,
+};
 use crate::world::{AutonomyLevel, BusinessKind, BusinessOwner, OrganizationKind};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -166,12 +168,10 @@ fn predatory_stake(
     let district = shop.neighborhood();
     let local_force = force_by_district.get(&district).copied().unwrap_or(0);
     let projected_force = local_force.max(strongest_force.saturating_sub(1));
-    let visible_defense: u32 = state
-        .enterprises()
-        .active_for_organization(defender)
-        .filter(|racket| district_of_racket(state, racket.location()) == Some(district))
-        .map(|racket| u32::from(racket.kind().baseline_associates()))
-        .sum();
+    // The same finite local defense used for protection demands must deter
+    // opportunistic strikes. Using only baseline racket associates here would
+    // make extra paid crew and named violent enforcers meaningless to the AI.
+    let visible_defense = local_defensive_force(state, defender, district);
     if projected_force <= visible_defense.saturating_add(DEFENSIVE_ADVANTAGE) {
         return 0;
     }

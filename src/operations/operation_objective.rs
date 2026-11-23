@@ -57,6 +57,24 @@ pub(crate) fn resolve_objective_blocker(
     state: &AppState,
     operation: &OperationRecord,
 ) -> Option<OperationObjectiveBlocker> {
+    // Protection applies to an already-authorized hostile operation too:
+    // a rival cannot evade a newly paid contract by starting its scouting
+    // or sabotage before the player answered the demand.
+    if matches!(
+        operation.kind(),
+        OperationKind::Surveillance | OperationKind::Sabotage
+    ) && let Some(target) = operation.objective().business_target()
+        && let Some(venue) = state.world().get_business(target)
+        && matches!(venue.owner(), BusinessOwner::Organization(owner)
+            if state.player_organization() == Some(owner))
+        && crate::decisions::decision_system::rival_pressure_blocked(
+            state,
+            operation.responsible_organization(),
+            venue.neighborhood(),
+        )
+    {
+        return Some(OperationObjectiveBlocker::ProtectionAgreement);
+    }
     if operation.kind().business_target_ownership()
         == Some(OperationBusinessTargetOwnership::Foreign)
         && let Some(business) = operation.objective().business_target()
@@ -144,6 +162,9 @@ pub(crate) fn blocker_clause(
     blocker: OperationObjectiveBlocker,
 ) -> &'static str {
     match blocker {
+        OperationObjectiveBlocker::ProtectionAgreement => {
+            "The crew's gang has an unresolved protection demand or a paid protection agreement in this district. The attack was cancelled while its own coercion was suspended."
+        }
         OperationObjectiveBlocker::TerritorialStandstill => {
             "A binding territorial standstill was signed before the crew began this hostile business operation. Leadership cancelled the attack rather than breaching the agreement."
         }
@@ -245,6 +266,12 @@ pub(crate) fn blocker_matches_objective(
     blocker: OperationObjectiveBlocker,
 ) -> bool {
     match blocker {
+        OperationObjectiveBlocker::ProtectionAgreement => {
+            matches!(
+                operation.kind(),
+                OperationKind::Surveillance | OperationKind::Sabotage
+            ) && operation.objective().business_target().is_some()
+        }
         OperationObjectiveBlocker::TerritorialStandstill => {
             operation.kind().business_target_ownership()
                 == Some(OperationBusinessTargetOwnership::Foreign)

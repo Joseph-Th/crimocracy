@@ -23,8 +23,8 @@ use crate::history::history_system::{
 };
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
-use crate::world::OrganizationKind;
 use crate::world::territory_influence::active_standstill;
+use crate::world::{CapabilityKind, OrganizationKind};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -58,6 +58,66 @@ pub fn active_district_force(
         .filter(|racket| district_of_racket(state, racket.location()) == Some(district))
         .map(|racket| u32::from(racket.associates()))
         .sum()
+}
+
+/// Street muscle is geographically finite. Associates defend only the ward
+/// where their racket operates. Capable named members can cover other wards,
+/// but must divide their attention across the organization's active commercial
+/// districts and active racket posts rather than guarding every business at
+/// full strength from anywhere in the city.
+///
+/// The allocation is deterministic and recomputed from live world state:
+/// sorted district IDs receive the remainder when named muscle cannot be
+/// divided evenly. It is not an extra mutable staffing or territory currency.
+pub fn local_defensive_force(
+    state: &AppState,
+    organization: OrganizationId,
+    district: NeighborhoodId,
+) -> u32 {
+    let active = active_district_force(state, organization, district);
+    let named = state
+        .world()
+        .characters_in_organization(organization)
+        .filter(|member| {
+            state
+                .legal()
+                .active_arrest_for_character(member.id())
+                .is_none()
+        })
+        .filter(|member| {
+            [CapabilityKind::Violence, CapabilityKind::Intimidation]
+                .into_iter()
+                .any(|skill| {
+                    member
+                        .capability(skill)
+                        .is_some_and(|rating| rating.value() >= 60)
+                })
+        })
+        .count();
+    let mut districts = BTreeSet::new();
+    for racket in state.enterprises().active_for_organization(organization) {
+        if let Some(ward) = district_of_racket(state, racket.location()) {
+            districts.insert(ward);
+        }
+    }
+    for shop in state.world().businesses_owned_by_organization(organization) {
+        if state
+            .economy()
+            .get_business_economy(shop.id())
+            .is_some_and(|economy| {
+                economy.status() == crate::economy::BusinessOperatingStatus::Active
+            })
+        {
+            districts.insert(shop.neighborhood());
+        }
+    }
+    let Some(rank) = districts.iter().position(|ward| *ward == district) else {
+        return active;
+    };
+    let per_district = named / districts.len();
+    let remainder = named % districts.len();
+    let assigned = per_district + usize::from(rank < remainder);
+    active.saturating_add(u32::try_from(assigned).unwrap_or(u32::MAX))
 }
 
 pub fn suppression_ends_at(state: &AppState, racket: EnterpriseId) -> Option<SimTime> {

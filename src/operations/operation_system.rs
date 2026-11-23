@@ -57,6 +57,10 @@ pub enum OperationTransition {
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum OperationError {
     #[error(
+        "district {0} is under a paid protection agreement with this gang; hostile business operations are barred"
+    )]
+    ProtectionAgreement(crate::core::id::NeighborhoodId),
+    #[error(
         "district {0} is under a binding territorial standstill; offensive business operations are barred"
     )]
     TerritoryStandstill(crate::core::id::NeighborhoodId),

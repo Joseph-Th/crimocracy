@@ -429,6 +429,8 @@ pub enum OperationObjectiveBlocker {
     NoPressureableWitnessCase,
     ExtractionCustodyEnded,
     TerritorialStandstill,
+    /// The target paid this gang to cease commercial coercion temporarily.
+    ProtectionAgreement,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

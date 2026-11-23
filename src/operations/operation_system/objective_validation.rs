@@ -575,6 +575,22 @@ pub(super) fn validate_operation_objective(
         kind,
         objective,
     )?;
+    // Paying the actual threatening gang buys a temporary halt to the attacks
+    // it can authorize, including reconnaissance for a later sabotage. This
+    // is also checked again before the operation starts and resolves.
+    if matches!(kind, OperationKind::Surveillance | OperationKind::Sabotage)
+        && let Some(business) = objective.business_target()
+        && let Some(venue) = state.world().get_business(business)
+        && matches!(venue.owner(), crate::world::BusinessOwner::Organization(owner)
+            if state.player_organization() == Some(owner))
+        && crate::decisions::decision_system::rival_pressure_blocked(
+            state,
+            responsible_organization,
+            venue.neighborhood(),
+        )
+    {
+        return Err(OperationError::ProtectionAgreement(venue.neighborhood()));
+    }
     // Reconnaissance remains permitted, but neither party can exploit a settlement
     // with an offensive business operation. This is checked again at commit.
     if kind.business_target_ownership()

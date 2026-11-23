@@ -364,7 +364,9 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
 
 #[test]
 fn abandoned_rackets_expose_clean_stores_to_gangs_without_local_commercial_competition() {
-    use crate::enterprises::enterprise_execution::validate_suspend_enterprise;
+    use crate::enterprises::enterprise_execution::{
+        validate_staff_enterprise, validate_suspend_enterprise,
+    };
 
     let registry = crate::build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(82_734_113)).unwrap();
@@ -377,6 +379,8 @@ fn abandoned_rackets_expose_clean_stores_to_gangs_without_local_commercial_compe
         .active_for_organization(rival)
         .next()
         .unwrap();
+    let staffed = rival_racket.kind().max_associates();
+    let racket_id = rival_racket.id();
     let rival_district = district_of_racket(&city.state, rival_racket.location()).unwrap();
     let strongest_force = u32::from(rival_racket.associates());
     let force_by_district = BTreeMap::from([(rival_district, strongest_force)]);
@@ -394,6 +398,21 @@ fn abandoned_rackets_expose_clean_stores_to_gangs_without_local_commercial_compe
         0,
         "an operating home racket keeps its affiliated shops out of predatory reach"
     );
+    // A genuine opposing workforce can defeat the named enforcers who
+    // remain after the player's local racket closes. No virtual attack
+    // strength is injected into the operation planner.
+    validate_staff_enterprise(&city.state, racket_id, staffed)
+        .expect("actual rival management can reinforce its racket before a challenge")
+        .commit(&mut city.state)
+        .unwrap();
+    let strongest_force = u32::from(
+        city.state
+            .enterprises()
+            .get_enterprise(racket_id)
+            .unwrap()
+            .associates(),
+    );
+    let force_by_district = BTreeMap::from([(rival_district, strongest_force)]);
     validate_suspend_enterprise(&city.state, city.starter_racket)
         .unwrap()
         .commit(&mut city.state)

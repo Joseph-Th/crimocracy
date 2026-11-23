@@ -673,6 +673,9 @@ pub(crate) fn build_abort_summary(
                 OperationObjectiveBlocker::TerritorialStandstill => {
                     "the sponsoring gang signed a territorial standstill covering the target district"
                 }
+                OperationObjectiveBlocker::ProtectionAgreement => {
+                    "the sponsoring gang's protection negotiation or paid agreement barred the attack in that district"
+                }
             };
             Ok(format!(
                 "{} was cancelled before execution because {reason}. Objective resolution was not attempted.",

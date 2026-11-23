@@ -72,7 +72,7 @@ fn validate_protection_demand_decision(
     let invalid = || invalid_decision_context(decision);
     if decision.options()
         != &std::collections::BTreeSet::from([DecisionResponse::Approve, DecisionResponse::Reject])
-        || !(5_000..=150_000).contains(&context.amount().cents())
+        || !(5_000..=1_500_000).contains(&context.amount().cents())
         || context.attacker() == decision.recipient()
         || state
             .world
