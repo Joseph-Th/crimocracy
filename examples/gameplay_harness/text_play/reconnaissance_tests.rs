@@ -106,7 +106,7 @@ fn market_and_intelligence_browsing_preserve_knowledge_boundaries() {
         "{political}"
     );
     assert!(
-        political.contains("needs two storefront titles held for 90 days"),
+        political.contains("needs two storefront titles held for 1080 days"),
         "{political}"
     );
     assert!(political.contains("mature 30d net"), "{political}");

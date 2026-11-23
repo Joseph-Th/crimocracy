@@ -166,7 +166,7 @@ impl Session<'_> {
                 }
                 writeln!(
                     out,
-                    "  Standard acquisition price: {} cents",
+                    "  Base property price (before portfolio premium): {} cents",
                     appraisal.standard_price.cents()
                 )
                 .unwrap();
@@ -177,6 +177,11 @@ impl Session<'_> {
                     appraisal.cycle_minutes
                 )
                 .unwrap();
+                if let Some((quote, _)) =
+                    acquisition_offer(self.registry, state, self.player, business)
+                {
+                    writeln!(out, "  Your current listed purchase quote: {} cents, including portfolio consolidation premium.", quote.cents()).unwrap();
+                }
                 if owned {
                     out.push_str(
                         "  Negotiated offer: not applicable to a property you already own.\n",
@@ -184,7 +189,7 @@ impl Session<'_> {
                 } else {
                     writeln!(
                         out,
-                        "  Negotiated reference offer: {} cents; seller consent is not guaranteed.",
+                        "  Negotiated reference offer: {} cents before your consolidation premium; seller consent is not guaranteed.",
                         appraisal.reference_offer_cents
                     )
                     .unwrap();

@@ -91,6 +91,8 @@ pub enum BusinessAcquisitionError {
     OfferDeclined,
     #[error("an acquisition offer must be positive")]
     InvalidOffer,
+    #[error("the buyer-specific business acquisition quote exceeds supported account capacity")]
+    PriceOverflow,
     #[error("acquisition validated at {expected:?} cannot commit at {found:?}")]
     StaleTime { expected: SimTime, found: SimTime },
     #[error("the listing for business {0} changed after acquisition validation")]
@@ -214,7 +216,10 @@ impl ValidatedBusinessAcquisition {
                 business: self.business,
                 owner: business_record.owner(),
             });
-        } else if business_record.version() != self.expected_business_version {
+        } else if business_record.version() != self.expected_business_version
+            || listed_acquisition_price(registry, state, self.organization, self.business)?
+                != self.price
+        {
             return Err(BusinessAcquisitionError::StaleListing(self.business));
         }
         validate_funding_accounts(state, self.organization, &self.funding_accounts, self.price)?;
@@ -489,9 +494,40 @@ fn plan_institutional_sale_observations(
     Ok(observations)
 }
 
-/// Public offer for an independently owned property that can be transferred to this buyer.
-/// This deliberately discloses only listed infrastructure and price, never a rival's owner,
-/// ledger, enterprise dependencies, or operating performance. Funds are checked at purchase.
+/// Growing a sprawling criminal holding company requires legal diligence,
+/// financing and management integration beyond the third deed. The quoted
+/// premium applies to independent listings and negotiated buyouts alike.
+/// It affects the actual balanced purchase payment, not later shop income.
+fn consolidation_percentage(state: &AppState, buyer: OrganizationId) -> i128 {
+    let owned = state
+        .world()
+        .businesses_owned_by_organization(buyer)
+        .count();
+    100 + i128::try_from(owned.saturating_sub(2).min(12)).unwrap_or(12) * 50
+}
+
+fn listed_acquisition_price(
+    registry: &Registry,
+    state: &AppState,
+    buyer: OrganizationId,
+    business: BusinessId,
+) -> Result<Money, BusinessAcquisitionError> {
+    let record = state
+        .world()
+        .get_business(business)
+        .ok_or(BusinessAcquisitionError::MissingBusiness(business))?;
+    let base = registry
+        .get_business(record.kind())
+        .economics()
+        .acquisition_cost();
+    let quoted = i128::from(base.cents()) * consolidation_percentage(state, buyer) / 100;
+    Ok(Money::from_cents(
+        i64::try_from(quoted).map_err(|_| BusinessAcquisitionError::PriceOverflow)?,
+    ))
+}
+
+/// Public quote for an independent listing, including the buyer's consolidation premium.
+/// It reveals only public infrastructure and price, not rival books.
 pub fn acquisition_offer<'state>(
     registry: &Registry,
     state: &'state AppState,
@@ -509,10 +545,7 @@ pub fn acquisition_offer<'state>(
     )
     .ok()?;
     Some((
-        registry
-            .get_business(record.kind())
-            .economics()
-            .acquisition_cost(),
+        listed_acquisition_price(registry, state, organization, business).ok()?,
         record.functions(),
     ))
 }
@@ -537,10 +570,7 @@ pub fn validate_acquire_business(
             owner: business_record.owner(),
         });
     }
-    let price = registry
-        .get_business(business_record.kind())
-        .economics()
-        .acquisition_cost();
+    let price = listed_acquisition_price(registry, state, draft.organization, draft.business)?;
     validate_funding_accounts(state, draft.organization, &draft.funding_accounts, price)?;
     // Ownership conflicts (active enterprise hosts/supports) reject through the canonical
     // transfer path; unchanged ownership is impossible because an Independent owner never
@@ -621,7 +651,8 @@ fn eligible_offer_seller(
         }
         FinancialOwner::Business(_) => unreachable!("business is not a personal proprietor"),
     };
-    if i128::from(offer.cents()) < minimum
+    if i128::from(offer.cents())
+        < minimum.saturating_mul(consolidation_percentage(state, buyer)) / 100
         || matches!(seller, FinancialOwner::Organization(organization)
             if seller_preserves_earning_base(registry, state, organization, business, offer)?)
     {

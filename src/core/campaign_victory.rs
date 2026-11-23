@@ -64,7 +64,13 @@ pub const RETIREMENT_NEST_EGG: Money = Money::from_cents(100_000_000);
 pub const RETIREMENT_SEVERANCE_DAYS: i64 = 180;
 /// Economic and territorial coalitions must prove they can sustain operations.
 pub const VICTORY_ESTABLISHMENT_DAYS: u64 = 90;
-pub const POLITICAL_CONTACT_DAYS: u64 = 30;
+/// Civic districts need three years of stable ownership; underbosses still use
+/// the separate 90-day operational proof.
+pub const POLITICAL_BUSINESS_ESTABLISHMENT_DAYS: u64 = 1_080;
+pub const POLITICAL_CONTACT_DAYS: u64 = 180;
+/// A full year without active rackets or criminal operating settlements is
+/// evidence of an actual transition from racketeering to civic business.
+pub const POLITICAL_CLEAN_OPERATION_DAYS: u64 = 365;
 /// A civic coalition needs its own district organizers plus two headquarters
 /// personnel; a business portfolio cannot substitute for a real leadership team.
 pub const POLITICAL_HEADQUARTERS_PERSONNEL: usize = 2;
@@ -112,6 +118,8 @@ pub struct VictoryProgress {
     pub required_campaign_spent_cents: i64,
     pub required_mayoral_reserve_cents: i64,
     pub mayoral_leader_eligible: bool,
+    pub legitimate_transition_ready: bool,
+    pub days_since_last_racket_cycle: Option<u64>,
     pub mayoral_nominated_for_day: Option<u64>,
     pub latest_election_day: Option<u64>,
     pub latest_election_won: bool,
@@ -122,7 +130,7 @@ pub struct VictoryProgress {
     pub workforce_ready_districts: usize,
     /// Uncontested mature profitable districts with independent, non-reused captains.
     pub staffed_underboss_districts: usize,
-    /// Average realized daily profits from eligible 90-day businesses, over 30 days.
+    /// Average realized daily profits from politically mature businesses, over 30 days.
     pub legitimate_daily_net: Money,
     /// Average realized daily profits from eligible 90-day rackets, over 30 days.
     pub racket_daily_net: Money,
@@ -143,7 +151,7 @@ pub struct PoliticalDistrictProgress {
     pub district: NeighborhoodId,
     pub active_owned: usize,
     pub suspended_owned: usize,
-    /// Active businesses continuously owned at least 90 days.
+    /// Active businesses continuously owned for the political establishment period.
     pub mature_active: usize,
     /// Mature businesses with fresh settlements and at least 20 profitable cycles in 30 days.
     pub established_active: usize,
@@ -190,7 +198,7 @@ pub enum VictoryError {
     #[error("Campaign over: victory has already been claimed")]
     AlreadyWon,
     #[error(
-        "becoming mayor requires a 30-day political contact, three quarters of districts with mature profitable diverse businesses and independent political delegates, sustained competitive campaign majorities, major campaign expenditures, substantial remaining clean reserves and legitimate income covering payroll"
+        "becoming mayor requires a long-standing political contact, a year without operating rackets, durable profitable diverse businesses and independent political delegates, sustained competitive majorities, major clean campaign expenditures and reserves, and legitimate income covering payroll"
     )]
     PoliticalNotReady,
     #[error(
@@ -328,7 +336,11 @@ fn mature_business_title(state: &AppState, business: BusinessId, owner: Organiza
         .get_business_ownership_change_for_version(business, record.version())
         .is_some_and(|change| {
             change.new_owner() == BusinessOwner::Organization(owner)
-                && established_for(state.now(), change.changed_at(), VICTORY_ESTABLISHMENT_DAYS)
+                && established_for(
+                    state.now(),
+                    change.changed_at(),
+                    POLITICAL_BUSINESS_ESTABLISHMENT_DAYS,
+                )
         })
 }
 
@@ -559,7 +571,7 @@ pub fn political_business_progress(
                         .saturating_sub(change.changed_at().as_minutes())
                 });
             let owned_days = owned_minutes / DAY_MINUTES;
-            let days_until_mature = (VICTORY_ESTABLISHMENT_DAYS * DAY_MINUTES)
+            let days_until_mature = (POLITICAL_BUSINESS_ESTABLISHMENT_DAYS * DAY_MINUTES)
                 .saturating_sub(owned_minutes)
                 .div_ceil(DAY_MINUTES);
             let last_owned_settlement = state
@@ -804,6 +816,14 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .filter_map(|enterprise| racket_district(enterprise))
         .collect::<BTreeSet<_>>()
         .len();
+    let days_since_last_racket_cycle = state
+        .enterprises()
+        .enterprises_for_organization(organization)
+        .filter_map(|racket| racket.last_cycle_at())
+        .max()
+        .map(|last| state.now().as_minutes().saturating_sub(last.as_minutes()) / DAY_MINUTES);
+    let legitimate_transition_ready = own_rackets.is_empty()
+        && days_since_last_racket_cycle.is_none_or(|days| days >= POLITICAL_CLEAN_OPERATION_DAYS);
     let mut rackets_by_district: BTreeMap<_, (i128, u64)> = BTreeMap::new();
     let mut captains_by_district = BTreeMap::<NeighborhoodId, BTreeSet<CharacterId>>::new();
     let mut mature_workers_by_district = BTreeMap::<NeighborhoodId, u64>::new();
@@ -928,6 +948,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         required_campaign_spent_cents: MAYORAL_CAMPAIGN_SPEND_REQUIRED,
         required_mayoral_reserve_cents: MAYORAL_LIQUID_RESERVE_REQUIRED,
         mayoral_leader_eligible,
+        legitimate_transition_ready,
+        days_since_last_racket_cycle,
         mayoral_nominated_for_day,
         latest_election_day: latest_election.map(|election| election.election_day),
         latest_election_won: latest_election.is_some_and(|election| election.elected),
@@ -968,7 +990,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
 /// Campaign readiness is tested at the municipal ballot, not rewarded as an
 /// immediate victory. The election owner uses this same threshold snapshot.
 pub(crate) fn mayoral_ballot_ready(standing: &VictoryProgress) -> bool {
-    standing.established_political_contacts > 0
+    standing.legitimate_transition_ready
+        && standing.established_political_contacts > 0
         && standing.total_districts > 0
         && standing.established_business_districts >= standing.required_political_districts
         && standing.key_personnel >= standing.required_political_personnel

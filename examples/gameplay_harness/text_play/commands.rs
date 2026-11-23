@@ -129,7 +129,7 @@ impl Session<'_> {
                     "Optional endings (claim-victory <political|retirement|underboss>):"
                 )
                 .unwrap();
-                writeln!(out, "  Mayoral election: {}/{} contacts held for 30 days; owned businesses in {} districts, {} productive mature districts ({} required of {} city districts)",
+                writeln!(out, "  Mayoral election: {}/{} contacts held for 180 days; owned businesses in {} districts, {} productive mature districts ({} required of {} city districts)",
                     standing.established_political_contacts, standing.active_political_contacts,
                     standing.owned_operating_business_districts, standing.established_business_districts,
                     standing.required_political_districts, standing.total_districts).unwrap();
@@ -137,11 +137,13 @@ impl Session<'_> {
                     standing.key_personnel, standing.required_political_personnel,
                     crimocracy::core::campaign_victory::POLITICAL_HEADQUARTERS_PERSONNEL,
                     standing.staffed_political_districts, standing.required_political_districts).unwrap();
+                writeln!(out, "    Legitimate transition: {} | days since last racket settlement: {:?} (365 required; no active rackets)",
+                    standing.legitimate_transition_ready, standing.days_since_last_racket_cycle).unwrap();
                 out.push_str("    Each district needs two distinct kinds of mature profitable businesses and its own active, undetained delegate with both a neighborhood mandate and Political function scope, at Delegated or Broad autonomy. One manager cannot count for two districts; the leader cannot serve as a district delegate.\n");
                 writeln!(out, "    Mature legitimate income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.legitimate_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
-                writeln!(out, "    Sustained contested electoral majorities: {} / {} districts (800/1000 local influence, stronger than rivals for 30 days)",
+                writeln!(out, "    Sustained contested electoral majorities: {} / {} districts (800/1000 local influence, stronger than rivals for 90 days)",
                     standing.mayoral_majority_districts, standing.required_political_districts).unwrap();
                 writeln!(out, "    Nomination filed for election day: {:?}; latest election: {:?}, elected: {}. Only an actual winning municipal ballot permits the political victory claim.",
                     standing.mayoral_nominated_for_day, standing.latest_election_day,
@@ -174,7 +176,7 @@ impl Session<'_> {
                     } else if district.mature_active
                         < crimocracy::core::campaign_victory::POLITICAL_BUSINESS_KINDS_PER_DISTRICT
                     {
-                        "needs two storefront titles held for 90 days (inspect 'political district-N')"
+                        "needs two storefront titles held for 1080 days (inspect 'political district-N')"
                     } else if district.established_active
                         < crimocracy::core::campaign_victory::POLITICAL_BUSINESS_KINDS_PER_DISTRICT
                     {
@@ -228,7 +230,7 @@ impl Session<'_> {
                     standing.racket_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.racket_self_sufficient { "yes" } else { "no" }).unwrap();
                 out.push_str("    A captain must direct 20 profitable settlements in 30 days; associate strength must have operated for 20 profitable cycles. Named personnel lead rank-and-file workers, whose compensation is paid through racket operating costs.\n");
-                writeln!(out, "  Productive mature districts require 90 days of ownership/operation, 20 profitable settlements in the last 30 days, a settlement within 7 days, and 30-day net income sufficient for one crew member's daily wage ({} cents/day).",
+                writeln!(out, "  Underboss rackets require 90 days of operation; mayoral businesses require 1080 days of ownership. Both require 20 profitable settlements in the last 30 days, a settlement within 7 days, and 30-day net income sufficient for one crew member's daily wage ({} cents/day).",
                     self.registry.upkeep().per_member_daily().cents()).unwrap();
                 out.push_str(
                     "Reaching a threshold does not end sandbox play until you claim the victory.",

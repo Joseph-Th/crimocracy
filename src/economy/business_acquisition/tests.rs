@@ -148,6 +148,94 @@ fn acquisition_draft(fixture: &AcquisitionFixture) -> BusinessAcquisitionDraft {
 }
 
 #[test]
+fn quoted_consolidation_premium_is_paid_and_honors_same_minute_staleness() {
+    let mut fixture = make_independent_fixture();
+    let base = hospitality_price(&fixture);
+    let district = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .unwrap()
+        .neighborhood();
+    let quote = |f: &AcquisitionFixture| {
+        acquisition_offer(&f.registry, &f.state, f.organization, f.business)
+            .unwrap()
+            .0
+    };
+    assert_eq!(quote(&fixture), base);
+    for i in 0..3 {
+        insert_business(
+            &fixture.registry,
+            &mut fixture.state,
+            BusinessDraft {
+                name: format!("Owned shop {i}"),
+                kind: BusinessKind::Hospitality,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::MeetingSpace,
+                    BusinessFunction::CustomerAccess,
+                ]),
+                neighborhood: district,
+                owner: BusinessOwner::Organization(fixture.organization),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            quote(&fixture).cents(),
+            base.cents() * (100 + 50 * (i64::from(i) - 1).max(0)) / 100
+        );
+    }
+    fund_accounted_from_street(&mut fixture, base.cents() * 2);
+    let held = validate_acquire_business(
+        &fixture.registry,
+        &fixture.state,
+        acquisition_draft(&fixture),
+    )
+    .unwrap();
+    insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Fourth owned shop".into(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::from([
+                BusinessFunction::CashIntensive,
+                BusinessFunction::MeetingSpace,
+                BusinessFunction::CustomerAccess,
+            ]),
+            neighborhood: district,
+            owner: BusinessOwner::Organization(fixture.organization),
+        },
+    )
+    .unwrap();
+    assert_eq!(quote(&fixture).cents(), base.cents() * 2);
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        held.commit(&fixture.registry, &mut fixture.state),
+        Err(BusinessAcquisitionError::StaleListing(fixture.business))
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    let bought = validate_acquire_business(
+        &fixture.registry,
+        &fixture.state,
+        acquisition_draft(&fixture),
+    )
+    .unwrap()
+    .commit(&fixture.registry, &mut fixture.state)
+    .unwrap();
+    assert_eq!(bought.price.cents(), base.cents() * 2);
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(fixture.accounted)
+            .unwrap()
+            .balance(),
+        Money::ZERO
+    );
+}
+
+#[test]
 fn stale_acquisition_listing_rejects_after_ownership_round_trip() {
     let mut fixture = make_independent_fixture();
     let price = hospitality_price(&fixture);

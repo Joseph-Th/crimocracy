@@ -271,7 +271,7 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
     .unwrap()
     .commit(&mut city.state)
     .unwrap();
-    for _ in 0..30 {
+    for _ in 0..crate::core::campaign_victory::POLITICAL_CONTACT_DAYS {
         day(&registry, &mut city.state);
     }
     validate_nominate_mayor(&city.state, city.boss)
@@ -290,9 +290,9 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
             .candidacy()
             .unwrap()
             .election_day,
-        180
+        360
     );
-    for _ in 30..179 {
+    for _ in 180..359 {
         day(&registry, &mut city.state);
     }
     let mut restored =
@@ -310,7 +310,7 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
         .unwrap()
         .latest_election()
         .unwrap();
-    assert_eq!(election.election_day, 180);
+    assert_eq!(election.election_day, 360);
     assert_eq!(election.candidate, city.boss);
     assert!(!election.elected);
     assert_eq!(election.wards_won, 0);
@@ -342,7 +342,7 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
             .candidacy()
             .unwrap()
             .election_day,
-        360
+        540
     );
     validate_invariants(&city.state);
 }

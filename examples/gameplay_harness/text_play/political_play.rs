@@ -62,6 +62,8 @@ impl Session<'_> {
             progress.latest_election_won
         )
         .unwrap();
+        writeln!(out, "Legitimate transition: {} | days since last racket settlement: {:?} (365 required; no active rackets)",
+            progress.legitimate_transition_ready, progress.days_since_last_racket_cycle).unwrap();
         for district in self.state.world().neighborhoods() {
             let own = self
                 .state
@@ -102,7 +104,7 @@ impl Session<'_> {
                 }
             }
         }
-        out.push_str("A ward needs 800 machine, 300 grassroots and 300 institutional support, plus a 3:2 lead over rival machine influence for 30 days. Influence is bought with clean funds or sustained by paid specialists; meetings primarily raise grassroots support, labor coalitions raise institutional support, and local press supports both. All three scores erode daily. Filing costs 2000000 cents, requires an established political contact and must precede a municipal ballot by 30 days. Elections occur every 180 days; resident fear and active local rackets cost votes.");
+        out.push_str("A ward needs 800 machine, 300 grassroots and 300 institutional support, plus a 3:2 lead over rival machine influence for 90 days. Influence is bought with clean funds or sustained by paid specialists; meetings primarily raise grassroots support, labor coalitions raise institutional support, and local press supports both. All three scores erode daily. Filing costs 2000000 cents, requires a 180-day political contact and must precede a municipal ballot by 30 days. Elections occur every 180 days; resident fear and active local rackets cost votes.");
         Ok(out)
     }
 
@@ -275,7 +277,7 @@ impl Session<'_> {
             ).unwrap();
             writeln!(
                 out,
-                "Electoral contest: machine {}/1000 | grassroots {}/1000 | institutions {}/1000 | rival pressure {} | majority held {} day(s) / 30 | mayoral-ready {}",
+                "Electoral contest: machine {}/1000 | grassroots {}/1000 | institutions {}/1000 | rival pressure {} | majority held {} day(s) / 90 | mayoral-ready {}",
                 local.own_influence, local.grassroots_support, local.institutional_support,
                 pressure_label(local.rival_influence), local.majority_held_days, local.mayoral_ready,
             ).unwrap();

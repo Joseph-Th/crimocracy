@@ -10,6 +10,7 @@ use super::{
     SpecialistKind, WardBallot,
 };
 use crate::contacts::{ContactKind, ContactStatus};
+use crate::core::campaign_victory::POLITICAL_CONTACT_DAYS;
 use crate::core::id::{CharacterId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current, is_day_boundary};
@@ -124,7 +125,11 @@ fn established_contact(state: &AppState, owner: OrganizationId, kind: ContactKin
                 .now()
                 .as_minutes()
                 .saturating_sub(contact.established_at().as_minutes())
-                >= 30 * DAY_MINUTES
+                >= (if kind == ContactKind::Political {
+                    POLITICAL_CONTACT_DAYS
+                } else {
+                    30 // Existing shorter standing requirement for a labor contact.
+                }) * DAY_MINUTES
             && (kind != ContactKind::Political
                 || state
                     .world()

@@ -318,6 +318,31 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
 
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(104)).unwrap();
+    // This criminal outfit opens with a racket. Stopping it is mandatory
+    // before it can claim a credible transition into legitimate politics.
+    assert!(
+        !progress(&registry, &city.state)
+            .unwrap()
+            .legitimate_transition_ready
+    );
+    let rackets = city
+        .state
+        .enterprises()
+        .enterprises_for_organization(city.player)
+        .filter(|racket| racket.status() == crate::enterprises::EnterpriseStatus::Active)
+        .map(|racket| racket.id())
+        .collect::<Vec<_>>();
+    for racket in rackets {
+        crate::enterprises::enterprise_execution::validate_suspend_enterprise(&city.state, racket)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    assert!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .legitimate_transition_ready
+    );
     let council = city
         .state
         .world()
@@ -358,7 +383,7 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
 
     // Purchase actual businesses in multiple districts. A cheap same-day
     // purchase plus the newly opened contact must not be a terminal win.
-    fund(&mut city.state, city.player, 20_000_000);
+    fund(&mut city.state, city.player, 100_000_000);
     let funding = city
         .state
         .finance()
@@ -425,7 +450,10 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         );
         for title in titles {
             assert_eq!(title.owned_days, 0);
-            assert_eq!(title.days_until_mature, VICTORY_ESTABLISHMENT_DAYS);
+            assert_eq!(
+                title.days_until_mature,
+                POLITICAL_BUSINESS_ESTABLISHMENT_DAYS
+            );
             assert!(!title.established);
         }
     }
@@ -460,7 +488,7 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
             .commit(&mut city.state)
             .unwrap();
     }
-    for day in 1..=VICTORY_ESTABLISHMENT_DAYS {
+    for day in 1..=POLITICAL_BUSINESS_ESTABLISHMENT_DAYS {
         city.state
             .advance_clock(crate::core::time::SimDuration::from_minutes(
                 DAY_MINUTES as u32,
@@ -493,7 +521,7 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
                 0
             );
         }
-        if day == VICTORY_ESTABLISHMENT_DAYS - 1 {
+        if day == POLITICAL_BUSINESS_ESTABLISHMENT_DAYS - 1 {
             assert_eq!(
                 progress(&registry, &city.state)
                     .unwrap()
@@ -775,7 +803,7 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         apply_due_political_campaigns, validate_hire_specialist, validate_invest_influence,
         validate_nominate_mayor,
     };
-    fund(&mut city.state, city.player, 30_000_000);
+    fund(&mut city.state, city.player, 120_000_000);
     for (&district, &manager) in districts.iter().zip(managers.iter()) {
         validate_hire_specialist(&city.state, district, manager, SpecialistKind::Strategist)
             .unwrap()
@@ -803,7 +831,9 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower).err(),
         Some(VictoryError::PoliticalNotReady)
     );
-    for _ in VICTORY_ESTABLISHMENT_DAYS..crate::politics::MUNICIPAL_ELECTION_INTERVAL_DAYS {
+    let election_day =
+        crate::politics::political_system::next_municipal_election_day(city.state.now());
+    for day in POLITICAL_BUSINESS_ESTABLISHMENT_DAYS..election_day {
         city.state
             .advance_clock(crate::core::time::SimDuration::from_minutes(
                 DAY_MINUTES as u32,
@@ -823,6 +853,18 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
             }
         }
         apply_due_political_campaigns(&registry, &mut city.state);
+        if day % 7 == 0 {
+            for (&district, &manager) in districts.iter().zip(managers.iter()) {
+                if let Ok(order) = crate::politics::political_system::validate_civic_initiative(
+                    &city.state,
+                    district,
+                    manager,
+                    crate::politics::CivicInitiative::PublicMeetings,
+                ) {
+                    order.commit(&mut city.state).unwrap();
+                }
+            }
+        }
     }
     let elected = progress(&registry, &city.state).unwrap();
     assert_eq!(
@@ -831,10 +873,7 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     );
     assert!(elected.campaign_spent_cents >= MAYORAL_CAMPAIGN_SPEND_REQUIRED);
     assert!(elected.accounted_net.cents() >= MAYORAL_LIQUID_RESERVE_REQUIRED);
-    assert_eq!(
-        elected.latest_election_day,
-        Some(crate::politics::MUNICIPAL_ELECTION_INTERVAL_DAYS)
-    );
+    assert_eq!(elected.latest_election_day, Some(election_day));
     assert!(
         elected.latest_election_won,
         "actual municipal ballot failed: {elected:?}"
@@ -1547,7 +1586,7 @@ fn long_owned_low_margin_storefront_does_not_create_political_leverage() {
             .commit(&mut city.state)
             .unwrap();
     }
-    for _ in 0..VICTORY_ESTABLISHMENT_DAYS {
+    for _ in 0..POLITICAL_BUSINESS_ESTABLISHMENT_DAYS {
         city.state
             .advance_clock(crate::core::time::SimDuration::from_minutes(
                 DAY_MINUTES as u32,
@@ -1576,6 +1615,80 @@ fn long_owned_low_margin_storefront_does_not_create_political_leverage() {
         .unwrap(),
         standing
     );
+}
+
+#[test]
+fn political_legitimacy_requires_a_year_after_criminal_operating_income() {
+    use crate::city_generation::{CityScale, generate_city};
+    use crate::enterprises::enterprise_execution::{
+        EnterpriseCycleRandomness, decide_enterprise_cycle, validate_enterprise_cycle_plan,
+        validate_suspend_enterprise,
+    };
+    use crate::opportunities::OpportunityStatus;
+    use crate::opportunities::opportunity_system::validate_dismiss_opportunity;
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(104)).unwrap();
+    let racket = city
+        .state
+        .enterprises()
+        .enterprises_for_organization(city.player)
+        .next()
+        .unwrap()
+        .id();
+    let open = city
+        .state
+        .opportunities()
+        .opportunities_for_organization(city.player)
+        .filter(|lead| lead.status() == OpportunityStatus::Open)
+        .map(|lead| lead.id())
+        .collect::<Vec<_>>();
+    for lead in open {
+        validate_dismiss_opportunity(&registry, &city.state, lead)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    city.state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(
+            DAY_MINUTES as u32,
+        ));
+    let cycle = decide_enterprise_cycle(
+        &registry,
+        &city.state,
+        racket,
+        EnterpriseCycleRandomness::new(
+            0,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
+    )
+    .unwrap();
+    validate_enterprise_cycle_plan(&city.state, cycle)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    validate_suspend_enterprise(&city.state, racket)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let recent = progress(&registry, &city.state).unwrap();
+    assert_eq!(recent.days_since_last_racket_cycle, Some(0));
+    assert!(!recent.legitimate_transition_ready);
+    city.state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(
+            ((POLITICAL_CLEAN_OPERATION_DAYS - 1) * DAY_MINUTES) as u32,
+        ));
+    let almost = progress(&registry, &city.state).unwrap();
+    assert_eq!(almost.days_since_last_racket_cycle, Some(364));
+    assert!(!almost.legitimate_transition_ready);
+    city.state
+        .advance_clock(crate::core::time::SimDuration::from_minutes(
+            DAY_MINUTES as u32,
+        ));
+    let clean = progress(&registry, &city.state).unwrap();
+    assert_eq!(clean.days_since_last_racket_cycle, Some(365));
+    assert!(clean.legitimate_transition_ready);
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(progress(&registry, &restored).unwrap(), clean);
 }
 
 #[test]

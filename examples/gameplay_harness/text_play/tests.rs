@@ -19,7 +19,10 @@ fn political_dossier_exposes_title_countdown_without_mutating_or_exposing_rivals
         .0;
     assert!(dossier.contains("Political dossier:"), "{dossier}");
     assert!(dossier.contains("title age 0 full day(s)"), "{dossier}");
-    assert!(dossier.contains("title matures in 90 day(s)"), "{dossier}");
+    assert!(
+        dossier.contains("title matures in 1080 day(s)"),
+        "{dossier}"
+    );
     assert!(dossier.contains("profitable settlements"), "{dossier}");
     assert!(!dossier.contains("rival influence"), "{dossier}");
     assert!(session.execute("political district-99999").is_err());
@@ -84,7 +87,7 @@ fn political_dossier_exposes_title_countdown_without_mutating_or_exposing_rivals
         "{appointed}"
     );
     assert!(
-        appointed.contains("title matures in 90 day(s)"),
+        appointed.contains("title matures in 1080 day(s)"),
         "{appointed}"
     );
 }
