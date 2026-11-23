@@ -7,6 +7,25 @@ fn snapshot(registry: &Registry, session: &Session<'_>) -> Vec<u8> {
 }
 
 #[test]
+fn generated_brief_exposes_derived_public_reach_without_changing_campaign_state() {
+    let registry = crimocracy::build_registry();
+    let session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let tier = crimocracy::world::organization_pressure::public_prominence_tier(
+        &session.state,
+        session.player,
+    );
+    let before = snapshot(&registry, &session);
+    let brief = session.brief();
+    assert!(
+        brief.contains(&format!("Public prominence: tier {tier}/6")),
+        "{brief}"
+    );
+    assert!(brief.contains("greater scrutiny of active rackets"));
+    assert_eq!(before, snapshot(&registry, &session));
+}
+
+#[test]
 fn generated_start_flags_are_strict_and_keep_authored_openings_available() {
     let args = vec!["--generate", "--city-size", "large", "--seed", "0x2a"]
         .into_iter()

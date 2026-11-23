@@ -338,30 +338,37 @@ fn autonomous_rivals_spend_clean_money_weekly_in_the_players_contested_ward() {
     }
     assert_eq!(rival_pressure(&city.state, city.player, district), 0);
     fund(&mut city.state, rival, 500_000);
+    let affordable =
+        political_system::affordable_rival_campaign_points(&registry, &city.state, rival);
+    assert!(
+        (1..100).contains(&affordable),
+        "funding cannot consume reserved wages"
+    );
     advance_day(&registry, &mut city.state);
-    assert_eq!(rival_pressure(&city.state, city.player, district), 100);
+    assert_eq!(
+        rival_pressure(&city.state, city.player, district),
+        affordable
+    );
     assert_eq!(
         city.state
             .politics()
             .organization(rival)
             .unwrap()
             .spent_cents(),
-        500_000
+        i64::from(affordable) * INFLUENCE_COST_PER_POINT
     );
     for _ in 0..7 {
         advance_day(&registry, &mut city.state);
     }
+    let spent = city
+        .state
+        .politics()
+        .organization(rival)
+        .unwrap()
+        .spent_cents();
     assert!(
-        rival_pressure(&city.state, city.player, district) < 100,
-        "an unfunded rival's influence must also decay"
-    );
-    assert_eq!(
-        city.state
-            .politics()
-            .organization(rival)
-            .unwrap()
-            .spent_cents(),
-        500_000
+        spent >= i64::from(affordable) * INFLUENCE_COST_PER_POINT,
+        "later spending must be supported by real new funds"
     );
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(restored.politics(), city.state.politics());
@@ -478,36 +485,45 @@ fn autonomous_rival_campaign_moves_between_actual_competing_wards() {
             .map_or(0, DistrictCampaign::influence)
     };
     assert_eq!(influence(&city.state, first), 0);
-    assert_eq!(influence(&city.state, second), 100);
+    let first_spent = city
+        .state
+        .politics()
+        .organization(rival)
+        .unwrap()
+        .spent_cents();
+    assert!((1..=100).contains(&influence(&city.state, second)));
     // After the strongest challenge is defended, redirect the finite weekly
     // budget toward the next exposed ward, not an arbitrary lowest-ID ward.
     political_system::validate_invest_for(&city.state, rival, second, 4_500_000)
         .unwrap()
         .commit(&mut city.state)
         .unwrap();
+    let second_week_affordable =
+        political_system::affordable_rival_campaign_points(&registry, &city.state, rival);
+    assert!((1..=100).contains(&second_week_affordable));
     let mut restored =
         restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     for _ in 0..7 {
         advance_day(&registry, &mut city.state);
         advance_day(&registry, &mut restored);
     }
-    assert_eq!(influence(&city.state, first), 100);
-    assert_eq!(influence(&restored, first), 100);
+    assert_eq!(influence(&city.state, first), second_week_affordable);
+    assert_eq!(influence(&restored, first), second_week_affordable);
     assert_eq!(influence(&restored, second), influence(&city.state, second));
-    assert_eq!(
+    assert!(
         city.state
             .politics()
             .organization(rival)
             .unwrap()
-            .spent_cents(),
-        5_500_000
+            .spent_cents()
+            > first_spent
     );
     validate_invariants(&city.state);
     validate_state_against_registry(&registry, &city.state).unwrap();
 }
 
 #[test]
-fn rival_with_a_well_defended_weak_challenge_invests_in_another_ward() {
+fn rival_with_a_well_defended_weak_challenge_preserves_funds_in_an_uncontested_ward() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(6_219)).unwrap();
     let rival = city.rivals[0];
@@ -528,9 +544,9 @@ fn rival_with_a_well_defended_weak_challenge_invests_in_another_ward() {
         advance_day(&registry, &mut city.state);
     }
     let campaign = city.state.politics().organization(rival).unwrap();
-    assert_eq!(campaign.district(other).unwrap().influence(), 100);
+    assert!(campaign.district(other).is_none());
     assert!(campaign.district(contested).unwrap().influence() > 600);
-    assert_eq!(campaign.spent_cents(), 5_000_000);
+    assert_eq!(campaign.spent_cents(), 4_500_000);
     validate_invariants(&city.state);
     validate_state_against_registry(&registry, &city.state).unwrap();
 }

@@ -766,13 +766,43 @@ fn pay_campaign_staff(state: &mut AppState) {
     }
 }
 
-fn autonomous_rival_campaigns(state: &mut AppState) {
-    // Weekly initiative: defend an *operating* commercial stake against the
-    // player's strongest outstanding challenge. Selecting the first campaign
-    // entry indefinitely would spend rival money on dormant wards and leave
-    // actual contested neighborhoods unopposed. Equal threats use district ID
-    // as a stable tie-breaker; even uncontested rivals spread investment toward
-    // their least-defended operating district.
+/// Available clean investment after reserving one full week of current named
+/// payroll across all liquid accounts. Rivals must not spend wages on elections,
+/// and a cash-poor organization can buy a few real points rather than silently
+/// forgoing political activity because it cannot afford the full weekly target.
+pub(super) fn affordable_rival_campaign_points(
+    registry: &Registry,
+    state: &AppState,
+    owner: OrganizationId,
+) -> u16 {
+    let members = state.world().characters_in_organization(owner).count() as i128;
+    let reserve = i128::from(registry.upkeep().per_member_daily().cents()) * members * 7;
+    let mut clean = 0_i128;
+    let mut other = 0_i128;
+    for account in state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(owner))
+    {
+        let available = i128::from(account.available_payment_balance().cents());
+        if account.kind() == AccountKind::AccountedFunds {
+            clean += available;
+        } else if matches!(
+            account.kind(),
+            AccountKind::StreetCash | AccountKind::ConcealedCash
+        ) {
+            other += available;
+        }
+    }
+    let spendable = (clean - (reserve - other).max(0)).max(0);
+    u16::try_from((spendable / i128::from(INFLUENCE_COST_PER_POINT)).min(220))
+        .expect("campaign points are bounded at 220")
+}
+
+fn autonomous_rival_campaigns(registry: &Registry, state: &mut AppState) {
+    // Weekly initiative: defend an *operating* commercial stake against an
+    // actual player challenge. Do not burn scarce rival capital on empty wards;
+    // a large public player portfolio can also induce a modest preemptive defense
+    // in wards where that organization owns several active businesses.
     if !(state.now().as_minutes() / DAY_MINUTES).is_multiple_of(7) {
         return;
     }
@@ -781,6 +811,24 @@ fn autonomous_rival_campaigns(state: &mut AppState) {
     };
     let player_prominence =
         crate::world::organization_pressure::public_prominence_tier(state, player);
+    let player_properties_by_district = state
+        .world()
+        .businesses_owned_by_organization(player)
+        .filter(|business| {
+            state
+                .economy()
+                .get_business_economy(business.id())
+                .is_some_and(|economy| {
+                    economy.status() == crate::economy::BusinessOperatingStatus::Active
+                })
+        })
+        .fold(
+            BTreeMap::<NeighborhoodId, usize>::new(),
+            |mut counts, business| {
+                *counts.entry(business.neighborhood()).or_default() += 1;
+                counts
+            },
+        );
     // Take a small value snapshot before rival ledgers are mutated below.
     let player_pressure: BTreeMap<_, _> = state
         .politics()
@@ -811,6 +859,10 @@ fn autonomous_rival_campaigns(state: &mut AppState) {
         .map(|organization| organization.id())
         .collect::<Vec<_>>();
     for owner in rivals {
+        let affordable = affordable_rival_campaign_points(registry, state, owner);
+        if affordable == 0 {
+            continue;
+        }
         let districts = state
             .world()
             .businesses_owned_by_organization(owner)
@@ -840,6 +892,20 @@ fn autonomous_rival_campaigns(state: &mut AppState) {
                 }
                 let (machine, grassroots, institutions) =
                     player_pressure.get(&district).copied().unwrap_or((0, 0, 0));
+                let preempt = player_prominence >= 3
+                    && player_properties_by_district
+                        .get(&district)
+                        .is_some_and(|&owned| owned >= 3);
+                if machine == 0 && grassroots == 0 && institutions == 0 && !preempt {
+                    return None;
+                }
+                // A rational adversary defends a lead instead of wasting
+                // money indefinitely once its current position is sufficient.
+                let desired = (u32::from(machine) * 3 / 4 + 150 + u32::from(player_prominence) * 30)
+                    .min(u32::from(INFLUENCE_CAP)) as u16;
+                if own >= desired {
+                    return None;
+                }
                 Some((
                     district,
                     (
@@ -847,7 +913,7 @@ fn autonomous_rival_campaigns(state: &mut AppState) {
                         // is not an urgent challenge merely because its
                         // historical office has nonzero support.
                         machine > own,
-                        i32::from(machine) - i32::from(own),
+                        i32::from(desired) - i32::from(own),
                         u32::from(grassroots) + u32::from(institutions),
                         std::cmp::Reverse(district),
                     ),
@@ -867,7 +933,13 @@ fn autonomous_rival_campaigns(state: &mut AppState) {
         // counter-campaigning. Rivals still need an actual local operating stake and
         // must pay the entire incremental cost from their own accounted funds.
         let weekly_budget_points = 100 + u16::from(player_prominence) * 20;
-        let points = (INFLUENCE_CAP - current).min(weekly_budget_points.min(220));
+        let (machine, _, _) = player_pressure.get(&district).copied().unwrap_or((0, 0, 0));
+        let desired = (u32::from(machine) * 3 / 4 + 150 + u32::from(player_prominence) * 30)
+            .min(u32::from(INFLUENCE_CAP)) as u16;
+        let points = (INFLUENCE_CAP - current)
+            .min(desired.saturating_sub(current))
+            .min(weekly_budget_points.min(220))
+            .min(affordable);
         if points == 0 {
             continue;
         }
@@ -891,7 +963,7 @@ pub fn apply_due_political_campaigns(registry: &Registry, state: &mut AppState) 
     }
     apply_daily_decay(state);
     pay_campaign_staff(state);
-    autonomous_rival_campaigns(state);
+    autonomous_rival_campaigns(registry, state);
     let owners = state
         .politics()
         .organizations

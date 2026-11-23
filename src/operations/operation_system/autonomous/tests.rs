@@ -6,7 +6,10 @@ use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::economy::BusinessEconomyDraft;
 use crate::economy::business_economy_system::validate_establish_business_economy;
 use crate::finance::finance_system::insert_account;
+use crate::finance::finance_system::validate_record_transaction;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
+use crate::finance::{LedgerPosting, LedgerTransactionDraft, Money};
+use crate::politics::political_system::validate_invest_influence;
 use crate::world::world_system::{
     designate_player_organization, insert_business, insert_character, insert_neighborhood,
     insert_organization,
@@ -455,6 +458,167 @@ fn rival_extends_profitable_strikes_against_a_prominent_public_owner() {
         finish_operation(&registry, &mut state, operation);
     }
     let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
+fn organized_rival_resists_public_political_expansion_without_shared_retail_sector() {
+    let Fixture {
+        registry,
+        mut state,
+        rival,
+        player,
+        competitor,
+        ..
+    } = fixture();
+    let district = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Civic Ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(60),
+                    commercial_activity: rating(60),
+                    illicit_demand: rating(55),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(0),
+                },
+            },
+        },
+    )
+    .unwrap();
+    let mut operating_shop = |owner, name: &str, kind| {
+        let business = insert_business(
+            &registry,
+            &mut state,
+            BusinessDraft {
+                name: name.to_owned(),
+                kind,
+                functions: BTreeSet::from([BusinessFunction::CustomerAccess]),
+                neighborhood: district,
+                owner: BusinessOwner::Organization(owner),
+            },
+        )
+        .unwrap();
+        let operating_account = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(business),
+                kind: AccountKind::LegitimateOperating,
+            },
+        )
+        .unwrap();
+        let settlement_account = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Business(business),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .unwrap();
+        validate_establish_business_economy(
+            &registry,
+            &state,
+            BusinessEconomyDraft {
+                business,
+                operating_account,
+                settlement_account,
+            },
+        )
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+        business
+    };
+    let rival_laundry = operating_shop(rival, "Rival Laundry", BusinessKind::Laundry);
+    let civic_center = operating_shop(player, "Civic Retail Hall", BusinessKind::Retail);
+    assert_eq!(
+        forecast_competitor_disruption_gain(&registry, &state, civic_center, &[rival_laundry])
+            .unwrap(),
+        0,
+        "rival has no direct retail customer incentive in the civic ward"
+    );
+    let mut quiet = state.clone();
+    assert_eq!(
+        next_day(&registry, &mut quiet)
+            .autonomous_operations
+            .iter()
+            .map(|&id| quiet
+                .operations()
+                .get_operation(id)
+                .unwrap()
+                .objective()
+                .business_target())
+            .collect::<Vec<_>>(),
+        vec![Some(competitor)],
+        "without political stakes the rival should still pursue real customer gains"
+    );
+
+    insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Civic Council".to_owned(),
+            kind: OrganizationKind::Political,
+        },
+    )
+    .unwrap();
+    let clean = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .unwrap();
+    let source = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Civic test funding".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: clean,
+                    amount: Money::from_cents(4_500_000),
+                },
+                LedgerPosting {
+                    account: source,
+                    amount: Money::from_cents(-4_500_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    validate_invest_influence(&state, district, 4_500_000)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    let tick = next_day(&registry, &mut state);
+    assert_eq!(tick, next_day(&registry, &mut restored));
+    assert_eq!(tick.autonomous_operations.len(), 1);
+    let attack = state
+        .operations()
+        .get_operation(tick.autonomous_operations[0])
+        .unwrap();
+    assert_eq!(attack.kind(), OperationKind::Surveillance);
+    assert_eq!(attack.responsible_organization(), rival);
+    assert_eq!(attack.objective().business_target(), Some(civic_center));
     assert_eq!(
         bincode::serialize(&state).unwrap(),
         bincode::serialize(&restored).unwrap()

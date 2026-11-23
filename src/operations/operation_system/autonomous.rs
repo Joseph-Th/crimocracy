@@ -30,9 +30,10 @@ use crate::world::{AutonomyLevel, BusinessKind, BusinessOwner, OrganizationKind}
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A failed watch or strike is not retried immediately. Two successful strikes within
-/// this window constitute a concerted campaign; reassess other opportunities before
-/// repeatedly committing the same scarce crew to the same storefront.
+/// A failed watch or strike is not retried immediately. Two successful strikes
+/// against a small owner (four against a prominent one) constitute a concerted
+/// campaign; reassess other opportunities before repeatedly committing the
+/// same scarce crew to the same storefront.
 const UNSUCCESSFUL_RETRY_MINUTES: u64 = 3 * DAY_MINUTES;
 const CAMPAIGN_REVIEW_MINUTES: u64 = 7 * DAY_MINUTES;
 
@@ -243,7 +244,36 @@ fn choose_plan<'r>(
         let gain = *gains.entry((district, kind)).or_insert_with(|| {
             forecast_competitor_disruption_gain(registry, state, id, stakes).unwrap_or(0)
         });
-        if gain <= 0 {
+        // Rival businesses also have a political reason to oppose a local
+        // challenger: displacing an established civic venue can interrupt the
+        // commercial constituency behind a public campaign. This requires an
+        // actual player-owned active shop and a visible 500-point local political
+        // machine. It never licenses blind strikes on independent owners or
+        // against a ward where the attacker has no operating business.
+        let local_machine = if state
+            .player_organization()
+            .is_some_and(|player| target_owner == Some(BusinessOwner::Organization(player)))
+        {
+            state
+                .player_organization()
+                .and_then(|player| state.politics().organization(player))
+                .and_then(|campaign| campaign.district(district))
+                .map_or(0, |office| office.influence())
+        } else {
+            0
+        };
+        let political_stake = if local_machine >= 500
+            && state
+                .economy()
+                .get_business_economy(id)
+                .is_some_and(|economy| {
+                    economy.status() == crate::economy::BusinessOperatingStatus::Active
+                }) {
+            i128::from(local_machine - 300) * 18
+        } else {
+            0
+        };
+        if gain <= 0 && political_stake == 0 {
             continue;
         }
         if !is_actionable_opportunity_target(
@@ -287,7 +317,7 @@ fn choose_plan<'r>(
         }
         // Compare the actual forecast benefit to our own businesses, not the count of
         // properties or the target's ID. Finish a viable watch/strike sequence on equal
-        // stakes; after a two-strike campaign, other targets get their turn. The oldest
+        // stakes; after a bounded concerted campaign, other targets get their turn. The oldest
         // attempt wins an otherwise equal choice (untried properties precede old ones).
         let last_attempt = [OperationKind::Surveillance, OperationKind::Sabotage]
             .into_iter()
@@ -296,7 +326,8 @@ fn choose_plan<'r>(
         // Rank by the genuine expected customer gain, but treat the public reach of
         // the competing owner as a strategic threat worth contesting. Never infer
         // concealed rackets or treasury balances when selecting a rival target.
-        let strategic_gain = gain.saturating_mul(100 + i128::from(prominence) * 35) / 100;
+        let strategic_gain = (gain.saturating_mul(100 + i128::from(prominence) * 35) / 100)
+            .saturating_add(political_stake);
         candidates.push((
             Reverse(strategic_gain),
             !observed,
