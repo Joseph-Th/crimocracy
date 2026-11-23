@@ -1037,6 +1037,12 @@ impl<'a> Session<'a> {
                 ).expect("owned operating books must have a valid capital basis").cents())
             })
             .sum();
+        let overhead_basis_points =
+            crimocracy::economy::business_economy_system::portfolio_overhead_basis_points(
+                state, player,
+            );
+        let estimated_owner_surplus =
+            surplus - (surplus * i128::from(overhead_basis_points) + 9_999) / 10_000;
         let distribution = if state.automatic_profit_sweeps() {
             "daily"
         } else {
@@ -1171,9 +1177,9 @@ impl<'a> Session<'a> {
                 format!("Report {}: {}", report.id().raw(), report.title())
             });
         format!(
-            "{name} | {} | {} ({})\nPeople: {members} named | Associates: {active_associates} active, {inactive_associates} suspended | Venues: {venues} ({suspended_venues} suspended) | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents | distribution: {distribution}\nAssigned racket captains: {active_captains} | all-chain command duties: {command_required}/{command_available} available | direct reporting lines: {command_lines} | overloaded leaders: {overstretched_leaders} (see 'people' for individual workloads)\nNamed-member daily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)
+            "{name} | {} | {} ({})\nPeople: {members} named | Associates: {active_associates} active, {inactive_associates} suspended | Venues: {venues} ({suspended_venues} suspended) | Rackets: {rackets} ({active_rackets} active, {} suspended)\nTreasury: street {street} cents | concealed {concealed} cents | accounted {clean} cents\nSpendable now: street {street_spendable} cents | concealed {concealed_spendable} cents | accounted {clean_spendable} cents | separate account deficits {deficits} cents\nWithdrawable storefront surplus: {surplus} cents gross | owner net estimate {estimated_owner_surplus} cents after {overhead_basis_points} bp portfolio administration | distribution: {distribution}\nAssigned racket captains: {active_captains} | all-chain command duties: {command_required}/{command_available} available | direct reporting lines: {command_lines} | overloaded leaders: {overstretched_leaders} (see 'people' for individual workloads)\nNamed-member daily payroll: {payroll} cents | covered from current treasury: {covered} cents (before future revenue)
 Gross payroll runway: {wage_runway} at current headcount and accessible funds, ignoring new income and other spending
-Additional associate wages: {incremental_labor_wages} cents/day through racket operating expenses (baseline workers included in fixed racket costs)\nRealized operating net (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs payroll {payroll_gap:+} cents/day (excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | suspended storefronts: {suspended_venues} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
+Additional associate wages: {incremental_labor_wages} cents/day through racket operating expenses (baseline workers included in fixed racket costs)\nRealized operating net before owner-distribution overhead (last {days} day(s)): legitimate {business_net} cents | rackets {racket_net} cents | averaged {avg_daily_net} cents/day | vs payroll {payroll_gap:+} cents/day (excludes laundering and asset trades)\nDetained staff: {detained_members} | suspended rackets: {} | suspended storefronts: {suspended_venues} | use 'counsel' and 'recovery' for actionable details\nPending decisions: {pending} | Active operations: {active} | Open leads: {leads}\nLatest: {latest}\nUse 'reports', 'opportunities', 'people', or 'accounts' to investigate.",
             time_label(state.now().as_minutes()),
             self.district,
             self.district_variant,

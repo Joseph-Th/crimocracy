@@ -62,6 +62,282 @@ use std::collections::BTreeMap;
 
 const ONE_DAY: u32 = 1_440;
 
+#[test]
+fn portfolio_overhead_is_paid_from_both_manual_and_automatic_profit_distributions() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    let district = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .unwrap()
+        .neighborhood();
+    for index in 0..3 {
+        insert_business(
+            &registry,
+            &mut fixture.state,
+            BusinessDraft {
+                name: format!("Additional holding {index}"),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([BusinessFunction::CustomerAccess]),
+                neighborhood: district,
+                owner: BusinessOwner::Organization(fixture.organization),
+            },
+        )
+        .unwrap();
+    }
+    let rate = portfolio_overhead_basis_points(&fixture.state, fixture.organization);
+    assert_eq!(rate, 600, "four holdings incur six percent group overhead");
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(ONE_DAY));
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0).unwrap(),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let gross =
+        resolve_available_business_profit(&fixture.state, fixture.organization, fixture.business)
+            .unwrap();
+    assert!(gross > Money::ZERO);
+    let fee = portfolio_overhead_charge(gross, rate);
+    let retained = gross.checked_sub(fee).unwrap();
+    let old_settlement = fixture
+        .state
+        .finance()
+        .get_account(fixture.settlement)
+        .unwrap()
+        .balance();
+
+    let mut manual = fixture.state.clone();
+    let destination = insert_account(
+        &mut manual,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .unwrap();
+    let before_penny = bincode::serialize(&manual).unwrap();
+    assert_eq!(
+        validate_sweep_business_profits(
+            &manual,
+            BusinessProfitSweepDraft {
+                organization: fixture.organization,
+                business: fixture.business,
+                destination,
+                amount: Money::from_cents(1),
+            }
+        )
+        .err(),
+        Some(BusinessProfitSweepError::NonPositiveNetReceipt),
+        "a one-cent draw must not silently consume all of the owner's proceeds",
+    );
+    assert_eq!(bincode::serialize(&manual).unwrap(), before_penny);
+    validate_sweep_business_profits(
+        &manual,
+        BusinessProfitSweepDraft {
+            organization: fixture.organization,
+            business: fixture.business,
+            destination,
+            amount: gross,
+        },
+    )
+    .unwrap()
+    .commit(&mut manual)
+    .unwrap();
+    assert_eq!(
+        manual.finance().get_account(destination).unwrap().balance(),
+        retained
+    );
+    assert_eq!(
+        manual
+            .finance()
+            .get_account(fixture.settlement)
+            .unwrap()
+            .balance(),
+        old_settlement.checked_add(fee).unwrap()
+    );
+
+    let mut automatic = fixture.state.clone();
+    apply_due_autonomous_profit_sweeps(&mut automatic)
+        .unwrap()
+        .unwrap();
+    let accounted: i64 = automatic
+        .finance()
+        .accounts_for(FinancialOwner::Organization(fixture.organization))
+        .filter(|account| account.kind() == AccountKind::AccountedFunds)
+        .map(|account| account.balance().cents())
+        .sum();
+    assert_eq!(accounted, retained.cents());
+    assert_eq!(
+        automatic
+            .finance()
+            .get_account(fixture.settlement)
+            .unwrap()
+            .balance(),
+        old_settlement.checked_add(fee).unwrap()
+    );
+    assert_eq!(
+        automatic
+            .finance()
+            .get_account(fixture.operating)
+            .unwrap()
+            .balance(),
+        manual
+            .finance()
+            .get_account(fixture.operating)
+            .unwrap()
+            .balance()
+    );
+    for state in [&manual, &automatic] {
+        validate_invariants(state);
+        validate_state_against_registry(&registry, state).unwrap();
+        let restored = restore_save(&registry, build_save(&registry, state).unwrap()).unwrap();
+        assert_eq!(
+            bincode::serialize(&restored).unwrap(),
+            bincode::serialize(state).unwrap()
+        );
+    }
+}
+
+#[test]
+fn finance_directors_reduce_overhead_but_cannot_preserve_stale_withdrawal_quotes() {
+    use crate::delegation::delegation_system::validate_assign_mandate;
+    use crate::delegation::{MandateDraft, ResponsibilityFunction, ResponsibilityScope};
+
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    let district = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .unwrap()
+        .neighborhood();
+    for index in 0..3 {
+        insert_business(
+            &registry,
+            &mut fixture.state,
+            BusinessDraft {
+                name: format!("Commercial interest {index}"),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([BusinessFunction::CustomerAccess]),
+                neighborhood: district,
+                owner: BusinessOwner::Organization(fixture.organization),
+            },
+        )
+        .unwrap();
+    }
+    add_boss(&mut fixture);
+    let boss = fixture
+        .state
+        .world()
+        .characters_in_organization(fixture.organization)
+        .find(|member| member.supervisor().is_none())
+        .unwrap()
+        .id();
+    let manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Financial director".into(),
+            organization: Some(fixture.organization),
+            supervisor: Some(boss),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let destination = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .unwrap();
+    let funding = Money::from_cents(10_000);
+    validate_record_business_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Proven operating cash".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.settlement,
+                    amount: funding.checked_neg().unwrap(),
+                },
+                LedgerPosting {
+                    account: fixture.operating,
+                    amount: funding,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    assert_eq!(
+        portfolio_overhead_basis_points(&fixture.state, fixture.organization),
+        600
+    );
+    let draft = BusinessProfitSweepDraft {
+        organization: fixture.organization,
+        business: fixture.business,
+        destination,
+        amount: funding,
+    };
+    let held = validate_sweep_business_profits(&fixture.state, draft.clone()).unwrap();
+    validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: fixture.organization,
+            manager,
+            scopes: BTreeSet::from([
+                ResponsibilityScope::Function(ResponsibilityFunction::Finance),
+                ResponsibilityScope::Neighborhood(district),
+            ]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    assert_eq!(
+        portfolio_overhead_basis_points(&fixture.state, fixture.organization),
+        300
+    );
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert!(matches!(
+        held.commit(&mut fixture.state),
+        Err(BusinessProfitSweepError::StalePortfolio)
+    ));
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    validate_sweep_business_profits(&fixture.state, draft)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .finance()
+            .get_account(destination)
+            .unwrap()
+            .balance(),
+        funding
+            .checked_sub(portfolio_overhead_charge(funding, 300))
+            .unwrap()
+    );
+    validate_state_against_registry(&registry, &fixture.state).unwrap();
+}
+
 fn accounted_treasury_with_headroom(
     state: &mut AppState,
     organization: OrganizationId,

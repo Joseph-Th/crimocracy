@@ -1,5 +1,6 @@
 //! Owner withdrawals from legitimate business tills into organization accounted funds.
 
+use super::{portfolio_overhead_basis_points, portfolio_overhead_charge};
 use crate::core::id::{BusinessId, FinancialAccountId, OrganizationId};
 use crate::core::state::AppState;
 use crate::finance::finance_system::{
@@ -58,6 +59,8 @@ pub struct BusinessProfitSweepDraft {
 pub enum BusinessProfitSweepError {
     #[error("profit sweep amount must be positive")]
     NonPositiveAmount,
+    #[error("the requested transfer is entirely consumed by portfolio administration")]
+    NonPositiveNetReceipt,
     #[error("organization {0} does not exist")]
     MissingOrganization(OrganizationId),
     #[error("business {0} does not exist")]
@@ -120,6 +123,8 @@ pub enum BusinessProfitSweepError {
         expected: u32,
         found: u32,
     },
+    #[error("the owner's commercial portfolio changed after the distribution was validated")]
+    StalePortfolio,
     #[error(transparent)]
     Finance(#[from] FinanceError),
 }
@@ -130,6 +135,7 @@ pub struct ValidatedBusinessProfitSweep {
     organization: OrganizationId,
     expected_business_version: u32,
     expected_economy_version: u32,
+    expected_overhead_basis_points: u16,
 }
 
 impl std::fmt::Debug for ValidatedBusinessProfitSweep {
@@ -169,6 +175,11 @@ impl ValidatedBusinessProfitSweep {
                 found: economy.version(),
             });
         }
+        if portfolio_overhead_basis_points(state, self.organization)
+            != self.expected_overhead_basis_points
+        {
+            return Err(BusinessProfitSweepError::StalePortfolio);
+        }
         self.transaction.commit(state)?;
         Ok(())
     }
@@ -188,6 +199,31 @@ pub fn validate_sweep_business_profits(
         context.operating_balance,
         context.capital_floor,
     )?;
+    let overhead = portfolio_overhead_basis_points(state, draft.organization);
+    let fee = portfolio_overhead_charge(draft.amount, overhead);
+    let owner_receipt = draft.amount.checked_sub(fee).expect("fee is at most gross");
+    if owner_receipt == Money::ZERO {
+        return Err(BusinessProfitSweepError::NonPositiveNetReceipt);
+    }
+    let mut postings = vec![LedgerPosting {
+        account: context.operating_account,
+        amount: draft
+            .amount
+            .checked_neg()
+            .expect("positive gross must negate"),
+    }];
+    if fee > Money::ZERO {
+        postings.push(LedgerPosting {
+            account: context.settlement_account,
+            amount: fee,
+        });
+    }
+    if owner_receipt > Money::ZERO {
+        postings.push(LedgerPosting {
+            account: draft.destination,
+            amount: owner_receipt,
+        });
+    }
     let transaction = validate_record_business_transaction(
         state,
         LedgerTransactionDraft {
@@ -197,19 +233,7 @@ pub fn validate_sweep_business_profits(
                 format_money_cents(draft.amount.cents()),
                 context.business_name,
             ),
-            postings: vec![
-                LedgerPosting {
-                    account: context.operating_account,
-                    amount: draft
-                        .amount
-                        .checked_neg()
-                        .expect("positive sweep amount must negate"),
-                },
-                LedgerPosting {
-                    account: draft.destination,
-                    amount: draft.amount,
-                },
-            ],
+            postings,
             authorization: None,
         },
     )?;
@@ -219,11 +243,13 @@ pub fn validate_sweep_business_profits(
         organization: draft.organization,
         expected_business_version: context.business_version,
         expected_economy_version: context.economy_version,
+        expected_overhead_basis_points: overhead,
     })
 }
 
 pub(super) struct BusinessProfitSweepContext {
     pub(super) operating_account: FinancialAccountId,
+    pub(super) settlement_account: FinancialAccountId,
     pub(super) operating_balance: Money,
     pub(super) capital_floor: Money,
     business_name: String,
@@ -274,6 +300,7 @@ pub(super) fn resolve_business_profit_sweep_context(
     }
     Ok(BusinessProfitSweepContext {
         operating_account: economy.operating_account(),
+        settlement_account: economy.settlement_account(),
         operating_balance: operating.spendable_balance(),
         capital_floor: economy.operating_capital_floor(),
         business_name: business_record.name().to_owned(),

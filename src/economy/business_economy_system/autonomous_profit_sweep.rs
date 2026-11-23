@@ -9,6 +9,7 @@ use super::profit_sweep::{
     plan_accounted_receipts, resolve_business_profit_sweep_context,
     validate_business_profit_sweep_capacity,
 };
+use super::{portfolio_overhead_basis_points, portfolio_overhead_charge};
 use crate::core::id::{
     BusinessId, FinancialAccountId, IdKind, LedgerTransactionId, OrganizationId,
 };
@@ -28,7 +29,9 @@ use std::collections::{BTreeMap, BTreeSet};
 struct PlannedProfitSource {
     business: BusinessId,
     operating_account: FinancialAccountId,
+    settlement_account: FinancialAccountId,
     amount: Money,
+    overhead: Money,
     business_version: u32,
     economy_version: u32,
 }
@@ -148,6 +151,12 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
                 account: source.operating_account,
                 amount: source.amount.checked_neg().expect("earned surplus negates"),
             });
+            if source.overhead > Money::ZERO {
+                postings.push(LedgerPosting {
+                    account: source.settlement_account,
+                    amount: source.overhead,
+                });
+            }
         }
         postings.extend(allocations.iter().map(|(account, amount)| LedgerPosting {
             account: *account,
@@ -227,17 +236,28 @@ fn plan_available_profit_sources(
         if amount == Money::ZERO {
             continue;
         }
+        let overhead =
+            portfolio_overhead_charge(amount, portfolio_overhead_basis_points(state, organization));
+        let receipt = amount
+            .checked_sub(overhead)
+            .expect("owner fee cannot exceed gross");
+        if receipt == Money::ZERO {
+            continue;
+        }
         group.total = group
             .total
-            .checked_add(amount)
+            .checked_add(receipt)
             .expect("owner distribution is capped by representable money");
         group.sources.push(PlannedProfitSource {
             business: business.id(),
             operating_account: context.operating_account,
+            settlement_account: context.settlement_account,
             amount,
+            overhead,
             business_version: context.business_version,
             economy_version: context.economy_version,
         });
     }
+    groups.retain(|_, group| group.total > Money::ZERO);
     Ok(groups)
 }

@@ -268,13 +268,15 @@ impl Session<'_> {
         .unwrap();
         if let Some(local) = local {
             writeln!(out,
-                "Current readiness: {} | {} mature owned shops, {} recently proven, {} distinct proven kinds | citywide counted organizer: {}",
+                "Current readiness: {} | {} mature owned shops, {} recently proven, {} distinct proven kinds | citywide counted organizer: {} | financial director: {}",
                 if local.qualifies { "qualified" } else { "incomplete" },
                 local.mature_active,
                 local.established_active,
                 local.established_kinds,
                 local.steward.map_or("not assigned".to_owned(), |id| format!("char-{}", id.raw())),
+                local.financial_steward.map_or("not assigned".to_owned(), |id| format!("char-{}", id.raw())),
             ).unwrap();
+            writeln!(out, "Local eligible directors: {} political, {} financial; both must be distinct and assigned citywide", local.available_stewards, local.available_financial_stewards).unwrap();
             writeln!(
                 out,
                 "Electoral contest: machine {}/1000 | grassroots {}/1000 | institutions {}/1000 | rival pressure {} | majority held {} day(s) / 90 | mayoral-ready {}",

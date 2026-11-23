@@ -133,15 +133,15 @@ impl Session<'_> {
                     standing.established_political_contacts, standing.active_political_contacts,
                     standing.owned_operating_business_districts, standing.established_business_districts,
                     standing.required_political_districts, standing.total_districts).unwrap();
-                writeln!(out, "    Named political staff: {} / {} required ({} headquarters and one independent local delegate per required district); staffed mature districts: {} / {}",
+                writeln!(out, "    Named political staff: {} / {} required ({} headquarters and two independent local managers per required district); staffed mature districts: {} / {}",
                     standing.key_personnel, standing.required_political_personnel,
                     crimocracy::core::campaign_victory::POLITICAL_HEADQUARTERS_PERSONNEL,
                     standing.staffed_political_districts, standing.required_political_districts).unwrap();
                 writeln!(out, "    Legitimate transition: {} | days since last racket settlement: {:?} (365 required; no active rackets)",
                     standing.legitimate_transition_ready, standing.days_since_last_racket_cycle).unwrap();
-                out.push_str("    Each district needs two distinct kinds of mature profitable businesses and its own active, undetained delegate with both a neighborhood mandate and Political function scope, at Delegated or Broad autonomy. One manager cannot count for two districts; the leader cannot serve as a district delegate.\n");
-                writeln!(out, "    Mature legitimate income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
-                    standing.legitimate_daily_net.cents(), standing.daily_payroll.cents(),
+                out.push_str("    Each district needs at least three mature profitable businesses across two kinds, plus two different, active, undetained managers: one Neighborhood + Political delegate and one Neighborhood + Finance director. Both need Delegated or Broad autonomy; neither may represent another qualifying district.\n");
+                writeln!(out, "    Mature legitimate income after {} bp administrative overhead: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
+                    standing.portfolio_overhead_basis_points, standing.legitimate_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
                 writeln!(out, "    Sustained contested electoral majorities: {} / {} districts (800/1000 local influence, stronger than rivals for 90 days)",
                     standing.mayoral_majority_districts, standing.required_political_districts).unwrap();
@@ -174,21 +174,23 @@ impl Session<'_> {
                     } else if district.active_owned == 0 {
                         "no active storefronts; check 'recovery'"
                     } else if district.mature_active
-                        < crimocracy::core::campaign_victory::POLITICAL_BUSINESS_KINDS_PER_DISTRICT
+                        < crimocracy::core::campaign_victory::POLITICAL_BUSINESSES_PER_DISTRICT
                     {
-                        "needs two storefront titles held for 1080 days (inspect 'political district-N')"
+                        "needs three storefront titles held for 1080 days (inspect 'political district-N')"
                     } else if district.established_active
-                        < crimocracy::core::campaign_victory::POLITICAL_BUSINESS_KINDS_PER_DISTRICT
+                        < crimocracy::core::campaign_victory::POLITICAL_BUSINESSES_PER_DISTRICT
                     {
-                        "needs two mature storefronts with 20 profitable cycles in 30 days and recent settlements"
+                        "needs three mature storefronts with 20 profitable cycles in 30 days and recent settlements"
                     } else if district.established_kinds
                         < crimocracy::core::campaign_victory::POLITICAL_BUSINESS_KINDS_PER_DISTRICT
                     {
                         "needs two different established business kinds"
                     } else if !district.economically_qualified {
-                        "mature storefront income below one member's 30-day wages"
+                        "mature net storefront income below one member's 30-day wages"
                     } else if district.steward.is_none() {
                         "needs an independent eligible political district delegate"
+                    } else if district.financial_steward.is_none() {
+                        "needs a separate eligible financial district director"
                     } else {
                         "not locally qualified"
                     };
@@ -197,7 +199,7 @@ impl Session<'_> {
                         .map_or("none".to_owned(), |id| format!("char-{}", id.raw()));
                     writeln!(
                         out,
-                        "      district-{} {name}: {reason} | {} active, {} suspended, {} mature, {} settlement-qualified, {} kinds | {} available delegates, assigned {steward} | mature 30d net {} / {} cents required",
+                        "      district-{} {name}: {reason} | {} active, {} suspended, {} mature, {} settlement-qualified, {} kinds | {} political candidates, organizer {steward}, {} finance candidates, director {:?} | mature 30d net {} / {} cents required",
                         district.district.raw(),
                         district.active_owned,
                         district.suspended_owned,
@@ -205,6 +207,8 @@ impl Session<'_> {
                         district.established_active,
                         district.established_kinds,
                         district.available_stewards,
+                        district.available_financial_stewards,
+                        district.financial_steward.map(|manager| format!("char-{}", manager.raw())),
                         district.mature_window_net.cents(),
                         local_floor
                     )
@@ -229,6 +233,10 @@ impl Session<'_> {
                 writeln!(out, "    Mature racket income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.racket_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.racket_self_sufficient { "yes" } else { "no" }).unwrap();
+                writeln!(out, "    Underboss operating reserve: {} / {} cents ({} days of named crew payroll, net of treasury deficits)",
+                    standing.underboss_liquid_reserve.cents(),
+                    standing.required_underboss_liquid_reserve.cents(),
+                    crimocracy::core::campaign_victory::UNDERBOSS_LIQUID_RUNWAY_DAYS).unwrap();
                 out.push_str("    A captain must direct 20 profitable settlements in 30 days; associate strength must have operated for 20 profitable cycles. Named personnel lead rank-and-file workers, whose compensation is paid through racket operating costs.\n");
                 writeln!(out, "  Underboss rackets require 90 days of operation; mayoral businesses require 1080 days of ownership. Both require 20 profitable settlements in the last 30 days, a settlement within 7 days, and 30-day net income sufficient for one crew member's daily wage ({} cents/day).",
                     self.registry.upkeep().per_member_daily().cents()).unwrap();

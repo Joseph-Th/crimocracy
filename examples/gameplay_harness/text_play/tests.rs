@@ -874,7 +874,7 @@ fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
     let progress = session.execute("victory").unwrap().0;
     assert!(
-        progress.contains("Named command staff: 4 / 10 required"),
+        progress.contains("Named command staff: 4 / 14 required"),
         "{progress}"
     );
     assert!(progress.contains("independently captained mature districts"));
@@ -906,7 +906,7 @@ fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_
             .execute("victory")
             .unwrap()
             .0
-            .contains("Named command staff: 5 / 10 required")
+            .contains("Named command staff: 5 / 14 required")
     );
     session.state =
         restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
@@ -941,7 +941,7 @@ fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_
             .execute("victory")
             .unwrap()
             .0
-            .contains("Named command staff: 6 / 10 required")
+            .contains("Named command staff: 6 / 14 required")
     );
 }
 

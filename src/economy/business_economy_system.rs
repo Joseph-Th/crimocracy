@@ -6,7 +6,9 @@ mod autonomous_profit_sweep;
 mod cycle_planning;
 mod market;
 mod personal_owner_dividends;
+mod portfolio_overhead;
 pub(crate) use market::forecast_competitor_disruption_gain;
+pub use portfolio_overhead::{portfolio_overhead_basis_points, portfolio_overhead_charge};
 
 #[cfg(test)]
 use cycle_planning::resolve_gross_before_variance;
