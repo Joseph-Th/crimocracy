@@ -79,15 +79,19 @@ impl MarketSnapshot {
 
     pub(crate) fn gross_basis_points(self, disrupted: bool, damaged_weight: u32) -> u32 {
         let own_weight = if disrupted { damaged_weight } else { FULL };
-        // Use twice the weight to preserve exact half-competitor arithmetic even when the
-        // authored disruption weight is odd.
+        // Both sides of the market-share fraction must use the damaged shop's reduced
+        // capacity. Weighting only the denominator would increase its contested share
+        // after sabotage and create customer demand from nowhere.
+        // Double weights preserve exact half-competitor arithmetic.
         let market_weight = 2 * u64::from(own_weight)
             + 2 * u64::from(self.healthy_competitors) * u64::from(FULL)
             + 2 * u64::from(self.damaged_competitors) * u64::from(damaged_weight)
             + u64::from(self.related_healthy_competitors) * u64::from(FULL)
             + u64::from(self.related_damaged_competitors) * u64::from(damaged_weight);
-        let contested = u64::from(CONTESTED_BASIS_POINTS) * 2 * u64::from(FULL)
-            / market_weight.max(2 * u64::from(FULL));
+        // A sole damaged store still takes all contested local custom before the
+        // separate damage-to-gross multiplier is applied.
+        let contested =
+            u64::from(CONTESTED_BASIS_POINTS) * 2 * u64::from(own_weight) / market_weight.max(1);
         FULL - CONTESTED_BASIS_POINTS + u32::try_from(contested).expect("contested share bounded")
     }
 
@@ -348,5 +352,29 @@ mod tests {
         let mut damaged = no_peers;
         damaged.add_competitor(Competition::Related, true);
         assert_eq!(damaged.gross_basis_points(false, 4_000), 9_333);
+    }
+
+    #[test]
+    fn disruption_redistributes_contested_customers_without_creating_demand() {
+        let damage = 4_000;
+        let mut original = MarketSnapshot::default();
+        original.add_competitor(Competition::Direct, false);
+        let healthy_pair = original.gross_basis_points(false, damage);
+        assert_eq!(healthy_pair, 8_000);
+
+        let damaged_shop = original.gross_basis_points(true, damage);
+        let mut surviving_shop = MarketSnapshot::default();
+        surviving_shop.add_competitor(Competition::Direct, true);
+        let surviving_share = surviving_shop.gross_basis_points(false, damage);
+
+        assert_eq!(damaged_shop, 7_142);
+        assert_eq!(surviving_share, 8_857);
+        assert!(damaged_shop < healthy_pair);
+        assert!(surviving_share > healthy_pair);
+        assert!(damaged_shop + surviving_share <= healthy_pair * 2);
+        assert_eq!(
+            MarketSnapshot::default().gross_basis_points(true, damage),
+            FULL
+        );
     }
 }

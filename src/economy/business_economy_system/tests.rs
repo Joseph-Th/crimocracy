@@ -2347,6 +2347,119 @@ fn sabotage_disruption_degrades_cycle_gross_until_the_horizon_passes() {
 }
 
 #[test]
+fn sabotage_reallocates_real_local_sales_between_two_operating_competitors() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let neighborhood = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .expect("original storefront exists")
+        .neighborhood();
+    let competitor = insert_business(
+        &registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Competing Grocer".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::new(),
+            neighborhood,
+            owner: BusinessOwner::Organization(fixture.organization),
+        },
+    )
+    .expect("second store should be established through the world owner");
+    let operating = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(competitor),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .expect("competing operating account should open");
+    let settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(competitor),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .expect("competing settlement account should open");
+    validate_establish_business_economy(
+        &registry,
+        &fixture.state,
+        BusinessEconomyDraft {
+            business: competitor,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .expect("competitor's trading books should validate")
+    .commit(&mut fixture.state)
+    .expect("competitor's trading books should open");
+
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let original = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+        .expect("original competitor has a due cycle");
+    let baseline_other = decide_business_cycle(&registry, &fixture.state, competitor, 0)
+        .expect("second competitor has a due cycle");
+    let damage = registry.business_disruption().gross_basis_points();
+    let original_share = original.economics.market.gross_basis_points(false, damage);
+    let other_share = baseline_other
+        .economics
+        .market
+        .gross_basis_points(false, damage);
+    assert_eq!(original_share, other_share);
+
+    validate_disrupt_business_economy(&registry, &fixture.state, fixture.business)
+        .expect("damage should validate for an active store")
+        .commit(&mut fixture.state)
+        .expect("damage should apply through the production economy owner");
+    let damaged = decide_business_cycle(&registry, &fixture.state, fixture.business, 0)
+        .expect("disrupted business still has a due cycle");
+    let surviving = decide_business_cycle(&registry, &fixture.state, competitor, 0)
+        .expect("surviving competitor still has a due cycle");
+    let damaged_share = damaged.economics.market.gross_basis_points(true, damage);
+    let surviving_share = surviving.economics.market.gross_basis_points(false, damage);
+    assert!(damaged_share < original_share);
+    assert!(surviving_share > other_share);
+    assert!(damaged_share + surviving_share <= original_share + other_share);
+    assert!(damaged.economics.gross_revenue < original.economics.gross_revenue);
+    assert!(surviving.economics.gross_revenue > baseline_other.economics.gross_revenue);
+
+    let damaged_cycle = validate_business_cycle_plan(&fixture.state, damaged)
+        .expect("disrupted plan must validate")
+        .commit(&mut fixture.state)
+        .expect("disrupted books should settle");
+    let surviving_cycle = validate_business_cycle_plan(&fixture.state, surviving)
+        .expect("independent competing plan must validate")
+        .commit(&mut fixture.state)
+        .expect("surviving books should settle");
+    let saved = build_save(&registry, &fixture.state).expect("both settlements should save");
+    let restored = restore_save(&registry, saved).expect("both settlements should restore");
+    for id in [damaged_cycle, surviving_cycle] {
+        assert_eq!(
+            restored
+                .economy()
+                .get_cycle(id)
+                .expect("restored cycle")
+                .gross_revenue(),
+            fixture
+                .state
+                .economy()
+                .get_cycle(id)
+                .expect("settled cycle")
+                .gross_revenue(),
+        );
+    }
+    validate_state_against_registry(&registry, &restored)
+        .expect("re-derived market economics should match the real settled records");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn repeated_sabotage_extends_but_never_shortens_the_disruption_horizon() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture();

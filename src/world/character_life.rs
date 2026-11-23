@@ -383,9 +383,14 @@ fn finish_day(
                 .min(100);
         }
         None => {
+            // Six demanding detective or freelance shifts add up to 24 fatigue
+            // per week. A full rest day must clear that ordinary weekly load;
+            // otherwise every continuously assigned investigator eventually
+            // becomes permanently exhausted despite taking scheduled days off.
+            // Chronic losses still make proprietors progressively exhausted.
             life.fatigue = life
                 .fatigue
-                .saturating_sub(if work.detained { 2 } else { 14 });
+                .saturating_sub(if work.detained { 2 } else { 24 });
             if work.detained {
                 life.professional_standing = life.professional_standing.saturating_sub(1);
             }

@@ -1,5 +1,6 @@
 use crate::build_registry;
 use crate::city_generation::{CityScale, generate_city};
+use crate::core::entity::EntityRef;
 use crate::core::invariants::{validate_invariants, validate_state_against_registry};
 use crate::core::persistence::{build_save, restore_save};
 use crate::core::time::{DAY_MINUTES, SimDuration};
@@ -14,8 +15,14 @@ use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
+use crate::legal::InvestigationDraft;
+use crate::legal::investigation_system::{
+    validate_assign_investigator, validate_open_investigation,
+};
 use crate::world::character_life::apply_due_character_lives;
-use crate::world::{BusinessOwner, CivicActivity, CivicProfession, OrganizationKind};
+use crate::world::{
+    BusinessOwner, CapabilityKind, CivicActivity, CivicProfession, OrganizationKind,
+};
 use std::collections::BTreeSet;
 
 #[test]
@@ -70,6 +77,77 @@ fn police_departments_stagger_weekly_rest_instead_of_closing_citywide() {
     }
     validate_invariants(&city.state);
     restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+}
+
+#[test]
+fn long_running_detective_assignment_recovers_on_actual_weekly_rest_days() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let police = city.police[0];
+    let detective = city
+        .state
+        .world()
+        .characters_in_organization(police)
+        .find(|person| person.capability(CapabilityKind::Investigation).is_some())
+        .expect("generated precinct has a detective with investigative skill")
+        .id();
+    let subject = city
+        .state
+        .player_organization()
+        .expect("procedural campaign has a criminal organization");
+    let investigation = validate_open_investigation(
+        &city.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Long-running case with recurring detective shifts".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Organization(subject)]),
+        },
+    )
+    .expect("real investigative case should open")
+    .commit(&mut city.state)
+    .expect("case should commit");
+    validate_assign_investigator(&city.state, investigation, detective)
+        .expect("skilled detective may be assigned to an open case")
+        .commit(&mut city.state)
+        .expect("lead assignment should commit");
+
+    // Run the actual daily condition owner for twelve weeks, retaining the
+    // genuinely staffed case instead of fabricating private condition state.
+    for _ in 0..84 {
+        city.state
+            .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+        crate::opportunities::opportunity_system::apply_opportunity_expiry(
+            &registry,
+            &mut city.state,
+        )
+        .expect("expired leads should conclude before day-end invariant checks");
+        apply_due_character_lives(&mut city.state);
+    }
+    let detective_life = city.state.world().get_character(detective).unwrap().life();
+    assert!(
+        detective_life.fatigue() <= 24,
+        "six detective shifts and a full rest day should not accumulate permanent exhaustion"
+    );
+    assert!(
+        detective_life.career_days() >= 72,
+        "recovery must not come from ignoring productive casework"
+    );
+    assert_eq!(
+        city.state
+            .legal()
+            .get_investigation(investigation)
+            .unwrap()
+            .lead_investigator(),
+        Some(detective)
+    );
+    validate_invariants(&city.state);
+    validate_state_against_registry(&registry, &city.state).unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap())
+        .expect("long-running detective condition should persist");
+    assert_eq!(
+        restored.world().get_character(detective).unwrap().life(),
+        detective_life
+    );
 }
 
 #[test]
