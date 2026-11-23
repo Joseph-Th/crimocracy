@@ -3,12 +3,15 @@
 //! `stores` owns the record collections; `payroll_execution` owns the daily wage pass;
 //! `territory_influence` derives district control and validates bilateral
 //! standstills, and `territory_conflict` resolves contested criminal pressure
-//! through canonical enterprise lifecycle. `rating` and `vocabulary` are read-only.
+//! through canonical enterprise lifecycle. `organization_pressure` derives public
+//! prominence for law-enforcement and competitor responses. `rating` and
+//! `vocabulary` are read-only.
 
 pub mod character_life;
 #[cfg(test)]
 mod civic_tests;
 pub mod freelance_contracts;
+pub mod organization_pressure;
 pub(crate) mod payroll_departures;
 pub mod payroll_execution;
 #[cfg(test)]

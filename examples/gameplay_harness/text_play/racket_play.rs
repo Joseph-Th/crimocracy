@@ -19,11 +19,14 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
         Some((at, cases)) => writeln!(out, "  Last observed own-operation pressure in district: {cases} case equivalent(s) at {}", time_label(at.as_minutes())).unwrap(),
         None => writeln!(out, "  Own-operation pressure unknown: no recent owned racket settlement; estimate assumes no surcharge").unwrap(),
     }
-    let baseline_risk = u32::from(outlook.inquiry_risk_basis_points_per_source);
-    writeln!(out, "  New police inquiry risk per operating cycle (unless this racket already has an active inquiry): {}.{:02}% with no district cases", baseline_risk / 100, baseline_risk % 100).unwrap();
+    let baseline_risk = outlook.inquiry_risk_no_cases_basis_points;
+    writeln!(out, "  New police inquiry risk per operating cycle (unless this racket already has an active inquiry): {}.{:02}% with no district cases (includes public prominence and operating racket footprint)", baseline_risk / 100, baseline_risk % 100).unwrap();
     if let Some((_, observed_cases)) = outlook.observed_pressure {
         let conditional_risk = baseline_risk
-            .saturating_mul(observed_cases.saturating_add(1))
+            .saturating_add(
+                u32::from(outlook.inquiry_risk_basis_points_per_source)
+                    .saturating_mul(observed_cases),
+            )
             .min(10_000);
         writeln!(out, "  At last observed case pressure: {}.{:02}% per cycle, if still current (not a live police forecast)", conditional_risk / 100, conditional_risk % 100).unwrap();
     }
@@ -129,7 +132,7 @@ impl Session<'_> {
                     writeln!(out, "    Estimated next cycle: {} cents net | shared spendable cash: {} cents{}",
                         outlook.estimated_net_cash.cents(), outlook.shared_spendable_cash.cents(),
                         if outlook.observed_pressure.is_none() { " | district pressure unobserved (zero assumed)" } else { "" }).unwrap();
-                    writeln!(out, "    Baseline fresh-inquiry chance while operating: {}.{:02}% per cycle (an existing inquiry into this racket suppresses duplicate intake)", u32::from(outlook.inquiry_risk_basis_points_per_source) / 100, u32::from(outlook.inquiry_risk_basis_points_per_source) % 100).unwrap();
+                    writeln!(out, "    Fresh-inquiry risk while operating: {}.{:02}% per cycle with no district cases, including visible reach (an existing inquiry suppresses duplicate intake)", outlook.inquiry_risk_no_cases_basis_points / 100, outlook.inquiry_risk_no_cases_basis_points % 100).unwrap();
                     if outlook.shared_spendable_cash < outlook.estimated_operating_cost {
                         writeln!(out, "    Warning: shared cash is below one estimated cycle's operating cost ({} cents); reopening can be valid but unfunded.", outlook.estimated_operating_cost.cents()).unwrap();
                     }

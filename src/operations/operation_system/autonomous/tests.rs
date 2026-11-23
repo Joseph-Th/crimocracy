@@ -403,6 +403,65 @@ fn rival_reassesses_market_after_a_concerted_campaign() {
 }
 
 #[test]
+fn rival_extends_profitable_strikes_against_a_prominent_public_owner() {
+    let Fixture {
+        registry,
+        mut state,
+        rival,
+        player,
+        competitor,
+        ..
+    } = fixture_with_competitors(100, Some(BusinessKind::Pharmacy));
+    let elsewhere = state
+        .world()
+        .neighborhoods()
+        .find(|ward| ward.name() == "Uptown")
+        .unwrap()
+        .id();
+    for index in 0..8 {
+        insert_business(
+            &registry,
+            &mut state,
+            BusinessDraft {
+                name: format!("Public Expansion {index}"),
+                kind: BusinessKind::Retail,
+                functions: BTreeSet::from([
+                    BusinessFunction::CustomerAccess,
+                    BusinessFunction::ProfessionalRecords,
+                ]),
+                neighborhood: elsewhere,
+                owner: BusinessOwner::Organization(player),
+            },
+        )
+        .unwrap();
+    }
+    assert!(
+        public_prominence_tier(&state, player) >= 3,
+        "the public footprint must earn sustained strategic attention"
+    );
+    for kind in [
+        OperationKind::Surveillance,
+        OperationKind::Sabotage,
+        OperationKind::Sabotage,
+        OperationKind::Sabotage,
+    ] {
+        let tick = next_day(&registry, &mut state);
+        assert_eq!(tick.autonomous_operations.len(), 1);
+        let operation = tick.autonomous_operations[0];
+        let record = state.operations().get_operation(operation).unwrap();
+        assert_eq!(record.kind(), kind);
+        assert_eq!(record.responsible_organization(), rival);
+        assert_eq!(record.objective().business_target(), Some(competitor));
+        finish_operation(&registry, &mut state, operation);
+    }
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn held_business_settlement_stales_when_local_competitor_is_damaged() {
     use crate::economy::business_economy_system::{
         BusinessEconomyError, decide_business_cycle, validate_business_cycle_plan,

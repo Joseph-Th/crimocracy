@@ -23,6 +23,7 @@ use crate::finance::Money;
 use crate::legal::jurisdiction_system::resolve_case_intake_authority_snapshot;
 use crate::registry::Registry;
 use crate::world::CapabilityKind;
+use crate::world::organization_pressure::vice_inquiry_chance_basis_points;
 
 pub fn decide_enterprise_cycle(
     registry: &Registry,
@@ -113,14 +114,22 @@ pub fn decide_enterprise_cycle(
 
     // The racket itself is one standing source of vice exposure even before police have opened
     // a district case. Otherwise an untouched district would make an operating racket permanently
-    // immune to inquiry unless another crime first created a police file. Each active district
-    // case adds the authored per-case risk. Existing inquiries suppress duplicate intake.
-    let enforcement_chance_basis_points = u32::try_from(
-        (u64::from(economics.enforcement_attention_basis_points_per_exposure_source())
-            * (u64::from(active_district_cases) + 1))
-            .min(10_000),
-    )
-    .expect("vice chance is explicitly capped to basis-point range");
+    // immune to inquiry unless another crime first created a police file. Public commercial
+    // and political prominence draws additional vice scrutiny, as does operating a larger
+    // racket portfolio. These are investigative *opportunities*, not evidence or automatic
+    // arrests: actual police routing, casework, and admissible proof remain mandatory.
+    // Existing inquiries suppress duplicate intake.
+    let active_rackets = state
+        .enterprises()
+        .active_for_organization(record.organization())
+        .count();
+    let enforcement_chance_basis_points = vice_inquiry_chance_basis_points(
+        state,
+        record.organization(),
+        active_rackets,
+        active_district_cases,
+        economics.enforcement_attention_basis_points_per_exposure_source(),
+    );
     let had_active_enterprise_inquiry = has_active_enterprise_inquiry(state, enterprise);
     let enforcement_roll_hits = !had_active_enterprise_inquiry
         && u32::from(randomness.enforcement_attention_roll()) < enforcement_chance_basis_points;

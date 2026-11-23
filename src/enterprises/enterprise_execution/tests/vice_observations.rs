@@ -6,6 +6,72 @@ use crate::legal::prosecution_system::member_prosecution_under_review;
 use crate::world::world_system::designate_player_organization;
 
 #[test]
+fn established_public_business_network_draws_more_vice_scrutiny_without_fabricating_evidence() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let EnterpriseLocation::Neighborhood(district) = fixture.location else {
+        unreachable!()
+    };
+    insert_district_police(&registry, &mut fixture, "Prominence Vice Bureau", district);
+    let base_chance = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .enforcement_attention_basis_points_per_exposure_source();
+    let mut quiet = fixture.state.clone();
+    quiet.advance_clock(DAY_DURATION);
+    let quiet_plan = decide_enterprise_cycle(
+        &registry,
+        &quiet,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, base_chance),
+    )
+    .unwrap();
+    assert!(quiet_plan.enforcement_incident.is_none());
+
+    for index in 0..8 {
+        let owner = fixture.organization;
+        insert_support_business(
+            &registry,
+            &mut fixture,
+            &format!("Public Chain Store {index}"),
+            BusinessKind::Retail,
+            BTreeSet::from([
+                BusinessFunction::CustomerAccess,
+                BusinessFunction::ProfessionalRecords,
+            ]),
+            BusinessOwner::Organization(owner),
+        );
+    }
+    assert!(
+        crate::world::organization_pressure::public_prominence_tier(
+            &fixture.state,
+            fixture.organization
+        ) >= 2
+    );
+    fixture.state.advance_clock(DAY_DURATION);
+    let exposed = decide_enterprise_cycle(
+        &registry,
+        &fixture.state,
+        enterprise,
+        EnterpriseCycleRandomness::new(0, base_chance),
+    )
+    .unwrap();
+    assert!(exposed.enforcement_incident.is_some());
+    assert_eq!(
+        exposed.economics.operating_cost, quiet_plan.economics.operating_cost,
+        "public prominence affects detection, not an invented racket operating cost"
+    );
+    assert_eq!(exposed.economics.investigation_heat, Money::ZERO);
+    validate_enterprise_cycle_plan(&fixture.state, exposed)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    validate_state_against_registry(&registry, &fixture.state).unwrap();
+    restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+}
+
+#[test]
 fn foreign_case_raises_discovery_risk_but_not_own_racket_cost() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();

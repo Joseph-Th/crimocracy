@@ -9,10 +9,13 @@ use crate::enterprises::enterprise_execution::{
     EnterpriseError, EnterpriseProjectionStaffing, resolve_enterprise_financial_projection,
     resolve_location_neighborhood, validate_establish_enterprise,
 };
-use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseRecord};
+use crate::enterprises::{
+    EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseRecord, EnterpriseStatus,
+};
 use crate::finance::Money;
 use crate::registry::Registry;
 use crate::world::CapabilityKind;
+use crate::world::organization_pressure::vice_inquiry_chance_basis_points;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -58,9 +61,11 @@ pub struct EnterpriseOutlook {
     pub estimated_operating_cost: Money,
     pub estimated_net_cash: Money,
     pub observed_pressure: Option<(SimTime, u32)>,
-    /// Authored chance of a fresh police inquiry per cycle with no active district case.
-    /// A current inquiry suppresses duplicates; actual case pressure is deliberately private.
+    /// Authored chance contributed by each exposure source.
     pub inquiry_risk_basis_points_per_source: u16,
+    /// Projected fresh inquiry risk with no current district cases, including the
+    /// visible commercial footprint and the planned operating racket roster.
+    pub inquiry_risk_no_cases_basis_points: u32,
     pub shared_cash_balance: Money,
     pub shared_spendable_cash: Money,
 }
@@ -101,6 +106,7 @@ pub fn resolve_enterprise_outlook(
             manager: record.manager(),
             cash: record.cash_account(),
             associates: record.associates(),
+            additional_active_racket: record.status() != EnterpriseStatus::Active,
         },
     )
 }
@@ -124,6 +130,7 @@ pub fn preview_enterprise_establishment(
             manager: draft.authority.manager,
             cash: draft.cash_account,
             associates: draft.kind.baseline_associates(),
+            additional_active_racket: true,
         },
     )
 }
@@ -136,6 +143,7 @@ struct OutlookConfiguration {
     manager: CharacterId,
     cash: FinancialAccountId,
     associates: u16,
+    additional_active_racket: bool,
 }
 
 fn resolve_configuration_outlook(
@@ -179,6 +187,15 @@ fn resolve_configuration_outlook(
         .heat_surcharge_per_active_case();
     let nonpositive_at_cases =
         nonpositive_case_threshold(baseline_net_cash, heat_surcharge_per_case);
+    let per_source = registry
+        .get_enterprise(configuration.kind)
+        .economics()
+        .enforcement_attention_basis_points_per_exposure_source();
+    let active_rackets = state
+        .enterprises()
+        .active_for_organization(configuration.organization)
+        .count()
+        .saturating_add(usize::from(configuration.additional_active_racket));
     Ok(EnterpriseOutlook {
         baseline_net_cash,
         heat_surcharge_per_case,
@@ -186,10 +203,14 @@ fn resolve_configuration_outlook(
         estimated_operating_cost,
         estimated_net_cash,
         observed_pressure: observation.map(|value| (value.observed_at, value.case_count)),
-        inquiry_risk_basis_points_per_source: registry
-            .get_enterprise(configuration.kind)
-            .economics()
-            .enforcement_attention_basis_points_per_exposure_source(),
+        inquiry_risk_basis_points_per_source: per_source,
+        inquiry_risk_no_cases_basis_points: vice_inquiry_chance_basis_points(
+            state,
+            configuration.organization,
+            active_rackets,
+            0,
+            per_source,
+        ),
         shared_cash_balance: account.balance(),
         shared_spendable_cash: account.spendable_balance(),
     })

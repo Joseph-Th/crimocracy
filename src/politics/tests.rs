@@ -15,7 +15,10 @@ use crate::politics::political_system::{
     PoliticalError, apply_due_political_campaigns, controls_district, dismiss_specialist,
     rival_pressure, validate_hire_specialist, validate_invest_influence,
 };
-use crate::world::{AutonomyLevel, OrganizationKind};
+use crate::world::world_system::insert_business;
+use crate::world::{
+    AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, BusinessOwner, OrganizationKind,
+};
 
 fn fund(state: &mut crate::AppState, owner: OrganizationId, cents: i64) {
     let clean = insert_account(
@@ -362,6 +365,85 @@ fn autonomous_rivals_spend_clean_money_weekly_in_the_players_contested_ward() {
     );
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(restored.politics(), city.state.politics());
+}
+
+#[test]
+fn financed_rival_counter_campaign_scales_with_visible_player_reach() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(6_218)).unwrap();
+    let rival = city
+        .state
+        .world()
+        .organizations()
+        .find(|organization| {
+            organization.kind() == OrganizationKind::Criminal && organization.id() != city.player
+        })
+        .unwrap()
+        .id();
+    let contested = city
+        .state
+        .world()
+        .businesses_owned_by_organization(rival)
+        .next()
+        .unwrap()
+        .neighborhood();
+    fund(&mut city.state, rival, 3_000_000);
+    fund(&mut city.state, city.player, 1_000_000);
+    validate_invest_influence(&city.state, contested, 500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let mut quiet = city.state.clone();
+    let mut prominent = city.state;
+    assert_eq!(
+        crate::world::organization_pressure::public_prominence_tier(&quiet, city.player),
+        0
+    );
+    for index in 0..12 {
+        insert_business(
+            &registry,
+            &mut prominent,
+            BusinessDraft {
+                name: format!("Visible Public Holding {index}"),
+                kind: BusinessKind::Retail,
+                functions: std::collections::BTreeSet::from([
+                    BusinessFunction::CustomerAccess,
+                    BusinessFunction::ProfessionalRecords,
+                ]),
+                neighborhood: city.home,
+                owner: BusinessOwner::Organization(city.player),
+            },
+        )
+        .unwrap();
+    }
+    let prominence =
+        crate::world::organization_pressure::public_prominence_tier(&prominent, city.player);
+    assert!(prominence >= 3);
+    for _ in 0..7 {
+        advance_day(&registry, &mut quiet);
+        advance_day(&registry, &mut prominent);
+    }
+    let influence = |state: &crate::AppState| {
+        state
+            .politics()
+            .organization(rival)
+            .and_then(|campaign| campaign.district(contested))
+            .map_or(0, DistrictCampaign::influence)
+    };
+    assert_eq!(influence(&quiet), 100);
+    assert_eq!(influence(&prominent), 100 + u16::from(prominence) * 20);
+    assert!(
+        prominent
+            .politics()
+            .organization(rival)
+            .unwrap()
+            .spent_cents()
+            > quiet.politics().organization(rival).unwrap().spent_cents(),
+        "escalation must be paid from rival funds, not generated influence"
+    );
+    validate_state_against_registry(&registry, &prominent).unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &prominent).unwrap()).unwrap();
+    assert_eq!(restored.politics(), prominent.politics());
 }
 
 #[test]

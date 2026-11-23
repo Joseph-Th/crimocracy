@@ -779,6 +779,8 @@ fn autonomous_rival_campaigns(state: &mut AppState) {
     let Some(player) = state.player_organization() else {
         return;
     };
+    let player_prominence =
+        crate::world::organization_pressure::public_prominence_tier(state, player);
     // Take a small value snapshot before rival ledgers are mutated below.
     let player_pressure: BTreeMap<_, _> = state
         .politics()
@@ -861,7 +863,11 @@ fn autonomous_rival_campaigns(state: &mut AppState) {
             .organization(owner)
             .and_then(|campaign| campaign.district(district))
             .map_or(0, DistrictCampaign::influence);
-        let points = (INFLUENCE_CAP - current).min(100);
+        // A rising public business/political machine invites more determined
+        // counter-campaigning. Rivals still need an actual local operating stake and
+        // must pay the entire incremental cost from their own accounted funds.
+        let weekly_budget_points = 100 + u16::from(player_prominence) * 20;
+        let points = (INFLUENCE_CAP - current).min(weekly_budget_points.min(220));
         if points == 0 {
             continue;
         }

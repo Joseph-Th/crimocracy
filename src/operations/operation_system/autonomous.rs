@@ -25,7 +25,8 @@ use crate::operations::{
 };
 use crate::registry::Registry;
 use crate::reputation::{AudienceKind, reputation_system::resolve_score};
-use crate::world::{AutonomyLevel, BusinessKind, OrganizationKind};
+use crate::world::organization_pressure::public_prominence_tier;
+use crate::world::{AutonomyLevel, BusinessKind, BusinessOwner, OrganizationKind};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -218,11 +219,25 @@ fn choose_plan<'r>(
     );
     let mut candidates = Vec::new();
     let mut gains = BTreeMap::<(_, BusinessKind), i128>::new();
+    let mut prominence_by_owner = BTreeMap::<OrganizationId, u8>::new();
     for (id, name, kind, district) in state.world().public_business_directory() {
         let Some(stakes) = sectors.get(&district) else {
             continue;
         };
-        if owned.contains(&id) || recent_strikes.get(&id).copied().unwrap_or(0) >= 2 {
+        let target_owner = state
+            .world()
+            .get_business(id)
+            .map(|business| business.owner());
+        // Publicly conspicuous competitors provoke longer campaigns. Small owners still
+        // receive the old two-strike respite and an attacker still needs a real local stake.
+        let prominence = match target_owner {
+            Some(BusinessOwner::Organization(owner)) => *prominence_by_owner
+                .entry(owner)
+                .or_insert_with(|| public_prominence_tier(state, owner)),
+            _ => 0,
+        };
+        let strike_limit = if prominence >= 3 { 4 } else { 2 };
+        if owned.contains(&id) || recent_strikes.get(&id).copied().unwrap_or(0) >= strike_limit {
             continue;
         }
         let gain = *gains.entry((district, kind)).or_insert_with(|| {
@@ -278,7 +293,18 @@ fn choose_plan<'r>(
             .into_iter()
             .filter_map(|kind| last.get(&(id, kind)).map(|(at, _)| *at))
             .max();
-        candidates.push((Reverse(gain), !observed, last_attempt, id, name, kind));
+        // Rank by the genuine expected customer gain, but treat the public reach of
+        // the competing owner as a strategic threat worth contesting. Never infer
+        // concealed rackets or treasury balances when selecting a rival target.
+        let strategic_gain = gain.saturating_mul(100 + i128::from(prominence) * 35) / 100;
+        candidates.push((
+            Reverse(strategic_gain),
+            !observed,
+            last_attempt,
+            id,
+            name,
+            kind,
+        ));
     }
     candidates.sort_unstable_by_key(|item| (item.0, item.1, item.2, item.3));
     for (_, _, _, id, name, kind) in candidates {
