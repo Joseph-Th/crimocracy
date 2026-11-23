@@ -7,7 +7,7 @@
 //! rivals to abandon that stale frozen configuration so dead records cannot reserve a location
 //! forever.
 
-use crate::core::id::{EnterpriseId, MandateId};
+use crate::core::id::{EnterpriseId, FinancialAccountId, MandateId, OrganizationId};
 use crate::core::state::AppState;
 use crate::delegation::delegation_system::DelegationError;
 use crate::enterprises::autonomous_planning::{
@@ -20,7 +20,8 @@ use crate::enterprises::enterprise_execution::{
     resolve_enterprise_financial_projection, validate_resume_enterprise,
     validate_retire_enterprise,
 };
-use crate::finance::Money;
+use crate::finance::finance_system::{StreetCapitalizationDraft, validate_capitalize_street_cash};
+use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
 use crate::world::{AutonomyLevel, CapabilityKind};
 use std::collections::BTreeSet;
@@ -191,16 +192,38 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             .then(left.enterprise.cmp(&right.enterprise))
     });
     let mut resumed_mandates = BTreeSet::new();
+    let mut capitalized_organizations = BTreeSet::new();
     let mut resumptions = Vec::new();
     for candidate in candidates {
         if resumed_mandates.contains(&candidate.mandate) {
             continue;
         }
-        let Some(account) = state.finance().get_account(candidate.cash_account) else {
-            continue;
-        };
-        if available_working_capital(account, &reservations) < candidate.required_working_capital {
-            continue;
+        let organization = state
+            .enterprises()
+            .get_enterprise(candidate.enterprise)
+            .expect("resume candidate remains present")
+            .organization();
+        let funded = state
+            .finance()
+            .get_account(candidate.cash_account)
+            .is_some_and(|account| {
+                available_working_capital(account, &reservations)
+                    >= candidate.required_working_capital
+            });
+        if !funded {
+            if capitalized_organizations.contains(&organization)
+                || !capitalize_suspended_racket(
+                    registry,
+                    state,
+                    organization,
+                    candidate.cash_account,
+                    candidate.required_working_capital,
+                    &reservations,
+                )?
+            {
+                continue;
+            }
+            capitalized_organizations.insert(organization);
         }
         // Reserve before authoritative mutation so there is no fallible planning step after a
         // successful resume. The fresh canonical token re-proves authority and asset liveness.
@@ -218,6 +241,68 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
         resumptions,
     }
     .commit(state))
+}
+
+/// A delegated rival can use earned legitimate dividends to restore a viable street
+/// operation. It must clear the old deficit in full, fund one cycle of projected costs,
+/// and retain two days of clean payroll. No credit or invented cash is created.
+fn capitalize_suspended_racket(
+    registry: &Registry,
+    state: &mut AppState,
+    organization: OrganizationId,
+    cash_account: FinancialAccountId,
+    required: Money,
+    reservations: &std::collections::BTreeMap<FinancialAccountId, Money>,
+) -> Result<bool, AutonomousEnterpriseError> {
+    let Some(destination) = state.finance().get_account(cash_account) else {
+        return Ok(false);
+    };
+    if destination.kind() != AccountKind::StreetCash {
+        return Ok(false);
+    }
+    let reserved_cents = reservations
+        .get(&cash_account)
+        .map_or(0, |value| value.cents());
+    let needed = i128::from(required.cents()) + i128::from(reserved_cents)
+        - i128::from(destination.balance().cents());
+    if needed <= 0 || needed > i128::from(i64::MAX) {
+        return Ok(false);
+    }
+    let needed = Money::from_cents(needed as i64);
+    let payroll_reserve = i128::from(registry.upkeep().per_member_daily().cents())
+        * state
+            .world()
+            .characters_in_organization(organization)
+            .count() as i128
+        * 2;
+    let source = state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(organization))
+        .filter(|account| account.kind() == AccountKind::AccountedFunds)
+        .filter(|account| {
+            i128::from(account.available_payment_balance().cents())
+                >= i128::from(needed.cents()) + payroll_reserve
+        })
+        .max_by_key(|account| {
+            (
+                account.available_payment_balance(),
+                std::cmp::Reverse(account.id()),
+            )
+        });
+    let Some(source) = source else {
+        return Ok(false);
+    };
+    validate_capitalize_street_cash(
+        state,
+        StreetCapitalizationDraft {
+            organization,
+            accounted_account: source.id(),
+            street_account: cash_account,
+            amount: needed,
+        },
+    )?
+    .commit(state)?;
+    Ok(true)
 }
 
 impl AutonomousEnterpriseLifecyclePlan {
@@ -261,4 +346,146 @@ fn stale_configuration_requires_retirement(error: &EnterpriseError) -> bool {
         ) | EnterpriseError::SupportingBusinessOwnershipMismatch { .. }
             | EnterpriseError::HostBusinessOwnershipMismatch { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::city_generation::{CityScale, generate_city};
+    use crate::core::invariants::validate_invariants;
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::core::simulation::run_test_tick;
+    use crate::enterprises::enterprise_execution::validate_suspend_enterprise;
+    use crate::finance::finance_system::{insert_account, validate_record_transaction};
+    use crate::finance::{FinancialAccountDraft, LedgerPosting, LedgerTransactionDraft};
+
+    #[test]
+    fn indebted_rival_reinvests_real_clean_dividends_to_reopen_racket() {
+        let registry = crate::build_registry();
+        let mut city = generate_city(&registry, CityScale::Small.config(82_734_113)).unwrap();
+        let organization = city.rivals[0];
+        let racket = city
+            .state
+            .enterprises()
+            .active_for_organization(organization)
+            .next()
+            .unwrap()
+            .id();
+        let cash = city
+            .state
+            .enterprises()
+            .get_enterprise(racket)
+            .unwrap()
+            .cash_account();
+        let opening_balance = city
+            .state
+            .finance()
+            .get_account(cash)
+            .unwrap()
+            .balance()
+            .cents();
+        let accounted = insert_account(
+            &mut city.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(organization),
+                kind: AccountKind::AccountedFunds,
+            },
+        )
+        .unwrap();
+        let settlement = city
+            .state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(organization))
+            .find(|account| account.kind() == AccountKind::Settlement)
+            .unwrap()
+            .id();
+        for (memo, from, to, amount) in [
+            (
+                "Existing earned legitimate reserve",
+                settlement,
+                accounted,
+                200_000,
+            ),
+            (
+                "Old enterprise operating loss",
+                cash,
+                settlement,
+                opening_balance + 50_000,
+            ),
+        ] {
+            validate_record_transaction(
+                &city.state,
+                LedgerTransactionDraft {
+                    occurred_at: city.state.now(),
+                    memo: memo.into(),
+                    postings: vec![
+                        LedgerPosting {
+                            account: from,
+                            amount: Money::from_cents(-amount),
+                        },
+                        LedgerPosting {
+                            account: to,
+                            amount: Money::from_cents(amount),
+                        },
+                    ],
+                    authorization: None,
+                },
+            )
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        }
+        validate_suspend_enterprise(&city.state, racket)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        assert_eq!(
+            city.state
+                .finance()
+                .get_account(cash)
+                .unwrap()
+                .balance()
+                .cents(),
+            -50_000
+        );
+        let clean_before = city
+            .state
+            .finance()
+            .get_account(accounted)
+            .unwrap()
+            .balance();
+        let mut replay =
+            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+        for _ in 0..1_440 {
+            run_test_tick(&registry, &mut city.state);
+            run_test_tick(&registry, &mut replay);
+        }
+        let reopened = city.state.enterprises().get_enterprise(racket).unwrap();
+        assert_eq!(
+            reopened.status(),
+            crate::enterprises::EnterpriseStatus::Active
+        );
+        assert!(city.state.finance().get_account(cash).unwrap().balance() > Money::ZERO);
+        assert!(
+            city.state
+                .finance()
+                .get_account(accounted)
+                .unwrap()
+                .balance()
+                < clean_before
+        );
+        assert!(city.state.finance().transactions().any(|transaction| {
+            transaction.memo().contains("Treasury capitalization")
+                && transaction
+                    .postings()
+                    .iter()
+                    .any(|posting| posting.account == cash)
+        }));
+        assert_eq!(
+            bincode::serialize(&city.state).unwrap(),
+            bincode::serialize(&replay).unwrap()
+        );
+        validate_invariants(&city.state);
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    }
 }

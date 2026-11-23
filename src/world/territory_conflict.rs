@@ -31,7 +31,7 @@ use thiserror::Error;
 
 pub const CLASH_COOLDOWN_DAYS: u64 = 7;
 pub const CLASH_SUPPRESSION_DAYS: u64 = 7;
-const DEFENSIVE_ADVANTAGE: u32 = 2;
+pub(crate) const DEFENSIVE_ADVANTAGE: u32 = 2;
 
 pub fn district_of_racket(
     state: &AppState,

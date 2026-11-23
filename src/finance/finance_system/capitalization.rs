@@ -26,7 +26,7 @@ pub enum StreetCapitalizationError {
     InvalidDestination,
     #[error("source has {available} spendable cents, less than the requested {requested}")]
     InsufficientFunds { available: i64, requested: i64 },
-    #[error("destination cannot accept a full street-cash receipt; open a fresh street account")]
+    #[error("destination cannot accept a full street-cash receipt or clear its existing deficit")]
     DestinationUnavailable,
     #[error(transparent)]
     Finance(#[from] FinanceError),
@@ -65,7 +65,15 @@ pub fn validate_capitalize_street_cash(
             requested: draft.amount.cents(),
         });
     }
-    if !destination.can_receive_liquid_payment(draft.amount) {
+    // Explicit capitalization may repay debt, but only by clearing the entire
+    // deficit in a balanced transfer from the organization's clean account.
+    let fully_clears_deficit = destination.balance() < Money::ZERO
+        && destination.version() < u32::MAX
+        && destination
+            .balance()
+            .checked_add(draft.amount)
+            .is_some_and(|balance| balance >= Money::ZERO);
+    if !destination.can_receive_liquid_payment(draft.amount) && !fully_clears_deficit {
         return Err(StreetCapitalizationError::DestinationUnavailable);
     }
     Ok(validate_record_transaction(
@@ -184,6 +192,7 @@ mod tests {
                 &state,
                 StreetCapitalizationDraft {
                     street_account: old_deficit,
+                    amount: Money::from_cents(250),
                     ..draft
                 }
             )
@@ -243,6 +252,32 @@ mod tests {
                 -500
             );
             assert!(live.finance().get_transaction(transaction).is_some());
+            let explicit_repayment = validate_capitalize_street_cash(
+                live,
+                StreetCapitalizationDraft {
+                    street_account: old_deficit,
+                    amount: Money::from_cents(1_000),
+                    ..draft
+                },
+            )
+            .unwrap();
+            explicit_repayment.commit(live).unwrap();
+            assert_eq!(
+                live.finance()
+                    .get_account(old_deficit)
+                    .unwrap()
+                    .balance()
+                    .cents(),
+                500
+            );
+            assert_eq!(
+                live.finance()
+                    .get_account(accounted)
+                    .unwrap()
+                    .balance()
+                    .cents(),
+                12_000
+            );
             validate_state_against_registry(&registry, live).unwrap();
             validate_invariants(live);
         }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::city_generation::{CityScale, generate_city};
 use crate::core::persistence::{build_save, restore_save};
 use crate::core::simulation::run_test_tick;
 use crate::delegation::MandateDraft;
@@ -312,6 +313,15 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
             .unwrap()
             .is_disrupted(state.now())
     );
+    assert!(state.reports().reports_for(player).any(|report| {
+        report
+            .title()
+            .contains("Hostile attack on Finch Harbor Store")
+            && report.entries().iter().any(|entry| {
+                entry.attention == crate::core::attention::AttentionClass::Crisis
+                    && entry.entities.contains(&EntityRef::Business(competitor))
+            })
+    }));
     let settlement = next_day(&registry, &mut state);
     next_day(&registry, &mut control);
     next_day(&registry, &mut control);
@@ -350,6 +360,190 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
     }));
     crate::core::invariants::validate_state(&state).unwrap();
     restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+}
+
+#[test]
+fn abandoned_rackets_expose_clean_stores_to_gangs_without_local_commercial_competition() {
+    use crate::enterprises::enterprise_execution::validate_suspend_enterprise;
+
+    let registry = crate::build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(82_734_113)).unwrap();
+    let rival = city.rivals[0];
+    let player = city.player;
+    let target = city.starter_front;
+    let rival_racket = city
+        .state
+        .enterprises()
+        .active_for_organization(rival)
+        .next()
+        .unwrap();
+    let rival_district = district_of_racket(&city.state, rival_racket.location()).unwrap();
+    let strongest_force = u32::from(rival_racket.associates());
+    let force_by_district = BTreeMap::from([(rival_district, strongest_force)]);
+    let owner = BusinessOwner::Organization(player);
+    assert_eq!(
+        predatory_stake(
+            &registry,
+            &city.state,
+            rival,
+            target,
+            owner,
+            &force_by_district,
+            strongest_force,
+        ),
+        0,
+        "an operating home racket keeps its affiliated shops out of predatory reach"
+    );
+    validate_suspend_enterprise(&city.state, city.starter_racket)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert!(
+        predatory_stake(
+            &registry,
+            &city.state,
+            rival,
+            target,
+            owner,
+            &force_by_district,
+            strongest_force,
+        ) > 0,
+        "suspending the last local racket must expose real, still-operating storefronts"
+    );
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    let tick = next_day(&registry, &mut city.state);
+    assert_eq!(tick, next_day(&registry, &mut restored));
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&restored).unwrap(),
+        "rival decisions must continue identically after save and load"
+    );
+    assert!(
+        tick.autonomous_operations.iter().any(|id| {
+            let operation = city.state.operations().get_operation(*id).unwrap();
+            operation.kind() == OperationKind::Surveillance
+                && operation
+                    .objective()
+                    .business_target()
+                    .is_some_and(|business| {
+                        city.state
+                            .world()
+                            .get_business(business)
+                            .is_some_and(|record| {
+                                record.owner() == BusinessOwner::Organization(player)
+                            })
+                    })
+        }),
+        "at least one rival must actually scout an exposed player-owned business"
+    );
+}
+
+#[test]
+fn paid_rival_crew_can_pressure_undefended_shops_without_active_rackets_or_competing_stores() {
+    let Fixture {
+        registry,
+        mut state,
+        player,
+        ..
+    } = fixture();
+    let raiders = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Unestablished Raiders".into(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let captain = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Raider Captain".into(),
+            organization: Some(raiders),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(85))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Raider Scout".into(),
+            organization: Some(raiders),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([
+                (CapabilityKind::Surveillance, rating(90)),
+                (CapabilityKind::Burglary, rating(85)),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_assign_mandate(
+        &state,
+        MandateDraft {
+            organization: raiders,
+            manager: captain,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Operations,
+            )]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let mut understrength = state.clone();
+    let first = next_day(&registry, &mut understrength);
+    assert!(
+        first.autonomous_operations.iter().all(|id| {
+            understrength
+                .operations()
+                .get_operation(*id)
+                .unwrap()
+                .responsible_organization()
+                != raiders
+        }),
+        "two named people cannot project enough criminal force"
+    );
+    for index in 0..3 {
+        insert_character(
+            &mut state,
+            CharacterDraft {
+                name: format!("Raider Soldier {index}"),
+                organization: Some(raiders),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([(CapabilityKind::Violence, rating(70))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    }
+    let tick = next_day(&registry, &mut state);
+    assert!(
+        tick.autonomous_operations.iter().any(|id| {
+            let operation = state.operations().get_operation(*id).unwrap();
+            operation.responsible_organization() == raiders
+                && operation.kind() == OperationKind::Surveillance
+                && operation
+                    .objective()
+                    .business_target()
+                    .is_some_and(|business| {
+                        state.world().get_business(business).unwrap().owner()
+                            == BusinessOwner::Organization(player)
+                    })
+        }),
+        "a rival roster can target an undefended shop without owning a business or a racket"
+    );
 }
 
 #[test]

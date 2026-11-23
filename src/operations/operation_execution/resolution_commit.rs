@@ -48,6 +48,7 @@ pub(crate) struct ValidatedOperationResolution {
     information: ValidatedInformation,
     history: ValidatedHistoryEvent,
     report: ValidatedReport,
+    victim_report: Option<ValidatedReport>,
     detainee_release: Option<crate::legal::arrest_system::ValidatedRelease>,
     witness_intimidation: Vec<crate::legal::witness_system::ValidatedWitnessCooperation>,
     business_disruption: Option<ValidatedBusinessDisruption>,
@@ -73,6 +74,9 @@ impl ValidatedOperationResolution {
         }
         if let Some(incident) = self.incident.as_ref() {
             budget.extend(incident.id_budget()?);
+        }
+        if self.victim_report.is_some() {
+            budget.push((IdKind::Report, 1));
         }
         state.ids.reserve_many(&budget)?;
         validate_plan_snapshot(state, &self.plan, self.off_window_patrol_presence_percent)?;
@@ -182,6 +186,11 @@ impl ValidatedOperationResolution {
             .report
             .commit(state)
             .expect("resolution report ID was preflighted before mutation");
+        if let Some(report) = self.victim_report {
+            report
+                .commit(state)
+                .expect("victim notification report ID was preflighted before mutation");
+        }
         let participant_information = self
             .participant_information
             .into_iter()
@@ -326,6 +335,59 @@ pub(crate) fn validate_operation_resolution_plan(
             }],
         },
     )?;
+    // Notify the damaged shop's owner, not just the gang that authorized the job. The
+    // recipient learns about the attack, but not the attacker's undiscovered identity.
+    let victim_report = match (effects.business_disruption.as_ref(), record.objective()) {
+        (
+            Some(_),
+            OperationObjective::DisruptBusiness {
+                target: EntityRef::Business(business),
+            },
+        ) => {
+            let shop = state
+                .world()
+                .get_business(*business)
+                .expect("validated disruption must target a live business");
+            match shop.owner() {
+                crate::world::BusinessOwner::Organization(owner)
+                    if state.player_organization() == Some(owner)
+                        && owner != record.responsible_organization() =>
+                {
+                    let district = shop.neighborhood();
+                    let district_name = state
+                        .world()
+                        .get_neighborhood(district)
+                        .expect("business district must exist")
+                        .name();
+                    Some(validate_record_report(
+                        state,
+                        ReportDraft {
+                            recipient: owner,
+                            kind: ReportKind::AfterAction,
+                            title: format!("Hostile attack on {}", shop.name()),
+                            entries: vec![ReportEntry {
+                                attention: AttentionClass::Crisis,
+                                summary: format!(
+                                    "A hostile crew damaged {} in {district_name}. Earnings will be reduced during repairs.",
+                                    shop.name()
+                                ),
+                                sources: Vec::new(),
+                                entities: BTreeSet::from([
+                                    EntityRef::Business(*business),
+                                    EntityRef::Neighborhood(district),
+                                ]),
+                                decision: None,
+                            }],
+                        },
+                    )?)
+                }
+                crate::world::BusinessOwner::Independent
+                | crate::world::BusinessOwner::Character(_)
+                | crate::world::BusinessOwner::Organization(_) => None,
+            }
+        }
+        _ => None,
+    };
     let participant_information = record
         .participants()
         .into_iter()
@@ -359,6 +421,7 @@ pub(crate) fn validate_operation_resolution_plan(
         information,
         history,
         report,
+        victim_report,
         detainee_release: effects.detainee_release,
         witness_intimidation: effects.witness_intimidation,
         business_disruption: effects.business_disruption,

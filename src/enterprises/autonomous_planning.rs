@@ -26,6 +26,8 @@ pub(crate) enum AutonomousEnterpriseError {
     #[error(transparent)]
     Finance(#[from] FinanceError),
     #[error(transparent)]
+    Capitalization(#[from] crate::finance::finance_system::StreetCapitalizationError),
+    #[error(transparent)]
     Enterprise(#[from] EnterpriseError),
 }
 

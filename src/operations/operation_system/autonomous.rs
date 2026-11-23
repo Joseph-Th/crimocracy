@@ -16,7 +16,9 @@ use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, SimTime, is_day_boundary};
 use crate::delegation::delegation_system::resolve_mandate_authority;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
-use crate::economy::business_economy_system::forecast_competitor_disruption_gain;
+use crate::economy::business_economy_system::{
+    forecast_competitor_disruption_gain, resolve_business_gross_potential,
+};
 use crate::intelligence::{InformationSourceKind, InformationTopic, KnowledgeHolder};
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::{
@@ -26,6 +28,7 @@ use crate::operations::{
 use crate::registry::Registry;
 use crate::reputation::{AudienceKind, reputation_system::resolve_score};
 use crate::world::organization_pressure::public_prominence_tier;
+use crate::world::territory_conflict::{DEFENSIVE_ADVANTAGE, district_of_racket};
 use crate::world::{AutonomyLevel, BusinessKind, BusinessOwner, OrganizationKind};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -129,6 +132,56 @@ fn crew(
     Some((leader, roles))
 }
 
+/// Criminal storefront owners cannot shed every local racket and retain its protection for
+/// free. A rival with an operating racket or a substantial paid named crew can send
+/// personnel to pressure an under-defended shop, even without a competing local business.
+/// A local foothold carries full strength; projecting from elsewhere costs one associate.
+/// The attacker estimates the defender's visible baseline crews, never its secret extra hires
+/// or private books. Actual sabotage still requires scouting, an authorized operation, and
+/// successful execution under ordinary police and business-economy rules.
+fn predatory_stake(
+    registry: &Registry,
+    state: &AppState,
+    attacker: OrganizationId,
+    target: BusinessId,
+    owner: BusinessOwner,
+    force_by_district: &BTreeMap<crate::core::id::NeighborhoodId, u32>,
+    strongest_force: u32,
+) -> i128 {
+    let BusinessOwner::Organization(defender) = owner else {
+        return 0;
+    };
+    if defender == attacker
+        || state
+            .world()
+            .get_organization(defender)
+            .is_none_or(|organization| organization.kind() != OrganizationKind::Criminal)
+    {
+        return 0;
+    }
+    let Some(shop) = state.world().get_business(target) else {
+        return 0;
+    };
+    let district = shop.neighborhood();
+    let local_force = force_by_district.get(&district).copied().unwrap_or(0);
+    let projected_force = local_force.max(strongest_force.saturating_sub(1));
+    let visible_defense: u32 = state
+        .enterprises()
+        .active_for_organization(defender)
+        .filter(|racket| district_of_racket(state, racket.location()) == Some(district))
+        .map(|racket| u32::from(racket.kind().baseline_associates()))
+        .sum();
+    if projected_force <= visible_defense.saturating_add(DEFENSIVE_ADVANTAGE) {
+        return 0;
+    }
+    // A public venue's normal gross, not its confidential ledgers, measures how much
+    // hostile disruption can cost a competitor. Local enforcers prefer close targets.
+    let gross = resolve_business_gross_potential(registry, state, target)
+        .map(|value| value.cents().max(0))
+        .unwrap_or(0);
+    i128::from(gross) * if local_force > 0 { 2 } else { 1 } / 2
+}
+
 fn choose_plan<'r>(
     registry: &'r Registry,
     state: &AppState,
@@ -164,9 +217,34 @@ fn choose_plan<'r>(
                 .push(business.id());
         }
     }
-    if sectors.is_empty() {
-        return None;
+    let mut force_by_district = BTreeMap::new();
+    for racket in state.enterprises().active_for_organization(organization) {
+        if let Some(district) = district_of_racket(state, racket.location()) {
+            *force_by_district.entry(district).or_insert(0_u32) += u32::from(racket.associates());
+        }
     }
+    // A gang whose rackets are temporarily closed can still send its *named* paid
+    // organization against a competitor. Do not require a profitable racket before
+    // a rival is capable of hostile operations; detained members contribute nothing.
+    // Actual scouting and sabotage still require available trained characters.
+    let named_force = state
+        .world()
+        .characters_in_organization(organization)
+        .filter(|member| {
+            state
+                .legal()
+                .active_arrest_for_character(member.id())
+                .is_none()
+        })
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let strongest_force = force_by_district
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(named_force);
 
     let mut last = BTreeMap::<(BusinessId, OperationKind), _>::new();
     let mut recent_strikes = BTreeMap::<BusinessId, usize>::new();
@@ -222,9 +300,6 @@ fn choose_plan<'r>(
     let mut gains = BTreeMap::<(_, BusinessKind), i128>::new();
     let mut prominence_by_owner = BTreeMap::<OrganizationId, u8>::new();
     for (id, name, kind, district) in state.world().public_business_directory() {
-        let Some(stakes) = sectors.get(&district) else {
-            continue;
-        };
         let target_owner = state
             .world()
             .get_business(id)
@@ -241,8 +316,21 @@ fn choose_plan<'r>(
         if owned.contains(&id) || recent_strikes.get(&id).copied().unwrap_or(0) >= strike_limit {
             continue;
         }
-        let gain = *gains.entry((district, kind)).or_insert_with(|| {
-            forecast_competitor_disruption_gain(registry, state, id, stakes).unwrap_or(0)
+        let gain = sectors.get(&district).map_or(0, |stakes| {
+            *gains.entry((district, kind)).or_insert_with(|| {
+                forecast_competitor_disruption_gain(registry, state, id, stakes).unwrap_or(0)
+            })
+        });
+        let predatory_gain = target_owner.map_or(0, |owner| {
+            predatory_stake(
+                registry,
+                state,
+                organization,
+                id,
+                owner,
+                &force_by_district,
+                strongest_force,
+            )
         });
         // Rival businesses also have a political reason to oppose a local
         // challenger: displacing an established civic venue can interrupt the
@@ -273,7 +361,7 @@ fn choose_plan<'r>(
         } else {
             0
         };
-        if gain <= 0 && political_stake == 0 {
+        if gain <= 0 && political_stake == 0 && predatory_gain == 0 {
             continue;
         }
         if !is_actionable_opportunity_target(
@@ -327,7 +415,8 @@ fn choose_plan<'r>(
         // the competing owner as a strategic threat worth contesting. Never infer
         // concealed rackets or treasury balances when selecting a rival target.
         let strategic_gain = (gain.saturating_mul(100 + i128::from(prominence) * 35) / 100)
-            .saturating_add(political_stake);
+            .saturating_add(political_stake)
+            .saturating_add(predatory_gain);
         candidates.push((
             Reverse(strategic_gain),
             !observed,

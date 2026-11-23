@@ -34,11 +34,12 @@ use cohort_planning::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-const LEAD_NEIGHBORHOOD_AUTHORITY_RANK: usize = 0;
-const OTHER_NEIGHBORHOOD_AUTHORITY_RANK: usize = 1;
-const BUSINESS_AUTHORITY_RANK: usize = 2;
-const ENTERPRISE_FUNCTION_LEAD_AUTHORITY_RANK: usize = 3;
-const ENTERPRISE_FUNCTION_OTHER_AUTHORITY_RANK: usize = 4;
+const UNGUARDED_CRIMINAL_COMMERCE_AUTHORITY_RANK: usize = 0;
+const LEAD_NEIGHBORHOOD_AUTHORITY_RANK: usize = 1;
+const OTHER_NEIGHBORHOOD_AUTHORITY_RANK: usize = 2;
+const BUSINESS_AUTHORITY_RANK: usize = 3;
+const ENTERPRISE_FUNCTION_LEAD_AUTHORITY_RANK: usize = 4;
+const ENTERPRISE_FUNCTION_OTHER_AUTHORITY_RANK: usize = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AutonomousExpansionPlan {
@@ -74,6 +75,11 @@ struct NeighborhoodExpansionAuthority {
     rank: usize,
     scope: ResponsibilityScope,
     neighborhood: NeighborhoodId,
+}
+
+struct EnterpriseFunctionDistricts<'a> {
+    leaders: &'a BTreeMap<NeighborhoodId, Option<OrganizationId>>,
+    vacated_commerce: &'a BTreeSet<NeighborhoodId>,
 }
 
 /// Daily delegated-autonomy expansion for organizations other than the player's: every active
@@ -202,6 +208,18 @@ fn decide_autonomous_expansion(
     let enterprise_function_scope =
         ResponsibilityScope::Function(ResponsibilityFunction::Enterprise);
     let has_enterprise_function_scope = mandate.scopes().contains(&enterprise_function_scope);
+    let vacated_commercial_districts = if has_enterprise_function_scope {
+        iteration
+            .district_leaders
+            .keys()
+            .copied()
+            .filter(|district| {
+                unguarded_criminal_commerce(iteration.state, organization, *district)
+            })
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
 
     let management = iteration
         .state
@@ -246,7 +264,10 @@ fn decide_autonomous_expansion(
                 definition,
                 enterprise_function_scope,
                 owned_venues,
-                iteration.district_leaders,
+                EnterpriseFunctionDistricts {
+                    leaders: iteration.district_leaders,
+                    vacated_commerce: &vacated_commercial_districts,
+                },
                 &mut candidates,
             )?;
         }
@@ -300,12 +321,17 @@ fn collect_enterprise_function_candidates(
     definition: &EnterpriseDefinition,
     scope: ResponsibilityScope,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
-    district_leaders: &BTreeMap<NeighborhoodId, Option<OrganizationId>>,
+    districts: EnterpriseFunctionDistricts<'_>,
     candidates: &mut Vec<AutonomousExpansionPlan>,
 ) -> Result<(), AutonomousEnterpriseError> {
-    for (neighborhood_id, leader) in district_leaders {
+    for (neighborhood_id, leader) in districts.leaders {
         let leads = *leader == Some(economics.organization);
-        let authority_rank = if leads {
+        // A commercial portfolio with no active local racket is an opening for an
+        // organized rival. Under delegated citywide authority, pursue a financially
+        // viable foothold there before adding another front in an already held ward.
+        let authority_rank = if districts.vacated_commerce.contains(neighborhood_id) {
+            UNGUARDED_CRIMINAL_COMMERCE_AUTHORITY_RANK
+        } else if leads {
             ENTERPRISE_FUNCTION_LEAD_AUTHORITY_RANK
         } else {
             ENTERPRISE_FUNCTION_OTHER_AUTHORITY_RANK
@@ -324,6 +350,48 @@ fn collect_enterprise_function_candidates(
         )?;
     }
     Ok(())
+}
+
+fn unguarded_criminal_commerce(
+    state: &AppState,
+    attacker: OrganizationId,
+    district: NeighborhoodId,
+) -> bool {
+    state
+        .world()
+        .public_business_directory()
+        .filter(|(_, _, _, neighborhood)| *neighborhood == district)
+        .any(|(business_id, _, _, _)| {
+            let Some(business) = state.world().get_business(business_id) else {
+                return false;
+            };
+            let crate::world::BusinessOwner::Organization(owner) = business.owner() else {
+                return false;
+            };
+            owner != attacker
+                && state
+                    .world()
+                    .get_organization(owner)
+                    .is_some_and(|org| org.kind() == crate::world::OrganizationKind::Criminal)
+                && state.economy().get_business_economy(business_id).is_some_and(|books| {
+                    books.status() == crate::economy::BusinessOperatingStatus::Active
+                })
+                // This is a genuine vacated criminal foothold, not simply a shop
+                // purchased in a district where its owner never operated a racket.
+                && state.enterprises().enterprises_for_organization(owner).any(|racket| {
+                    racket.status() != crate::enterprises::EnterpriseStatus::Active
+                        && crate::world::territory_conflict::district_of_racket(
+                            state,
+                            racket.location(),
+                        ) == Some(district)
+                })
+                && !state.enterprises().active_for_organization(owner).any(|racket| {
+                    crate::world::territory_conflict::district_of_racket(
+                        state,
+                        racket.location(),
+                    ) == Some(district)
+                })
+        })
 }
 
 /// One organization's currently usable business network for an immutable expansion selection
@@ -413,11 +481,81 @@ fn settlement_account_is_available(state: &AppState, account: FinancialAccountId
 mod tests {
     use super::*;
     use crate::build_registry;
+    use crate::city_generation::{CityScale, generate_city};
     use crate::core::invariants::validate_invariants;
+    use crate::core::persistence::{build_save, restore_save};
     use crate::finance::finance_system::{insert_account, validate_record_transaction};
     use crate::finance::{LedgerPosting, LedgerTransactionDraft};
     use crate::world::world_system::insert_organization;
     use crate::world::{OrganizationDraft, OrganizationKind};
+
+    #[test]
+    fn rival_enterprise_planning_prioritizes_abandoned_criminal_commerce() {
+        use crate::enterprises::enterprise_execution::validate_suspend_enterprise;
+
+        let registry = build_registry();
+        let mut city = generate_city(&registry, CityScale::Small.config(82_734_113)).unwrap();
+        let attacker = city.rivals[0];
+        assert!(!unguarded_criminal_commerce(
+            &city.state,
+            attacker,
+            city.home
+        ));
+        validate_suspend_enterprise(&city.state, city.starter_racket)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        assert!(unguarded_criminal_commerce(
+            &city.state,
+            attacker,
+            city.home
+        ));
+        let mut replayed =
+            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+        let first =
+            plan_due_autonomous_expansions(&registry, &city.state, &BTreeSet::new()).unwrap();
+        let replay =
+            plan_due_autonomous_expansions(&registry, &replayed, &BTreeSet::new()).unwrap();
+        let first_locations = first
+            .actions
+            .iter()
+            .map(|action| (action.organization, action.plan.location))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first_locations,
+            replay
+                .actions
+                .iter()
+                .map(|action| (action.organization, action.plan.location))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            first_locations.iter().any(|(organization, location)| {
+                *organization == attacker
+                    && *location == EnterpriseLocation::Neighborhood(city.home)
+            }),
+            "a rival with viable citywide authority should establish a racket in the vacated commercial ward: {first_locations:?}"
+        );
+        // Execute every canonical minute of the first day, not a hand-advanced clock
+        // with overdue opportunities and an invalid save. This exercises the real tick.
+        for _ in 0..1_440 {
+            crate::core::simulation::run_test_tick(&registry, &mut city.state);
+            crate::core::simulation::run_test_tick(&registry, &mut replayed);
+        }
+        assert!(
+            city.state
+                .enterprises()
+                .active_for_organization(attacker)
+                .any(|racket| { racket.location() == EnterpriseLocation::Neighborhood(city.home) }),
+            "a rival with viable citywide authority should actually establish in the vacated ward"
+        );
+        assert_eq!(
+            bincode::serialize(&city.state).unwrap(),
+            bincode::serialize(&replayed).unwrap()
+        );
+        validate_invariants(&city.state);
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    }
 
     #[test]
     fn autonomous_cash_selection_uses_smallest_sufficient_pool() {
