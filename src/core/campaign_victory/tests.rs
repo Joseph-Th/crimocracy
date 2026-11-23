@@ -938,7 +938,8 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         Some(VictoryError::PoliticalNotReady)
     );
     let election_day =
-        crate::politics::political_system::next_municipal_election_day(city.state.now());
+        crate::politics::political_system::next_municipal_election_day(city.state.now())
+            .expect("fixture has another municipal election");
     for day in POLITICAL_BUSINESS_ESTABLISHMENT_DAYS..election_day {
         city.state
             .advance_clock(crate::core::time::SimDuration::from_minutes(

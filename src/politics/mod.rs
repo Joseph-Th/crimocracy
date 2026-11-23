@@ -103,14 +103,6 @@ impl SpecialistKind {
             Self::Strategist => 16_000,
         }
     }
-
-    pub const fn daily_growth(self) -> u16 {
-        match self {
-            Self::Organizer => 8,
-            Self::Publicist => 18,
-            Self::Strategist => 34,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

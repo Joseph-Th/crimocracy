@@ -346,3 +346,45 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
     );
     validate_invariants(&city.state);
 }
+
+#[test]
+fn mayoral_nomination_rejects_an_election_beyond_the_simulation_clock() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(104)).unwrap();
+    let council = city
+        .state
+        .world()
+        .organizations()
+        .find(|organization| organization.kind() == OrganizationKind::Political)
+        .unwrap()
+        .id();
+    let official = city
+        .state
+        .world()
+        .characters_in_organization(council)
+        .next()
+        .unwrap()
+        .id();
+    validate_establish_contact(
+        &city.state,
+        InstitutionalContactDraft {
+            sponsor: city.player,
+            handler: city.boss,
+            contact: official,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    city.state.set_now_for_test(crate::core::time::SimTime::MAX);
+    let before = bincode::serialize(&city.state).unwrap();
+    assert_eq!(
+        political_system::next_municipal_election_day(city.state.now()),
+        None
+    );
+    assert_eq!(
+        validate_nominate_mayor(&city.state, city.boss).err(),
+        Some(PoliticalError::ElectionUnavailable)
+    );
+    assert_eq!(bincode::serialize(&city.state).unwrap(), before);
+}

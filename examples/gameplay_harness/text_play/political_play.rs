@@ -56,7 +56,8 @@ impl Session<'_> {
         writeln!(
             out,
             "Next election day {} | nomination {:?} | latest election {:?}, won {}",
-            next_municipal_election_day(self.state.now()),
+            next_municipal_election_day(self.state.now())
+                .map_or_else(|| "unavailable".to_owned(), |day| day.to_string()),
             progress.mayoral_nominated_for_day,
             progress.latest_election_day,
             progress.latest_election_won
@@ -115,9 +116,14 @@ impl Session<'_> {
             .organization(self.player)
             .and_then(|campaign| campaign.latest_election())
         else {
+            let Some(day) = next_municipal_election_day(self.state.now()) else {
+                return Ok(
+                    "No future municipal ballot fits within the remaining simulation clock; nomination is unavailable."
+                        .to_owned(),
+                );
+            };
             return Ok(format!(
-                "No mayoral ballot yet. Next election day {}. File your leader at least 30 days in advance using 'nominate-mayor char-N'.",
-                next_municipal_election_day(self.state.now())
+                "No mayoral ballot yet. Next election day {day}. File your leader at least 30 days in advance using 'nominate-mayor char-N'."
             ));
         };
         let mut out = format!(

@@ -63,6 +63,24 @@ fn advance_day(registry: &crate::Registry, state: &mut crate::AppState) {
     apply_due_political_campaigns(registry, state);
 }
 
+fn operating_rival_wards(state: &crate::AppState, owner: OrganizationId) -> Vec<NeighborhoodId> {
+    state
+        .world()
+        .businesses_owned_by_organization(owner)
+        .filter(|business| {
+            state
+                .economy()
+                .get_business_economy(business.id())
+                .is_some_and(|economy| {
+                    economy.status() == crate::economy::BusinessOperatingStatus::Active
+                })
+        })
+        .map(|business| business.neighborhood())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 #[test]
 fn political_investment_requires_clean_funds_and_loses_influence_without_staff() {
     let registry = build_registry();
@@ -344,4 +362,93 @@ fn autonomous_rivals_spend_clean_money_weekly_in_the_players_contested_ward() {
     );
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(restored.politics(), city.state.politics());
+}
+
+#[test]
+fn autonomous_rival_campaign_moves_between_actual_competing_wards() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(6_219)).unwrap();
+    let rival = city.rivals[0];
+    let districts = operating_rival_wards(&city.state, rival);
+    assert!(
+        districts.len() >= 2,
+        "rival must have two operating commercial wards"
+    );
+    let (first, second) = (districts[0], districts[1]);
+    fund(&mut city.state, city.player, 2_500_000);
+    fund(&mut city.state, rival, 5_500_000);
+    validate_invest_influence(&city.state, first, 500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    validate_invest_influence(&city.state, second, 2_000_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    for _ in 0..7 {
+        advance_day(&registry, &mut city.state);
+    }
+    let influence = |state: &crate::AppState, district| {
+        state
+            .politics()
+            .organization(rival)
+            .and_then(|campaign| campaign.district(district))
+            .map_or(0, DistrictCampaign::influence)
+    };
+    assert_eq!(influence(&city.state, first), 0);
+    assert_eq!(influence(&city.state, second), 100);
+    // After the strongest challenge is defended, redirect the finite weekly
+    // budget toward the next exposed ward, not an arbitrary lowest-ID ward.
+    political_system::validate_invest_for(&city.state, rival, second, 4_500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for _ in 0..7 {
+        advance_day(&registry, &mut city.state);
+        advance_day(&registry, &mut restored);
+    }
+    assert_eq!(influence(&city.state, first), 100);
+    assert_eq!(influence(&restored, first), 100);
+    assert_eq!(influence(&restored, second), influence(&city.state, second));
+    assert_eq!(
+        city.state
+            .politics()
+            .organization(rival)
+            .unwrap()
+            .spent_cents(),
+        5_500_000
+    );
+    validate_invariants(&city.state);
+    validate_state_against_registry(&registry, &city.state).unwrap();
+}
+
+#[test]
+fn rival_with_a_well_defended_weak_challenge_invests_in_another_ward() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(6_219)).unwrap();
+    let rival = city.rivals[0];
+    let districts = operating_rival_wards(&city.state, rival);
+    assert!(districts.len() >= 2);
+    let (other, contested) = (districts[0], districts[1]);
+    fund(&mut city.state, city.player, 500_000);
+    fund(&mut city.state, rival, 5_500_000);
+    validate_invest_influence(&city.state, contested, 500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    political_system::validate_invest_for(&city.state, rival, contested, 4_500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    for _ in 0..7 {
+        advance_day(&registry, &mut city.state);
+    }
+    let campaign = city.state.politics().organization(rival).unwrap();
+    assert_eq!(campaign.district(other).unwrap().influence(), 100);
+    assert!(campaign.district(contested).unwrap().influence() > 600);
+    assert_eq!(campaign.spent_cents(), 5_000_000);
+    validate_invariants(&city.state);
+    validate_state_against_registry(&registry, &city.state).unwrap();
 }

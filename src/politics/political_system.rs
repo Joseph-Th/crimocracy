@@ -29,7 +29,7 @@ use crate::reputation::reputation_system::resolve_score;
 use crate::world::{
     AutonomyLevel, BusinessFunction, BusinessKind, CapabilityKind, OrganizationKind,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -51,7 +51,7 @@ pub enum PoliticalError {
     #[error("this local initiative was already organized in the past seven days")]
     InitiativeCooldown,
     #[error(
-        "a mayoral candidate must be the eligible executive with a 30-day active council contact"
+        "a mayoral candidate must be the available executive with a 180-day active council contact"
     )]
     IneligibleCandidate,
     #[error("a candidacy is already registered for the upcoming municipal election")]
@@ -108,9 +108,13 @@ pub fn eligible_manager(
         })
 }
 
-pub fn next_municipal_election_day(now: SimTime) -> u64 {
-    (now.as_minutes() / DAY_MINUTES / MUNICIPAL_ELECTION_INTERVAL_DAYS + 1)
-        * MUNICIPAL_ELECTION_INTERVAL_DAYS
+/// The next ballot must actually fit on the finite simulation clock. Returning
+/// `None` also keeps read-only campaign views from advertising an impossible date.
+pub fn next_municipal_election_day(now: SimTime) -> Option<u64> {
+    let day = (now.as_minutes() / DAY_MINUTES / MUNICIPAL_ELECTION_INTERVAL_DAYS)
+        .checked_add(1)?
+        .checked_mul(MUNICIPAL_ELECTION_INTERVAL_DAYS)?;
+    day.checked_mul(DAY_MINUTES).map(|_| day)
 }
 
 fn established_contact(state: &AppState, owner: OrganizationId, kind: ContactKind) -> bool {
@@ -264,7 +268,8 @@ pub fn validate_nominate_mayor(
     if !eligible_candidate(state, owner, candidate) {
         return Err(PoliticalError::IneligibleCandidate);
     }
-    let proposed = next_municipal_election_day(state.now());
+    let proposed =
+        next_municipal_election_day(state.now()).ok_or(PoliticalError::ElectionUnavailable)?;
     let deadline = state
         .now()
         .as_minutes()
@@ -553,7 +558,8 @@ impl ValidatedPoliticalOrder {
                         .organization(self.owner)
                         .and_then(OrganizationCampaign::candidacy)
                         .is_some()
-                    || next_municipal_election_day(state.now()) > candidacy.election_day =>
+                    || next_municipal_election_day(state.now())
+                        .is_none_or(|day| day > candidacy.election_day) =>
             {
                 return Err(PoliticalError::Stale);
             }
@@ -761,19 +767,38 @@ fn pay_campaign_staff(state: &mut AppState) {
 }
 
 fn autonomous_rival_campaigns(state: &mut AppState) {
-    // Weekly initiative: the existing commercial stake determines which ward
-    // a rival contests, with a deterministic preference for the player's own
-    // organized wards. Rivals must actually pay for influence from clean books.
+    // Weekly initiative: defend an *operating* commercial stake against the
+    // player's strongest outstanding challenge. Selecting the first campaign
+    // entry indefinitely would spend rival money on dormant wards and leave
+    // actual contested neighborhoods unopposed. Equal threats use district ID
+    // as a stable tie-breaker; even uncontested rivals spread investment toward
+    // their least-defended operating district.
     if !(state.now().as_minutes() / DAY_MINUTES).is_multiple_of(7) {
         return;
     }
     let Some(player) = state.player_organization() else {
         return;
     };
-    let player_districts: BTreeSet<_> = state
+    // Take a small value snapshot before rival ledgers are mutated below.
+    let player_pressure: BTreeMap<_, _> = state
         .politics()
         .organization(player)
-        .map(|campaign| campaign.districts.keys().copied().collect())
+        .map(|campaign| {
+            campaign
+                .districts
+                .iter()
+                .map(|(&district, office)| {
+                    (
+                        district,
+                        (
+                            office.influence(),
+                            office.grassroots(),
+                            office.institutions(),
+                        ),
+                    )
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let rivals = state
         .world()
@@ -787,13 +812,47 @@ fn autonomous_rival_campaigns(state: &mut AppState) {
         let districts = state
             .world()
             .businesses_owned_by_organization(owner)
+            .filter(|business| {
+                state
+                    .economy()
+                    .get_business_economy(business.id())
+                    .is_some_and(|economy| {
+                        economy.status() == crate::economy::BusinessOperatingStatus::Active
+                    })
+            })
             .map(|business| business.neighborhood())
             .collect::<BTreeSet<_>>();
         let choice = districts
-            .iter()
-            .copied()
-            .find(|district| player_districts.contains(district))
-            .or_else(|| districts.iter().copied().next());
+            .into_iter()
+            .filter_map(|district| {
+                // A fully secured ward cannot accept more investment. Exclude it
+                // before ranking, otherwise an intense but already capped player
+                // challenge can indefinitely starve another operating ward.
+                let own = state
+                    .politics()
+                    .organization(owner)
+                    .and_then(|campaign| campaign.district(district))
+                    .map_or(0, DistrictCampaign::influence);
+                if own == INFLUENCE_CAP {
+                    return None;
+                }
+                let (machine, grassroots, institutions) =
+                    player_pressure.get(&district).copied().unwrap_or((0, 0, 0));
+                Some((
+                    district,
+                    (
+                        // A player presence that our machine already exceeds
+                        // is not an urgent challenge merely because its
+                        // historical office has nonzero support.
+                        machine > own,
+                        i32::from(machine) - i32::from(own),
+                        u32::from(grassroots) + u32::from(institutions),
+                        std::cmp::Reverse(district),
+                    ),
+                ))
+            })
+            .max_by_key(|(_, priority)| *priority)
+            .map(|(district, _)| district);
         let Some(district) = choice else {
             continue;
         };
