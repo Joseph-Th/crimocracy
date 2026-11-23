@@ -2,6 +2,7 @@
 
 use super::planning::PoliceMode;
 use super::*;
+use crimocracy::decisions::DecisionContext;
 use crimocracy::world::{AutonomyLevel, CharacterRecord};
 
 /// The recruitment owner has established an existing personal acquaintance. Show
@@ -1402,12 +1403,17 @@ impl Session<'_> {
                     Some("reject") => DecisionResponse::Reject,
                     _ => return Err("decide <id> <continue|abort|approve|reject>".to_owned()),
                 };
-                let decision = state
+                let request = state
                     .decisions()
                     .pending_for_recipient(self.player)
                     .find(|record| record.id().raw() == raw)
-                    .ok_or("no pending decision for your organization")?
-                    .id();
+                    .ok_or("no pending decision for your organization")?;
+                let decision = request.id();
+                let protection = match request.context() {
+                    DecisionContext::ProtectionDemand(context) => Some(context),
+                    DecisionContext::RecruitmentApproval(_)
+                    | DecisionContext::OperationPoliceArrival { .. } => None,
+                };
                 validate_resolve_decision(
                     self.registry,
                     &self.state,
@@ -1419,6 +1425,35 @@ impl Session<'_> {
                 .commit(&mut self.state)
                 .map_err(|e| e.to_string())?;
                 writeln!(out, "Decision {raw} resolved: {response:?}.").unwrap();
+                if let Some(context) = protection {
+                    let gang = self
+                        .state
+                        .world()
+                        .get_organization(context.attacker())
+                        .expect("protection demand references an existing gang");
+                    let district = self
+                        .state
+                        .world()
+                        .get_neighborhood(context.district())
+                        .expect("protection demand references an existing ward");
+                    match response {
+                        DecisionResponse::Approve => {
+                            writeln!(out,
+                                "  Paid {} cents to {} for 30 days' protection from that gang's new attacks in {}.",
+                                context.amount().cents(), gang.name(), district.name(),
+                            ).unwrap();
+                        }
+                        DecisionResponse::Reject => {
+                            writeln!(out,
+                                "  Refused {}'s demand in {}. Their scouts and strike crews remain a threat.",
+                                gang.name(), district.name(),
+                            ).unwrap();
+                        }
+                        DecisionResponse::Continue | DecisionResponse::Abort => {
+                            unreachable!("protection decisions support approve or reject only")
+                        }
+                    }
+                }
                 if let Some(attempt) = self
                     .state
                     .recruitment()

@@ -14,6 +14,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{BusinessId, CharacterId, IdKind, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, SimTime, is_day_boundary};
+use crate::decisions::decision_system::{recently_refused_protection, rival_pressure_blocked};
 use crate::delegation::delegation_system::resolve_mandate_authority;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::economy::business_economy_system::{
@@ -316,6 +317,13 @@ fn choose_plan<'r>(
         if owned.contains(&id) || recent_strikes.get(&id).copied().unwrap_or(0) >= strike_limit {
             continue;
         }
+        if state
+            .player_organization()
+            .is_some_and(|player| target_owner == Some(BusinessOwner::Organization(player)))
+            && rival_pressure_blocked(state, organization, district)
+        {
+            continue;
+        }
         let gain = sectors.get(&district).map_or(0, |stakes| {
             *gains.entry((district, kind)).or_insert_with(|| {
                 forecast_competitor_disruption_gain(registry, state, id, stakes).unwrap_or(0)
@@ -416,7 +424,14 @@ fn choose_plan<'r>(
         // concealed rackets or treasury balances when selecting a rival target.
         let strategic_gain = (gain.saturating_mul(100 + i128::from(prominence) * 35) / 100)
             .saturating_add(political_stake)
-            .saturating_add(predatory_gain);
+            .saturating_add(predatory_gain)
+            .saturating_add(
+                if recently_refused_protection(state, organization, district) {
+                    predatory_gain.saturating_mul(4)
+                } else {
+                    0
+                },
+            );
         candidates.push((
             Reverse(strategic_gain),
             !observed,

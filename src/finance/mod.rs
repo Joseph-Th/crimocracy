@@ -414,6 +414,30 @@ impl FinanceState {
             .collect()
     }
 
+    /// Auditable exact-minute postings for a single account, using the
+    /// persisted account-chronology index. A resolved protection contract
+    /// must never linearly scan years of unrelated business settlements.
+    pub(crate) fn transactions_for_account_at(
+        &self,
+        account: FinancialAccountId,
+        at: SimTime,
+    ) -> impl Iterator<Item = &LedgerTransactionRecord> {
+        self.transactions_by_account
+            .get(&account)
+            .into_iter()
+            .flat_map(move |transactions| {
+                transactions.range(
+                    (at, LedgerTransactionId::from_raw(0))
+                        ..=(at, LedgerTransactionId::from_raw(u32::MAX)),
+                )
+            })
+            .map(|(_, transaction)| {
+                self.transactions
+                    .get(transaction)
+                    .expect("account transaction index must reference a transaction")
+            })
+    }
+
     pub(crate) fn transactions_for_account_through(
         &self,
         account: FinancialAccountId,

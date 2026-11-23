@@ -5,11 +5,13 @@ pub mod decision_system;
 use crate::core::attention::AttentionClass;
 use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, MandateId, OperationId, OrganizationId, PoliceResponseId,
+    BusinessId, CharacterId, DecisionRequestId, MandateId, NeighborhoodId, OperationId,
+    OrganizationId, PoliceResponseId,
 };
 use crate::core::time::SimTime;
 use crate::core::version::advance_version_preflighted;
 use crate::delegation::MandateAuthority;
+use crate::finance::Money;
 use crate::recruitment::{RecruitmentApproach, RecruitmentPolicySource};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,6 +73,45 @@ impl RecruitmentApprovalContext {
     }
 }
 
+/// A local rival's time-limited demand. Resolved records preserve the
+/// protection window without a second, drifting protection state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectionDemandContext {
+    attacker: OrganizationId,
+    district: NeighborhoodId,
+    business: BusinessId,
+    amount: Money,
+}
+
+impl ProtectionDemandContext {
+    pub(crate) fn new(
+        attacker: OrganizationId,
+        district: NeighborhoodId,
+        business: BusinessId,
+        amount: Money,
+    ) -> Self {
+        Self {
+            attacker,
+            district,
+            business,
+            amount,
+        }
+    }
+
+    pub fn attacker(self) -> OrganizationId {
+        self.attacker
+    }
+    pub fn district(self) -> NeighborhoodId {
+        self.district
+    }
+    pub fn business(self) -> BusinessId {
+        self.business
+    }
+    pub fn amount(self) -> Money {
+        self.amount
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionContext {
     /// A post-entry police arrival paused an in-progress operation and leadership must
@@ -80,6 +121,7 @@ pub enum DecisionContext {
         response: PoliceResponseId,
     },
     RecruitmentApproval(RecruitmentApprovalContext),
+    ProtectionDemand(ProtectionDemandContext),
 }
 
 impl DecisionContext {
@@ -87,6 +129,7 @@ impl DecisionContext {
         match self {
             Self::OperationPoliceArrival { operation, .. } => Some(operation),
             Self::RecruitmentApproval(_) => None,
+            Self::ProtectionDemand(_) => None,
         }
     }
 
@@ -98,6 +141,9 @@ impl DecisionContext {
             Self::RecruitmentApproval(context) => DecisionPendingKey::RecruitmentApproval {
                 target_organization: context.target_organization(),
                 candidate: context.candidate(),
+            },
+            Self::ProtectionDemand(context) => DecisionPendingKey::ProtectionDemand {
+                district: context.district(),
             },
         }
     }
@@ -272,6 +318,9 @@ enum DecisionPendingKey {
         target_organization: OrganizationId,
         candidate: CharacterId,
     },
+    ProtectionDemand {
+        district: NeighborhoodId,
+    },
 }
 
 impl DecisionState {
@@ -355,6 +404,12 @@ impl DecisionState {
                 target_organization,
                 candidate,
             })
+            .copied()
+    }
+
+    pub fn pending_protection_demand(&self, district: NeighborhoodId) -> Option<DecisionRequestId> {
+        self.pending_by_context
+            .get(&DecisionPendingKey::ProtectionDemand { district })
             .copied()
     }
 

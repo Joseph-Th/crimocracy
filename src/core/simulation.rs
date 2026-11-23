@@ -326,6 +326,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // The player never signs an NPC-proposed treaty automatically.
     let territorial_standstills =
         crate::world::territory_influence::apply_due_autonomous_territory_standstills(state);
+    // Racket-backed gangs make protection demands against defenseless commercial wards
+    // before planning new surveillance or sabotage. A pending response pauses escalation
+    // from the demanding rival, but never creates criminal protection automatically.
+    decision_requests
+        .extend(crate::decisions::decision_system::apply_due_protection_demands(registry, state));
     // Rival operational planning follows economic decisions and reputation updates so current
     // commercial stakes, lawful staffing, and enforcement risk govern the next day's action.
     let autonomous_operations =

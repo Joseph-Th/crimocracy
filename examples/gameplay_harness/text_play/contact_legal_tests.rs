@@ -701,6 +701,26 @@ fn text_play_advance_pauses_for_player_custody_before_next_decision() {
     while session.state.now().as_minutes() + 1 < release_at.as_minutes() {
         run_tick(&registry, &mut session.state).unwrap();
     }
+    // This direct-tick custody fixture can now encounter a genuine rival
+    // protection demand during the long detention window. Reject such player
+    // decisions before testing the independent custody-release pause contract.
+    let demands: Vec<_> = session
+        .state
+        .decisions()
+        .pending_for_recipient(session.player)
+        .filter(|decision| {
+            matches!(
+                decision.context(),
+                crimocracy::decisions::DecisionContext::ProtectionDemand(_)
+            )
+        })
+        .map(|decision| decision.id())
+        .collect();
+    for demand in demands {
+        session
+            .execute(&format!("decide {} reject", demand.raw()))
+            .unwrap();
+    }
     let release = session.execute("advance 1h").unwrap().0;
     assert!(
         release.contains("your member was released from custody"),

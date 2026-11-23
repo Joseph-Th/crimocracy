@@ -236,7 +236,8 @@ fn validate_attempt_authority(
             let decision_record = state.decisions.get_decision(decision).ok_or_else(invalid)?;
             let approval_context = match decision_record.context() {
                 DecisionContext::RecruitmentApproval(context) => context,
-                DecisionContext::OperationPoliceArrival { .. } => return Err(invalid()),
+                DecisionContext::OperationPoliceArrival { .. }
+                | DecisionContext::ProtectionDemand(_) => return Err(invalid()),
             };
             let approval_resolution = decision_record.resolution().ok_or_else(invalid)?;
             if !recruitment_authority_snapshot_is_valid(

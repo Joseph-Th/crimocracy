@@ -179,7 +179,12 @@ fn operation_phase_batch_is_terminally_blocked(error: &OperationPhaseBatchError)
             | DecisionError::StaleOperation { .. }
             | DecisionError::StaleDecision { .. }
             | DecisionError::Delegation(_)
-            | DecisionError::Recruitment(_) => false,
+            | DecisionError::Recruitment(_)
+            | DecisionError::Finance(_)
+            | DecisionError::MissingProtectionBusiness(_)
+            | DecisionError::ProtectionNoLongerOwned(_)
+            | DecisionError::InsufficientProtectionFunds { .. }
+            | DecisionError::MissingProtectionRecipient(_) => false,
         },
     }
 }

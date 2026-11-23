@@ -161,7 +161,8 @@ impl ValidatedRecruitmentApprovalRequest {
     fn context(&self) -> RecruitmentApprovalContext {
         match self.draft.context {
             DecisionContext::RecruitmentApproval(context) => context,
-            DecisionContext::OperationPoliceArrival { .. } => {
+            DecisionContext::OperationPoliceArrival { .. }
+            | DecisionContext::ProtectionDemand(_) => {
                 unreachable!("validated recruitment approval must retain recruitment context")
             }
         }

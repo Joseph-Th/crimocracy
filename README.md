@@ -38,7 +38,7 @@ minutes and a digest of deferred alerts, including player-crew departures after
 wage shortfalls; normal advancement pauses for an enabled exception when members
 walk away. The `brief` command shows gross full-day payroll runway based on
 presently accessible wages, without assuming new income or other expenditures.
-Inspect `reports`, `people`, `counsel`, and `recovery` after advancing. Operation scheduling delays and deadlines remain
+Inspect `reports`, `people`, `counsel`, and `recovery` after advancing. A commercial empire without active local rackets or available trained enforcers now attracts **protection demands** from genuinely stronger local gangs. When a rival names your district and demands a 30-day payment, use `decisions` to inspect the requested amount and `decide <id> approve` to pay it from actual clean organization funds, or `decide <id> reject` to refuse. Payment is a real ledger transfer to the rival and deters that gang's new attacks in that ward for 30 days; refusing leaves you exposed to reconnaissance and sabotage. A financially secure organization is not automatically a defensible one. Even the two original businesses can become exposed if the player loses their local crew and a stronger rival gains a foothold. Operation scheduling delays and deadlines remain
 limited to seven days.
 
 ```powershell

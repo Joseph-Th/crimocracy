@@ -1,6 +1,11 @@
 //! Decision validation and atomic cross-subsystem commits; sibling decision state owns pending indexes.
 
+mod protection;
 mod recruitment_approval;
+
+pub(crate) use protection::{
+    apply_due_protection_demands, recently_refused_protection, rival_pressure_blocked,
+};
 
 use recruitment_approval::validate_recruitment_approval_authority_snapshot;
 pub(crate) use recruitment_approval::{
@@ -14,8 +19,8 @@ pub use recruitment_approval::{
 
 use crate::core::attention::AttentionClass;
 use crate::core::id::{
-    CharacterId, DecisionRequestId, IdExhaustionError, IdKind, OperationId, OrganizationId,
-    PoliceResponseId, RecruitmentAttemptId,
+    BusinessId, CharacterId, DecisionRequestId, IdExhaustionError, IdKind, OperationId,
+    OrganizationId, PoliceResponseId, RecruitmentAttemptId,
 };
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
@@ -29,6 +34,7 @@ use crate::decisions::{
 };
 use crate::delegation::ResponsibilityScope;
 use crate::delegation::delegation_system::DelegationError;
+use crate::finance::finance_system::{FinanceError, ValidatedLedgerTransaction};
 use crate::legal::PoliceResponseStatus;
 use crate::operations::operation_abort::{
     ValidatedOperationAbort, validate_deadline_missed_operation, validate_decision_abort_operation,
@@ -123,6 +129,14 @@ pub enum DecisionError {
         "recruitment approval authority or effective policy changed after the request was created"
     )]
     StaleRecruitmentApprovalAuthority,
+    #[error("protection demand references missing business {0}")]
+    MissingProtectionBusiness(BusinessId),
+    #[error("protection demand is no longer for your business {0}")]
+    ProtectionNoLongerOwned(BusinessId),
+    #[error("protection payment requires {needed} cents, short {missing} cents in accounted funds")]
+    InsufficientProtectionFunds { needed: i64, missing: i64 },
+    #[error("the threatening organization {0} has no usable street account")]
+    MissingProtectionRecipient(OrganizationId),
     #[error("decision {0} does not exist")]
     MissingDecision(DecisionRequestId),
     #[error("decision {0} is no longer pending")]
@@ -166,6 +180,8 @@ pub enum DecisionError {
     Delegation(#[from] DelegationError),
     #[error(transparent)]
     Recruitment(#[from] RecruitmentError),
+    #[error(transparent)]
+    Finance(#[from] FinanceError),
     #[error(transparent)]
     Operation(#[from] OperationError),
     #[error(transparent)]
@@ -537,6 +553,9 @@ enum DecisionResolutionAction {
         context: RecruitmentApprovalContext,
         attempt: Option<Box<ValidatedRecruitmentAttempt>>,
     },
+    Protection {
+        payment: Option<Box<ValidatedLedgerTransaction>>,
+    },
 }
 
 pub struct ValidatedDecisionResolution {
@@ -562,6 +581,9 @@ impl ValidatedDecisionResolution {
             DecisionResolutionAction::RecruitmentApproval { attempt, .. } => attempt
                 .as_ref()
                 .map_or_else(Vec::new, |attempt| attempt.id_budget()),
+            DecisionResolutionAction::Protection { payment } => payment
+                .as_ref()
+                .map_or_else(Vec::new, |payment| payment.id_budget()),
         }
     }
 
@@ -661,6 +683,18 @@ impl ValidatedDecisionResolution {
                     );
                     None
                 }
+            }
+            DecisionResolutionAction::Protection { payment } => {
+                if let Some(payment) = payment {
+                    payment.ensure_current(state)?;
+                    state.ids.reserve_many(&payment.id_budget())?;
+                    (*payment).commit_preflighted(state);
+                }
+                state.decisions.resolve(
+                    self.decision,
+                    build_resolution(self.response, state.now(), self.resolver),
+                );
+                None
             }
         };
         Ok(DecisionResolutionOutcome {
@@ -792,6 +826,18 @@ pub fn validate_resolve_decision(
         }
         DecisionContext::RecruitmentApproval(context) => {
             validate_recruitment_resolution_action(registry, state, decision, response, context)?
+        }
+        DecisionContext::ProtectionDemand(context) => {
+            let payment = match response {
+                DecisionResponse::Approve => Some(Box::new(
+                    protection::validate_protection_payment(state, decision, resolver, context)?,
+                )),
+                DecisionResponse::Reject => None,
+                DecisionResponse::Continue | DecisionResponse::Abort => {
+                    return Err(DecisionError::InvalidResponse { decision, response });
+                }
+            };
+            DecisionResolutionAction::Protection { payment }
         }
     };
     Ok(ValidatedDecisionResolution {

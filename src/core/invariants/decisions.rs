@@ -58,7 +58,95 @@ fn validate_decision(
         DecisionContext::RecruitmentApproval(context) => {
             validate_recruitment_approval_decision(state, decision, context)
         }
+        DecisionContext::ProtectionDemand(context) => {
+            validate_protection_demand_decision(state, decision, context)
+        }
     }
+}
+
+fn validate_protection_demand_decision(
+    state: &AppState,
+    decision: &DecisionRequestRecord,
+    context: crate::decisions::ProtectionDemandContext,
+) -> Result<(), StateValidationError> {
+    let invalid = || invalid_decision_context(decision);
+    if decision.options()
+        != &std::collections::BTreeSet::from([DecisionResponse::Approve, DecisionResponse::Reject])
+        || !(5_000..=150_000).contains(&context.amount().cents())
+        || context.attacker() == decision.recipient()
+        || state
+            .world
+            .get_organization(context.attacker())
+            .is_none_or(|organization| organization.kind() != OrganizationKind::Criminal)
+        || state
+            .world
+            .get_organization(decision.recipient())
+            .is_none_or(|organization| organization.kind() != OrganizationKind::Criminal)
+        || state
+            .world
+            .get_business(context.business())
+            .is_none_or(|shop| shop.neighborhood() != context.district())
+        || decision.status() == DecisionStatus::Cancelled
+    {
+        return Err(invalid());
+    }
+    if let Some(resolution) = decision.resolution() {
+        match resolution.response() {
+            DecisionResponse::Approve => {
+                let memo = format!("Protection payment for decision {}", decision.id().raw());
+                let matching = state
+                    .finance
+                    .accounts_for(crate::finance::FinancialOwner::Organization(
+                        context.attacker(),
+                    ))
+                    .filter(|account| account.kind() == crate::finance::AccountKind::StreetCash)
+                    .flat_map(|account| {
+                        state
+                            .finance
+                            .transactions_for_account_at(account.id(), resolution.resolved_at())
+                    })
+                    .filter(|transaction| {
+                        if transaction.memo() != memo
+                            || transaction.occurred_at() != resolution.resolved_at()
+                        {
+                            return false;
+                        }
+                        let mut paid = 0_i128;
+                        let mut collected = 0_i128;
+                        for posting in transaction.postings() {
+                            let Some(account) = state.finance.get_account(posting.account) else {
+                                return false;
+                            };
+                            match (account.owner(), account.kind()) {
+                                (
+                                    crate::finance::FinancialOwner::Organization(owner),
+                                    crate::finance::AccountKind::AccountedFunds,
+                                ) if owner == decision.recipient()
+                                    && posting.amount.cents() < 0 =>
+                                {
+                                    paid += -i128::from(posting.amount.cents());
+                                }
+                                (
+                                    crate::finance::FinancialOwner::Organization(owner),
+                                    crate::finance::AccountKind::StreetCash,
+                                ) if owner == context.attacker() && posting.amount.cents() > 0 => {
+                                    collected += i128::from(posting.amount.cents());
+                                }
+                                _ => return false,
+                            }
+                        }
+                        paid == i128::from(context.amount().cents()) && collected == paid
+                    })
+                    .count();
+                if matching != 1 {
+                    return Err(invalid());
+                }
+            }
+            DecisionResponse::Reject => {}
+            DecisionResponse::Continue | DecisionResponse::Abort => return Err(invalid()),
+        }
+    }
+    Ok(())
 }
 
 fn validate_decision_references(

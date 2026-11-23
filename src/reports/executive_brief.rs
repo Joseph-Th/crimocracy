@@ -314,6 +314,11 @@ fn decision_entities(decision: &DecisionRequestRecord) -> BTreeSet<EntityRef> {
             entities.insert(EntityRef::Character(context.candidate()));
             entities.insert(EntityRef::Mandate(context.authority().authority().mandate));
         }
+        DecisionContext::ProtectionDemand(context) => {
+            entities.insert(EntityRef::Organization(context.attacker()));
+            entities.insert(EntityRef::Neighborhood(context.district()));
+            entities.insert(EntityRef::Business(context.business()));
+        }
     }
     entities
 }

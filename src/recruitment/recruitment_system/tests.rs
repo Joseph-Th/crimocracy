@@ -2307,7 +2307,7 @@ fn save_round_trip_preserves_pending_recruitment_approval() {
             assert_eq!(context.candidate(), fixture.candidate);
             assert_eq!(context.recruiter(), fixture.recruiter);
         }
-        DecisionContext::OperationPoliceArrival { .. } => {
+        DecisionContext::OperationPoliceArrival { .. } | DecisionContext::ProtectionDemand(_) => {
             panic!("restored personnel approval changed context")
         }
     }
@@ -4003,7 +4003,7 @@ fn run_tick_surfaces_player_recruitment_pause_and_reserves_the_candidate_for_tha
             assert_eq!(context.candidate(), fixture.candidate);
             assert_eq!(context.recruiter(), fixture.recruiter);
         }
-        DecisionContext::OperationPoliceArrival { .. } => {
+        DecisionContext::OperationPoliceArrival { .. } | DecisionContext::ProtectionDemand(_) => {
             panic!("recruitment cadence surfaced the wrong decision kind")
         }
     }
@@ -4071,7 +4071,7 @@ fn approval_required_manager_prefers_the_stronger_relationship_not_the_lower_cha
         DecisionContext::RecruitmentApproval(context) => {
             assert_eq!(context.candidate(), stronger_candidate);
         }
-        DecisionContext::OperationPoliceArrival { .. } => {
+        DecisionContext::OperationPoliceArrival { .. } | DecisionContext::ProtectionDemand(_) => {
             panic!("personnel pass produced the wrong decision context")
         }
     }
