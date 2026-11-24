@@ -648,6 +648,62 @@ fn executive_command_is_a_real_bottleneck_until_an_underboss_delegates_the_crews
             .required,
         2
     );
+    // A weak intermediate supervisor cannot manage a tightly controlled branch.
+    // Resolve that branch before the executive, whose overload disappears with it.
+    let mut nested = fixture.state.clone();
+    let weak = insert_character(
+        &mut nested,
+        CharacterDraft {
+            name: "Inexperienced Supervisor".to_owned(),
+            organization: Some(fixture.organization),
+            supervisor: Some(executive),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    crate::world::world_system::validate_set_character_supervisor(
+        &nested,
+        captains[0].manager,
+        Some(weak),
+    )
+    .unwrap()
+    .commit(&mut nested)
+    .unwrap();
+    crate::world::world_system::validate_set_character_autonomy(
+        &nested,
+        fixture.organization,
+        captains[0].manager,
+        AutonomyLevel::Guided,
+    )
+    .unwrap()
+    .commit(&mut nested)
+    .unwrap();
+    let load = manager_workload(&nested, weak).unwrap();
+    assert_eq!((load.required, load.available), (2, 1));
+    nested.advance_clock(SimDuration::from_minutes(1_440));
+    let mut replay = restore_save(&registry, build_save(&registry, &nested).unwrap()).unwrap();
+    for state in [&mut nested, &mut replay] {
+        assert_eq!(
+            apply_due_overstretched_manager_suspensions(state),
+            vec![first],
+            "a child overload must not sacrifice a healthy sibling branch"
+        );
+        assert_eq!(
+            state.enterprises().get_enterprise(second).unwrap().status(),
+            EnterpriseStatus::Active
+        );
+        let load = manager_workload(state, executive).unwrap();
+        assert_eq!((load.required, load.available), (1, 1));
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&nested).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
+
     assert!(apply_due_overstretched_manager_suspensions(&mut fixture.state).is_empty());
     fixture
         .state

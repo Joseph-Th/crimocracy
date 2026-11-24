@@ -821,6 +821,35 @@ fn organized_rival_resists_public_political_expansion_without_shared_retail_sect
         .unwrap()
         .commit(&mut state)
         .unwrap();
+    let mut absent = state.clone();
+    crate::world::world_system::validate_transfer_business_ownership(
+        &absent,
+        rival_laundry,
+        BusinessOwner::Independent,
+    )
+    .unwrap()
+    .commit(&mut absent)
+    .unwrap();
+    let tick = next_day(&registry, &mut absent);
+    assert_eq!(
+        absent
+            .world()
+            .businesses_owned_by_organization(rival)
+            .filter(|shop| shop.neighborhood() == district)
+            .count(),
+        0
+    );
+    assert_eq!(tick.autonomous_operations.len(), 1);
+    assert_eq!(
+        absent
+            .operations()
+            .get_operation(tick.autonomous_operations[0])
+            .unwrap()
+            .objective()
+            .business_target(),
+        Some(competitor),
+        "political influence alone cannot give a rival a stake in an unrelated ward"
+    );
     let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
     let tick = next_day(&registry, &mut state);
     assert_eq!(tick, next_day(&registry, &mut restored));

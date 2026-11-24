@@ -359,6 +359,7 @@ fn choose_plan<'r>(
             0
         };
         let political_stake = if local_machine >= 500
+            && sectors.contains_key(&district)
             && state
                 .economy()
                 .get_business_economy(id)

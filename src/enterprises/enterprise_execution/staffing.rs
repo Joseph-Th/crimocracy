@@ -322,6 +322,24 @@ pub(crate) fn apply_due_overstretched_manager_suspensions(
             person = supervisor;
         }
     }
+    // Reconcile the deepest operating branches before their superiors. Closing
+    // a child branch may remove the superior's overload without sacrificing a
+    // healthy sibling. Character IDs alone do not encode reporting order.
+    let mut managers: Vec<_> = managers.into_iter().collect();
+    managers.sort_by_cached_key(|&manager| {
+        let mut depth = 0;
+        let mut cursor = manager;
+        while let Some(supervisor) = state
+            .world()
+            .get_character(cursor)
+            .expect("a manager belongs to a valid reporting tree")
+            .supervisor()
+        {
+            depth += 1;
+            cursor = supervisor;
+        }
+        (std::cmp::Reverse(depth), manager)
+    });
     let mut suspended = Vec::new();
     for manager in managers {
         while let Some(load) = manager_workload(state, manager) {
