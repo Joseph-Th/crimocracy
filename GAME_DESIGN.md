@@ -452,11 +452,23 @@ not be awarded for revenue alone:** it requires enough paid, independently
 accountable commanders to cover the city, with distinct durable local crews and
 redundant leadership instead of one manager nominally directing every district.
 Expansion therefore brings both wage obligations and a real need to recruit and
-delegate, not merely to open another profitable racket. Claiming the underboss
-position also requires a net spendable six-month wage reserve for the full
-command roster, excluding commercial tills and non-liquid clearing balances.
-The organization must show that it can withstand sustained disruption rather
-than relying on one unusually profitable week of racketeering.
+delegate, not merely to open another profitable racket. A city underboss is a
+dominant syndicate, not the legal owner of every property or the only gang left
+in the city. The organization must control mature, diversified street economies
+in three quarters of the districts, field proven local crews and named defenders,
+and exceed the combined rivals citywide. Even a small city needs at least 24
+available named personnel and 30 proven associates in each qualifying district.
+Two independent captains per district and a capable senior manager actually
+directing proven captains across different districts make the hierarchy substantive.
+Institutional influence means longstanding usable contacts spread across several
+civic sectors and handlers, plus actual local machine and institutional support
+in those same districts; it does not require becoming an elected politician.
+The organization must cover payroll from settled criminal earnings and hold a net
+spendable six-month named wage reserve plus a three-month buffer for the current
+active network's operating expenses, including labor, infrastructure and modeled
+disruption costs. Commercial tills, non-liquid clearing balances and projected
+future income cannot substitute for reserves. Scale should create new management,
+financial and relationship problems, not just a longer wait for a money counter.
 
 **The real constraint is managerial workload versus actual assigned people.**
 Every active racket requires a trusted named captain plus a rank-and-file crew.

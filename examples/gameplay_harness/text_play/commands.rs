@@ -231,21 +231,39 @@ impl Session<'_> {
                 writeln!(out, "  Underboss: active rackets in {} districts, {} productive mature districts ({} required); local majority and superior strength relative to rivals required",
                     standing.own_active_racket_districts, standing.established_racket_districts,
                     standing.required_underboss_districts).unwrap();
-                writeln!(out, "    Named command staff: {} / {} required; independently captained mature districts: {} / {} required ({} distinct proven active-racket managers per district, not shared across districts)",
-                    standing.key_personnel, standing.required_underboss_personnel,
+                use crimocracy::core::campaign_victory::{
+                    UNDERBOSS_ASSOCIATES_PER_DISTRICT, UNDERBOSS_CAPTAINS_PER_DISTRICT,
+                    UNDERBOSS_CONTACT_DAYS, UNDERBOSS_CONTACT_HANDLERS, UNDERBOSS_CONTACT_KINDS,
+                    UNDERBOSS_ENFORCERS_PER_DISTRICT, UNDERBOSS_LIQUID_RUNWAY_DAYS,
+                    UNDERBOSS_LOCAL_INSTITUTIONAL_SUPPORT, UNDERBOSS_LOCAL_MACHINE_INFLUENCE,
+                    UNDERBOSS_OPERATING_RUNWAY_DAYS, UNDERBOSS_RACKET_KINDS_PER_DISTRICT,
+                    UNDERBOSS_SENIOR_MANAGEMENT_RATING,
+                };
+                writeln!(out, "    Available named command staff: {} / {} required ({} on payroll); independent captains in defended districts: {} / {} required ({} proven captains per district, never shared)",
+                    standing.available_underboss_personnel, standing.required_underboss_personnel, standing.key_personnel,
                     standing.staffed_underboss_districts, standing.required_underboss_districts,
-                    crimocracy::core::campaign_victory::UNDERBOSS_CAPTAINS_PER_DISTRICT).unwrap();
-                writeln!(out, "    Proven rank-and-file associates: {} across mature rackets; economically uncontested districts with at least {} proven associates and more active associates than rivals combined: {} / {}",
-                    standing.mature_associates,
-                    crimocracy::core::campaign_victory::UNDERBOSS_ASSOCIATES_PER_DISTRICT,
+                    UNDERBOSS_CAPTAINS_PER_DISTRICT).unwrap();
+                writeln!(out, "    Proven associates: {}; uncontested districts with at least {} proven associates across {} racket kinds and more workers than all local rivals combined: {} / {}",
+                    standing.mature_associates, UNDERBOSS_ASSOCIATES_PER_DISTRICT, UNDERBOSS_RACKET_KINDS_PER_DISTRICT,
                     standing.workforce_ready_districts, standing.required_underboss_districts).unwrap();
+                writeln!(out, "    Defended mature districts with at least {} available named enforcers each: {} / {}",
+                    UNDERBOSS_ENFORCERS_PER_DISTRICT, standing.defended_underboss_districts, standing.required_underboss_districts).unwrap();
+                writeln!(out, "    Fully backed districts: {} / {} required (same defended and independently commanded districts, with {} machine influence and {} institutional support each; see 'campaign')",
+                    standing.influential_underboss_districts, standing.required_underboss_districts,
+                    UNDERBOSS_LOCAL_MACHINE_INFLUENCE, UNDERBOSS_LOCAL_INSTITUTIONAL_SUPPORT).unwrap();
+                writeln!(out, "    Senior commanders: {} / 1 required (non-boss delegated manager, Management {}+, two proven direct-report captains in different qualifying districts)",
+                    standing.senior_underboss_commands, UNDERBOSS_SENIOR_MANAGEMENT_RATING).unwrap();
+                writeln!(out, "    Institutional reach: {} / {} contact kinds (legal, political, labor, professional); {} / {} independent handlers; active usable contacts held at least {} days",
+                    standing.underboss_contact_kinds, UNDERBOSS_CONTACT_KINDS,
+                    standing.underboss_contact_handlers, UNDERBOSS_CONTACT_HANDLERS, UNDERBOSS_CONTACT_DAYS).unwrap();
+                out.push_str("    Citywide, your mature rackets and proven workforce must exceed all rivals combined, with a free executive leader. Rival positions require reconnaissance.\n");
                 writeln!(out, "    Mature racket income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.racket_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.racket_self_sufficient { "yes" } else { "no" }).unwrap();
-                writeln!(out, "    Underboss operating reserve: {} / {} cents ({} days of named crew payroll, net of treasury deficits)",
+                writeln!(out, "    Underboss operating reserve: {} / {} cents ({} days of named payroll plus {} days of current racket costs at maximum modeled heat: {} cents; net of treasury deficits)",
                     standing.underboss_liquid_reserve.cents(),
                     standing.required_underboss_liquid_reserve.cents(),
-                    crimocracy::core::campaign_victory::UNDERBOSS_LIQUID_RUNWAY_DAYS).unwrap();
+                    UNDERBOSS_LIQUID_RUNWAY_DAYS, UNDERBOSS_OPERATING_RUNWAY_DAYS, standing.underboss_operating_buffer.cents()).unwrap();
                 out.push_str("    A captain must direct 20 profitable settlements in 30 days; associate strength must have operated for 20 profitable cycles. Named personnel lead rank-and-file workers, whose compensation is paid through racket operating costs.\n");
                 writeln!(out, "  Underboss rackets require 90 days of operation; mayoral businesses require 1080 days of ownership. Both require 20 profitable settlements in the last 30 days, a settlement within 7 days, and 30-day net income sufficient for one crew member's daily wage ({} cents/day).",
                     self.registry.upkeep().per_member_daily().cents()).unwrap();

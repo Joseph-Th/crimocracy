@@ -1373,6 +1373,76 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         .commit(&mut city.state)
         .unwrap();
     }
+    use crate::contacts::contact_system::{
+        InstitutionalContactDraft, validate_establish_contact, validate_terminate_contact,
+    };
+    use crate::enterprises::enterprise_execution::validate_staff_enterprise;
+    use crate::world::world_system::validate_set_character_supervisor;
+
+    let lieutenant = city
+        .state
+        .enterprises()
+        .get_enterprise(city.starter_racket)
+        .unwrap()
+        .manager();
+    validate_staff_enterprise(&city.state, city.starter_racket, 6)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    // Actual established civic relationships, with more than one current handler.
+    let mut contacts = Vec::new();
+    for (kind, handler) in [
+        (OrganizationKind::LegalServices, lieutenant),
+        (OrganizationKind::Political, city.boss),
+        (OrganizationKind::Labor, city.boss),
+    ] {
+        let institution = city
+            .state
+            .world()
+            .organizations()
+            .find(|org| org.kind() == kind)
+            .unwrap()
+            .id();
+        let establishment = city
+            .state
+            .world()
+            .characters_in_organization(institution)
+            .find_map(|official| {
+                validate_establish_contact(
+                    &city.state,
+                    InstitutionalContactDraft {
+                        sponsor: city.player,
+                        handler,
+                        contact: official.id(),
+                    },
+                )
+                .ok()
+            })
+            .expect("generated crew has a real connection to this institution");
+        contacts.push(establishment.commit(&mut city.state).unwrap());
+    }
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .underboss_contact_kinds,
+        0
+    );
+    let senior = insert_character(
+        &mut city.state,
+        CharacterDraft {
+            name: "Senior district coordinator".into(),
+            organization: Some(city.player),
+            supervisor: Some(city.boss),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(90).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
     // Independent profitable captains, rather than one omnipresent manager,
     // must be answerable for each long-established district foothold.
     for (index, district) in [home, empty_districts[0], empty_districts[1]]
@@ -1384,11 +1454,11 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
             CharacterDraft {
                 name: format!("Independent district captain {index}"),
                 organization: Some(city.player),
-                supervisor: Some(city.boss),
+                supervisor: Some(senior),
                 autonomy: AutonomyLevel::Delegated,
                 capabilities: BTreeMap::from([(
                     CapabilityKind::Management,
-                    Rating::try_new(95).unwrap(),
+                    Rating::try_new(100).unwrap(),
                 )]),
                 traits: BTreeSet::new(),
                 drives: BTreeMap::new(),
@@ -1401,7 +1471,10 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
             MandateDraft {
                 organization: city.player,
                 manager: captain,
-                scopes: BTreeSet::from([scope]),
+                scopes: BTreeSet::from([
+                    scope,
+                    ResponsibilityScope::Function(ResponsibilityFunction::Political),
+                ]),
                 standing_orders: BTreeMap::new(),
                 budget: None,
             },
@@ -1409,59 +1482,65 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         .unwrap()
         .commit(&mut city.state)
         .unwrap();
-        let venue = insert_business(
-            &registry,
-            &mut city.state,
-            BusinessDraft {
-                name: format!("Independent district front {index}"),
-                kind: BusinessKind::Hospitality,
-                functions: BTreeSet::from([
-                    BusinessFunction::CashIntensive,
-                    BusinessFunction::MeetingSpace,
-                    BusinessFunction::CustomerAccess,
-                ]),
-                neighborhood: district,
-                owner: BusinessOwner::Organization(city.player),
-            },
-        )
-        .unwrap();
-        let settlement = insert_account(
-            &mut city.state,
-            FinancialAccountDraft {
-                owner: FinancialOwner::Organization(city.player),
-                kind: AccountKind::Settlement,
-            },
-        )
-        .unwrap();
-        let second_racket = validate_establish_enterprise(
-            &registry,
-            &city.state,
-            EnterpriseDraft {
-                kind: EnterpriseKind::Gambling,
-                organization: city.player,
-                authority: MandateAuthority {
-                    mandate,
-                    manager: captain,
-                    scope,
+        for slot in 0..2 {
+            let venue = insert_business(
+                &registry,
+                &mut city.state,
+                BusinessDraft {
+                    name: format!("Independent district front {index}-{slot}"),
+                    kind: BusinessKind::Hospitality,
+                    functions: BTreeSet::from([
+                        BusinessFunction::CashIntensive,
+                        BusinessFunction::MeetingSpace,
+                        BusinessFunction::CustomerAccess,
+                    ]),
+                    neighborhood: district,
+                    owner: BusinessOwner::Organization(city.player),
                 },
-                location: EnterpriseLocation::Business(venue),
-                supporting_businesses: BTreeSet::new(),
-                cash_account: cash,
-                settlement_account: settlement,
-            },
-        )
-        .unwrap()
-        .commit(&mut city.state)
-        .unwrap();
-        // Field strength must actually earn its way into territorial standing.
-        crate::enterprises::enterprise_execution::validate_staff_enterprise(
-            &city.state,
-            second_racket,
-            if index == 0 { 7 } else { 8 },
-        )
-        .unwrap()
-        .commit(&mut city.state)
-        .unwrap();
+            )
+            .unwrap();
+            let settlement = insert_account(
+                &mut city.state,
+                FinancialAccountDraft {
+                    owner: FinancialOwner::Organization(city.player),
+                    kind: AccountKind::Settlement,
+                },
+            )
+            .unwrap();
+            let (kind, workers) = if index == 0 {
+                if slot == 0 {
+                    (EnterpriseKind::Gambling, 12)
+                } else {
+                    (EnterpriseKind::Protection, 12)
+                }
+            } else {
+                (EnterpriseKind::Gambling, 13)
+            };
+            let racket = validate_establish_enterprise(
+                &registry,
+                &city.state,
+                EnterpriseDraft {
+                    kind,
+                    organization: city.player,
+                    authority: MandateAuthority {
+                        mandate,
+                        manager: captain,
+                        scope,
+                    },
+                    location: EnterpriseLocation::Business(venue),
+                    supporting_businesses: BTreeSet::new(),
+                    cash_account: cash,
+                    settlement_account: settlement,
+                },
+            )
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+            validate_staff_enterprise(&city.state, racket, workers)
+                .unwrap()
+                .commit(&mut city.state)
+                .unwrap();
+        }
     }
     let standing = progress(&registry, &city.state).unwrap();
     assert_eq!(standing.own_active_racket_districts, 3);
@@ -1553,9 +1632,12 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     let established = progress(&registry, &city.state).unwrap();
     assert!(established.established_racket_districts >= established.required_underboss_districts);
     assert_eq!(established.workforce_ready_districts, 3);
-    assert!(established.mature_associates >= 36);
-    assert_eq!(established.staffed_underboss_districts, 3);
-    assert_eq!(established.required_underboss_personnel, 14);
+    assert!(established.mature_associates >= 90);
+    assert_eq!(established.defended_underboss_districts, 0);
+    assert_eq!(established.staffed_underboss_districts, 0);
+    assert_eq!(established.required_underboss_personnel, 24);
+    assert_eq!(established.underboss_contact_kinds, 3);
+    assert_eq!(established.underboss_contact_handlers, 2);
     assert!(established.key_personnel < established.required_underboss_personnel);
     assert!(established.racket_self_sufficient);
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
@@ -1570,11 +1652,35 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         before,
         bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
     );
+    // The same successful operations cannot claim command without named
+    // defenders. Add the actual capabilities consumed by local_defensive_force.
+    for index in 0..9 {
+        insert_character(
+            &mut city.state,
+            CharacterDraft {
+                name: format!("District defensive specialist {index}"),
+                organization: Some(city.player),
+                supervisor: Some(city.boss),
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Violence,
+                    Rating::try_new(75).unwrap(),
+                )]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    }
+    let staffed = progress(&registry, &city.state).unwrap();
+    assert_eq!(staffed.defended_underboss_districts, 3);
+    assert_eq!(staffed.staffed_underboss_districts, 3);
+    assert!(staffed.senior_underboss_commands > 0);
     hire_additional_staff(
         &mut city.state,
         city.player,
         city.boss,
-        established.required_underboss_personnel - established.key_personnel,
+        staffed.required_underboss_personnel - staffed.key_personnel,
     );
     let ready = progress(&registry, &city.state).unwrap();
     assert_eq!(ready.key_personnel, ready.required_underboss_personnel);
@@ -1601,7 +1707,7 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     crate::enterprises::enterprise_execution::validate_staff_enterprise(
         &instant_hiring,
         home_expansion,
-        8,
+        13,
     )
     .unwrap()
     .commit(&mut instant_hiring)
@@ -1752,13 +1858,111 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     let cash = progress(&registry, &city.state).unwrap();
     assert_eq!(
         cash.required_underboss_liquid_reserve.cents(),
-        cash.daily_payroll.cents() * UNDERBOSS_LIQUID_RUNWAY_DAYS as i64,
+        cash.daily_payroll.cents() * UNDERBOSS_LIQUID_RUNWAY_DAYS as i64
+            + cash.underboss_operating_buffer.cents(),
     );
-    // This deliberately profitable deterministic fixture already saved enough cash
-    // after ninety unsettled payroll days. Move the actual liquid reserves to
-    // nonspendable clearing in a parallel state: the command and mature force
-    // stay intact, but a hollow treasury can no longer claim citywide control.
-    assert!(cash.underboss_liquid_reserve >= cash.required_underboss_liquid_reserve);
+    assert!(cash.underboss_operating_buffer > Money::ZERO);
+    // Capitalize the scaled command through the ledger, then isolate the
+    // additional authority/relationship/reserve gates on the same viable state.
+    use crate::politics::political_system::{validate_civic_initiative, validate_invest_influence};
+    use crate::politics::{CivicInitiative, INFLUENCE_COST_PER_POINT};
+    let influence_cost = i64::from(UNDERBOSS_LOCAL_MACHINE_INFLUENCE) * INFLUENCE_COST_PER_POINT;
+    let civic_cost = CivicInitiative::LaborCoalition.cost_cents();
+    let shortfall = (cash.required_underboss_liquid_reserve.cents()
+        - cash.underboss_liquid_reserve.cents())
+    .max(0);
+    fund(
+        &mut city.state,
+        city.player,
+        shortfall + 3 * (influence_cost + civic_cost),
+    );
+    let without_leverage = progress(&registry, &city.state).unwrap();
+    assert_eq!(without_leverage.staffed_underboss_districts, 3);
+    assert_eq!(without_leverage.influential_underboss_districts, 0);
+    assert!(
+        without_leverage.underboss_liquid_reserve
+            >= without_leverage.required_underboss_liquid_reserve
+    );
+    assert_eq!(
+        validate_claim_victory(&registry, &city.state, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+    for district in [home, empty_districts[0], empty_districts[1]] {
+        validate_invest_influence(&city.state, district, influence_cost)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .influential_underboss_districts,
+        0,
+        "machine influence alone does not constitute institutional leverage"
+    );
+    for district in [home, empty_districts[0], empty_districts[1]] {
+        let manager = city
+            .state
+            .delegation()
+            .active_for_scope(ResponsibilityScope::Neighborhood(district))
+            .find(|mandate| {
+                mandate.organization() == city.player
+                    && mandate.scopes().contains(&ResponsibilityScope::Function(
+                        ResponsibilityFunction::Political,
+                    ))
+            })
+            .unwrap()
+            .manager();
+        validate_civic_initiative(
+            &city.state,
+            district,
+            manager,
+            CivicInitiative::LaborCoalition,
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    }
+    let cash = progress(&registry, &city.state).unwrap();
+    assert_eq!(cash.influential_underboss_districts, 3);
+    assert!(cash.underboss_ready);
+    let mut isolated = city.state.clone();
+    validate_terminate_contact(&isolated, contacts[0])
+        .unwrap()
+        .commit(&mut isolated)
+        .unwrap();
+    let no_reach = progress(&registry, &isolated).unwrap();
+    assert_eq!(no_reach.underboss_contact_kinds, 2);
+    assert_eq!(no_reach.staffed_underboss_districts, 3);
+    assert_eq!(
+        validate_claim_victory(&registry, &isolated, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+
+    let mut flat = city.state.clone();
+    let captains = flat
+        .enterprises()
+        .active_for_organization(city.player)
+        .map(|racket| racket.manager())
+        .collect::<BTreeSet<_>>();
+    for captain in captains {
+        if flat.world().get_character(captain).unwrap().supervisor() != Some(city.boss) {
+            validate_set_character_supervisor(&flat, captain, Some(city.boss))
+                .unwrap()
+                .commit(&mut flat)
+                .unwrap();
+        }
+    }
+    let flat_progress = progress(&registry, &flat).unwrap();
+    assert_eq!(flat_progress.staffed_underboss_districts, 3);
+    assert_eq!(flat_progress.senior_underboss_commands, 0);
+    assert_eq!(
+        validate_claim_victory(&registry, &flat, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+    // Holding only the former six-month payroll reserve is insufficient when
+    // the current network also has real wages and operating expenses.
+    let payroll_only = cash.daily_payroll.cents() * UNDERBOSS_LIQUID_RUNWAY_DAYS as i64;
     let mut unfunded = city.state.clone();
     let sources = unfunded
         .finance()
@@ -1774,9 +1978,7 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
             (amount > Money::ZERO).then_some((account.id(), amount))
         })
         .collect::<Vec<_>>();
-    let total = sources.iter().fold(Money::ZERO, |sum, (_, amount)| {
-        sum.checked_add(*amount).unwrap()
-    });
+    let total = Money::from_cents(cash.underboss_liquid_reserve.cents() - payroll_only);
     let sink = insert_account(
         &mut unfunded,
         FinancialAccountDraft {
@@ -1785,13 +1987,19 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         },
     )
     .unwrap();
-    let mut postings = sources
-        .iter()
-        .map(|(account, amount)| LedgerPosting {
-            account: *account,
-            amount: amount.checked_neg().unwrap(),
-        })
-        .collect::<Vec<_>>();
+    let mut remaining = total;
+    let mut postings = Vec::new();
+    for (account, balance) in sources {
+        let amount = remaining.min(balance);
+        if amount > Money::ZERO {
+            postings.push(LedgerPosting {
+                account,
+                amount: amount.checked_neg().unwrap(),
+            });
+            remaining = remaining.checked_sub(amount).unwrap();
+        }
+    }
+    assert_eq!(remaining, Money::ZERO);
     postings.push(LedgerPosting {
         account: sink,
         amount: total,
@@ -1814,6 +2022,7 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         cash.staffed_underboss_districts
     );
     assert_eq!(depleted.racket_daily_net, cash.racket_daily_net);
+    assert_eq!(depleted.underboss_liquid_reserve.cents(), payroll_only);
     assert!(depleted.underboss_liquid_reserve < depleted.required_underboss_liquid_reserve);
     let before = bincode::serialize(&build_save(&registry, &unfunded).unwrap()).unwrap();
     assert_eq!(
@@ -1881,10 +2090,10 @@ fn established_crews_must_outnumber_combined_rivals_not_only_win_a_plurality() {
 
 #[test]
 fn city_command_posts_cannot_be_filled_twice_by_the_same_manager() {
-    assert_eq!(required_underboss_personnel(2), 14);
-    assert_eq!(required_underboss_personnel(3), 14);
-    assert_eq!(required_underboss_personnel(6), 23);
-    assert_eq!(required_underboss_personnel(12), 41);
+    assert_eq!(required_underboss_personnel(2), 24);
+    assert_eq!(required_underboss_personnel(3), 24);
+    assert_eq!(required_underboss_personnel(6), 42);
+    assert_eq!(required_underboss_personnel(12), 78);
     let first = NeighborhoodId::from_raw(1);
     let second = NeighborhoodId::from_raw(2);
     let third = NeighborhoodId::from_raw(3);

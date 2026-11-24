@@ -994,10 +994,14 @@ fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
     let progress = session.execute("victory").unwrap().0;
     assert!(
-        progress.contains("Named command staff: 4 / 14 required"),
+        progress.contains("Available named command staff: 4 / 24 required"),
         "{progress}"
     );
-    assert!(progress.contains("independently captained mature districts"));
+    assert!(progress.contains("independent captains in defended districts"));
+    assert!(progress.contains("Fully backed districts: 0 / 2 required"));
+    assert!(progress.contains("Institutional reach: 0 / 3 contact kinds"));
+    assert!(progress.contains("Senior commanders: 0 / 1 required"));
+    assert!(progress.contains("180 days of named payroll plus 90 days of current racket costs"));
     let initial = session.execute("prospects").unwrap().0;
     assert!(initial.contains("Danny Ferro"));
     assert!(
@@ -1026,7 +1030,7 @@ fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_
             .execute("victory")
             .unwrap()
             .0
-            .contains("Named command staff: 5 / 14 required")
+            .contains("Available named command staff: 5 / 24 required")
     );
     session.state =
         restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
@@ -1061,7 +1065,7 @@ fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_
             .execute("victory")
             .unwrap()
             .0
-            .contains("Named command staff: 6 / 14 required")
+            .contains("Available named command staff: 6 / 24 required")
     );
 }
 
@@ -1168,7 +1172,7 @@ fn text_play_staffing_is_authoritative_financially_visible_and_persistent() {
             .execute("victory")
             .unwrap()
             .0
-            .contains("Proven rank-and-file associates: 0")
+            .contains("Proven associates: 0")
     );
 }
 
