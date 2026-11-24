@@ -297,6 +297,142 @@ fn specialist_requires_delegated_political_manager_and_paid_salary_to_grow() {
 }
 
 #[test]
+fn permanent_campaign_offices_need_distinct_supervisors_and_reserve_real_contract_payroll() {
+    use crate::core::campaign_victory::{UNDERBOSS_OPERATING_RUNWAY_DAYS, progress};
+    use crate::politics::political_system::campaign_salary_commitment;
+    use crate::world::world_system::validate_set_character_autonomy;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(5_611)).unwrap();
+    let district = city.home;
+    let other = city
+        .state
+        .world()
+        .neighborhoods()
+        .find(|ward| ward.id() != district)
+        .unwrap()
+        .id();
+    fund(&mut city.state, city.player, 3_000_000);
+    let manager = city
+        .state
+        .enterprises()
+        .get_enterprise(city.starter_racket)
+        .unwrap()
+        .manager();
+    let mandate = city.state.delegation().active_for_manager(manager).unwrap();
+    let mut scopes = mandate.scopes().clone();
+    scopes.insert(ResponsibilityScope::Function(
+        ResponsibilityFunction::Political,
+    ));
+    scopes.insert(ResponsibilityScope::Neighborhood(other));
+    validate_revise_mandate(
+        &city.state,
+        mandate.id(),
+        MandateRevisionDraft {
+            scopes,
+            standing_orders: mandate.standing_orders().clone(),
+            budget: mandate.budget(),
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    validate_invest_influence(&city.state, district, INFLUENCE_COST_PER_POINT)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let baseline = progress(&registry, &city.state).unwrap();
+    let held =
+        validate_hire_specialist(&city.state, other, manager, SpecialistKind::Organizer).unwrap();
+    validate_hire_specialist(&city.state, district, manager, SpecialistKind::Strategist)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        held.commit(&mut city.state).err(),
+        Some(PoliticalError::Stale)
+    );
+    assert_eq!(
+        validate_hire_specialist(&city.state, other, manager, SpecialistKind::Organizer).err(),
+        Some(PoliticalError::ManagerOfficeConflict)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+    validate_hire_specialist(&city.state, district, manager, SpecialistKind::Organizer)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let salary = Money::from_cents(
+        SpecialistKind::Strategist.daily_salary() + SpecialistKind::Organizer.daily_salary(),
+    );
+    let commitment = campaign_salary_commitment(&city.state, city.player);
+    assert_eq!(commitment.contracted, salary);
+    assert_eq!(commitment.payable, salary);
+    let expanded = progress(&registry, &city.state).unwrap();
+    assert_eq!(expanded.campaign_daily_payroll, salary);
+    assert_eq!(
+        expanded.underboss_campaign_buffer.cents(),
+        salary.cents() * UNDERBOSS_OPERATING_RUNWAY_DAYS as i64
+    );
+    assert_eq!(
+        expanded.required_underboss_liquid_reserve.cents(),
+        baseline.required_underboss_liquid_reserve.cents()
+            + expanded.underboss_campaign_buffer.cents()
+    );
+
+    // Dormant offices earn no salary or influence, but their contractual
+    // reserve remains until the organization actually releases the staff.
+    validate_set_character_autonomy(&city.state, city.player, manager, AutonomyLevel::Tight)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let inactive = campaign_salary_commitment(&city.state, city.player);
+    assert_eq!(inactive.contracted, salary);
+    assert_eq!(inactive.payable, Money::ZERO);
+    let spent = city
+        .state
+        .politics()
+        .organization(city.player)
+        .unwrap()
+        .spent_cents();
+    advance_day(&registry, &mut city.state);
+    assert_eq!(
+        city.state
+            .politics()
+            .organization(city.player)
+            .unwrap()
+            .spent_cents(),
+        spent
+    );
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(campaign_salary_commitment(&restored, city.player), inactive);
+    assert_eq!(
+        progress(&registry, &restored)
+            .unwrap()
+            .underboss_campaign_buffer,
+        expanded.underboss_campaign_buffer
+    );
+    validate_set_character_autonomy(&city.state, city.player, manager, AutonomyLevel::Delegated)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    dismiss_specialist(&mut city.state, district, SpecialistKind::Strategist).unwrap();
+    dismiss_specialist(&mut city.state, district, SpecialistKind::Organizer).unwrap();
+    validate_hire_specialist(&city.state, other, manager, SpecialistKind::Organizer)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert_eq!(
+        campaign_salary_commitment(&city.state, city.player).contracted,
+        Money::from_cents(SpecialistKind::Organizer.daily_salary())
+    );
+    validate_state_against_registry(&registry, &city.state).unwrap();
+}
+
+#[test]
 fn purchased_machine_influence_alone_cannot_win_a_ward_and_rivals_can_contest_it() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(6_217)).unwrap();

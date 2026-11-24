@@ -71,11 +71,11 @@ fn real_text_campaign_orders_expose_funded_civic_work_and_official_election_sche
             postings: vec![
                 LedgerPosting {
                     account: funding,
-                    amount: Money::from_cents(200_000),
+                    amount: Money::from_cents(500_000),
                 },
                 LedgerPosting {
                     account: clearing,
-                    amount: Money::from_cents(-200_000),
+                    amount: Money::from_cents(-500_000),
                 },
             ],
             authorization: None,
@@ -120,8 +120,46 @@ fn real_text_campaign_orders_expose_funded_civic_work_and_official_election_sche
         campaign.contains("machine 11/1000 | grassroots 70/1000"),
         "{campaign}"
     );
+    session.execute("mandate 3 add district-2").unwrap();
+    session
+        .execute("hire-specialist district-1 char-9 organizer")
+        .unwrap();
+    let active = session.execute("campaign").unwrap().0;
+    assert!(
+        active.contains(
+            "Campaign contracts: 3000 cents/day total | 3000 cents/day currently payable"
+        ),
+        "{active}"
+    );
+    assert!(active.contains("funded daily"), "{active}");
+    let before_conflict =
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let rejection = session
+        .execute("hire-specialist district-2 char-9 organizer")
+        .err()
+        .unwrap();
+    assert!(
+        rejection.contains("already supervises specialists in another district"),
+        "{rejection}"
+    );
+    assert_eq!(
+        before_conflict,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    session.execute("autonomy 9 tight").unwrap();
+    let paused = session.execute("campaign").unwrap().0;
+    assert!(
+        paused.contains("Campaign contracts: 3000 cents/day total | 0 cents/day currently payable"),
+        "{paused}"
+    );
+    assert!(paused.contains("paused: manager unavailable"), "{paused}");
+    let victory = session.execute("victory").unwrap().0;
+    assert!(
+        victory.contains("campaign contracts: 3000 cents/day, 270000 cents reserved"),
+        "{victory}"
+    );
     let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
     validate_invariants(&restored);
     session.state = restored;
-    assert_eq!(session.execute("campaign").unwrap().0, campaign);
+    assert_eq!(session.execute("campaign").unwrap().0, paused);
 }

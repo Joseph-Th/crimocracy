@@ -465,10 +465,17 @@ civic sectors and handlers, plus actual local machine and institutional support
 in those same districts; it does not require becoming an elected politician.
 The organization must cover payroll from settled criminal earnings and hold a net
 spendable six-month named wage reserve plus a three-month buffer for the current
-active network's operating expenses, including labor, infrastructure and modeled
-disruption costs. Commercial tills, non-liquid clearing balances and projected
-future income cannot substitute for reserves. Scale should create new management,
-financial and relationship problems, not just a longer wait for a money counter.
+active network's operating expenses, including labor, infrastructure, modeled
+disruption costs and retained civic specialist salaries. Commercial tills,
+non-liquid clearing balances and projected future income cannot substitute for
+reserves. Recent net losses remain part of the operating record even after a
+venture closes or its title changes; only eligible mature ventures contribute
+positive standing. Scale should create new management, financial and relationship
+problems, not just a longer wait for a money counter. A permanent civic office
+needs a local supervisor rather than a broadly scoped name appearing in every
+ward. Its paid staff stop producing support when the supervisor is unavailable.
+Political and financial district posts must be allocated as complete independent
+teams rather than through two unrelated personnel lists.
 
 **The real constraint is managerial workload versus actual assigned people.**
 Every active racket requires a trusted named captain plus a rank-and-file crew.

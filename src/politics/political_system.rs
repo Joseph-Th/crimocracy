@@ -62,6 +62,10 @@ pub enum PoliticalError {
         "specialist requires an active, available, independently delegated political manager in that district"
     )]
     InvalidManager,
+    #[error(
+        "this manager already supervises specialists in another district; dismiss that office's contracts before assigning a new office"
+    )]
+    ManagerOfficeConflict,
     #[error("campaign spending would overflow its recorded lifetime budget")]
     BudgetOverflow,
     #[error("campaign order is stale")]
@@ -106,6 +110,69 @@ pub fn eligible_manager(
                     ResponsibilityFunction::Political,
                 ))
         })
+}
+
+/// A standing mandate may cover several wards, but an ongoing political office
+/// requires a local supervisor. Contracts retain their assigned office until
+/// explicitly dismissed, even if the supervisor temporarily loses authority.
+pub fn campaign_office_available(
+    state: &AppState,
+    owner: OrganizationId,
+    district: NeighborhoodId,
+    manager: CharacterId,
+) -> bool {
+    state.politics().organization(owner).is_none_or(|campaign| {
+        campaign.districts.iter().all(|(&other, office)| {
+            other == district
+                || !office
+                    .specialists
+                    .values()
+                    .any(|&assigned| assigned == manager)
+        })
+    })
+}
+
+/// Contract output and salary use exactly the same live availability rule.
+/// A conflicting assignment in a restored older state produces neither wages
+/// nor support until its contracts are reorganized.
+pub fn specialist_manager_available(
+    state: &AppState,
+    owner: OrganizationId,
+    district: NeighborhoodId,
+    manager: CharacterId,
+) -> bool {
+    eligible_manager(state, owner, district, manager)
+        && campaign_office_available(state, owner, district, manager)
+}
+
+/// Full daily contractual salary and the currently payable subset, before
+/// affordability is checked at the daily settlement. Both use authored wages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CampaignSalaryCommitment {
+    pub contracted: Money,
+    pub payable: Money,
+}
+
+pub fn campaign_salary_commitment(
+    state: &AppState,
+    owner: OrganizationId,
+) -> CampaignSalaryCommitment {
+    let mut contracted = 0_i64;
+    let mut payable = 0_i64;
+    if let Some(campaign) = state.politics().organization(owner) {
+        for (&district, office) in &campaign.districts {
+            for (&kind, &manager) in &office.specialists {
+                contracted = contracted.saturating_add(kind.daily_salary());
+                if specialist_manager_available(state, owner, district, manager) {
+                    payable = payable.saturating_add(kind.daily_salary());
+                }
+            }
+        }
+    }
+    CampaignSalaryCommitment {
+        contracted: Money::from_cents(contracted),
+        payable: Money::from_cents(payable),
+    }
 }
 
 /// The next ballot must actually fit on the finite simulation clock. Returning
@@ -503,6 +570,9 @@ pub fn validate_hire_specialist(
     if !eligible_manager(state, owner, district, manager) {
         return Err(PoliticalError::InvalidManager);
     }
+    if !campaign_office_available(state, owner, district, manager) {
+        return Err(PoliticalError::ManagerOfficeConflict);
+    }
     if state
         .politics()
         .organization(owner)
@@ -539,7 +609,7 @@ impl ValidatedPoliticalOrder {
                 return Err(PoliticalError::Stale);
             }
             CampaignAction::Hire(kind, manager)
-                if !eligible_manager(state, self.owner, self.district, manager)
+                if !specialist_manager_available(state, self.owner, self.district, manager)
                     || campaign
                         .and_then(|c| c.district(self.district))
                         .is_some_and(|d| d.specialists.contains_key(&kind)) =>
@@ -734,7 +804,7 @@ fn pay_campaign_staff(state: &mut AppState) {
     for (owner, district, specialists) in offices {
         let active = specialists
             .into_iter()
-            .filter(|(_, manager)| eligible_manager(state, owner, district, *manager))
+            .filter(|(_, manager)| specialist_manager_available(state, owner, district, *manager))
             .map(|(kind, manager)| (kind, specialist_output(state, manager, kind)))
             .collect::<Vec<_>>();
         let cents: i64 = active.iter().map(|(kind, _)| kind.daily_salary()).sum();

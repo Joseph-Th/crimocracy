@@ -188,10 +188,12 @@ impl Session<'_> {
                         "needs two different established business kinds"
                     } else if !district.economically_qualified {
                         "mature net storefront income below one member's 30-day wages"
-                    } else if district.steward.is_none() {
+                    } else if district.available_stewards == 0 {
                         "needs an independent eligible political district delegate"
-                    } else if district.financial_steward.is_none() {
+                    } else if district.available_financial_stewards == 0 {
                         "needs a separate eligible financial district director"
+                    } else if district.steward.is_none() || district.financial_steward.is_none() {
+                        "no independent complete two-person team in the citywide assignment"
                     } else {
                         "not locally qualified"
                     };
@@ -260,10 +262,12 @@ impl Session<'_> {
                 writeln!(out, "    Mature racket income: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
                     standing.racket_daily_net.cents(), standing.daily_payroll.cents(),
                     if standing.racket_self_sufficient { "yes" } else { "no" }).unwrap();
-                writeln!(out, "    Underboss operating reserve: {} / {} cents ({} days of named payroll plus {} days of current racket costs at maximum modeled heat: {} cents; net of treasury deficits)",
+                writeln!(out, "    Underboss operating reserve: {} / {} cents ({} days of named payroll plus {} days of current racket costs at maximum modeled heat: {} cents; campaign contracts: {} cents/day, {} cents reserved for same operating runway; net of treasury deficits)",
                     standing.underboss_liquid_reserve.cents(),
                     standing.required_underboss_liquid_reserve.cents(),
-                    UNDERBOSS_LIQUID_RUNWAY_DAYS, UNDERBOSS_OPERATING_RUNWAY_DAYS, standing.underboss_operating_buffer.cents()).unwrap();
+                    UNDERBOSS_LIQUID_RUNWAY_DAYS, UNDERBOSS_OPERATING_RUNWAY_DAYS, standing.underboss_operating_buffer.cents(),
+                    standing.campaign_daily_payroll.cents(), standing.underboss_campaign_buffer.cents()).unwrap();
+                out.push_str("    Both route income figures deduct recent net losses from ventures that are not eligible to contribute positive mature earnings, even after closure or title transfer.\n");
                 out.push_str("    A captain must direct 20 profitable settlements in 30 days; associate strength must have operated for 20 profitable cycles. Named personnel lead rank-and-file workers, whose compensation is paid through racket operating costs.\n");
                 writeln!(out, "  Underboss rackets require 90 days of operation; mayoral businesses require 1080 days of ownership. Both require 20 profitable settlements in the last 30 days, a settlement within 7 days, and 30-day net income sufficient for one crew member's daily wage ({} cents/day).",
                     self.registry.upkeep().per_member_daily().cents()).unwrap();

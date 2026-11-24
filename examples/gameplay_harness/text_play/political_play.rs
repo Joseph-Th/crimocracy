@@ -4,9 +4,10 @@ use crimocracy::core::campaign_victory::{
     VICTORY_PROFITABLE_CYCLES, political_business_progress, political_district_progress,
 };
 use crimocracy::politics::political_system::{
-    daily_campaign_erosion, dismiss_specialist, initiative_available, next_municipal_election_day,
-    specialist_output, validate_civic_initiative, validate_hire_specialist,
-    validate_invest_influence, validate_nominate_mayor,
+    campaign_salary_commitment, daily_campaign_erosion, dismiss_specialist, initiative_available,
+    next_municipal_election_day, specialist_manager_available, specialist_output,
+    validate_civic_initiative, validate_hire_specialist, validate_invest_influence,
+    validate_nominate_mayor,
 };
 use crimocracy::politics::{CivicInitiative, SpecialistKind};
 
@@ -53,6 +54,9 @@ impl Session<'_> {
             progress.mayoral_majority_districts,
             progress.required_political_districts,
         );
+        let salaries = campaign_salary_commitment(&self.state, self.player);
+        writeln!(out, "Campaign contracts: {} cents/day total | {} cents/day currently payable before funding checks",
+            salaries.contracted.cents(), salaries.payable.cents()).unwrap();
         writeln!(
             out,
             "Next election day {} | nomination {:?} | latest election {:?}, won {}",
@@ -98,10 +102,20 @@ impl Session<'_> {
                 );
                 writeln!(out, "    Next daily erosion before specialist output: -{machine} machine, -{grassroots} grassroots, -{institutions} institutions").unwrap();
                 for (kind, manager) in office.specialists() {
-                    let (machine, grassroots, institutions) =
-                        specialist_output(&self.state, *manager, *kind);
-                    writeln!(out, "    {:?} under char-{} | salary {} cents/day | funded daily +{} machine, +{} grassroots, +{} institutions",
-                        kind, manager.raw(), kind.daily_salary(), machine, grassroots, institutions).unwrap();
+                    if specialist_manager_available(
+                        &self.state,
+                        self.player,
+                        district.id(),
+                        *manager,
+                    ) {
+                        let (machine, grassroots, institutions) =
+                            specialist_output(&self.state, *manager, *kind);
+                        writeln!(out, "    {:?} under char-{} | salary {} cents/day | funded daily +{} machine, +{} grassroots, +{} institutions",
+                            kind, manager.raw(), kind.daily_salary(), machine, grassroots, institutions).unwrap();
+                    } else {
+                        writeln!(out, "    {:?} under char-{} | contract {} cents/day | paused: manager unavailable, lacks local authority or has a conflicting office; no current salary or output",
+                            kind, manager.raw(), kind.daily_salary()).unwrap();
+                    }
                 }
             }
         }
@@ -390,7 +404,7 @@ impl Session<'_> {
                 property.recent_net.cents(), blocker,
             ).unwrap();
         }
-        out.push_str("Title age, recent profits and settlement dates are actual own records. A fresh purchase cannot inherit the previous owner's political establishment. Mandates and citywide independent-organizer matching are shown by 'victory'.");
+        out.push_str("Title age, recent profits and settlement dates are actual own records. A fresh purchase cannot inherit the previous owner's political establishment. Mandates and joint citywide two-director matching are shown by 'victory'. A permanent specialist office commits its supervisor to that district.");
         Ok(out)
     }
 }

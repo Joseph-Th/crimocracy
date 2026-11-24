@@ -5,7 +5,9 @@ use crate::core::persistence::{build_save, restore_save};
 use crate::core::simulation::{TickError, run_tick};
 use crate::core::time::SimDuration;
 use crate::delegation::delegation_system::validate_assign_mandate;
-use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
+use crate::delegation::{
+    MandateAuthority, MandateDraft, ResponsibilityFunction, ResponsibilityScope,
+};
 use crate::enterprises::enterprise_execution::{
     EnterpriseCycleRandomness, decide_enterprise_cycle, validate_enterprise_cycle_plan,
     validate_establish_enterprise, validate_retire_enterprise, validate_suspend_enterprise,
@@ -1037,6 +1039,61 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     );
     assert!(staffed.legitimate_self_sufficient);
     assert!(staffed.key_personnel >= staffed.required_political_personnel);
+
+    // Joint staffing must find the valid team when the earliest organizer is
+    // also the only finance director for the first ward. All actual mandates
+    // are revised through the production owner, rather than editing the graph.
+    let mut dual_role = city.state.clone();
+    for (manager, remove_finance) in [(managers[0], false), (finance_managers[0], true)] {
+        let mandate = dual_role.delegation().active_for_manager(manager).unwrap();
+        let mut scopes = mandate.scopes().clone();
+        if remove_finance {
+            scopes.remove(&ResponsibilityScope::Function(
+                ResponsibilityFunction::Finance,
+            ));
+            scopes.insert(ResponsibilityScope::Function(
+                ResponsibilityFunction::Political,
+            ));
+        } else {
+            scopes.insert(ResponsibilityScope::Function(
+                ResponsibilityFunction::Finance,
+            ));
+        }
+        validate_revise_mandate(
+            &dual_role,
+            mandate.id(),
+            MandateRevisionDraft {
+                scopes,
+                standing_orders: mandate.standing_orders().clone(),
+                budget: mandate.budget(),
+            },
+        )
+        .unwrap()
+        .commit(&mut dual_role)
+        .unwrap();
+    }
+    let dual_rows = political_district_progress(&registry, &dual_role).unwrap();
+    let first_ward = dual_rows
+        .iter()
+        .find(|row| row.district == districts[0])
+        .unwrap();
+    assert_eq!(first_ward.steward, Some(finance_managers[0]));
+    assert_eq!(first_ward.financial_steward, Some(managers[0]));
+    assert_eq!(first_ward.available_financial_stewards, 1);
+    assert_eq!(
+        progress(&registry, &dual_role)
+            .unwrap()
+            .staffed_political_districts,
+        districts.len()
+    );
+    let restored_dual =
+        restore_save(&registry, build_save(&registry, &dual_role).unwrap()).unwrap();
+    assert_eq!(
+        political_district_progress(&registry, &restored_dual).unwrap(),
+        dual_rows
+    );
+    validate_state_against_registry(&registry, &dual_role).unwrap();
+
     // A political delegate needs current independent authority, not a name
     // in a historical mandate or a dormant member's payroll record.
     validate_set_character_autonomy(&city.state, city.player, managers[1], AutonomyLevel::Tight)
@@ -2129,6 +2186,251 @@ fn city_command_posts_cannot_be_filled_twice_by_the_same_manager() {
     captains.insert(second, BTreeSet::from([a, c]));
     captains.insert(third, BTreeSet::from([b, d]));
     assert_eq!(staffed_racket_districts(&districts, &captains), 2);
+}
+
+#[test]
+fn recent_enterprise_losses_survive_suspension_and_retirement() {
+    let (registry, mut state, owner, boss, _) = retirement_fixture();
+    let rating = |value| Rating::try_new(value).unwrap();
+    let district = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Low-demand ward".into(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(0),
+                    commercial_activity: rating(0),
+                    illicit_demand: rating(2),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(44),
+                },
+            },
+        },
+    )
+    .unwrap();
+    let manager = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Inexperienced manager".into(),
+            organization: Some(owner),
+            supervisor: Some(boss),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let scope = ResponsibilityScope::Neighborhood(district);
+    let mandate = validate_assign_mandate(
+        &state,
+        MandateDraft {
+            organization: owner,
+            manager,
+            scopes: BTreeSet::from([scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    let enterprise = validate_establish_enterprise(
+        &registry,
+        &state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization: owner,
+            authority: MandateAuthority {
+                mandate,
+                manager,
+                scope,
+            },
+            location: EnterpriseLocation::Neighborhood(district),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: cash,
+            settlement_account: settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+    let plan = decide_enterprise_cycle(
+        &registry,
+        &state,
+        enterprise,
+        EnterpriseCycleRandomness::new(
+            -800,
+            EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+        ),
+    )
+    .unwrap();
+    validate_enterprise_cycle_plan(&state, plan)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let loss = state
+        .enterprises()
+        .latest_cycle(enterprise)
+        .unwrap()
+        .net_cash();
+    assert!(loss.cents() < -30);
+    let daily_loss = Money::from_cents(loss.cents() / VICTORY_INCOME_WINDOW_DAYS as i64);
+    assert_eq!(
+        progress(&registry, &state).unwrap().racket_daily_net,
+        daily_loss
+    );
+    validate_suspend_enterprise(&state, enterprise)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    assert_eq!(
+        progress(&registry, &state).unwrap().racket_daily_net,
+        daily_loss
+    );
+    validate_retire_enterprise(&state, enterprise)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let standing = progress(&registry, &state).unwrap();
+    assert_eq!(standing.racket_daily_net, daily_loss);
+    assert_eq!(standing.established_racket_districts, 0);
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(progress(&registry, &restored).unwrap(), standing);
+    state.advance_clock(SimDuration::from_minutes(
+        (VICTORY_INCOME_WINDOW_DAYS * DAY_MINUTES) as u32,
+    ));
+    assert_eq!(
+        progress(&registry, &state).unwrap().racket_daily_net,
+        Money::ZERO
+    );
+}
+
+#[test]
+fn recent_storefront_losses_survive_suspension_and_title_transfer() {
+    use crate::economy::BusinessEconomyDraft;
+    use crate::economy::business_economy_system::{
+        decide_business_cycle, validate_business_cycle_plan, validate_establish_business_economy,
+        validate_suspend_business_economy,
+    };
+    use crate::world::world_system::{insert_business, validate_transfer_business_ownership};
+    use crate::world::{BusinessDraft, BusinessFunction};
+
+    let (registry, mut state, owner, _, _) = retirement_fixture();
+    let rating = |value| Rating::try_new(value).unwrap();
+    let district = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Depressed Ward".into(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(5),
+                    commercial_activity: rating(5),
+                    illicit_demand: rating(5),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(95),
+                },
+            },
+        },
+    )
+    .unwrap();
+    let shop = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Loss-making warehouse".into(),
+            kind: BusinessKind::Warehouse,
+            functions: BTreeSet::from([BusinessFunction::Warehousing]),
+            neighborhood: district,
+            owner: BusinessOwner::Organization(owner),
+        },
+    )
+    .unwrap();
+    let operating = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(shop),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(shop),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_establish_business_economy(
+        &registry,
+        &state,
+        BusinessEconomyDraft {
+            business: shop,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+    let plan = decide_business_cycle(&registry, &state, shop, -500).unwrap();
+    validate_business_cycle_plan(&state, plan)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let loss = state.economy().latest_cycle(shop).unwrap().net_cash();
+    assert!(loss.cents() < -30);
+    let daily_loss = Money::from_cents(loss.cents() / VICTORY_INCOME_WINDOW_DAYS as i64);
+    assert_eq!(
+        progress(&registry, &state).unwrap().legitimate_daily_net,
+        daily_loss
+    );
+    validate_suspend_business_economy(&state, shop)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    assert_eq!(
+        progress(&registry, &state).unwrap().legitimate_daily_net,
+        daily_loss
+    );
+    validate_transfer_business_ownership(&state, shop, BusinessOwner::Independent)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let standing = progress(&registry, &state).unwrap();
+    assert_eq!(standing.legitimate_daily_net, daily_loss);
+    assert_eq!(standing.owned_operating_business_districts, 0);
+    assert_eq!(standing.established_business_districts, 0);
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(progress(&registry, &restored).unwrap(), standing);
+    state.advance_clock(SimDuration::from_minutes(
+        (VICTORY_INCOME_WINDOW_DAYS * DAY_MINUTES) as u32,
+    ));
+    assert_eq!(
+        progress(&registry, &state).unwrap().legitimate_daily_net,
+        Money::ZERO
+    );
 }
 
 #[test]
