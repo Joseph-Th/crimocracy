@@ -7,7 +7,9 @@ use crate::economy::business_economy_system::{
 };
 use crate::reports::organization_financial_report::validate_organization_financial_report;
 
-fn concurrent_cash_take_fixture() -> (Registry, AppState, OperationId, OperationId) {
+fn concurrent_cash_take_fixture(
+    second_kind: OperationKind,
+) -> (Registry, AppState, OperationId, OperationId) {
     let (registry, mut state, organization, first) = make_operation_fixture();
     let target = state
         .operations()
@@ -32,19 +34,43 @@ fn concurrent_cash_take_fixture() -> (Registry, AppState, OperationId, Operation
         },
     )
     .expect("second crew leader must validate");
+    let roles = if second_kind == OperationKind::Robbery {
+        let muscle = insert_character(
+            &mut state,
+            CharacterDraft {
+                name: "Independent Collection Crew Muscle".to_owned(),
+                organization: Some(organization),
+                supervisor: Some(second_leader),
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Violence,
+                    Rating::try_new(90).expect("capability rating must validate"),
+                )]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .expect("second crew muscle must validate");
+        BTreeMap::from([
+            (RoleKind::Coordinator, second_leader),
+            (RoleKind::Muscle, muscle),
+        ])
+    } else {
+        BTreeMap::from([(RoleKind::Coordinator, second_leader)])
+    };
     let second = validate_authorize_operation(
         &registry,
         &state,
         OperationDraft {
             title: "Second concurrent collection".to_owned(),
-            kind: OperationKind::Intimidation,
+            kind: second_kind,
             responsible_organization: organization,
             leader: second_leader,
             objective: OperationObjective::ObtainCash {
                 target: EntityRef::Business(target),
             },
             approach: OperationApproach::Intimidating,
-            roles: BTreeMap::from([(RoleKind::Coordinator, second_leader)]),
+            roles,
             intelligence: BTreeSet::new(),
             constraints: Vec::new(),
             contingencies: Vec::new(),
@@ -61,8 +87,90 @@ fn concurrent_cash_take_fixture() -> (Registry, AppState, OperationId, Operation
 }
 
 #[test]
+fn robbery_and_intimidation_share_venue_cash_depletion_and_revalidate_history() {
+    let (registry, mut state, first, robbery) =
+        concurrent_cash_take_fixture(OperationKind::Robbery);
+    let first_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        first,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("collection should resolve");
+    let robbery_plan = decide_operation_resolution(
+        &registry,
+        &state,
+        robbery,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("robbery should resolve");
+    assert_eq!(
+        first_plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Achieved
+    );
+    assert_eq!(
+        robbery_plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Achieved
+    );
+    let full_till = robbery_plan
+        .outcome
+        .cash_proceeds_plan
+        .proceeds
+        .expect("undiminished robbery should yield cash")
+        .amount();
+    let first_token = validate_operation_resolution_plan(&registry, &state, first_plan)
+        .expect("collection plan must validate");
+    let robbery_token = validate_operation_resolution_plan(&registry, &state, robbery_plan)
+        .expect("robbery plan must validate before the first collection");
+    first_token
+        .commit(&mut state)
+        .expect("collection must persist");
+    let before = bincode::serialize(&state).expect("state must serialize");
+    assert!(matches!(
+        robbery_token.commit(&mut state),
+        Err(OperationResolutionError::StaleCashProceedsContext { operation })
+            if operation == robbery
+    ));
+    assert_eq!(
+        bincode::serialize(&state).expect("state must serialize"),
+        before,
+        "an obsolete robbery valuation cannot partially mutate its settlement"
+    );
+
+    let replanned = decide_operation_resolution(
+        &registry,
+        &state,
+        robbery,
+        OperationResolutionRandomness::new(12, 0),
+    )
+    .expect("robbery should reprice after a collection");
+    assert!(replanned.outcome.cash_proceeds_plan.depleted_by_recent_take);
+    let reduced_till = replanned
+        .outcome
+        .cash_proceeds_plan
+        .proceeds
+        .expect("repriced robbery should still yield cash")
+        .amount();
+    assert!(reduced_till < full_till);
+    validate_operation_resolution_plan(&registry, &state, replanned)
+        .expect("repriced robbery must validate")
+        .commit(&mut state)
+        .expect("repriced robbery must commit");
+
+    let restored = restore_save(
+        &registry,
+        build_save(&registry, &state).expect("cross-kind cash takes should save"),
+    )
+    .expect("cross-kind depleted cash history must restore");
+    validate_state_against_registry(&registry, &restored)
+        .expect("the saved shared cash history must re-derive");
+    validate_invariants(&restored);
+}
+
+#[test]
 fn held_concurrent_cash_resolution_stales_after_first_take_without_mutation() {
-    let (registry, mut state, first, second) = concurrent_cash_take_fixture();
+    let (registry, mut state, first, second) =
+        concurrent_cash_take_fixture(OperationKind::Intimidation);
     let first_plan = decide_operation_resolution(
         &registry,
         &state,
@@ -142,7 +250,8 @@ fn held_concurrent_cash_resolution_stales_after_first_take_without_mutation() {
 
 #[test]
 fn reverse_same_minute_take_order_cannot_rewrite_prior_depletion_history() {
-    let (registry, mut state, first, second) = concurrent_cash_take_fixture();
+    let (registry, mut state, first, second) =
+        concurrent_cash_take_fixture(OperationKind::Intimidation);
     let first_plan = decide_operation_resolution(
         &registry,
         &state,

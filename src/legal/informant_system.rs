@@ -72,7 +72,7 @@ pub enum InformantError {
         investigation: InvestigationId,
     },
     #[error(
-        "information {information} already has disclosure {disclosure} in investigation {investigation}"
+        "information {information} or its originating observation already has disclosure {disclosure} in investigation {investigation}"
     )]
     DuplicateDisclosure {
         investigation: InvestigationId,
@@ -402,9 +402,8 @@ fn validate_disclosure_dependencies(
             investigation: draft.investigation,
         });
     }
-    if let Some(existing) = state
-        .legal
-        .informant_disclosure_for_case_information(draft.investigation, draft.source_information)
+    if let Some(existing) =
+        find_disclosure_of_same_observation(state, draft.investigation, draft.source_information)
     {
         return Err(InformantError::DuplicateDisclosure {
             investigation: draft.investigation,
@@ -413,6 +412,26 @@ fn validate_disclosure_dependencies(
         });
     }
     Ok(())
+}
+
+/// Different informants can hold internal-report copies of the very same observation.
+/// A case may record that originating observation only once, regardless of who forwards it;
+/// separate first-hand observations remain separate information roots.
+fn find_disclosure_of_same_observation(
+    state: &AppState,
+    investigation: InvestigationId,
+    information: InformationId,
+) -> Option<&InformantDisclosureRecord> {
+    let root = state.intelligence.internal_report_root(information)?;
+    state
+        .legal
+        .informant_disclosures_for_investigation(investigation)
+        .find(|disclosure| {
+            state
+                .intelligence
+                .internal_report_root(disclosure.source_information())
+                == Some(root)
+        })
 }
 
 /// A confidential source may contribute only facts that actually belong in the target case.
@@ -577,7 +596,7 @@ fn resolve_informant_flip_chance(
 /// Informants disclose personally held information relevant to their handler's active
 /// cases. Relevance uses the same subject/origin predicate as the canonical disclosure validator,
 /// so institution-authored cases and enterprise-origin vice inquiries are not arbitrarily excluded.
-/// Each case-information pair is disclosed at most once by the disclosure index.
+/// Each case receives an originating observation at most once, even across internal reports.
 pub(crate) fn apply_informant_disclosures(
     state: &mut AppState,
 ) -> Result<Vec<InformantDisclosureId>, InformantError> {
@@ -588,6 +607,7 @@ pub(crate) fn apply_informant_disclosures(
         return Ok(Vec::new());
     }
     let mut candidates: Vec<(InformantId, InformationId, InvestigationId)> = Vec::new();
+    let mut disclosed_roots_by_case = BTreeMap::new();
     let handlers: Vec<OrganizationId> = state.legal.informant_handlers().collect();
     for handler in handlers {
         // Build only this handler's live case view. A held fact is institutionally available to
@@ -624,6 +644,7 @@ pub(crate) fn apply_informant_disclosures(
                         append_pending_disclosures(
                             state,
                             &mut candidates,
+                            &mut disclosed_roots_by_case,
                             informant.id(),
                             information.id(),
                             investigations,
@@ -638,6 +659,7 @@ pub(crate) fn apply_informant_disclosures(
                     append_pending_disclosures(
                         state,
                         &mut candidates,
+                        &mut disclosed_roots_by_case,
                         informant.id(),
                         information.id(),
                         investigations,
@@ -649,6 +671,16 @@ pub(crate) fn apply_informant_disclosures(
     // Stable commit order is informant id, then information id, then case id. IDs order equal
     // facts only; they no longer decide whether another matching case receives the fact at all.
     candidates.sort_unstable();
+    // Distinct informants' internal copies may share an original observation. Reserve just one
+    // disclosure per case/root before the shared cohort's ID and version budgets are calculated.
+    let mut selected_observations = BTreeSet::new();
+    candidates.retain(|(_, information, investigation)| {
+        let root = state
+            .intelligence
+            .internal_report_root(*information)
+            .expect("candidate disclosure must reference a valid information lineage");
+        selected_observations.insert((*investigation, root))
+    });
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -774,16 +806,33 @@ pub(crate) fn apply_informant_disclosures(
 fn append_pending_disclosures(
     state: &AppState,
     candidates: &mut Vec<(InformantId, InformationId, InvestigationId)>,
+    disclosed_roots_by_case: &mut BTreeMap<InvestigationId, BTreeSet<InformationId>>,
     informant: InformantId,
     information: InformationId,
     investigations: &BTreeSet<InvestigationId>,
 ) {
+    let root = state
+        .intelligence
+        .internal_report_root(information)
+        .expect("held information must have a valid lineage");
     for investigation in investigations.iter().copied() {
-        if state
-            .legal
-            .informant_disclosure_for_case_information(investigation, information)
-            .is_none()
-        {
+        // Build each relevant case's history once for the immutable planning pass.
+        // Do not rewalk every prior disclosure for every personally held fact.
+        let disclosed_roots = disclosed_roots_by_case
+            .entry(investigation)
+            .or_insert_with(|| {
+                state
+                    .legal
+                    .informant_disclosures_for_investigation(investigation)
+                    .map(|disclosure| {
+                        state
+                            .intelligence
+                            .internal_report_root(disclosure.source_information())
+                            .expect("persisted disclosure must have a valid lineage")
+                    })
+                    .collect()
+            });
+        if !disclosed_roots.contains(&root) {
             candidates.push((informant, information, investigation));
         }
     }

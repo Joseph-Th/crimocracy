@@ -1080,39 +1080,6 @@ fn apportion_ward_votes(electorate: u32, scores: [u32; 3]) -> [u32; 3] {
     votes
 }
 
-#[cfg(test)]
-mod ballot_apportionment_tests {
-    use super::apportion_ward_votes;
-
-    #[test]
-    fn unsupported_contenders_receive_no_rounding_votes() {
-        assert_eq!(apportion_ward_votes(11, [2, 3, 0]), [4, 7, 0]);
-        assert_eq!(apportion_ward_votes(9, [0, 4, 0]), [0, 9, 0]);
-        assert_eq!(apportion_ward_votes(1, [0, 0, 8]), [0, 0, 1]);
-    }
-
-    #[test]
-    fn proportional_rounding_allocates_every_vote_and_breaks_ties_stably() {
-        assert_eq!(apportion_ward_votes(5, [1, 1, 1]), [2, 2, 1]);
-        assert_eq!(apportion_ward_votes(1, [3, 3, 0]), [1, 0, 0]);
-        assert_eq!(
-            apportion_ward_votes(u32::MAX, [1, 1, 0]),
-            [u32::MAX / 2 + 1, u32::MAX / 2, 0]
-        );
-        for electorate in 0..=100 {
-            for scores in [[0, 1, 0], [1, 1, 0], [1, 2, 3], [97, 0, 4]] {
-                let votes = apportion_ward_votes(electorate, scores);
-                assert_eq!(votes.iter().sum::<u32>(), electorate);
-                for index in 0..scores.len() {
-                    if scores[index] == 0 {
-                        assert_eq!(votes[index], 0);
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppState) {
     let day = state.now().as_minutes() / DAY_MINUTES;
     if day == 0 || !day.is_multiple_of(MUNICIPAL_ELECTION_INTERVAL_DAYS) {
@@ -1409,4 +1376,37 @@ pub fn valid_political_state(state: &AppState) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod ballot_apportionment_tests {
+    use super::apportion_ward_votes;
+
+    #[test]
+    fn unsupported_contenders_receive_no_rounding_votes() {
+        assert_eq!(apportion_ward_votes(11, [2, 3, 0]), [4, 7, 0]);
+        assert_eq!(apportion_ward_votes(9, [0, 4, 0]), [0, 9, 0]);
+        assert_eq!(apportion_ward_votes(1, [0, 0, 8]), [0, 0, 1]);
+    }
+
+    #[test]
+    fn proportional_rounding_allocates_every_vote_and_breaks_ties_stably() {
+        assert_eq!(apportion_ward_votes(5, [1, 1, 1]), [2, 2, 1]);
+        assert_eq!(apportion_ward_votes(1, [3, 3, 0]), [1, 0, 0]);
+        assert_eq!(
+            apportion_ward_votes(u32::MAX, [1, 1, 0]),
+            [u32::MAX / 2 + 1, u32::MAX / 2, 0]
+        );
+        for electorate in 0..=100 {
+            for scores in [[0, 1, 0], [1, 1, 0], [1, 2, 3], [97, 0, 4]] {
+                let votes = apportion_ward_votes(electorate, scores);
+                assert_eq!(votes.iter().sum::<u32>(), electorate);
+                for index in 0..scores.len() {
+                    if scores[index] == 0 {
+                        assert_eq!(votes[index], 0);
+                    }
+                }
+            }
+        }
+    }
 }

@@ -262,8 +262,8 @@ impl OperationObjective {
 
     /// The business whose gross potential sizes a take-like objective, if any. Theft and
     /// collection kinds use it as the depleted counterparty; gambling uses it as the venue whose
-    /// customer throughput sizes the house take. The economics owner decides replenishment
-    /// independently per operation kind.
+    /// customer throughput sizes the house take. Robbery and intimidation share a cash
+    /// collection pool; other kinds have independently replenishing economic pools.
     pub(crate) fn taken_business(&self) -> Option<BusinessId> {
         Self::business_target_for_objectives(
             self,

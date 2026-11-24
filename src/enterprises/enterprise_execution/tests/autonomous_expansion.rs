@@ -2139,7 +2139,7 @@ fn same_tick_racket_fear_blocks_due_autonomous_expansion() {
             let _ = crate::core::simulation::draw_index(&mut rng, variance_width).unwrap();
             crate::core::simulation::draw_index(
                 &mut rng,
-                usize::from(EnterpriseCycleRandomness::ENFORCEMENT_ATTENTION_ROLL_COUNT),
+                EnterpriseCycleRandomness::ENFORCEMENT_ATTENTION_ROLL_COUNT,
             )
             .unwrap()
                 < usize::try_from(exposure_chance).unwrap()

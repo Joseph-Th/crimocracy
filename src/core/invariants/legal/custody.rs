@@ -231,6 +231,7 @@ pub(super) fn validate_informant_disclosures(
     state: &AppState,
 ) -> Result<BTreeSet<EvidenceId>, StateValidationError> {
     let mut informant_evidence = BTreeSet::new();
+    let mut disclosed_observations = BTreeSet::new();
     for disclosure in state.legal.informant_disclosures() {
         let informant = state.legal.get_informant(disclosure.informant()).ok_or(
             StateValidationError::InvalidInformantDisclosure {
@@ -254,6 +255,12 @@ pub(super) fn validate_informant_disclosures(
                 disclosure: disclosure.id(),
             },
         )?;
+        let root = state
+            .intelligence
+            .internal_report_root(disclosure.source_information())
+            .ok_or(StateValidationError::InvalidInformantDisclosure {
+                disclosure: disclosure.id(),
+            })?;
         if investigation.owner() != informant.handler()
             || information.holder() != KnowledgeHolder::Character(informant.character())
             || !information_is_relevant_to_investigation(information, investigation)
@@ -262,6 +269,7 @@ pub(super) fn validate_informant_disclosures(
             || disclosure.disclosed_at() < investigation.opened_at()
             || disclosure.disclosed_at() > state.now()
             || !informant_evidence.insert(disclosure.evidence())
+            || !disclosed_observations.insert((disclosure.investigation(), root))
             || evidence.investigation() != disclosure.investigation()
             || evidence.custodian() != informant.handler()
             || evidence.subject() != information.subject()

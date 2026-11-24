@@ -14,6 +14,13 @@ use crate::finance::finance_system::insert_account;
 use crate::finance::{AccountKind, FinancialAccountDraft, FinancialOwner};
 use crate::operations::operation_execution::resolve_operation_police_alert_context;
 
+fn expect_enterprise_subject(subject: EntityRef) -> EnterpriseId {
+    let EntityRef::Enterprise(enterprise) = subject else {
+        panic!("expected enterprise observation, found {subject:?}");
+    };
+    enterprise
+}
+
 fn make_test_rival(fixture: &mut Fixture) -> (OrganizationId, MandateAuthority) {
     let rival = insert_organization(
         &fixture.registry,
@@ -331,10 +338,7 @@ fn achieved_organization_surveillance_discovers_three_active_enterprises_and_unl
     assert_eq!(discovered[0].subject(), EntityRef::Organization(rival));
     let discovered_enterprises = discovered[1..]
         .iter()
-        .map(|information| match information.subject() {
-            EntityRef::Enterprise(enterprise) => enterprise,
-            other => panic!("expected enterprise observation, found {other:?}"),
-        })
+        .map(|information| expect_enterprise_subject(information.subject()))
         .collect::<Vec<_>>();
     assert_eq!(discovered_enterprises.len(), 3);
     assert_eq!(
@@ -365,10 +369,7 @@ fn achieved_organization_surveillance_discovers_three_active_enterprises_and_unl
         })
     );
     for information in &discovered[1..] {
-        let enterprise = match information.subject() {
-            EntityRef::Enterprise(enterprise) => enterprise,
-            other => panic!("expected enterprise observation, found {other:?}"),
-        };
+        let enterprise = expect_enterprise_subject(information.subject());
         let index = enterprises
             .iter()
             .position(|candidate| *candidate == enterprise)
@@ -704,10 +705,7 @@ fn colocated_rackets_remain_distinguishable_in_surveillance_and_after_action() {
         .unwrap();
     let labels = ["protection", "bookmaking", "loan-sharking"];
     for observation in &observations {
-        let enterprise = match observation.subject() {
-            EntityRef::Enterprise(enterprise) => enterprise,
-            other => panic!("expected enterprise observation, found {other:?}"),
-        };
+        let enterprise = expect_enterprise_subject(observation.subject());
         let index = enterprises
             .iter()
             .position(|candidate| *candidate == enterprise)

@@ -70,7 +70,7 @@ struct TakeTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PropertyProceedsPlan {
     pub(crate) proceeds: Option<OperationPropertyProceedsRecord>,
-    /// True when a recent successful same-kind take on the same target reduced this haul.
+    /// True when a recent successful take in the same target's depletion pool reduced this haul.
     pub(crate) depleted_by_recent_take: bool,
     /// The target's damage state when this take was priced, including empty hauls.
     pub(crate) take_disrupted: Option<bool>,
@@ -180,9 +180,8 @@ pub(crate) fn resolve_property_proceeds(
     })
 }
 
-/// Recent successful same-kind takes against the same target at this operation's own resolution
-/// instant. A committed operation must keep validating against exactly the take history it saw
-/// when it resolved.
+/// The operation's own resolution instant anchors depletion history. A committed operation
+/// must keep validating against exactly the shared-pool history it saw when it resolved.
 fn take_reference_time(
     state: &AppState,
     operation: &crate::operations::OperationRecord,
@@ -230,7 +229,7 @@ pub(crate) fn recent_take_times(
 }
 
 /// Shared take economics: authored basis points of the target's gross potential, scaled down on a
-/// partial outcome and again by each recent successful same-kind hit against the same target.
+/// partial outcome and again by each recent successful hit in the target's depletion pool.
 fn resolve_take_cents(
     operation: crate::core::id::OperationId,
     gross_cents: i64,
@@ -418,7 +417,7 @@ pub(crate) fn build_held_cash_clause(kind: OperationKind, cents: i64) -> String 
     }
 }
 
-/// After-action phrasing for same-kind recency depletion. Different proceeds models represent
+/// After-action phrasing for recency depletion. Different proceeds models represent
 /// different practical bottlenecks, so the explanation must not describe gambling receipts or
 /// delivery payment as unreplaced physical stock.
 pub(crate) fn build_depleted_take_clause(kind: OperationKind) -> &'static str {

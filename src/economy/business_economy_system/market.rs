@@ -117,8 +117,8 @@ fn local_peers<'a>(
 }
 
 /// The subject is counted hypothetically as open even when forecasting a resumption.
-/// Other stores with no established operating books or a suspended economy cannot serve
-/// customers. Capture facts before any same-minute settlement closes another shop.
+/// Other stores with no established operating books, a suspended economy, or an exhausted
+/// recurrence cannot compete for future sales. Capture facts before the same-minute cohort settles.
 pub(super) fn resolve_market_snapshot(
     state: &AppState,
     business: BusinessId,
@@ -129,7 +129,8 @@ pub(super) fn resolve_market_snapshot(
         let Some(economy) = state.economy().get_business_economy(peer.id()) else {
             continue;
         };
-        if economy.status() != BusinessOperatingStatus::Active {
+        if economy.status() != BusinessOperatingStatus::Active || economy.next_cycle_at().is_none()
+        {
             continue;
         }
         snapshot.add_competitor(kind, economy.is_disrupted(state.now()));

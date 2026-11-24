@@ -213,11 +213,20 @@ pub fn remaining_laundering_capacity(
         gross_potential,
         registry.laundering().plausibility_gross_basis_points(),
     )?;
-    Some(
-        capacity
-            .checked_sub(economy.laundered_this_cycle())
-            .unwrap_or(Money::ZERO),
-    )
+    Some(unspent_laundering_capacity(
+        capacity,
+        economy.laundered_this_cycle(),
+    ))
+}
+
+/// A front can become over its current plausibility ceiling after sabotage without
+/// retroactively invalidating valid transfers. That leaves no *additional* room, not
+/// a negative allowance that leadership could misinterpret as an available amount.
+fn unspent_laundering_capacity(capacity: Money, consumed: Money) -> Money {
+    capacity
+        .checked_sub(consumed)
+        .unwrap_or(Money::ZERO)
+        .max(Money::ZERO)
 }
 
 pub fn validate_launder_funds(
@@ -362,9 +371,7 @@ fn validate_laundering_capacity(
     )
     .ok_or(LaunderingError::ArithmeticOverflow)?;
     let already_laundered = economy.laundered_this_cycle();
-    let remaining = capacity
-        .checked_sub(already_laundered)
-        .unwrap_or(Money::ZERO);
+    let remaining = unspent_laundering_capacity(capacity, already_laundered);
     if draft.amount > remaining {
         return Err(LaunderingError::CapacityExceeded {
             business: draft.business,

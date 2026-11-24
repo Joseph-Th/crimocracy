@@ -16,6 +16,35 @@ use crate::operations::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A venue's cash can be depleted by either a robbery or a coerced collection. Other take
+/// kinds model different stock, deliveries, or customers and retain independent recovery.
+/// This is a derived index key, not persisted authored or runtime state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TakeDepletionPool {
+    BusinessCashCollection,
+    Operation(OperationKind),
+}
+
+impl TakeDepletionPool {
+    fn for_kind(kind: OperationKind) -> Self {
+        match kind {
+            OperationKind::Robbery | OperationKind::Intimidation => Self::BusinessCashCollection,
+            OperationKind::Burglary
+            | OperationKind::Hijacking
+            | OperationKind::Smuggling
+            | OperationKind::Surveillance
+            | OperationKind::WitnessPressure
+            | OperationKind::DocumentTheft
+            | OperationKind::GamblingEvent
+            | OperationKind::Extraction
+            | OperationKind::Sabotage
+            | OperationKind::Arson
+            | OperationKind::Kidnapping
+            | OperationKind::Infiltration => Self::Operation(kind),
+        }
+    }
+}
+
 /// Minutes elapsed between a decision pause's start and its resumption instant. Shared by
 /// resume validation and commit so pause arithmetic cannot drift between the two phases.
 pub(crate) fn pause_duration_minutes(paused_at: SimTime, resumed_at: SimTime) -> u64 {
@@ -59,18 +88,17 @@ pub struct OperationState {
     /// deadline. Unlike resolution timing, decision pauses never shift this authored boundary.
     #[serde(skip)]
     active_by_completion_deadline: BTreeMap<SimTime, BTreeSet<OperationId>>,
-    /// Successful property/cash takes per target business and operation kind as
-    /// (resolved_at, operation_id). Different kinds represent different replenishment
-    /// channels, so a burglary cannot deplete a later smuggling payment merely because both
-    /// happened at the same venue.
+    /// Successful property/cash takes per target and economic depletion pool. Robbery and
+    /// intimidation draw on the same venue cash, while cargo, goods, event receipts, and
+    /// delivery payments retain distinct replenishment channels.
     #[serde(skip)]
-    successful_takes_by_business_kind:
-        BTreeMap<(BusinessId, OperationKind), BTreeSet<(SimTime, OperationId)>>,
+    successful_takes_by_business_pool:
+        BTreeMap<(BusinessId, TakeDepletionPool), BTreeSet<(SimTime, OperationId)>>,
     /// Completed viable takes including zero-valued hauls. Only these constrain the
     /// canonical same-minute operation-ID order for resolution histories.
     #[serde(skip)]
-    viable_takes_by_business_kind:
-        BTreeMap<(BusinessId, OperationKind), BTreeSet<(SimTime, OperationId)>>,
+    viable_takes_by_business_pool:
+        BTreeMap<(BusinessId, TakeDepletionPool), BTreeSet<(SimTime, OperationId)>>,
     /// Completed operations that produced held property or cash, keyed by organization and
     /// resolution chronology. Financial reporting uses this sparse projection instead of
     /// rescanning every operation the organization has ever authored.
@@ -105,8 +133,8 @@ impl OperationState {
         self.authorized_by_start.clear();
         self.in_progress_by_resolution_due.clear();
         self.active_by_completion_deadline.clear();
-        self.successful_takes_by_business_kind.clear();
-        self.viable_takes_by_business_kind.clear();
+        self.successful_takes_by_business_pool.clear();
+        self.viable_takes_by_business_pool.clear();
         self.financial_resolutions_by_organization.clear();
         self.property_dispositions_by_organization.clear();
         self.cash_dispositions_by_organization.clear();
@@ -162,8 +190,8 @@ impl OperationState {
                         != crate::operations::OperationObjectiveOutcome::Failed
                     && let Some(business) = record.objective().taken_business()
                 {
-                    self.viable_takes_by_business_kind
-                        .entry((business, record.kind()))
+                    self.viable_takes_by_business_pool
+                        .entry((business, TakeDepletionPool::for_kind(record.kind())))
                         .or_default()
                         .insert((resolution.resolved_at(), id));
                 }
@@ -171,8 +199,8 @@ impl OperationState {
                     && resolution_has_positive_take(resolution)
                     && let Some(business) = record.objective().taken_business()
                 {
-                    self.successful_takes_by_business_kind
-                        .entry((business, record.kind()))
+                    self.successful_takes_by_business_pool
+                        .entry((business, TakeDepletionPool::for_kind(record.kind())))
                         .or_default()
                         .insert((resolution.resolved_at(), id));
                 }
@@ -673,7 +701,7 @@ impl OperationState {
             record.runtime.awaiting_decision_since = None;
         }
         // A take that actually removed positive economic value from a business enters its
-        // operation-kind depletion channel at the resolution instant. Tactical success with no
+        // economic depletion channel at the resolution instant. Tactical success with no
         // proceeds cannot make an already-empty target still more depleted.
         let record = self
             .records
@@ -685,8 +713,8 @@ impl OperationState {
         if resolution.objective_outcome() != crate::operations::OperationObjectiveOutcome::Failed
             && let Some(business) = record.objective().taken_business()
         {
-            self.viable_takes_by_business_kind
-                .entry((business, record.kind()))
+            self.viable_takes_by_business_pool
+                .entry((business, TakeDepletionPool::for_kind(record.kind())))
                 .or_default()
                 .insert((resolution.resolved_at(), id));
         }
@@ -697,8 +725,8 @@ impl OperationState {
             // historical settlement's take economics against that settlement's own
             // recency window, so even entries older than the live window remain
             // load-bearing - same trade as the append-only ledger itself.
-            self.successful_takes_by_business_kind
-                .entry((business, record.kind()))
+            self.successful_takes_by_business_pool
+                .entry((business, TakeDepletionPool::for_kind(record.kind())))
                 .or_default()
                 .insert((resolution.resolved_at(), id));
         }
@@ -724,9 +752,9 @@ impl OperationState {
         self.set_status(id, OperationStatus::Completed);
     }
 
-    /// Successful same-kind takes against `business` resolved inside the recency window before
+    /// Successful takes from the same economic pool against `business` inside the window before
     /// the current operation's `(resolved_at, id)` ordering position. The lower time boundary
-    /// is open: that operation channel is fully replenished exactly when the authored window
+    /// is open: that economic pool is fully replenished exactly when the authored window
     /// elapses. Ordering by operation ID within one simulation minute mirrors the canonical
     /// due-operation pass and keeps historical re-derivation stable when several takes resolve
     /// at the same `SimTime`.
@@ -755,8 +783,8 @@ impl OperationState {
         // same-minute IDs that had not yet committed when this operation was resolved by the
         // canonical ascending-ID pass.
         let upper_key = (at, current_operation);
-        self.successful_takes_by_business_kind
-            .get(&(business, kind))
+        self.successful_takes_by_business_pool
+            .get(&(business, TakeDepletionPool::for_kind(kind)))
             .map(|takes| {
                 takes
                     .range((lower_range_bound, std::ops::Bound::Excluded(&upper_key)))
@@ -768,7 +796,7 @@ impl OperationState {
 
     /// A higher-ID take already completed at this instant prevents a lower-ID take from
     /// resolving now: historical re-derivation orders equal timestamps by operation ID.
-    /// The target/kind index includes viable empty hauls and avoids walking unrelated
+    /// The target/pool index includes viable empty hauls and avoids walking unrelated
     /// completed operations in long-lived campaigns.
     pub(crate) fn has_later_same_minute_take(
         &self,
@@ -777,8 +805,8 @@ impl OperationState {
         at: SimTime,
         current_operation: OperationId,
     ) -> bool {
-        self.viable_takes_by_business_kind
-            .get(&(business, kind))
+        self.viable_takes_by_business_pool
+            .get(&(business, TakeDepletionPool::for_kind(kind)))
             .is_some_and(|takes| {
                 takes
                     .range((
@@ -978,8 +1006,11 @@ mod tests {
         let lower = SimTime::from_minutes(680);
         let current = OperationId::from_raw(20);
         let mut state = OperationState::new();
-        state.successful_takes_by_business_kind.insert(
-            (business, OperationKind::Burglary),
+        state.successful_takes_by_business_pool.insert(
+            (
+                business,
+                TakeDepletionPool::for_kind(OperationKind::Burglary),
+            ),
             BTreeSet::from([
                 (lower, OperationId::from_raw(1)),
                 (SimTime::from_minutes(681), OperationId::from_raw(2)),
@@ -1014,8 +1045,11 @@ mod tests {
 
         let early = SimTime::from_minutes(100);
         let mut early_state = OperationState::new();
-        early_state.successful_takes_by_business_kind.insert(
-            (business, OperationKind::Burglary),
+        early_state.successful_takes_by_business_pool.insert(
+            (
+                business,
+                TakeDepletionPool::for_kind(OperationKind::Burglary),
+            ),
             BTreeSet::from([
                 (SimTime::from_minutes(0), OperationId::from_raw(1)),
                 (early, OperationId::from_raw(2)),
@@ -1032,5 +1066,56 @@ mod tests {
             vec![SimTime::from_minutes(0)],
             "before a full window has elapsed, campaign-start takes are still recent"
         );
+    }
+
+    #[test]
+    fn robbery_and_intimidation_share_cash_but_other_revenue_is_independent() {
+        let business = BusinessId::from_raw(8);
+        let now = SimTime::from_minutes(100);
+        let window = SimDuration::from_minutes(30);
+        let first = OperationId::from_raw(1);
+        let second = OperationId::from_raw(2);
+        let third = OperationId::from_raw(3);
+        let mut state = OperationState::new();
+        state.successful_takes_by_business_pool.insert(
+            (
+                business,
+                TakeDepletionPool::for_kind(OperationKind::Intimidation),
+            ),
+            BTreeSet::from([(now, first)]),
+        );
+        state.viable_takes_by_business_pool.insert(
+            (
+                business,
+                TakeDepletionPool::for_kind(OperationKind::Intimidation),
+            ),
+            BTreeSet::from([(now, third)]),
+        );
+        assert_eq!(
+            state.recent_successful_take_times(
+                business,
+                OperationKind::Robbery,
+                now,
+                window,
+                second,
+            ),
+            vec![now],
+        );
+        assert!(
+            state.has_later_same_minute_take(business, OperationKind::Robbery, now, second),
+            "a later collection must prevent reverse-order robbery settlement",
+        );
+        for kind in [
+            OperationKind::Smuggling,
+            OperationKind::GamblingEvent,
+            OperationKind::Burglary,
+        ] {
+            assert!(
+                state
+                    .recent_successful_take_times(business, kind, now, window, second)
+                    .is_empty()
+            );
+            assert!(!state.has_later_same_minute_take(business, kind, now, second));
+        }
     }
 }

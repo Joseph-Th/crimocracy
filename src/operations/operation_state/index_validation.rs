@@ -3,7 +3,7 @@
 //! The parent operation state owns storage and index mutation. This child owns the inverse audit
 //! that proves every derived index is an exact projection of authoritative operation records.
 
-use super::{OperationState, resolution_has_positive_take};
+use super::{OperationState, TakeDepletionPool, resolution_has_positive_take};
 use crate::operations::{OperationRecord, OperationResolutionRecord, OperationStatus};
 use std::collections::BTreeSet;
 
@@ -121,8 +121,8 @@ impl OperationState {
             && resolution_has_positive_take(resolution);
         let indexed = taken_business
             .and_then(|business| {
-                self.successful_takes_by_business_kind
-                    .get(&(business, record.kind()))
+                self.successful_takes_by_business_pool
+                    .get(&(business, TakeDepletionPool::for_kind(record.kind())))
             })
             .is_some_and(|takes| takes.contains(&(resolution.resolved_at(), record.id())));
         if indexed != should_index {
@@ -138,8 +138,8 @@ impl OperationState {
                 != crate::operations::OperationObjectiveOutcome::Failed;
         let indexed_viable = taken_business
             .and_then(|business| {
-                self.viable_takes_by_business_kind
-                    .get(&(business, record.kind()))
+                self.viable_takes_by_business_pool
+                    .get(&(business, TakeDepletionPool::for_kind(record.kind())))
             })
             .is_some_and(|takes| takes.contains(&(resolution.resolved_at(), record.id())));
         if indexed_viable != should_index_viable {
@@ -226,7 +226,7 @@ impl OperationState {
             return false;
         }
         let indexed_takes: usize = self
-            .successful_takes_by_business_kind
+            .successful_takes_by_business_pool
             .values()
             .map(BTreeSet::len)
             .sum();
@@ -234,7 +234,7 @@ impl OperationState {
             return false;
         }
         let indexed_viable_takes: usize = self
-            .viable_takes_by_business_kind
+            .viable_takes_by_business_pool
             .values()
             .map(BTreeSet::len)
             .sum();

@@ -191,6 +191,69 @@ fn autonomous_recovery_does_not_reopen_a_business_that_can_never_settle_again() 
 }
 
 #[test]
+fn exhausted_storefront_no_longer_competes_but_public_appraisal_remains_unchanged() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture();
+    establish_business_economy(&registry, &mut fixture);
+    let peer = suspend_new_business(&registry, &mut fixture, BusinessKind::Retail);
+    validate_resume_business_economy(&registry, &fixture.state, peer)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let original = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .unwrap()
+        .clone();
+    let mut near_terminal = business_economy_wire(&original);
+    near_terminal.version = u32::MAX - 1;
+    fixture.state = restore_save(
+        &registry,
+        replace_serialized_economy(
+            build_save(&registry, &fixture.state).unwrap(),
+            &original,
+            &near_terminal,
+        ),
+    )
+    .unwrap();
+
+    let public = forecast_normal_business_net(&registry, &fixture.state, peer).unwrap();
+    let competing = forecast_live_business_net(&registry, &fixture.state, peer).unwrap();
+    assert_eq!(public, competing);
+    let cycle = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .cycle();
+    fixture.state.advance_clock(cycle);
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0).unwrap(),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(fixture.business)
+            .unwrap()
+            .next_cycle_at(),
+        None
+    );
+    let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&fixture.state, &restored] {
+        assert!(forecast_live_business_net(&registry, state, peer).unwrap() > competing);
+        assert_eq!(
+            forecast_normal_business_net(&registry, state, peer).unwrap(),
+            public
+        );
+        validate_invariants(state);
+    }
+}
+
+#[test]
 fn equal_recovery_economics_keep_stable_id_tiebreaker() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture();

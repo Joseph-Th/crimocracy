@@ -169,7 +169,9 @@ fn actual_named_professions_have_daily_duties_and_private_career_histories() {
             {
                 Some((owner, business.id()))
             }
-            _ => None,
+            BusinessOwner::Independent
+            | BusinessOwner::Organization(_)
+            | BusinessOwner::Character(_) => None,
         })
         .expect("a generated city's private proprietors are named");
     let council = city

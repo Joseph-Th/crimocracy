@@ -2913,7 +2913,7 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
 }
 
 #[test]
-fn remaining_laundering_capacity_tracks_the_plausibility_budget() {
+fn remaining_laundering_capacity_tracks_the_budget_and_clamps_after_sabotage() {
     let registry = build_registry();
     let mut fixture = make_laundering_fixture();
     let before = remaining_laundering_capacity(
@@ -2974,6 +2974,62 @@ fn remaining_laundering_capacity_tracks_the_plausibility_budget() {
             requested_cents: before.cents() + 1,
             capacity_cents: before.cents(),
         }
+    );
+
+    // A valid full-capacity transfer precedes physical damage. Sabotage reduces the
+    // currently plausible ceiling, but it must not turn the reported remaining budget
+    // or rejection's capacity field negative.
+    validate_launder_funds(
+        &registry,
+        &fixture.state,
+        LaunderingDraft {
+            organization: fixture.organization,
+            street_account: fixture.street,
+            business: fixture.business,
+            accounted_account: fixture.accounted,
+            amount: before,
+        },
+    )
+    .expect("the healthy front should absorb its full authored capacity")
+    .commit(&mut fixture.state)
+    .expect("the original valid transfer must settle");
+    crate::economy::business_economy_system::validate_disrupt_business_economy(
+        &registry,
+        &fixture.state,
+        fixture.business,
+    )
+    .expect("sabotage should be valid for the active front")
+    .commit(&mut fixture.state)
+    .expect("disruption must commit");
+    assert_eq!(
+        remaining_laundering_capacity(
+            &registry,
+            &fixture.state,
+            fixture.organization,
+            fixture.business,
+        ),
+        Some(Money::ZERO),
+        "the damaged front has no remaining capacity rather than negative capacity"
+    );
+    assert_eq!(
+        validate_launder_funds(
+            &registry,
+            &fixture.state,
+            LaunderingDraft {
+                organization: fixture.organization,
+                street_account: fixture.street,
+                business: fixture.business,
+                accounted_account: fixture.accounted,
+                amount: Money::from_cents(1),
+            },
+        )
+        .err(),
+        Some(LaunderingError::CapacityExceeded {
+            business: fixture.business,
+            requested_cents: 1,
+            capacity_cents: 0,
+        }),
+        "validator and planning query must agree that the overcommitted front has zero room"
     );
     validate_invariants(&fixture.state);
 }

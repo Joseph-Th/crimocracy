@@ -6,9 +6,12 @@ use crate::core::invariants::{validate_invariants, validate_state};
 use crate::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crate::core::simulation::run_test_tick as run_tick;
 use crate::core::time::{SimDuration, SimTime};
-use crate::intelligence::intelligence_system::validate_record_information;
+use crate::intelligence::intelligence_system::{
+    validate_information_transfer, validate_record_information,
+};
 use crate::intelligence::{
-    InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
+    InformationDraft, InformationSourceKind, InformationTopic, InformationTransferDraft,
+    Reliability, Specificity,
 };
 use crate::legal::ArrestDraft;
 use crate::legal::investigation_system::{
@@ -35,6 +38,17 @@ struct Fixture {
     criminal: OrganizationId,
     member: CharacterId,
     investigation: InvestigationId,
+}
+
+fn disclosure_for_case_information(
+    state: &AppState,
+    investigation: InvestigationId,
+    information: InformationId,
+) -> Option<&InformantDisclosureRecord> {
+    state
+        .legal()
+        .informant_disclosures_for_investigation(investigation)
+        .find(|record| record.source_information() == information)
 }
 
 #[test]
@@ -211,6 +225,166 @@ fn record_personal_information(fixture: &mut Fixture) -> InformationId {
     .expect("personal information should validate")
     .commit(&mut fixture.state)
     .expect("personal information should commit")
+}
+
+/// Two different confidential sources holding one underlying observation: the second source
+/// learned it from the first through a canonical internal report rather than observing anew.
+fn shared_informant_observation(
+    fixture: &mut Fixture,
+) -> (
+    InformantId,
+    InformantId,
+    InformationId,
+    InformationId,
+    CharacterId,
+) {
+    let colleague = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Confidential Source".to_owned(),
+            organization: Some(fixture.criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .expect("second member should insert");
+    let original = record_personal_information(fixture);
+    let copy = validate_information_transfer(
+        &fixture.state,
+        InformationTransferDraft {
+            source: original,
+            recipient: KnowledgeHolder::Character(colleague),
+        },
+    )
+    .expect("second source should be able to learn the original fact")
+    .commit(&mut fixture.state)
+    .expect("internal report should persist");
+    let first = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .expect("first informant should validate")
+    .commit(&mut fixture.state)
+    .expect("first informant should commit");
+    let second = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: colleague,
+            handler: fixture.police,
+        },
+    )
+    .expect("second informant should validate")
+    .commit(&mut fixture.state)
+    .expect("second informant should commit");
+    (first, second, original, copy, colleague)
+}
+
+#[test]
+fn informants_cannot_repeat_an_original_observation_as_independent_case_evidence() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let (first, second, original, copy, colleague) = shared_informant_observation(&mut fixture);
+    let first_disclosure = validate_record_informant_disclosure(
+        &fixture.state,
+        InformantDisclosureDraft {
+            informant: first,
+            investigation: fixture.investigation,
+            source_information: original,
+        },
+    )
+    .expect("original informant evidence should validate")
+    .commit(&mut fixture.state)
+    .expect("original informant evidence should persist");
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        validate_record_informant_disclosure(
+            &fixture.state,
+            InformantDisclosureDraft {
+                informant: second,
+                investigation: fixture.investigation,
+                source_information: copy,
+            },
+        )
+        .expect_err("a second informant's internal copy must not count as independent evidence"),
+        InformantError::DuplicateDisclosure {
+            investigation: fixture.investigation,
+            information: copy,
+            disclosure: first_disclosure,
+        }
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+
+    // A genuinely separate direct observation by the second source remains admissible.
+    let independently_observed = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(colleague),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Organization(fixture.criminal),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "The second member independently observed another personnel fact.".to_owned(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    validate_record_informant_disclosure(
+        &fixture.state,
+        InformantDisclosureDraft {
+            informant: second,
+            investigation: fixture.investigation,
+            source_information: independently_observed,
+        },
+    )
+    .expect("independent observation must not be suppressed by the earlier hearsay")
+    .commit(&mut fixture.state)
+    .unwrap();
+    validate_state(&fixture.state)
+        .expect("independent evidence and deduplicated hearsay stay valid");
+    validate_invariants(&fixture.state);
+    let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap())
+        .expect("original disclosure sources must restore without double-counting");
+    validate_invariants(&restored);
+}
+
+#[test]
+fn autonomous_informants_disclose_one_case_evidence_per_observation_root() {
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let (_first, _second, original, copy, _) = shared_informant_observation(&mut fixture);
+    let disclosures = apply_informant_disclosures(&mut fixture.state)
+        .expect("parallel informants with the same observation must not fail the batch");
+    assert_eq!(disclosures.len(), 1);
+    let disclosure = fixture
+        .state
+        .legal()
+        .informant_disclosures()
+        .next()
+        .expect("one disclosure must persist");
+    assert_eq!(disclosure.source_information(), original);
+    assert_eq!(fixture.state.legal().informant_disclosures().count(), 1);
+    assert!(disclosure_for_case_information(&fixture.state, fixture.investigation, copy).is_none());
+    assert!(
+        apply_informant_disclosures(&mut fixture.state)
+            .unwrap()
+            .is_empty()
+    );
+    validate_state(&fixture.state)
+        .expect("automatic disclosure should preserve case evidence integrity");
+    let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap())
+        .expect("single original-source evidence should restore");
+    assert_eq!(restored.legal().informant_disclosures().count(), 1);
+    validate_invariants(&restored);
 }
 
 fn arrest_high_safety_detainee(
@@ -788,19 +962,10 @@ fn autonomous_disclosure_allocator_exhaustion_is_terminal_noop_atomically() {
         "neither matching case may receive a prefix disclosure"
     );
     assert!(
-        fixture
-            .state
-            .legal()
-            .informant_disclosure_for_case_information(fixture.investigation, information)
+        disclosure_for_case_information(&fixture.state, fixture.investigation, information)
             .is_none()
     );
-    assert!(
-        fixture
-            .state
-            .legal()
-            .informant_disclosure_for_case_information(second_case, information)
-            .is_none()
-    );
+    assert!(disclosure_for_case_information(&fixture.state, second_case, information).is_none());
     validate_state(&fixture.state).expect("rejected disclosure batch should remain valid");
     validate_invariants(&fixture.state);
 }
@@ -875,18 +1040,11 @@ fn autonomous_disclosure_skips_capacity_exhausted_case_without_blocking_other_ca
     );
     for information in [first_information, second_information] {
         assert!(
-            fixture
-                .state
-                .legal()
-                .informant_disclosure_for_case_information(fixture.investigation, information)
+            disclosure_for_case_information(&fixture.state, fixture.investigation, information)
                 .is_none()
         );
         assert!(
-            fixture
-                .state
-                .legal()
-                .informant_disclosure_for_case_information(other_case, information)
-                .is_some(),
+            disclosure_for_case_information(&fixture.state, other_case, information).is_some(),
             "the representable case must still receive every matching fact"
         );
     }

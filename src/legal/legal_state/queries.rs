@@ -96,21 +96,25 @@ impl LegalState {
                     .expect("patrol-neighborhood index must reference a deployment")
             })
     }
-    pub(crate) fn informant_disclosure_for_case_information(
+    /// Iterate one case's disclosures by indexed source-information ID, not full case history.
+    pub(crate) fn informant_disclosures_for_investigation(
         &self,
         investigation: InvestigationId,
-        information: InformationId,
-    ) -> Option<&InformantDisclosureRecord> {
+    ) -> impl Iterator<Item = &InformantDisclosureRecord> {
         self.indexes
             .informants
             .disclosure_by_case_information
-            .get(&(investigation, information))
-            .map(|id| {
+            .range(
+                (investigation, InformationId::from_raw(0))
+                    ..=(investigation, InformationId::from_raw(u32::MAX)),
+            )
+            .map(|(_, id)| {
                 self.informant_disclosures
                     .get(id)
-                    .expect("informant disclosure index must reference a disclosure")
+                    .expect("case-information index must reference an informant disclosure")
             })
     }
+
     pub fn get_jurisdiction(&self, organization: OrganizationId) -> Option<&JurisdictionRecord> {
         self.jurisdictions.get(&organization)
     }

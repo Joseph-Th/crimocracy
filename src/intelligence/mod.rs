@@ -441,7 +441,7 @@ impl IntelligenceState {
     /// A repeated internal handoff carries the original observation, not a new fact. Follow
     /// internal reports only; independently acquired facts and contact disclosures start their
     /// own lineage even when they concern the same subject.
-    fn internal_report_root(&self, mut source: InformationId) -> Option<InformationId> {
+    pub(crate) fn internal_report_root(&self, mut source: InformationId) -> Option<InformationId> {
         loop {
             let record = self.records.get(&source)?;
             if record.source_kind() != InformationSourceKind::InternalReport {
