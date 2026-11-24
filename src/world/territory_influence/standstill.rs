@@ -260,7 +260,7 @@ pub fn validate_negotiate_standstill_with_tribute(
             .finance()
             .accounts_for(FinancialOwner::Organization(initiator))
         {
-            if account.kind() != AccountKind::StreetCash || account.version() == u32::MAX {
+            if account.kind() != AccountKind::StreetCash {
                 continue;
             }
             let debit = remaining.min(account.available_payment_balance());
@@ -301,14 +301,11 @@ pub fn validate_negotiate_standstill_with_tribute(
         let existing = state
             .finance()
             .accounts_for(FinancialOwner::Organization(counterparty))
-            .filter(|account| {
+            .find(|account| {
                 account.kind() == AccountKind::StreetCash
-                    && account.balance() >= Money::ZERO
-                    && account.version() < u32::MAX
-                    && account.balance().checked_add(tribute).is_some()
+                    && account.can_receive_liquid_payment(tribute)
             })
-            .map(|account| account.id())
-            .next();
+            .map(|account| account.id());
         if let Some(destination) = existing {
             Some(validate_record_transaction(state, draft(destination))?)
         } else {

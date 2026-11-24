@@ -1011,6 +1011,27 @@ fn rival_campaign_requires_available_executive() {
         },
     )
     .unwrap();
+    let mut ambiguous = city.state.clone();
+    insert_character(
+        &mut ambiguous,
+        CharacterDraft {
+            name: "Competing Executive".into(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: Default::default(),
+            traits: Default::default(),
+            drives: Default::default(),
+        },
+    )
+    .unwrap();
+    for _ in 0..7 {
+        advance_day(&registry, &mut ambiguous);
+    }
+    assert!(
+        ambiguous.politics().organization(rival).is_none(),
+        "ambiguous executive authority cannot commission a campaign"
+    );
     for _ in 0..7 {
         advance_day(&registry, &mut city.state);
     }

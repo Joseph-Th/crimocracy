@@ -12,6 +12,7 @@ use crate::finance::{AccountKind, FinancialOwner};
 use crate::politics::{DistrictCampaign, INFLUENCE_CAP, INFLUENCE_COST_PER_POINT};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
+use crate::world::world_system::sole_available_executive;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Actual standing lost on the next daily decay pass, before paid specialist work.
@@ -181,18 +182,8 @@ fn autonomous_rival_campaigns(registry: &Registry, state: &mut AppState) {
     for owner in rivals {
         // A surviving commercial portfolio or treasury does not exercise new
         // executive authority. Like autonomous acquisitions, counter-campaigns
-        // require an undetained head of the organization to commission spending.
-        if !state
-            .world()
-            .characters_in_organization(owner)
-            .any(|member| {
-                member.supervisor().is_none()
-                    && state
-                        .legal()
-                        .active_arrest_for_character(member.id())
-                        .is_none()
-            })
-        {
+        // require a sole available executive to commission spending.
+        if sole_available_executive(state, owner).is_none() {
             continue;
         }
         let affordable = affordable_rival_campaign_points(registry, state, owner);
@@ -239,46 +230,25 @@ fn autonomous_rival_campaigns(registry: &Registry, state: &mut AppState) {
                 // money indefinitely once its current position is sufficient.
                 let desired = (u32::from(machine) * 3 / 4 + 150 + u32::from(player_prominence) * 30)
                     .min(u32::from(INFLUENCE_CAP)) as u16;
-                if own >= desired {
-                    return None;
-                }
+                let deficit = desired.checked_sub(own).filter(|&points| points > 0)?;
                 Some((
-                    district,
-                    (
-                        // A player presence that our machine already exceeds
-                        // is not an urgent challenge merely because its
-                        // historical office has nonzero support.
-                        machine > own,
-                        i32::from(desired) - i32::from(own),
-                        u32::from(grassroots) + u32::from(institutions),
-                        std::cmp::Reverse(district),
-                    ),
+                    // A player presence that our machine already exceeds
+                    // is not an urgent challenge merely because its
+                    // historical office has nonzero support.
+                    machine > own,
+                    deficit,
+                    u32::from(grassroots) + u32::from(institutions),
+                    std::cmp::Reverse(district),
                 ))
             })
-            .max_by_key(|(_, priority)| *priority)
-            .map(|(district, _)| district);
-        let Some(district) = choice else {
+            .max();
+        let Some((_, deficit, _, std::cmp::Reverse(district))) = choice else {
             continue;
         };
-        let current = state
-            .politics()
-            .organization(owner)
-            .and_then(|campaign| campaign.district(district))
-            .map_or(0, DistrictCampaign::influence);
-        // A rising public business/political machine invites more determined
-        // counter-campaigning. Rivals still need an actual local operating stake and
-        // must pay the entire incremental cost from their own accounted funds.
-        let weekly_budget_points = 100 + u16::from(player_prominence) * 20;
-        let (machine, _, _) = player_pressure.get(&district).copied().unwrap_or((0, 0, 0));
-        let desired = (u32::from(machine) * 3 / 4 + 150 + u32::from(player_prominence) * 30)
-            .min(u32::from(INFLUENCE_CAP)) as u16;
-        let points = (INFLUENCE_CAP - current)
-            .min(desired.saturating_sub(current))
-            .min(weekly_budget_points.min(220))
-            .min(affordable);
-        if points == 0 {
-            continue;
-        }
+        // Spend against the same deficit used to select the ward. The desired
+        // threshold was already bounded by the local influence cap.
+        let weekly_budget_points = (100 + u16::from(player_prominence) * 20).min(220);
+        let points = deficit.min(weekly_budget_points).min(affordable);
         if let Ok(order) = validate_invest_for(
             state,
             owner,

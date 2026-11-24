@@ -135,8 +135,6 @@ pub enum DecisionError {
     ProtectionNoLongerOwned(BusinessId),
     #[error("protection payment requires {needed} cents, short {missing} cents in accounted funds")]
     InsufficientProtectionFunds { needed: i64, missing: i64 },
-    #[error("the threatening organization {0} has no usable street account")]
-    MissingProtectionRecipient(OrganizationId),
     #[error("decision {0} does not exist")]
     MissingDecision(DecisionRequestId),
     #[error("decision {0} is no longer pending")]
@@ -686,6 +684,10 @@ impl ValidatedDecisionResolution {
             }
             DecisionResolutionAction::Protection { payment } => {
                 if let Some(payment) = payment {
+                    let DecisionContext::ProtectionDemand(context) = decision.context() else {
+                        unreachable!("protection resolution must refer to a protection demand");
+                    };
+                    protection::validate_protection_business(state, self.resolver, context)?;
                     payment.ensure_current(state)?;
                     state.ids.reserve_many(&payment.id_budget())?;
                     (*payment).commit_preflighted(state);

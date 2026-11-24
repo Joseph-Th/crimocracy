@@ -96,6 +96,30 @@ fn owner(fixture: &AcquisitionFixture, business: BusinessId) -> BusinessOwner {
 }
 
 #[test]
+fn ambiguous_rival_executive_cannot_commission_acquisition() {
+    let mut fixture = make_independent_fixture();
+    let rival = fixture.organization;
+    let player = organization(&mut fixture, "Player", OrganizationKind::Criminal);
+    designate_player_organization(&mut fixture.state, player).unwrap();
+    executive(&mut fixture, rival);
+    executive(&mut fixture, rival);
+    establish_existing_independent_economy(&mut fixture);
+    let price = hospitality_price(&fixture).cents();
+    let reserve = fixture.registry.upkeep().per_member_daily().cents() * 14;
+    fund_accounted_from_street(&mut fixture, price + reserve);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(7 * 1440));
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert!(apply_due_autonomous_acquisitions(&fixture.registry, &mut fixture.state).is_empty());
+    assert_eq!(
+        owner(&fixture, fixture.business),
+        BusinessOwner::Independent
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+}
+
+#[test]
 fn equally_funded_rivals_alternate_first_access_to_scarce_listings_across_weeks() {
     let mut fixture = make_independent_fixture();
     let first = fixture.organization;

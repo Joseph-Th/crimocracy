@@ -11,12 +11,13 @@ use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, is_recurring_boundary};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
+use crate::world::world_system::sole_available_executive;
 use crate::world::{BusinessOwner, OrganizationKind};
 use std::collections::BTreeSet;
 
 const REVIEW_DAYS: u32 = 7;
 
-/// Every week, each free non-player criminal executive may make one investment.
+/// Every week, each non-player gang with a sole available executive may make one investment.
 /// Prefer listed property over voluntary offers. First improve sustainable payroll
 /// coverage, then prefer existing districts and estimated return per unit of capital
 /// and time. A new foothold remains possible even after local inventory sells. Keep at least one
@@ -65,23 +66,15 @@ fn invest(
     state: &mut AppState,
     organization: OrganizationId,
 ) -> Option<BusinessId> {
-    let members: Vec<_> = state
-        .world
-        .characters_in_organization(organization)
-        .collect();
-    if !members.iter().any(|member| {
-        member.supervisor().is_none()
-            && state
-                .legal()
-                .active_arrest_for_character(member.id())
-                .is_none()
-    }) {
-        return None;
-    }
+    sole_available_executive(state, organization)?;
     let portfolio = PortfolioForecast::new(registry, state, organization, None).ok()?;
     let expected_daily_net = portfolio.daily_net();
+    let member_count = state
+        .world()
+        .characters_in_organization(organization)
+        .count();
     let daily_payroll =
-        i128::from(registry.upkeep().per_member_daily().cents()) * members.len() as i128;
+        i128::from(registry.upkeep().per_member_daily().cents()) * member_count as i128;
     let wage_gap = (daily_payroll - expected_daily_net).max(0);
     let reserve = daily_payroll * i128::from(REVIEW_DAYS);
     let mut funding_accounts = BTreeSet::new();
