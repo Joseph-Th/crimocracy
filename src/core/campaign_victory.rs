@@ -1,6 +1,6 @@
 //! Optional, record-backed campaign endings. Sandbox play never ends for merely meeting a threshold:
 //! the player must explicitly claim a qualified victory. A typed history event freezes the result
-//! without changing the serialized AppState layout, so existing campaign saves remain loadable.
+//! through the current-schema history and persistence owners.
 
 use crate::contacts::{ContactKind, ContactStatus};
 use crate::core::attention::AttentionClass;
@@ -23,9 +23,7 @@ use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
-use crate::history::history_system::{
-    HistoryError, ValidatedHistoryEvent, validate_campaign_victory_event,
-};
+use crate::history::history_system::{HistoryError, validate_campaign_victory_event};
 use crate::politics::political_system::{held_electoral_majority, rival_pressure};
 use crate::politics::{MAYORAL_CAMPAIGN_SPEND_REQUIRED, MAYORAL_LIQUID_RESERVE_REQUIRED};
 use crate::registry::Registry;
@@ -1369,7 +1367,6 @@ pub struct ValidatedCampaignVictory {
     owner: OrganizationId,
     path: VictoryPath,
     validated_at: SimTime,
-    history: ValidatedHistoryEvent,
     report: ValidatedReport,
     settlement: Option<ValidatedLedgerTransaction>,
 }
@@ -1393,10 +1390,6 @@ pub fn validate_claim_victory(
     } else {
         None
     };
-    let settlement_id = settlement
-        .as_ref()
-        .map(|_| LedgerTransactionId::from_raw(state.ids.next_raw(IdKind::LedgerTransaction)));
-    let history = validate_campaign_victory_event(state, owner, path, settlement_id)?;
     let mut entries = vec![ReportEntry {
         attention: AttentionClass::Crisis,
         summary: match path {
@@ -1520,7 +1513,6 @@ pub fn validate_claim_victory(
         owner,
         path,
         validated_at: state.now(),
-        history,
         report,
         settlement,
     })
@@ -1545,8 +1537,16 @@ impl ValidatedCampaignVictory {
             budget.extend(settlement.id_budget());
         }
         state.ids.reserve_many(&budget)?;
+        // Bind history to the next ledger ID only after every held dependency has
+        // been rechecked. Unrelated same-minute payments may have advanced it.
+        let settlement_id = self
+            .settlement
+            .as_ref()
+            .map(|_| LedgerTransactionId::from_raw(state.ids.next_raw(IdKind::LedgerTransaction)));
+        let history = validate_campaign_victory_event(state, self.owner, self.path, settlement_id)?;
         let settlement = self.settlement.map(|plan| plan.commit_preflighted(state));
-        let history = self.history.commit(state)?;
+        debug_assert_eq!(settlement, settlement_id);
+        let history = history.commit(state)?;
         let report = self.report.commit(state)?;
         Ok(CampaignVictoryOutcome {
             history,

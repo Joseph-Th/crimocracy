@@ -1,6 +1,6 @@
 //! Persistent, contested municipal campaigning. Political standing is purchased with
 //! accounted funds, erodes daily, and must be defended against rival organizations.
-//! The election is decided by the campaign-victory owner, not by an autonomous tick.
+//! Municipal elections are certified by the daily political phase; campaign victory is claimed separately.
 
 use crate::core::id::{CharacterId, FinancialAccountId, NeighborhoodId, OrganizationId};
 use crate::core::time::SimTime;
@@ -157,6 +157,10 @@ impl OrganizationCampaign {
 
     pub fn district(&self, id: NeighborhoodId) -> Option<&DistrictCampaign> {
         self.districts.get(&id)
+    }
+
+    pub(crate) fn district_campaigns(&self) -> impl Iterator<Item = &DistrictCampaign> {
+        self.districts.values()
     }
 
     pub fn candidacy(&self) -> Option<MayoralCandidacy> {

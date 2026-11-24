@@ -19,19 +19,15 @@ pub fn public_prominence_tier(state: &AppState, owner: OrganizationId) -> u8 {
         titles = titles.saturating_add(1);
         districts.insert(business.neighborhood());
     }
-    let visible_machine: u32 = districts
-        .iter()
-        .map(|district| {
-            state
-                .politics()
-                .organization(owner)
-                .and_then(|campaign| campaign.district(*district))
-                .map_or(0, |office| u32::from(office.influence()) / 250)
+    // Political activity is public even in wards without owned properties.
+    let visible_machine = state.politics().organization(owner).map_or(0, |campaign| {
+        campaign.district_campaigns().fold(0_u32, |total, office| {
+            total.saturating_add(u32::from(office.influence()) / 250)
         })
-        .sum();
+    });
     let footprint = titles.min(30)
         + u32::try_from(districts.len()).unwrap_or(u32::MAX).min(8) * 2
-        + visible_machine;
+        + visible_machine.min(30);
     (footprint / 5).min(6) as u8
 }
 

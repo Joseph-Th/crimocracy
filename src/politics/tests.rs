@@ -86,6 +86,45 @@ fn operating_rival_wards(state: &crate::AppState, owner: OrganizationId) -> Vec<
 }
 
 #[test]
+fn public_machine_influence_counts_without_property_titles() {
+    use crate::world::organization_pressure::public_prominence_tier;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(3_411)).unwrap();
+    let owner = city.player;
+    let title_districts: std::collections::BTreeSet<_> = city
+        .state
+        .world()
+        .businesses_owned_by_organization(owner)
+        .map(|business| business.neighborhood())
+        .collect();
+    let wards: Vec<_> = city
+        .state
+        .world()
+        .neighborhoods()
+        .map(|ward| ward.id())
+        .filter(|ward| !title_districts.contains(ward))
+        .take(2)
+        .collect();
+    assert_eq!(wards.len(), 2);
+    let baseline = public_prominence_tier(&city.state, owner);
+    let investment = i64::from(INFLUENCE_CAP) * INFLUENCE_COST_PER_POINT;
+    fund(&mut city.state, owner, 2 * investment);
+    for ward in wards {
+        validate_invest_influence(&city.state, ward, investment)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    assert!(public_prominence_tier(&city.state, owner) > baseline);
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        public_prominence_tier(&restored, owner),
+        public_prominence_tier(&city.state, owner)
+    );
+}
+
+#[test]
 fn political_investment_requires_clean_funds_and_loses_influence_without_staff() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(3_411)).unwrap();
@@ -587,10 +626,12 @@ fn autonomous_rival_campaign_moves_between_actual_competing_wards() {
         .organization(rival)
         .unwrap()
         .spent_cents();
-    assert!((1..=100).contains(&influence(&city.state, second)));
+    // The player's visible campaign lifts the opening footprint to tier one,
+    // increasing the rival's weekly capacity from 100 to 120 points.
+    assert_eq!(influence(&city.state, second), 120);
     // After the strongest challenge is defended, redirect the finite weekly
     // budget toward the next exposed ward, not an arbitrary lowest-ID ward.
-    political_system::validate_invest_for(&city.state, rival, second, 4_500_000)
+    political_system::validate_invest_for(&city.state, rival, second, 4_400_000)
         .unwrap()
         .commit(&mut city.state)
         .unwrap();

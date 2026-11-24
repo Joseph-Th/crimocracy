@@ -398,8 +398,52 @@ fn funded_retirement_pays_boss_and_staff_and_survives_reload_as_terminal() {
         .checked_add(severance.checked_mul(3).unwrap())
         .unwrap();
     fund(&mut state, owner, required.cents() + 200_000);
+    // Open unrelated accounts before planning, then commit an independent receipt.
+    let cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let source = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
     let plan = validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).unwrap();
+    let unrelated = validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Unrelated cash receipt".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: cash,
+                    amount: Money::from_cents(100),
+                },
+                LedgerPosting {
+                    account: source,
+                    amount: Money::from_cents(-100),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
     let result = plan.commit(&registry, &mut state).unwrap();
+    assert_ne!(result.settlement, Some(unrelated));
+    assert!(matches!(
+        state.history().campaign_victory(owner).unwrap().kind(),
+        crate::history::HistoryEventKind::CampaignVictory { settlement, .. }
+            if settlement == result.settlement
+    ));
     assert_eq!(result.path, VictoryPath::FundedRetirement);
     assert!(result.settlement.is_some());
     assert_eq!(

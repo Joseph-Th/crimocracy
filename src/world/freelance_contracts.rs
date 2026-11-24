@@ -149,29 +149,39 @@ pub enum FreelanceError {
 pub struct ValidatedFreelanceContract {
     payment: ValidatedLedgerTransaction,
     membership: ValidatedCharacterReassignment,
-    record: FreelanceContractRecord,
+    freelancer: CharacterId,
+    sponsor: OrganizationId,
+    manager: CharacterId,
+    signed_at: SimTime,
+    expires_at: SimTime,
+    fee_cents: i64,
 }
 
 impl ValidatedFreelanceContract {
     pub fn fee_cents(&self) -> i64 {
-        self.record.fee_cents
+        self.fee_cents
     }
     pub fn commit(self, state: &mut AppState) -> Result<(), FreelanceError> {
-        ensure_time_current(state.now(), self.record.signed_at)
+        ensure_time_current(state.now(), self.signed_at)
             .map_err(|(expected, found)| FreelanceError::StaleTime { expected, found })?;
-        ensure_eligible(
-            state,
-            self.record.sponsor,
-            self.record.freelancer,
-            self.record.manager,
-        )?;
+        ensure_eligible(state, self.sponsor, self.freelancer, self.manager)?;
         self.membership.ensure_current(state)?;
         self.payment.ensure_current(state)?;
         state.ids.reserve_many(&self.payment.id_budget())?;
         let transaction = self.payment.commit_preflighted(state);
-        debug_assert_eq!(transaction, self.record.transaction);
         self.membership.commit_preflighted(state);
-        state.world.record_freelance_contract(self.record);
+        state
+            .world
+            .record_freelance_contract(FreelanceContractRecord {
+                freelancer: self.freelancer,
+                sponsor: self.sponsor,
+                manager: self.manager,
+                signed_at: self.signed_at,
+                expires_at: self.expires_at,
+                ended_at: None,
+                fee_cents: self.fee_cents,
+                transaction,
+            });
         Ok(())
     }
 }
@@ -345,24 +355,15 @@ pub fn validate_hire_freelancer(
     if count >= u32::MAX as usize {
         return Err(FreelanceError::Capacity);
     }
-    let transaction = crate::core::id::LedgerTransactionId::from_raw(
-        state
-            .ids
-            .next_raw(crate::core::id::IdKind::LedgerTransaction),
-    );
     Ok(ValidatedFreelanceContract {
         payment,
         membership,
-        record: FreelanceContractRecord {
-            freelancer,
-            sponsor,
-            manager,
-            signed_at: state.now(),
-            expires_at,
-            ended_at: None,
-            fee_cents,
-            transaction,
-        },
+        freelancer,
+        sponsor,
+        manager,
+        signed_at: state.now(),
+        expires_at,
+        fee_cents,
     })
 }
 

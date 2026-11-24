@@ -11,6 +11,98 @@ use crate::world::freelance_contracts::{
 use crate::world::{CivicProfession, IndependentVocation};
 
 #[test]
+fn freelance_contract_uses_committed_ledger_id_after_unrelated_payment() {
+    use crate::finance::finance_system::{insert_account, validate_record_transaction};
+    use crate::finance::{
+        AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+        Money,
+    };
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let freelancer = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            person.life().vocation() == IndependentVocation::FreelanceCriminal
+                && city
+                    .state
+                    .social()
+                    .get_relationship(person.id(), city.boss)
+                    .is_some()
+        })
+        .unwrap()
+        .id();
+    let recipient = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Character(freelancer),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let owner = FinancialOwner::Organization(city.player);
+    let clean = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .unwrap();
+    let clearing = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    let signed =
+        validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 2).unwrap();
+    let fee = signed.fee_cents();
+    let unrelated = validate_record_transaction(
+        &city.state,
+        LedgerTransactionDraft {
+            occurred_at: city.state.now(),
+            memo: "Unrelated capital receipt".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: clean,
+                    amount: Money::from_cents(100),
+                },
+                LedgerPosting {
+                    account: clearing,
+                    amount: Money::from_cents(-100),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    signed.commit(&mut city.state).unwrap();
+    let contract = city
+        .state
+        .world()
+        .active_freelance_contract(freelancer)
+        .unwrap();
+    assert_ne!(contract.transaction(), unrelated);
+    let payment = city
+        .state
+        .finance()
+        .get_transaction(contract.transaction())
+        .unwrap();
+    assert!(payment.postings().iter().any(|posting| {
+        posting.account == recipient && posting.amount == Money::from_cents(fee)
+    }));
+    validate_invariants(&city.state);
+    restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+}
+
+#[test]
 fn freelance_career_change_is_blocked_during_a_contract_but_valid_after_expiry() {
     use crate::world::character_life::validate_set_civic_occupation;
 
