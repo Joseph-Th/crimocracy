@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn working_capital_reserves_the_actual_active_workforce_wages() {
+    use crate::enterprises::autonomous_planning::resolve_committed_working_capital;
+
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let baseline = resolve_committed_working_capital(&registry, &fixture.state, &BTreeMap::new())
+        .unwrap()[&fixture.cash];
+    validate_staff_enterprise(&fixture.state, enterprise, 9)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let staffed = resolve_committed_working_capital(&registry, &fixture.state, &BTreeMap::new())
+        .unwrap()[&fixture.cash];
+    assert_eq!(
+        staffed,
+        baseline.checked_add(Money::from_cents(5 * 1_500)).unwrap()
+    );
+}
+
+#[test]
 fn rank_and_file_staffing_changes_operating_books_and_preserves_historical_payroll() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
@@ -659,6 +680,49 @@ fn executive_command_is_a_real_bottleneck_until_an_underboss_delegates_the_crews
         manager_workload(&fixture.state, executive)
     );
     validate_state_against_registry(&registry, &restored).unwrap();
+
+    // Both branches can individually reopen, but the shared executive can
+    // supervise only one. A funded daily recovery cohort must not panic or
+    // exceed the same command capacity that governs fresh establishments.
+    validate_suspend_enterprise(&fixture.state, first)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    fund_enterprise_fixture_cash(&mut fixture, 200_000);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    for enterprise in [first, second] {
+        assert!(validate_resume_enterprise(&registry, &fixture.state, enterprise).is_ok());
+    }
+    let outcome =
+        crate::enterprises::autonomous_lifecycle::apply_due_autonomous_enterprise_lifecycle(
+            &registry,
+            &mut fixture.state,
+        )
+        .unwrap();
+    assert_eq!(outcome.resumed, vec![first]);
+    assert_eq!(
+        outcome.resumed_mandates,
+        BTreeSet::from([captains[0].mandate])
+    );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(second)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Suspended
+    );
+    assert_eq!(
+        manager_workload(&fixture.state, executive)
+            .unwrap()
+            .required,
+        1
+    );
+    validate_invariants(&fixture.state);
+    restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
 }
 
 #[test]

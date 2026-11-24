@@ -60,6 +60,7 @@ pub(crate) fn resolve_committed_working_capital(
             enterprise.location(),
             enterprise.supporting_businesses().len(),
             observed_active_cases,
+            enterprise.associates(),
         )?;
         reserve_working_capital(&mut reservations, enterprise.cash_account(), required);
     }

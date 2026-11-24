@@ -7,7 +7,7 @@
 //! rivals to abandon that stale frozen configuration so dead records cannot reserve a location
 //! forever.
 
-use crate::core::id::{EnterpriseId, FinancialAccountId, MandateId, OrganizationId};
+use crate::core::id::{EnterpriseId, FinancialAccountId, IdKind, MandateId, OrganizationId};
 use crate::core::state::AppState;
 use crate::delegation::delegation_system::DelegationError;
 use crate::enterprises::autonomous_planning::{
@@ -16,11 +16,14 @@ use crate::enterprises::autonomous_planning::{
     resolve_observed_district_pressure,
 };
 use crate::enterprises::enterprise_execution::{
-    EnterpriseError, EnterpriseProjectionStaffing, ValidatedEnterpriseStatusChange,
+    EnterpriseError, EnterpriseProjectionStaffing, ProjectedCommandJob,
+    ValidatedEnterpriseStatusChange, projected_command_jobs_fit,
     resolve_enterprise_financial_projection, validate_resume_enterprise,
     validate_retire_enterprise,
 };
-use crate::finance::finance_system::{StreetCapitalizationDraft, validate_capitalize_street_cash};
+use crate::finance::finance_system::{
+    StreetCapitalizationDraft, ValidatedLedgerTransaction, validate_capitalize_street_cash,
+};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
 use crate::world::{AutonomyLevel, CapabilityKind};
@@ -42,12 +45,20 @@ struct ResumeCandidate {
     cash_account: crate::core::id::FinancialAccountId,
     required_working_capital: Money,
     expected_net_cash: Money,
+    command_job: ProjectedCommandJob,
     resume: ValidatedEnterpriseStatusChange,
+}
+
+struct PlannedResumption {
+    enterprise: EnterpriseId,
+    mandate: MandateId,
+    resume: ValidatedEnterpriseStatusChange,
+    capitalization: Option<ValidatedLedgerTransaction>,
 }
 
 struct AutonomousEnterpriseLifecyclePlan {
     retirements: Vec<(EnterpriseId, ValidatedEnterpriseStatusChange)>,
-    resumptions: Vec<(EnterpriseId, MandateId, ValidatedEnterpriseStatusChange)>,
+    resumptions: Vec<PlannedResumption>,
 }
 
 /// Reconsiders suspended non-player rackets on the daily governance boundary.
@@ -175,6 +186,14 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             cash_account: enterprise.cash_account(),
             required_working_capital,
             expected_net_cash,
+            command_job: ProjectedCommandJob {
+                organization,
+                captain: manager,
+                kind: enterprise.kind(),
+                location: enterprise.location(),
+                associates: enterprise.associates(),
+                supporting_businesses: enterprise.supporting_businesses().len(),
+            },
             resume,
         });
     }
@@ -193,16 +212,20 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
     });
     let mut resumed_mandates = BTreeSet::new();
     let mut capitalized_organizations = BTreeSet::new();
+    let mut projected_jobs = Vec::new();
     let mut resumptions = Vec::new();
     for candidate in candidates {
         if resumed_mandates.contains(&candidate.mandate) {
             continue;
         }
-        let organization = state
-            .enterprises()
-            .get_enterprise(candidate.enterprise)
-            .expect("resume candidate remains present")
-            .organization();
+        let mut prospective_jobs = projected_jobs.clone();
+        prospective_jobs.push(candidate.command_job);
+        // Distinct mandates can share a superior. Just as in new expansion, the entire
+        // selected cohort must fit the actual command chain before any funding is moved.
+        if !projected_command_jobs_fit(state, &prospective_jobs) {
+            continue;
+        }
+        let organization = candidate.command_job.organization;
         let funded = state
             .finance()
             .get_account(candidate.cash_account)
@@ -210,30 +233,49 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
                 available_working_capital(account, &reservations)
                     >= candidate.required_working_capital
             });
-        if !funded {
+        let capitalization = if funded {
+            None
+        } else {
+            // Each transfer belongs to a distinct organization and consumes one ledger ID.
+            // Plan it without writing: its proceeds are fully reserved by this resumption,
+            // and no later candidate may plan a second transfer for the same owner.
+            let count = u32::try_from(capitalized_organizations.len() + 1)
+                .expect("capitalization cohort must fit the organization ID space");
             if capitalized_organizations.contains(&organization)
-                || !capitalize_suspended_racket(
-                    registry,
-                    state,
-                    organization,
-                    candidate.cash_account,
-                    candidate.required_working_capital,
-                    &reservations,
-                )?
+                || state
+                    .ids
+                    .reserve_many(&[(IdKind::LedgerTransaction, count)])
+                    .is_err()
             {
                 continue;
             }
+            let Some(capitalization) = plan_suspended_racket_capitalization(
+                registry,
+                state,
+                organization,
+                candidate.cash_account,
+                candidate.required_working_capital,
+                &reservations,
+            )?
+            else {
+                continue;
+            };
             capitalized_organizations.insert(organization);
-        }
-        // Reserve before authoritative mutation so there is no fallible planning step after a
-        // successful resume. The fresh canonical token re-proves authority and asset liveness.
+            Some(capitalization)
+        };
         reserve_working_capital(
             &mut reservations,
             candidate.cash_account,
             candidate.required_working_capital,
         );
+        projected_jobs = prospective_jobs;
         resumed_mandates.insert(candidate.mandate);
-        resumptions.push((candidate.enterprise, candidate.mandate, candidate.resume));
+        resumptions.push(PlannedResumption {
+            enterprise: candidate.enterprise,
+            mandate: candidate.mandate,
+            resume: candidate.resume,
+            capitalization,
+        });
     }
 
     Ok(AutonomousEnterpriseLifecyclePlan {
@@ -246,27 +288,28 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
 /// A delegated rival can use earned legitimate dividends to restore a viable street
 /// operation. It must clear the old deficit in full, fund one cycle of projected costs,
 /// and retain two days of clean payroll. No credit or invented cash is created.
-fn capitalize_suspended_racket(
+fn plan_suspended_racket_capitalization(
     registry: &Registry,
-    state: &mut AppState,
+    state: &AppState,
     organization: OrganizationId,
     cash_account: FinancialAccountId,
     required: Money,
     reservations: &std::collections::BTreeMap<FinancialAccountId, Money>,
-) -> Result<bool, AutonomousEnterpriseError> {
+) -> Result<Option<ValidatedLedgerTransaction>, AutonomousEnterpriseError> {
     let Some(destination) = state.finance().get_account(cash_account) else {
-        return Ok(false);
+        return Ok(None);
     };
-    if destination.kind() != AccountKind::StreetCash {
-        return Ok(false);
+    // A capitalization must leave at least one posting version for the resumed cycle.
+    if destination.kind() != AccountKind::StreetCash || destination.version() >= u32::MAX - 1 {
+        return Ok(None);
     }
     let reserved_cents = reservations
         .get(&cash_account)
         .map_or(0, |value| value.cents());
-    let needed = i128::from(required.cents()) + i128::from(reserved_cents)
-        - i128::from(destination.balance().cents());
-    if needed <= 0 || needed > i128::from(i64::MAX) {
-        return Ok(false);
+    let target = i128::from(required.cents()) + i128::from(reserved_cents);
+    let needed = target - i128::from(destination.balance().cents());
+    if target > i128::from(i64::MAX) || needed <= 0 || needed > i128::from(i64::MAX) {
+        return Ok(None);
     }
     let needed = Money::from_cents(needed as i64);
     let payroll_reserve = i128::from(registry.upkeep().per_member_daily().cents())
@@ -290,9 +333,9 @@ fn capitalize_suspended_racket(
             )
         });
     let Some(source) = source else {
-        return Ok(false);
+        return Ok(None);
     };
-    validate_capitalize_street_cash(
+    Ok(Some(validate_capitalize_street_cash(
         state,
         StreetCapitalizationDraft {
             organization,
@@ -300,9 +343,7 @@ fn capitalize_suspended_racket(
             street_account: cash_account,
             amount: needed,
         },
-    )?
-    .commit(state)?;
-    Ok(true)
+    )?))
 }
 
 impl AutonomousEnterpriseLifecyclePlan {
@@ -314,12 +355,18 @@ impl AutonomousEnterpriseLifecyclePlan {
                 .expect("preplanned autonomous retirement must remain current within one pass");
             outcome.retired.push(enterprise);
         }
-        for (enterprise, mandate, resume) in self.resumptions {
-            resume
+        for planned in self.resumptions {
+            if let Some(capitalization) = planned.capitalization {
+                capitalization.commit(state).expect(
+                    "preplanned independent capitalization must remain current within one pass",
+                );
+            }
+            planned
+                .resume
                 .commit(state)
                 .expect("preplanned autonomous resumption must remain current within one pass");
-            outcome.resumed.push(enterprise);
-            outcome.resumed_mandates.insert(mandate);
+            outcome.resumed.push(planned.enterprise);
+            outcome.resumed_mandates.insert(planned.mandate);
         }
         outcome
     }
@@ -454,6 +501,19 @@ mod tests {
             .get_account(accounted)
             .unwrap()
             .balance();
+        // A financially viable reopening still needs a representable ledger posting.
+        // An exhausted ledger must not spend clean funds, resume the racket, or fail
+        // the entire daily maintenance phase.
+        let mut exhausted = city.state.clone();
+        exhausted.advance_clock(crate::core::time::SimDuration::from_minutes(1_440));
+        exhausted
+            .ids
+            .set_next_raw_for_test(IdKind::LedgerTransaction, u32::MAX);
+        let before = bincode::serialize(&exhausted).unwrap();
+        let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut exhausted).unwrap();
+        assert_eq!(outcome, AutonomousEnterpriseLifecycleOutcome::default());
+        assert_eq!(bincode::serialize(&exhausted).unwrap(), before);
+
         let mut replay =
             restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
         for _ in 0..1_440 {

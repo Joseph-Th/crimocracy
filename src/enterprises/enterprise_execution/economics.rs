@@ -164,22 +164,38 @@ pub(crate) fn resolve_enterprise_operating_cost_projection(
     location: EnterpriseLocation,
     supporting_business_count: usize,
     observed_active_cases: u32,
+    associates: u16,
 ) -> Result<Money, EnterpriseError> {
     let profile = resolve_location_profile(state, location)?;
     let economics = registry.get_enterprise(kind).economics();
     let projection_overflow = || EnterpriseError::ProjectionArithmeticOverflow { kind, location };
+    let (_, labor_cost) = additional_associate_economics(kind, profile, associates)
+        .ok_or_else(projection_overflow)?;
+    resolve_projected_operating_cost(
+        economics,
+        profile,
+        supporting_business_count,
+        observed_active_cases,
+        labor_cost,
+    )
+    .ok_or_else(projection_overflow)
+}
+
+fn resolve_projected_operating_cost(
+    economics: &EnterpriseEconomicsDefinition,
+    profile: NeighborhoodProfile,
+    supporting_business_count: usize,
+    observed_active_cases: u32,
+    labor_cost: Money,
+) -> Option<Money> {
     let predictable =
-        resolve_predictable_operating_cost(economics, profile, supporting_business_count)
-            .ok_or_else(projection_overflow)?;
+        resolve_predictable_operating_cost(economics, profile, supporting_business_count)?;
     let heat = economics
         .heat_surcharge_per_active_case()
         .checked_mul(i64::from(
             observed_active_cases.min(MAX_CURRENT_HEAT_CASE_EQUIVALENTS),
-        ))
-        .ok_or_else(projection_overflow)?;
-    predictable
-        .checked_add(heat)
-        .ok_or_else(projection_overflow)
+        ))?;
+    predictable.checked_add(heat)?.checked_add(labor_cost)
 }
 
 /// Zero-variance financial projection for a proposed enterprise under the caller's observed
@@ -210,15 +226,13 @@ pub(crate) fn resolve_enterprise_financial_projection(
     let gross = resolve_gross_before_variance_value(economics, profile, staffing.management)
         .and_then(|gross| gross.checked_add(labor_revenue))
         .ok_or_else(projection_overflow)?;
-    let operating_cost = resolve_enterprise_operating_cost_projection(
-        registry,
-        state,
-        kind,
-        location,
+    let operating_cost = resolve_projected_operating_cost(
+        economics,
+        profile,
         supporting_business_count,
         observed_active_cases,
-    )?
-    .checked_add(labor_cost)
+        labor_cost,
+    )
     .ok_or_else(projection_overflow)?;
     let expected_net_cash = gross
         .checked_sub(operating_cost)

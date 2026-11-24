@@ -886,6 +886,7 @@ fn autonomous_expansion_requires_one_current_cycle_of_working_capital() {
         fixture.location,
         0,
         0,
+        EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("fixture enterprise operating cost should fit");
     assert!(required > Money::ZERO);
@@ -920,6 +921,7 @@ fn autonomous_expansion_does_not_oracle_unobserved_district_case_pressure() {
         fixture.location,
         0,
         0,
+        EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("base protection runway should fit");
     let hidden_case_runway = resolve_enterprise_operating_cost_projection(
@@ -929,6 +931,7 @@ fn autonomous_expansion_does_not_oracle_unobserved_district_case_pressure() {
         fixture.location,
         0,
         1,
+        EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("heated protection runway should fit");
     assert!(
@@ -1031,6 +1034,7 @@ fn autonomous_expansion_discards_stale_observed_district_pressure() {
         fixture.location,
         0,
         0,
+        EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("base protection runway should fit");
     let heated_runway = resolve_enterprise_operating_cost_projection(
@@ -1040,6 +1044,7 @@ fn autonomous_expansion_discards_stale_observed_district_pressure() {
         fixture.location,
         0,
         1,
+        EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("heated protection runway should fit");
     assert!(heated_runway > base_runway);
@@ -1178,6 +1183,7 @@ fn autonomous_expansion_skips_unaffordable_candidate_for_best_affordable_kind() 
         fixture.location,
         0,
         0,
+        EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("existing protection runway should fit");
     fund_enterprise_fixture_cash(
@@ -1317,6 +1323,7 @@ fn autonomous_expansion_allocates_scarce_runway_to_stronger_same_day_mandate() {
         fixture.location,
         0,
         0,
+        EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("protection runway should fit");
 
@@ -1344,6 +1351,7 @@ fn autonomous_expansion_allocates_scarce_runway_to_stronger_same_day_mandate() {
         EnterpriseLocation::Neighborhood(second_neighborhood),
         0,
         0,
+        EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("second protection runway should fit");
     fund_enterprise_fixture_cash(
