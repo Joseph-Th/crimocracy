@@ -113,7 +113,7 @@ another gang at the day boundary. It creates a crisis report when the player's
 operation is displaced, without revealing unrelated private rival information.
 One outcome suspends one racket through the canonical enterprise owner.
 
-The territory owner also validates bilateral 30-day standstills. Competing
+The private `world::territory_influence::standstill` owner validates bilateral 30-day standstills and owns their history-backed lifecycle, separate from the read-only economic influence resolver. Competing
 active rackets or a racket displaced by a recent territorial clash establish
 standing to negotiate. A stronger counterparty may require street-cash tribute,
 graduated by its local racket advantage; any offered tribute is one
@@ -143,15 +143,19 @@ active standstill per district until the agreement expires.
 
 Autonomous gang-war planning uses its own active manpower but estimates
 opponent force from the visible baseline crew sizes of their local racket
-types. Secretly hired additional defenders can repel an otherwise confident
-attack. An NPC that was repulsed avoids another challenge in that district
+types. Each NPC ranks its current local position at its turn in stable organization
+order; a committed suspension immediately updates the daily force projection, so
+later NPCs cannot act on manpower already lost or an obsolete rival footprint.
+Secretly hired additional defenders can repel an otherwise confident attack.
+An NPC that was repulsed avoids another challenge in that district
 for 30 days. After real NPC-on-NPC fighting, the defeated gang may negotiate
 a standstill at the next daily boundary, paying a required concession from
 its actual street-cash account when it can afford it. Player organizations
 are never automatically bound by an NPC-signed treaty.
-The autonomous peace pass considers the newest eligible clash per rival pair,
-not only one clash per district: unrelated gangs can settle their independent
-feuds on the same day without the latest local fight suppressing other talks.
+The autonomous peace pass considers the newest clash per rival pair, not only
+one clash per district. A renewed clash restarts the full-day waiting period,
+even when an earlier fight would otherwise qualify for negotiation. Unrelated
+gangs can settle their independent feuds on the same day.
 
 The player-driven text adapter lives in `examples/gameplay_harness/text_play/`
 and can start from either the generated authoritative city or a canonical

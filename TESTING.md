@@ -66,6 +66,12 @@ The tests `autonomous_gangs_can_negotiate_a_real_postwar_standstill`
 and `extra_defenders_can_repulse_an_optimistic_rival_ai_and_deter_repeat_raids`
 verify NPC-led reconciliation, defensive surprises caused by extra hires,
 and tactical memory after a failed autonomous challenge.
+`autonomous_raids_reassess_own_losses_before_later_same_day_choices` verifies that
+an earlier clash immediately reduces a later NPC's available manpower before
+it chooses a target, with identical outcomes after restoring the pre-clash save.
+`renewed_clash_restarts_the_peace_negotiation_wait` checks that an older eligible
+clash cannot authorize peace on the minute of renewed fighting and that negotiation
+becomes available a day later, with identical results after save restoration.
 
 ## Adversarial pressure checks
 

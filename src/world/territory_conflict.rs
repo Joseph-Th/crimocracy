@@ -440,18 +440,30 @@ pub(crate) fn apply_due_autonomous_territory_clashes(
     // when a rival front happened to receive its entity ID. A larger visible baseline
     // workforce on the target itself breaks equal-risk ties: disrupting that front has
     // the larger immediate staffing impact. Never consult hidden defender hires here.
-    let mut candidates = BTreeMap::<
-        OrganizationId,
-        Vec<(Reverse<u32>, Reverse<u16>, NeighborhoodId, EnterpriseId)>,
-    >::new();
-    for (district, positions) in districts {
-        for (&attacker, own) in &positions {
-            if state.player_organization() == Some(attacker)
-                || recently_repulsed(state, attacker, district)
-            {
+    let mut attacker_districts = BTreeMap::<OrganizationId, Vec<NeighborhoodId>>::new();
+    for (&district, positions) in &districts {
+        for &attacker in positions.keys() {
+            if state.player_organization() != Some(attacker) {
+                attacker_districts
+                    .entry(attacker)
+                    .or_default()
+                    .push(district);
+            }
+        }
+    }
+    let mut results = Vec::new();
+    for (attacker, local_districts) in attacker_districts {
+        // Earlier clashes in this pass can remove a gang's own workers or a rival
+        // front. Rank the current footprint at each gang's turn, not a frozen list
+        // of attacks computed before any of the losses.
+        let mut targets = Vec::new();
+        for district in local_districts {
+            let positions = &districts[&district];
+            let own = &positions[&attacker];
+            if own.targets.is_empty() || recently_repulsed(state, attacker, district) {
                 continue;
             }
-            for (&defender, rival) in &positions {
+            for (&defender, rival) in positions {
                 if attacker == defender
                     || own.actual_force <= rival.baseline_force.saturating_add(DEFENSIVE_ADVANTAGE)
                 {
@@ -459,27 +471,32 @@ pub(crate) fn apply_due_autonomous_territory_clashes(
                 }
                 let estimated_margin =
                     own.actual_force - rival.baseline_force - DEFENSIVE_ADVANTAGE;
-                candidates
-                    .entry(attacker)
-                    .or_default()
-                    .extend(rival.targets.iter().copied().map(|(target, baseline)| {
-                        (
-                            Reverse(estimated_margin),
-                            Reverse(baseline),
-                            district,
-                            target,
-                        )
-                    }));
+                targets.extend(rival.targets.iter().copied().map(|(target, baseline)| {
+                    (
+                        Reverse(estimated_margin),
+                        Reverse(baseline),
+                        district,
+                        target,
+                    )
+                }));
             }
         }
-    }
-    let mut results = Vec::new();
-    for (attacker, mut targets) in candidates {
         targets.sort_unstable();
-        for (_, _, _, target) in targets {
+        for (_, _, district, target) in targets {
             if let Ok(plan) = validate_territory_clash(state, attacker, target)
                 && let Ok(outcome) = plan.commit(state)
             {
+                let lost = state
+                    .enterprises()
+                    .get_enterprise(outcome.suspended_racket)
+                    .expect("a suspended racket remains in the enterprise history");
+                let position = districts
+                    .get_mut(&district)
+                    .and_then(|positions| positions.get_mut(&lost.organization()))
+                    .expect("the suspended racket belonged to the active footprint");
+                position.actual_force -= u32::from(lost.associates());
+                position.baseline_force -= u32::from(lost.kind().baseline_associates());
+                position.targets.retain(|(id, _)| *id != lost.id());
                 results.push(outcome);
                 break;
             }

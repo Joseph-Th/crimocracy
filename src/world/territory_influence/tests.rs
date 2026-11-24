@@ -545,6 +545,118 @@ fn autonomous_raids_prefer_a_safer_rival_over_an_earlier_created_target() {
 }
 
 #[test]
+fn autonomous_raids_reassess_own_losses_before_later_same_day_choices() {
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::core::time::{DAY_MINUTES, SimDuration};
+    use crate::enterprises::enterprise_execution::validate_staff_enterprise;
+    use crate::world::territory_conflict::{
+        active_district_force, apply_due_autonomous_territory_clashes,
+    };
+    use crate::world::world_system::designate_player_organization;
+
+    let registry = build_registry();
+    let mut fixture = make_influence_fixture();
+    let player = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Neutral Player".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut fixture.state, player).unwrap();
+    let (rival_manager, rival_mandate) = assign_district_authority(
+        &mut fixture.state,
+        fixture.challenger,
+        fixture.neighborhood,
+        "Second Rival Captain",
+    );
+    let (player_manager, player_mandate) = assign_district_authority(
+        &mut fixture.state,
+        player,
+        fixture.neighborhood,
+        "Player Captain",
+    );
+    let mut rival_rackets = Vec::new();
+    // All three gangs have the same visible baseline (10). Create the second
+    // rival's fronts first to make it the first gang's preferred equal-risk target.
+    for (organization, manager, mandate, staffing) in [
+        (fixture.challenger, rival_manager, rival_mandate, [9, 5]),
+        (fixture.dominant, fixture.manager, fixture.mandate, [11, 11]),
+        (player, player_manager, player_mandate, [5, 5]),
+    ] {
+        for (index, associates) in staffing.into_iter().enumerate() {
+            let venue = insert_venue(
+                &registry,
+                &mut fixture.state,
+                &format!("{organization} Club {index}"),
+                fixture.neighborhood,
+                BusinessOwner::Organization(organization),
+                hospitality_functions(),
+            );
+            let racket = establish_gambling_at_venue(
+                &registry,
+                &mut fixture.state,
+                organization,
+                mandate,
+                manager,
+                venue,
+            );
+            if associates != EnterpriseKind::Gambling.baseline_associates() {
+                validate_staff_enterprise(&fixture.state, racket, associates)
+                    .unwrap()
+                    .commit(&mut fixture.state)
+                    .unwrap();
+            }
+            if organization == fixture.challenger {
+                rival_rackets.push(racket);
+            }
+        }
+    }
+    assert_eq!(
+        active_district_force(&fixture.state, fixture.challenger, fixture.neighborhood),
+        14
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    let clashes = apply_due_autonomous_territory_clashes(&mut fixture.state);
+    assert_eq!(
+        clashes.len(),
+        1,
+        "a gang reduced to five associates must not act on its obsolete fourteen-person estimate"
+    );
+    assert_eq!(
+        apply_due_autonomous_territory_clashes(&mut restored),
+        clashes
+    );
+    assert_eq!(
+        bincode::serialize(&restored).unwrap(),
+        bincode::serialize(&fixture.state).unwrap()
+    );
+    assert!(clashes[0].attacker_won);
+    assert_eq!(clashes[0].suspended_racket, rival_rackets[0]);
+    assert_eq!(
+        active_district_force(&fixture.state, fixture.challenger, fixture.neighborhood),
+        5
+    );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(rival_rackets[1])
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Active
+    );
+    validate_invariants(&fixture.state);
+    restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+}
+
+#[test]
 fn suspended_rackets_leave_the_footprint() {
     let registry = build_registry();
     let mut fixture = make_influence_fixture();
@@ -1591,6 +1703,82 @@ fn independent_wars_in_one_district_can_each_reach_autonomous_peace() {
     assert_eq!(
         bincode::serialize(&fixture.state).unwrap(),
         bincode::serialize(&restored).unwrap(),
+    );
+}
+
+#[test]
+fn renewed_clash_restarts_the_peace_negotiation_wait() {
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::core::time::{DAY_MINUTES, SimDuration};
+    use crate::world::territory_conflict::validate_territory_clash;
+
+    let registry = build_registry();
+    let mut fixture = make_influence_fixture();
+    let (rival_manager, rival_mandate) = assign_district_authority(
+        &mut fixture.state,
+        fixture.challenger,
+        fixture.neighborhood,
+        "Second Captain",
+    );
+    let mut own = Vec::new();
+    let mut rival = Vec::new();
+    for (organization, manager, mandate, rackets) in [
+        (fixture.dominant, fixture.manager, fixture.mandate, &mut own),
+        (fixture.challenger, rival_manager, rival_mandate, &mut rival),
+    ] {
+        for index in 0..2 {
+            let venue = insert_venue(
+                &registry,
+                &mut fixture.state,
+                &format!("{organization} Hall {index}"),
+                fixture.neighborhood,
+                BusinessOwner::Organization(organization),
+                hospitality_functions(),
+            );
+            rackets.push(establish_gambling_at_venue(
+                &registry,
+                &mut fixture.state,
+                organization,
+                mandate,
+                manager,
+                venue,
+            ));
+        }
+    }
+    let day = SimDuration::from_minutes(DAY_MINUTES as u32);
+    fixture.state.advance_clock(day);
+    let initial = validate_territory_clash(&fixture.state, fixture.dominant, rival[0])
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert!(!initial.attacker_won);
+    assert_eq!(initial.suspended_racket, own[0]);
+
+    fixture.state.advance_clock(day);
+    let renewed = validate_territory_clash(&fixture.state, fixture.challenger, own[1])
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert!(renewed.attacker_won);
+    assert_eq!(renewed.suspended_racket, own[1]);
+
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert!(
+        apply_due_autonomous_territory_standstills(&mut fixture.state).is_empty(),
+        "an older clash must not permit negotiation on the minute of a renewed clash"
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        state.advance_clock(day);
+        assert_eq!(apply_due_autonomous_territory_standstills(state).len(), 1);
+        assert!(active_standstill(state, fixture.dominant, fixture.neighborhood).is_some());
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
     );
 }
 
