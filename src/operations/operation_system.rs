@@ -90,6 +90,14 @@ pub enum OperationError {
         leader: CharacterId,
         organization: OrganizationId,
     },
+    #[error(
+        "operation would finish at {planned_end:?}, after freelancer {character}'s term ends at {expires_at:?}"
+    )]
+    FreelanceWindow {
+        character: CharacterId,
+        planned_end: SimTime,
+        expires_at: SimTime,
+    },
     #[error("character {character} is already committed to overlapping operation {operation}")]
     ParticipantBusy {
         character: CharacterId,
@@ -370,6 +378,14 @@ impl<'registry> ValidatedOperation<'registry> {
         }
         let mut participants = BTreeSet::from([self.draft.leader]);
         participants.extend(self.draft.roles.values().copied());
+        freelance_plan_deadline(
+            self.registry,
+            state,
+            &participants,
+            self.draft.kind,
+            self.draft.scheduled_for,
+            &self.draft.constraints,
+        )?;
         if let Some((character, operation)) = find_busy_participant(
             self.registry,
             state,
@@ -512,6 +528,15 @@ pub fn participant_available_for_plan(
     state.world.get_character(character).is_some()
         && state.legal.active_arrest_for_character(character).is_none()
         && scheduled_for > state.now()
+        && freelance_plan_deadline(
+            registry,
+            state,
+            &BTreeSet::from([character]),
+            kind,
+            scheduled_for,
+            constraints,
+        )
+        .is_ok()
         && find_busy_participant(
             registry,
             state,
@@ -576,7 +601,7 @@ pub fn planning_information(
 pub fn validate_authorize_operation<'registry>(
     registry: &'registry Registry,
     state: &AppState,
-    draft: OperationDraft,
+    mut draft: OperationDraft,
 ) -> Result<ValidatedOperation<'registry>, OperationError> {
     if draft.title.trim().is_empty() {
         return Err(OperationError::EmptyTitle);
@@ -648,6 +673,28 @@ pub fn validate_authorize_operation<'registry>(
         &draft,
         &mut expected_participant_versions,
     )?;
+    // A signed term is a hard booking limit. Preserve any earlier deadline;
+    // delays and decision pauses use the existing deadline lifecycle.
+    if let Some(expires_at) = freelance_plan_deadline(
+        registry,
+        state,
+        &participants,
+        draft.kind,
+        draft.scheduled_for,
+        &draft.constraints,
+    )? && !draft.constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            crate::operations::OperationConstraint::CompleteBy(deadline)
+                if *deadline <= expires_at
+        )
+    }) {
+        draft
+            .constraints
+            .push(crate::operations::OperationConstraint::CompleteBy(
+                expires_at,
+            ));
+    }
     if let Some(character) =
         crate::operations::operation_objective::character_objective_target(&draft.objective)
         && participants.contains(&character)
@@ -690,6 +737,45 @@ pub fn validate_authorize_operation<'registry>(
         witness_pressure_cases,
         registry,
     })
+}
+
+/// Uses the canonical booking projection for both admission and crew selection.
+fn freelance_plan_deadline(
+    registry: &Registry,
+    state: &AppState,
+    participants: &BTreeSet<CharacterId>,
+    kind: OperationKind,
+    scheduled_for: SimTime,
+    constraints: &[crate::operations::OperationConstraint],
+) -> Result<Option<SimTime>, OperationError> {
+    let Some((expires_at, character)) = participants
+        .iter()
+        .filter_map(|character| {
+            state
+                .world()
+                .active_freelance_contract(*character)
+                .map(|contract| (contract.expires_at(), *character))
+        })
+        .min()
+    else {
+        return Ok(None);
+    };
+    let (_, planned_end) =
+        crate::operations::operation_scheduling::projected_authorized_operation_window(
+            registry,
+            state.now(),
+            kind,
+            scheduled_for,
+            constraints,
+        );
+    if planned_end > expires_at {
+        return Err(OperationError::FreelanceWindow {
+            character,
+            planned_end,
+            expires_at,
+        });
+    }
+    Ok(Some(expires_at))
 }
 
 fn resolve_witness_pressure_cases(

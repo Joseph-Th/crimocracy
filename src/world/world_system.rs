@@ -102,6 +102,10 @@ pub enum WorldError {
         supervisor: CharacterId,
         organization: Option<OrganizationId>,
     },
+    #[error("contracted freelancer {0} cannot supervise personnel")]
+    FreelanceSupervisor(CharacterId),
+    #[error("contracted freelancer {0} must retain a supervisor while employed")]
+    FreelanceExecutive(CharacterId),
     #[error("cannot assign supervisor {supervisor} to a character without an organization")]
     SupervisorWithoutOrganization { supervisor: CharacterId },
     #[error("character {character} cannot supervise itself")]
@@ -530,6 +534,12 @@ fn validate_reassignment_preconditions(
     }
 
     let organization_changed = organization != record.organization();
+    if !organization_changed
+        && supervisor.is_none()
+        && state.world.active_freelance_contract(character).is_some()
+    {
+        return Err(WorldError::FreelanceExecutive(character));
+    }
     if organization_changed {
         if let Some(organization) = organization
             && let Some(decision) = state
@@ -556,9 +566,7 @@ fn validate_reassignment_preconditions(
     // forming an underboss layer impossible in an operating organization.
     if organization_changed {
         validate_role_change_release(state, character)?;
-        if organization_changed
-            && let Some(direct_report) = state.world.direct_reports(character).next()
-        {
+        if let Some(direct_report) = state.world.direct_reports(character).next() {
             return Err(WorldError::DirectReportAssignment {
                 character,
                 direct_report: direct_report.id(),
@@ -938,6 +946,13 @@ fn validate_membership(
             .world
             .get_character(supervisor_id)
             .ok_or(WorldError::MissingCharacter(supervisor_id))?;
+        if state
+            .world
+            .active_freelance_contract(supervisor_id)
+            .is_some()
+        {
+            return Err(WorldError::FreelanceSupervisor(supervisor_id));
+        }
         if let Some(arrest) = state.legal.active_arrest_for_character(supervisor_id) {
             return Err(WorldError::DetainedSupervisor {
                 supervisor: supervisor_id,

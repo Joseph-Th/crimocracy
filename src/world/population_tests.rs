@@ -518,7 +518,7 @@ fn paid_freelance_contract_is_personal_temporary_and_recruitable_after_expiry() 
     assert_eq!(personal_cash, i128::from(fee));
     assert!(matches!(
         validate_hire_freelancer(&city.state, city.player, freelancer, manager, 2),
-        Err(FreelanceError::Unavailable(_)) | Err(FreelanceError::AlreadyContracted)
+        Err(FreelanceError::Unavailable(_))
     ));
     validate_invariants(&city.state);
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
@@ -577,6 +577,156 @@ fn paid_freelance_contract_is_personal_temporary_and_recruitable_after_expiry() 
     .expect("formerly contracted freelancer must be considered by the real recruitment owner");
     validate_invariants(&city.state);
     restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+}
+
+#[test]
+fn freelance_terms_cannot_be_extended_by_permanent_roles_or_future_bookings() {
+    use crate::contacts::contact_system::{
+        ContactError, InstitutionalContactDraft, validate_establish_contact,
+    };
+    use crate::core::entity::EntityRef;
+    use crate::delegation::delegation_system::{DelegationError, validate_assign_mandate};
+    use crate::delegation::{MandateDraft, ResponsibilityScope};
+    use crate::operations::operation_system::{
+        OperationError, participant_available_for_plan, validate_authorize_operation,
+    };
+    use crate::operations::{
+        OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
+    };
+    use crate::world::world_system::{WorldError, validate_set_character_supervisor};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let freelancer = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            person.life().vocation() == IndependentVocation::FreelanceCriminal
+                && city
+                    .state
+                    .social()
+                    .get_relationship(person.id(), city.boss)
+                    .is_some()
+        })
+        .unwrap()
+        .id();
+    let member = city
+        .state
+        .world()
+        .direct_reports(city.boss)
+        .next()
+        .unwrap()
+        .id();
+    let contact = city
+        .state
+        .world()
+        .public_civic_people()
+        .find(|person| person.organization().is_some())
+        .unwrap()
+        .id();
+    let district = city.state.world().neighborhoods().next().unwrap().id();
+    validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 1)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let expiry = city
+        .state
+        .world()
+        .active_freelance_contract(freelancer)
+        .unwrap()
+        .expires_at();
+    let before = bincode::serialize(&city.state).unwrap();
+    assert_eq!(
+        validate_set_character_supervisor(&city.state, member, Some(freelancer)).unwrap_err(),
+        WorldError::FreelanceSupervisor(freelancer)
+    );
+    assert_eq!(
+        validate_set_character_supervisor(&city.state, freelancer, None).unwrap_err(),
+        WorldError::FreelanceExecutive(freelancer)
+    );
+    assert_eq!(
+        validate_assign_mandate(
+            &city.state,
+            MandateDraft {
+                organization: city.player,
+                manager: freelancer,
+                scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(district)]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .unwrap_err(),
+        DelegationError::FreelanceManager(freelancer)
+    );
+    assert!(matches!(
+        validate_establish_contact(
+            &city.state,
+            InstitutionalContactDraft {
+                sponsor: city.player,
+                handler: freelancer,
+                contact,
+            },
+        ),
+        Err(ContactError::FreelanceHandler(id)) if id == freelancer
+    ));
+    let draft = |scheduled_for| OperationDraft {
+        title: "Contract reconnaissance".into(),
+        kind: OperationKind::Surveillance,
+        responsible_organization: city.player,
+        leader: city.boss,
+        objective: OperationObjective::GatherInformation {
+            target: EntityRef::Neighborhood(district),
+        },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Surveillance, freelancer)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for,
+    };
+    assert!(matches!(
+        validate_authorize_operation(&registry, &city.state, draft(expiry)),
+        Err(OperationError::FreelanceWindow { character, .. }) if character == freelancer
+    ));
+    assert!(!participant_available_for_plan(
+        &registry,
+        &city.state,
+        freelancer,
+        OperationKind::Surveillance,
+        expiry,
+        &[],
+    ));
+    assert_eq!(bincode::serialize(&city.state).unwrap(), before);
+
+    let start = city
+        .state
+        .now()
+        .checked_add(SimDuration::ONE_MINUTE)
+        .unwrap();
+    let operation = validate_authorize_operation(&registry, &city.state, draft(start))
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert_eq!(
+        city.state
+            .operations()
+            .get_operation(operation)
+            .unwrap()
+            .completion_deadline(),
+        Some(expiry)
+    );
+    validate_invariants(&city.state);
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .operations()
+            .get_operation(operation)
+            .unwrap()
+            .completion_deadline(),
+        Some(expiry)
+    );
 }
 
 #[test]

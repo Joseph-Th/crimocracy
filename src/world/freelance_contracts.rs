@@ -130,8 +130,6 @@ pub enum FreelanceError {
     InvalidDuration,
     #[error("contractor has no established personal relationship with organization leader")]
     NoRelationship,
-    #[error("freelancer already has an active contract")]
-    AlreadyContracted,
     #[error("organization has insufficient street cash for {required_cents}-cent signing fee")]
     Unfunded { required_cents: i64 },
     #[error("contract was validated at {expected:?} but current time is {found:?}")]
@@ -199,7 +197,7 @@ fn ensure_eligible(
     {
         return Err(FreelanceError::InvalidSponsor(sponsor));
     }
-    let candidate = state
+    state
         .world()
         .get_character(freelancer)
         .filter(|person| {
@@ -211,7 +209,7 @@ fn ensure_eligible(
                     .is_none()
         })
         .ok_or(FreelanceError::Unavailable(freelancer))?;
-    let leader = state
+    state
         .world()
         .get_character(manager)
         .filter(|person| {
@@ -222,14 +220,6 @@ fn ensure_eligible(
                     .is_none()
         })
         .ok_or(FreelanceError::Unavailable(manager))?;
-    let _ = (candidate, leader);
-    if state
-        .world()
-        .active_freelance_contract(freelancer)
-        .is_some()
-    {
-        return Err(FreelanceError::AlreadyContracted);
-    }
     if !state
         .social()
         .get_relationship(freelancer, manager)
@@ -276,7 +266,6 @@ pub fn validate_hire_freelancer(
         .accounts_for(FinancialOwner::Organization(sponsor))
         .filter(|account| {
             account.kind() == AccountKind::StreetCash
-                && account.version() < u32::MAX
                 && account.available_payment_balance() > Money::ZERO
         })
         .map(|account| (account.available_payment_balance(), account.id()))
@@ -373,31 +362,14 @@ pub fn apply_due_freelance_expirations(state: &mut AppState) -> Vec<CharacterId>
     let due = state.world().due_freelance_contracts(state.now());
     let mut ended = Vec::new();
     for freelancer in due {
-        let sponsor = state
-            .world()
-            .active_freelance_contract(freelancer)
-            .expect("expiry index references an active contract")
-            .sponsor();
-        let org = state
-            .world()
-            .get_character(freelancer)
-            .and_then(|person| person.organization());
-        if org == Some(sponsor) {
-            let Ok(release) = validate_reassign_character(state, freelancer, None, None) else {
-                continue;
-            };
-            if release.commit(state).is_err() {
-                continue;
-            }
+        // Active terms necessarily retain sponsor membership. The world reassignment
+        // owner closes the term and removes its expiry index entry on successful release.
+        let Ok(release) = validate_reassign_character(state, freelancer, None, None) else {
+            continue;
+        };
+        if release.commit(state).is_ok() {
+            ended.push(freelancer);
         }
-        if state
-            .world()
-            .active_freelance_contract(freelancer)
-            .is_some()
-        {
-            state.world.end_freelance_contract(freelancer, state.now());
-        }
-        ended.push(freelancer);
     }
     ended
 }
@@ -482,6 +454,22 @@ pub(crate) fn valid_freelance_contracts(state: &AppState) -> bool {
                         && (record.ended_at.is_some()
                             || person.is_some_and(|person| {
                                 person.organization() == Some(record.sponsor)
+                                    && person.supervisor().is_some()
+                                    && state.world().direct_reports(freelancer).next().is_none()
+                                    && state.delegation().active_for_manager(freelancer).is_none()
+                                    && state
+                                        .contacts()
+                                        .active_contacts_for_handler(freelancer)
+                                        .next()
+                                        .is_none()
+                                    && state
+                                        .operations()
+                                        .active_operations_for_participant(freelancer)
+                                        .all(|operation| {
+                                            operation.completion_deadline().is_some_and(|deadline| {
+                                                deadline <= record.expires_at
+                                            })
+                                        })
                             }))
                         && valid_contract_payment(state, freelancer, record)
                 })

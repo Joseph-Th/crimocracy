@@ -33,6 +33,8 @@ pub enum DelegationError {
         manager: CharacterId,
         organization: OrganizationId,
     },
+    #[error("contracted freelancer {0} cannot hold a standing mandate")]
+    FreelanceManager(CharacterId),
     #[error("manager {manager} is detained under arrest {arrest}")]
     DetainedManager {
         manager: CharacterId,
@@ -681,6 +683,9 @@ fn validate_manager(
             manager,
             organization,
         });
+    }
+    if state.world.active_freelance_contract(manager).is_some() {
+        return Err(DelegationError::FreelanceManager(manager));
     }
     if let Some(arrest) = state.legal.active_arrest_for_character(manager) {
         return Err(DelegationError::DetainedManager {

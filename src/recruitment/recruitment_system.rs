@@ -400,6 +400,7 @@ fn candidate_reassignment_is_unavailable(error: WorldError) -> bool {
         | WorldError::PendingRecruitmentApprovalAssignment { .. }
         | WorldError::PayrollDepartureCoolingOff { .. }
         | WorldError::PayrollDepartureUnfunded { .. }
+        | WorldError::FreelanceSupervisor(_)
         | WorldError::VersionCapacity(_) => true,
         WorldError::EmptyName
         | WorldError::MissingOrganization(_)
@@ -414,6 +415,7 @@ fn candidate_reassignment_is_unavailable(error: WorldError) -> bool {
         | WorldError::ActiveEnterpriseHost { .. }
         | WorldError::SupervisorOrganizationMismatch { .. }
         | WorldError::SupervisorWithoutOrganization { .. }
+        | WorldError::FreelanceExecutive(_)
         | WorldError::SelfSupervision { .. }
         | WorldError::SupervisionCycle { .. }
         | WorldError::DetainedSupervisor { .. }

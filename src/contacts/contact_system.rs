@@ -32,6 +32,8 @@ pub enum ContactError {
         handler: CharacterId,
         sponsor: OrganizationId,
     },
+    #[error("contracted freelancer {0} cannot own a standing institutional channel")]
+    FreelanceHandler(CharacterId),
     #[error("contact handler {handler} is detained under arrest {arrest}")]
     DetainedHandler {
         handler: CharacterId,
@@ -557,6 +559,9 @@ fn validate_contact_dependencies(
         .ok_or(ContactError::MissingHandler(handler))?;
     if handler_record.organization() != Some(sponsor) {
         return Err(ContactError::InvalidHandler { handler, sponsor });
+    }
+    if state.world.active_freelance_contract(handler).is_some() {
+        return Err(ContactError::FreelanceHandler(handler));
     }
     if let Some(arrest) = state.legal.active_arrest_for_character(handler) {
         return Err(ContactError::DetainedHandler {
