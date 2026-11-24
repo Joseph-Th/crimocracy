@@ -105,19 +105,17 @@ pub enum LaunderingError {
     VersionCapacity(#[from] VersionCapacityError),
 }
 
-pub struct ValidatedLaundering {
+pub struct ValidatedLaundering<'r> {
+    registry: &'r Registry,
     transaction: ValidatedLedgerTransaction,
     business: crate::core::id::BusinessId,
     organization: crate::core::id::OrganizationId,
     expected_business_version: u32,
-    /// Pre-computed per-cycle total (`already laundered + this transfer`) validated to stay
-    /// within the front's plausibility capacity. Committing writes it as a total so the
-    /// ledger leg and the budget leg of one laundering cannot half-apply.
-    new_cycle_total: Money,
+    amount: Money,
     expected_economy_version: u32,
 }
 
-impl ValidatedLaundering {
+impl ValidatedLaundering<'_> {
     pub fn commit(self, state: &mut AppState) -> Result<LedgerTransactionId, LaunderingError> {
         let business = state
             .world
@@ -148,15 +146,22 @@ impl ValidatedLaundering {
             });
         }
         ensure_version_can_advance(economy.version(), "business economy")?;
+        // A local competitor can open or recover during the same minute without changing
+        // this front's version. Re-prove the live earning-power ceiling before moving money.
+        let new_cycle_total = validate_laundering_capacity(
+            self.registry,
+            state,
+            self.business,
+            self.amount,
+            economy,
+        )?;
         let id = self.transaction.commit(state)?;
-        // The transfer committed, so the front's plausibility budget shrinks by the same
-        // volume. The version check above guarantees the budget window is unchanged, and the
-        // total was validated to fit before any mutation.
+        // Both the ledger and the economy's cumulative volume are preflighted.
         crate::economy::business_economy_system::apply_laundering_capacity_preflighted(
             state,
             self.business,
             id,
-            self.new_cycle_total,
+            new_cycle_total,
         );
         Ok(id)
     }
@@ -208,11 +213,7 @@ pub fn remaining_laundering_capacity(
     if economy.status() != BusinessOperatingStatus::Active {
         return None;
     }
-    let gross_potential = resolve_business_current_gross(registry, state, business).ok()?;
-    let capacity = apply_basis_point_multiplier(
-        gross_potential,
-        registry.laundering().plausibility_gross_basis_points(),
-    )?;
+    let capacity = laundering_ceiling(registry, state, business).ok()?;
     Some(unspent_laundering_capacity(
         capacity,
         economy.laundered_this_cycle(),
@@ -229,11 +230,11 @@ fn unspent_laundering_capacity(capacity: Money, consumed: Money) -> Money {
         .max(Money::ZERO)
 }
 
-pub fn validate_launder_funds(
-    registry: &Registry,
+pub fn validate_launder_funds<'r>(
+    registry: &'r Registry,
     state: &AppState,
     draft: LaunderingDraft,
-) -> Result<ValidatedLaundering, LaunderingError> {
+) -> Result<ValidatedLaundering<'r>, LaunderingError> {
     if draft.amount.cents() <= 0 {
         return Err(LaunderingError::NonPositiveAmount);
     }
@@ -246,18 +247,19 @@ pub fn validate_launder_funds(
     // this cycle has less plausible room left, so volume requires larger or additional fronts
     // rather than many small transfers. The basis is the front's current earning power, so a
     // sabotage-disrupted front cannot hide cash its degraded books cannot explain.
-    let new_cycle_total = validate_laundering_capacity(registry, state, &draft, economy)?;
+    validate_laundering_capacity(registry, state, draft.business, draft.amount, economy)?;
     // Both legs must remain material after cent rounding. A zero fee would fail to prove which
     // front absorbed the transfer, while a zero accounted credit would call a pure front-revenue
     // transfer "laundering" without cleaning any money.
     let transaction =
         validate_laundering_transaction(registry, state, &draft, business_record, economy)?;
     Ok(ValidatedLaundering {
+        registry,
         transaction,
         business: draft.business,
         organization: draft.organization,
         expected_business_version: business_record.version(),
-        new_cycle_total,
+        amount: draft.amount,
         expected_economy_version: economy.version(),
     })
 }
@@ -358,29 +360,38 @@ fn validate_laundering_front<'a>(
     Ok((business, economy))
 }
 
-fn validate_laundering_capacity(
+fn laundering_ceiling(
     registry: &Registry,
     state: &AppState,
-    draft: &LaunderingDraft,
-    economy: &BusinessEconomyRecord,
+    business: crate::core::id::BusinessId,
 ) -> Result<Money, LaunderingError> {
-    let gross_potential = resolve_business_current_gross(registry, state, draft.business)?;
-    let capacity = apply_basis_point_multiplier(
+    let gross_potential = resolve_business_current_gross(registry, state, business)?;
+    apply_basis_point_multiplier(
         gross_potential,
         registry.laundering().plausibility_gross_basis_points(),
     )
-    .ok_or(LaunderingError::ArithmeticOverflow)?;
+    .ok_or(LaunderingError::ArithmeticOverflow)
+}
+
+fn validate_laundering_capacity(
+    registry: &Registry,
+    state: &AppState,
+    business: crate::core::id::BusinessId,
+    amount: Money,
+    economy: &BusinessEconomyRecord,
+) -> Result<Money, LaunderingError> {
+    let capacity = laundering_ceiling(registry, state, business)?;
     let already_laundered = economy.laundered_this_cycle();
     let remaining = unspent_laundering_capacity(capacity, already_laundered);
-    if draft.amount > remaining {
+    if amount > remaining {
         return Err(LaunderingError::CapacityExceeded {
-            business: draft.business,
-            requested_cents: draft.amount.cents(),
+            business,
+            requested_cents: amount.cents(),
             capacity_cents: remaining.cents(),
         });
     }
     already_laundered
-        .checked_add(draft.amount)
+        .checked_add(amount)
         .ok_or(LaunderingError::ArithmeticOverflow)
 }
 

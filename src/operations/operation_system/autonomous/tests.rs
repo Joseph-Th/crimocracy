@@ -221,6 +221,172 @@ fn finish_operation(registry: &Registry, state: &mut AppState, id: crate::core::
 }
 
 #[test]
+fn refused_protection_prioritizes_the_refusing_owner_not_other_ward_businesses() {
+    use crate::decisions::DecisionResponse;
+    use crate::decisions::decision_system::{
+        apply_due_protection_demands, validate_resolve_decision,
+    };
+    use crate::delegation::delegation_system::{MandateRevisionDraft, validate_revise_mandate};
+    use crate::enterprises::enterprise_execution::validate_establish_enterprise;
+    use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
+
+    let Fixture {
+        registry,
+        mut state,
+        rival,
+        player,
+        competitor,
+        manager,
+    } = fixture();
+    let district = state
+        .world()
+        .get_business(competitor)
+        .unwrap()
+        .neighborhood();
+    let third_party = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Uninvolved Holdings".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let third_party_shop = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Uninvolved Nightclub".to_owned(),
+            kind: BusinessKind::Nightclub,
+            functions: BTreeSet::from([BusinessFunction::CustomerAccess]),
+            neighborhood: district,
+            owner: BusinessOwner::Organization(third_party),
+        },
+    )
+    .unwrap();
+    let operating_account = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(third_party_shop),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let settlement_account = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(third_party_shop),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_establish_business_economy(
+        &registry,
+        &state,
+        BusinessEconomyDraft {
+            business: third_party_shop,
+            operating_account,
+            settlement_account,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+
+    let mandate = state.delegation().active_for_manager(manager).unwrap().id();
+    let scope = ResponsibilityScope::Neighborhood(district);
+    validate_revise_mandate(
+        &state,
+        mandate,
+        MandateRevisionDraft {
+            scopes: BTreeSet::from([
+                scope,
+                ResponsibilityScope::Function(ResponsibilityFunction::Operations),
+            ]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let cash_account = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(rival),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let settlement_account = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(rival),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_establish_enterprise(
+        &registry,
+        &state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization: rival,
+            authority: MandateAuthority {
+                mandate,
+                manager,
+                scope,
+            },
+            location: EnterpriseLocation::Neighborhood(district),
+            supporting_businesses: BTreeSet::new(),
+            cash_account,
+            settlement_account,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+
+    let mut control = state.clone();
+    let targets = |state: &mut AppState| {
+        apply_due_rival_operations(&registry, state)
+            .into_iter()
+            .map(|id| {
+                state
+                    .operations()
+                    .get_operation(id)
+                    .unwrap()
+                    .objective()
+                    .business_target()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        targets(&mut control),
+        vec![Some(third_party_shop)],
+        "without a refusal, the wealthier target wins"
+    );
+    let demands = apply_due_protection_demands(&registry, &mut state);
+    assert_eq!(demands.len(), 1);
+    validate_resolve_decision(
+        &registry,
+        &state,
+        demands[0].decision,
+        player,
+        DecisionResponse::Reject,
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    assert_eq!(
+        targets(&mut state),
+        vec![Some(competitor)],
+        "retaliation belongs to the refusing owner, not an uninvolved neighbor"
+    );
+}
+
+#[test]
 fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_restore() {
     let Fixture {
         registry,

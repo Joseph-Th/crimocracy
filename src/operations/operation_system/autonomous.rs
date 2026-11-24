@@ -139,8 +139,8 @@ fn crew(
 /// free. A rival with an operating racket or a substantial paid named crew can send
 /// personnel to pressure an under-defended shop, even without a competing local business.
 /// A local foothold carries full strength; projecting from elsewhere costs one associate.
-/// The attacker estimates the defender's visible baseline crews, never its secret extra hires
-/// or private books. Actual sabotage still requires scouting, an authorized operation, and
+/// The defender's actual local operating force and available enforcers deter predation;
+/// private books do not enter the estimate. Sabotage still requires scouting, authorization, and
 /// successful execution under ordinary police and business-economy rules.
 fn predatory_stake(
     registry: &Registry,
@@ -317,11 +317,10 @@ fn choose_plan<'r>(
         if owned.contains(&id) || recent_strikes.get(&id).copied().unwrap_or(0) >= strike_limit {
             continue;
         }
-        if state
+        let player_owned = state
             .player_organization()
-            .is_some_and(|player| target_owner == Some(BusinessOwner::Organization(player)))
-            && rival_pressure_blocked(state, organization, district)
-        {
+            .is_some_and(|player| target_owner == Some(BusinessOwner::Organization(player)));
+        if player_owned && rival_pressure_blocked(state, organization, district) {
             continue;
         }
         let gain = sectors.get(&district).map_or(0, |stakes| {
@@ -346,10 +345,7 @@ fn choose_plan<'r>(
         // actual player-owned active shop and a visible 500-point local political
         // machine. It never licenses blind strikes on independent owners or
         // against a ward where the attacker has no operating business.
-        let local_machine = if state
-            .player_organization()
-            .is_some_and(|player| target_owner == Some(BusinessOwner::Organization(player)))
-        {
+        let local_machine = if player_owned {
             state
                 .player_organization()
                 .and_then(|player| state.politics().organization(player))
@@ -427,7 +423,7 @@ fn choose_plan<'r>(
             .saturating_add(political_stake)
             .saturating_add(predatory_gain)
             .saturating_add(
-                if recently_refused_protection(state, organization, district) {
+                if player_owned && recently_refused_protection(state, organization, district) {
                     predatory_gain.saturating_mul(4)
                 } else {
                     0
