@@ -12,10 +12,34 @@ pub(super) fn validate_history_against_registry(
     state: &AppState,
 ) -> Result<(), StateValidationError> {
     for event in state.history.events() {
-        if let HistoryEventKind::PayrollDeparture { daily_wage, .. } = event.kind()
-            && daily_wage != registry.upkeep().per_member_daily()
-        {
-            return Err(StateValidationError::InvalidPayrollDeparture { event: event.id() });
+        match event.kind() {
+            HistoryEventKind::PayrollDeparture { daily_wage, .. }
+                if daily_wage != registry.upkeep().per_member_daily() =>
+            {
+                return Err(StateValidationError::InvalidPayrollDeparture { event: event.id() });
+            }
+            HistoryEventKind::CampaignVictory {
+                organization,
+                path: crate::core::campaign_victory::VictoryPath::FundedRetirement,
+                settlement,
+            } if !settlement.is_some_and(|transaction| {
+                crate::core::campaign_victory::retirement_settlement_matches(
+                    state,
+                    organization,
+                    transaction,
+                    event.occurred_at(),
+                    Some(registry),
+                )
+            }) =>
+            {
+                return Err(StateValidationError::InvalidCampaignVictory { event: event.id() });
+            }
+            HistoryEventKind::Operation
+            | HistoryEventKind::Recruitment
+            | HistoryEventKind::PayrollDeparture { .. }
+            | HistoryEventKind::CampaignVictory { .. }
+            | HistoryEventKind::TerritoryStandstill { .. }
+            | HistoryEventKind::TerritoryClash { .. } => {}
         }
     }
     Ok(())
@@ -201,22 +225,16 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
                 })
                 .count();
             let settlement_valid = match (path, settlement) {
-                (crate::core::campaign_victory::VictoryPath::FundedRetirement, Some(transaction)) => {
-                    state.finance().get_transaction(transaction).is_some_and(|record| {
-                        record.occurred_at() == event.occurred_at()
-                            && record.memo() == "Final campaign retirement settlement: leader nest egg and crew severance"
-                            && record.postings().iter().any(|posting| posting.amount < Money::ZERO
-                                && state.finance().get_account(posting.account).is_some_and(|account| {
-                                    account.owner() == crate::finance::FinancialOwner::Organization(organization)
-                                        && account.kind() == crate::finance::AccountKind::AccountedFunds
-                                }))
-                            && record.postings().iter().any(|posting| posting.amount > Money::ZERO
-                                && state.finance().get_account(posting.account).is_some_and(|account| {
-                                    matches!(account.owner(), crate::finance::FinancialOwner::Character(_))
-                                        && account.kind() == crate::finance::AccountKind::AccountedFunds
-                                }))
-                    })
-                }
+                (
+                    crate::core::campaign_victory::VictoryPath::FundedRetirement,
+                    Some(transaction),
+                ) => crate::core::campaign_victory::retirement_settlement_matches(
+                    state,
+                    organization,
+                    transaction,
+                    event.occurred_at(),
+                    None,
+                ),
                 (crate::core::campaign_victory::VictoryPath::FundedRetirement, None) => false,
                 (_, None) => true,
                 (_, Some(_)) => false,

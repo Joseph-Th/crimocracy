@@ -4,8 +4,6 @@
 
 use crate::contacts::ContactKind;
 use crate::contacts::contact_system::usable_contacts_of_kind;
-use crate::core::attention::AttentionClass;
-use crate::core::entity::EntityRef;
 use crate::core::id::{
     BusinessId, CharacterId, HistoryEventId, IdExhaustionError, IdKind, LedgerTransactionId,
     NeighborhoodId, OrganizationId, ReportId,
@@ -15,20 +13,13 @@ use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current};
 use crate::economy::BusinessOperatingStatus;
 use crate::economy::business_economy_system::portfolio_overhead_basis_points;
 use crate::enterprises::EnterpriseStatus;
-use crate::finance::finance_system::{
-    FinanceError, ValidatedLedgerTransaction, validate_open_accounts, validate_record_transaction,
-    validate_record_transaction_with_openings,
-};
-use crate::finance::{
-    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
-    Money,
-};
+use crate::finance::finance_system::FinanceError;
+use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::history::history_system::{HistoryError, validate_campaign_victory_event};
 use crate::politics::political_system::{held_electoral_majority, rival_pressure};
 use crate::politics::{MAYORAL_CAMPAIGN_SPEND_REQUIRED, MAYORAL_LIQUID_RESERVE_REQUIRED};
 use crate::registry::Registry;
-use crate::reports::report_system::{ReportError, ValidatedReport, validate_report_draft};
-use crate::reports::{ReportDraft, ReportEntry, ReportKind};
+use crate::reports::report_system::ReportError;
 use crate::world::territory_influence::{
     NeighborhoodInfluenceSummary, resolve_neighborhood_influence,
 };
@@ -37,10 +28,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+mod certification_report;
 mod command_staffing;
 mod political_staffing;
+mod retirement;
 mod underboss;
+use certification_report::prepare_victory_report;
 use command_staffing::staffed_racket_districts;
+pub(crate) use retirement::retirement_settlement_matches;
+use retirement::{ValidatedRetirementSettlement, prepare_retirement_payment, retirement_members};
 use underboss::{institutional_reach, operating_reserve, senior_command_count};
 
 /// These are ending choices, not automatic achievements. Variant order is persistent.
@@ -268,47 +264,6 @@ pub enum VictoryError {
     Report(#[from] ReportError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
-}
-
-fn retirement_members(
-    registry: &Registry,
-    state: &AppState,
-    organization: OrganizationId,
-) -> Result<(Vec<(CharacterId, Money)>, Money), VictoryError> {
-    let members: Vec<_> = state
-        .world()
-        .characters_in_organization(organization)
-        .collect();
-    let leaders: Vec<_> = members
-        .iter()
-        .filter(|member| member.supervisor().is_none())
-        .map(|member| member.id())
-        .collect();
-    if leaders.len() != 1 || members.is_empty() {
-        return Err(VictoryError::RetirementNotReady);
-    }
-    let severance = registry
-        .upkeep()
-        .per_member_daily()
-        .checked_mul(RETIREMENT_SEVERANCE_DAYS)
-        .ok_or(VictoryError::Arithmetic)?;
-    let mut payees = Vec::with_capacity(members.len());
-    for member in members {
-        let amount = if member.id() == leaders[0] {
-            RETIREMENT_NEST_EGG
-        } else {
-            severance
-        };
-        payees.push((member.id(), amount));
-    }
-    let required = RETIREMENT_NEST_EGG
-        .checked_add(
-            severance
-                .checked_mul(i64::try_from(payees.len() - 1).map_err(|_| VictoryError::Arithmetic)?)
-                .ok_or(VictoryError::Arithmetic)?,
-        )
-        .ok_or(VictoryError::Arithmetic)?;
-    Ok((payees, required))
 }
 
 fn established_for(now: SimTime, since: SimTime, days: u64) -> bool {
@@ -1176,7 +1131,7 @@ fn ensure_eligible(
     registry: &Registry,
     state: &AppState,
     path: VictoryPath,
-) -> Result<(), VictoryError> {
+) -> Result<VictoryProgress, VictoryError> {
     if state.player_organization_defeated() {
         return Err(VictoryError::Defeated);
     }
@@ -1243,100 +1198,15 @@ fn ensure_eligible(
             Err(VictoryError::UnderbossNotReady)
         }
         VictoryPath::PoliticalPower | VictoryPath::CityUnderboss => Ok(()),
-    }
-}
-
-fn prepare_retirement_payment(
-    registry: &Registry,
-    state: &AppState,
-    owner: OrganizationId,
-) -> Result<ValidatedLedgerTransaction, VictoryError> {
-    let (payees, required) = retirement_members(registry, state, owner)?;
-    let mut remaining = required;
-    let mut postings = Vec::new();
-    for account in state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(owner))
-        .filter(|account| account.kind() == AccountKind::AccountedFunds)
-    {
-        if remaining == Money::ZERO {
-            break;
-        }
-        let debit = account.available_payment_balance().min(remaining);
-        if debit <= Money::ZERO {
-            continue;
-        }
-        postings.push(LedgerPosting {
-            account: account.id(),
-            amount: debit.checked_neg().ok_or(VictoryError::Arithmetic)?,
-        });
-        remaining = remaining
-            .checked_sub(debit)
-            .ok_or(VictoryError::Arithmetic)?;
-    }
-    if remaining != Money::ZERO {
-        return Err(VictoryError::RetirementNotReady);
-    }
-    let mut missing = Vec::new();
-    let mut destinations = Vec::new();
-    for (person, amount) in payees {
-        let destination = state
-            .finance()
-            .accounts_for(FinancialOwner::Character(person))
-            .find(|account| {
-                account.kind() == AccountKind::AccountedFunds
-                    && account.can_receive_liquid_payment(amount)
-            })
-            .map(|account| account.id());
-        if destination.is_none() {
-            missing.push(FinancialAccountDraft {
-                owner: FinancialOwner::Character(person),
-                kind: AccountKind::AccountedFunds,
-            });
-        }
-        destinations.push((destination, amount));
-    }
-    let openings = if missing.is_empty() {
-        None
-    } else {
-        Some(validate_open_accounts(state, missing)?)
-    };
-    let mut opened = 0;
-    for (destination, amount) in destinations {
-        let id = match destination {
-            Some(id) => id,
-            None => {
-                let id = openings
-                    .as_ref()
-                    .and_then(|plan| plan.account_id(opened))
-                    .ok_or(VictoryError::Arithmetic)?;
-                opened += 1;
-                id
-            }
-        };
-        postings.push(LedgerPosting {
-            account: id,
-            amount,
-        });
-    }
-    let draft = LedgerTransactionDraft {
-        occurred_at: state.now(),
-        memo: "Final campaign retirement settlement: leader nest egg and crew severance".to_owned(),
-        postings,
-        authorization: None,
-    };
-    Ok(match openings {
-        Some(plan) => validate_record_transaction_with_openings(state, plan, draft)?,
-        None => validate_record_transaction(state, draft)?,
-    })
+    }?;
+    Ok(standing)
 }
 
 pub struct ValidatedCampaignVictory {
     owner: OrganizationId,
     path: VictoryPath,
     validated_at: SimTime,
-    report: ValidatedReport,
-    settlement: Option<ValidatedLedgerTransaction>,
+    settlement: Option<ValidatedRetirementSettlement>,
 }
 
 pub struct CampaignVictoryOutcome {
@@ -1351,115 +1221,16 @@ pub fn validate_claim_victory(
     state: &AppState,
     path: VictoryPath,
 ) -> Result<ValidatedCampaignVictory, VictoryError> {
-    ensure_eligible(registry, state, path)?;
+    let standing = ensure_eligible(registry, state, path)?;
     let owner = state.player_organization().ok_or(VictoryError::NoPlayer)?;
     let settlement = if path == VictoryPath::FundedRetirement {
         Some(prepare_retirement_payment(registry, state, owner)?)
     } else {
         None
     };
-    let mut entries = vec![ReportEntry {
-        attention: AttentionClass::Crisis,
-        summary: match path {
-            VictoryPath::PoliticalPower =>
-                "The organization won the mayoral election through sustained local influence, professional campaign staff, funded operations and established civic alliances.".to_owned(),
-            VictoryPath::FundedRetirement => {
-                let standing = progress(registry, state)?;
-                format!(
-                    "The leader retired after {} profitable racket settlements and {} cents in net criminal proceeds over the last {} days, with a funded nest egg; each subordinate received 180 days of wages in an accounted personal account.",
-                    standing.retirement_profitable_racket_cycles,
-                    standing.retirement_racket_net.cents(),
-                    RETIREMENT_CRIME_WINDOW_DAYS,
-                )
-            },
-            VictoryPath::CityUnderboss => {
-                let standing = progress(registry, state)?;
-                format!("City underboss: {} independently commanded, defended and institutionally backed mature districts, {} proven associates, {} available named personnel, {} established institutional channel types and {} cents of liquid reserves. The organization demonstrated a durable citywide command, not just profitable fronts.", standing.influential_underboss_districts, standing.mature_associates, standing.available_underboss_personnel, standing.underboss_contact_kinds, standing.underboss_liquid_reserve.cents())
-            },
-        },
-        sources: Vec::new(),
-        entities: BTreeSet::from([EntityRef::Organization(owner)]),
-        decision: None,
-    }];
-    if path == VictoryPath::PoliticalPower {
-        let standing = progress(registry, state)?;
-        entries[0].summary = format!(
-            "{} was elected mayor after securing sustained competitive majorities in {} independently organized districts. Established legitimate business income is {} cents/day against {} cents/day in named-member wages.",
-            state
-                .world()
-                .characters_in_organization(owner)
-                .find(|person| person.supervisor().is_none())
-                .map_or("The leader", |person| person.name()),
-            standing.mayoral_majority_districts,
-            standing.legitimate_daily_net.cents(),
-            standing.daily_payroll.cents(),
-        );
-        if let Some(sponsor) =
-            usable_contacts_of_kind(state, owner, ContactKind::Political).find(|contact| {
-                established_for(
-                    state.now(),
-                    contact.established_at(),
-                    POLITICAL_CONTACT_DAYS,
-                )
-            })
-        {
-            let contact = state
-                .world()
-                .get_character(sponsor.contact())
-                .expect("established institutional contact has a real person");
-            entries.push(ReportEntry {
-                attention: AttentionClass::Notable,
-                summary: format!(
-                    "Political sponsor: {} (contact {}), kept through {} days of working relations.",
-                    contact.name(), sponsor.id(), POLITICAL_CONTACT_DAYS,
-                ),
-                sources: Vec::new(),
-                entities: BTreeSet::from([EntityRef::Character(contact.id())]),
-                decision: None,
-            });
-        }
-        for district in political_district_progress(registry, state)?
-            .into_iter()
-            .filter(|district| district.mayoral_ready)
-        {
-            let organizer = district.steward.expect("qualifying district has organizer");
-            let manager = state
-                .world()
-                .get_character(organizer)
-                .expect("assigned political organizer exists");
-            let name = state
-                .world()
-                .get_neighborhood(district.district)
-                .expect("qualifying district exists")
-                .name();
-            entries.push(ReportEntry {
-                attention: AttentionClass::Notable,
-                summary: format!(
-                    "{}: {} secured {} established business sectors, {} cents in mature local earnings over {} days, and a sustained electoral majority.",
-                    name,
-                    manager.name(),
-                    district.established_kinds,
-                    district.mature_window_net.cents(),
-                    VICTORY_INCOME_WINDOW_DAYS,
-                ),
-                sources: Vec::new(),
-                entities: BTreeSet::from([
-                    EntityRef::Neighborhood(district.district),
-                    EntityRef::Character(organizer),
-                ]),
-                decision: None,
-            });
-        }
-    }
-    let report = validate_report_draft(
-        state,
-        ReportDraft {
-            recipient: owner,
-            kind: ReportKind::CampaignVictory,
-            title: format!("Campaign victory: {}", path.label()),
-            entries,
-        },
-    )?;
+    // Preflight the report at validation. Its observations are rebuilt at commit
+    // after same-minute state changes, before any payment or history mutation.
+    prepare_victory_report(registry, state, owner, path, &standing)?;
     let mut budget = vec![(IdKind::HistoryEvent, 1), (IdKind::Report, 1)];
     if let Some(payment) = &settlement {
         budget.extend(payment.id_budget());
@@ -1469,7 +1240,6 @@ pub fn validate_claim_victory(
         owner,
         path,
         validated_at: state.now(),
-        report,
         settlement,
     })
 }
@@ -1484,10 +1254,11 @@ impl ValidatedCampaignVictory {
         if state.player_organization() != Some(self.owner) {
             return Err(VictoryError::Stale);
         }
-        ensure_eligible(registry, state, self.path)?;
+        let standing = ensure_eligible(registry, state, self.path)?;
         if let Some(settlement) = &self.settlement {
-            settlement.ensure_current(state)?;
+            settlement.ensure_current(registry, state, self.owner)?;
         }
+        let report = prepare_victory_report(registry, state, self.owner, self.path, &standing)?;
         let mut budget = vec![(IdKind::HistoryEvent, 1), (IdKind::Report, 1)];
         if let Some(settlement) = &self.settlement {
             budget.extend(settlement.id_budget());
@@ -1503,7 +1274,7 @@ impl ValidatedCampaignVictory {
         let settlement = self.settlement.map(|plan| plan.commit_preflighted(state));
         debug_assert_eq!(settlement, settlement_id);
         let history = history.commit(state)?;
-        let report = self.report.commit(state)?;
+        let report = report.commit(state)?;
         Ok(CampaignVictoryOutcome {
             history,
             report,

@@ -1,5 +1,6 @@
 use super::*;
 use crate::build_registry;
+use crate::core::entity::EntityRef;
 use crate::core::invariants::{validate_invariants, validate_state_against_registry};
 use crate::core::persistence::{build_save, restore_save};
 use crate::core::simulation::{TickError, run_tick};
@@ -14,6 +15,8 @@ use crate::enterprises::enterprise_execution::{
 };
 use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
+use crate::finance::{FinancialAccountDraft, LedgerPosting, LedgerTransactionDraft};
+use crate::reports::ReportKind;
 use crate::world::world_system::{
     designate_player_organization, insert_character, insert_neighborhood, insert_organization,
 };
@@ -494,6 +497,221 @@ fn funded_retirement_pays_boss_and_staff_and_survives_reload_as_terminal() {
         validate_claim_victory(&registry, &restored, VictoryPath::FundedRetirement).err(),
         Some(VictoryError::AlreadyWon)
     ));
+}
+
+#[test]
+fn retirement_rechecks_the_complete_payee_roster_before_settlement() {
+    let (registry, mut state, owner, boss, _) = retirement_ready_fixture();
+    let severance = registry
+        .upkeep()
+        .per_member_daily()
+        .checked_mul(RETIREMENT_SEVERANCE_DAYS)
+        .unwrap();
+    let original_required = progress(&registry, &state).unwrap().retirement_total;
+    // Enough for another subordinate even before planning; eligibility and all
+    // existing payment accounts stay viable after the hire.
+    fund(
+        &mut state,
+        owner,
+        original_required.cents() + severance.cents(),
+    );
+    let token = validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).unwrap();
+    let recruit = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Last-minute subordinate".into(),
+            organization: Some(owner),
+            supervisor: Some(boss),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let before = bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(
+        token.commit(&registry, &mut state).err(),
+        Some(VictoryError::Stale),
+        "the held settlement omits the new subordinate despite sufficient reserves"
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap()
+    );
+    // Leadership can also change without changing headcount, account versions
+    // or the aggregate settlement total. The nest egg must follow the new boss.
+    let mut succession = state.clone();
+    let old_leadership =
+        validate_claim_victory(&registry, &succession, VictoryPath::FundedRetirement).unwrap();
+    use crate::world::world_system::validate_set_character_supervisor;
+    validate_set_character_supervisor(&succession, recruit, None)
+        .unwrap()
+        .commit(&mut succession)
+        .unwrap();
+    validate_set_character_supervisor(&succession, boss, Some(recruit))
+        .unwrap()
+        .commit(&mut succession)
+        .unwrap();
+    let before_succession =
+        bincode::serialize(&build_save(&registry, &succession).unwrap()).unwrap();
+    assert_eq!(
+        old_leadership.commit(&registry, &mut succession).err(),
+        Some(VictoryError::Stale)
+    );
+    assert_eq!(
+        before_succession,
+        bincode::serialize(&build_save(&registry, &succession).unwrap()).unwrap()
+    );
+    validate_claim_victory(&registry, &succession, VictoryPath::FundedRetirement)
+        .unwrap()
+        .commit(&registry, &mut succession)
+        .unwrap();
+    for (person, expected) in [(recruit, RETIREMENT_NEST_EGG), (boss, severance)] {
+        let paid = succession
+            .finance()
+            .accounts_for(FinancialOwner::Character(person))
+            .filter(|account| account.kind() == AccountKind::AccountedFunds)
+            .map(|account| account.balance().cents())
+            .sum::<i64>();
+        assert_eq!(paid, expected.cents());
+    }
+    restore_save(&registry, build_save(&registry, &succession).unwrap()).unwrap();
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    for state in [&mut state, &mut restored] {
+        validate_claim_victory(&registry, state, VictoryPath::FundedRetirement)
+            .unwrap()
+            .commit(&registry, state)
+            .unwrap();
+        let paid = state
+            .finance()
+            .accounts_for(FinancialOwner::Character(recruit))
+            .filter(|account| account.kind() == AccountKind::AccountedFunds)
+            .map(|account| account.balance().cents())
+            .sum::<i64>();
+        assert_eq!(paid, severance.cents());
+        validate_invariants(state);
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
+fn retirement_save_rejects_incomplete_or_underpaid_settlement_reference() {
+    use crate::core::invariants::StateValidationError;
+    use crate::core::persistence::LoadError;
+    use crate::history::HistoryEventKind;
+
+    let (registry, mut state, owner, boss, member) = retirement_ready_fixture();
+    let (payees, required) = retirement_members(&registry, &state, owner).unwrap();
+    fund(&mut state, owner, required.cents() * 4);
+    let funding = state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(owner))
+        .find(|account| account.kind() == AccountKind::AccountedFunds)
+        .unwrap()
+        .id();
+    let destinations: Vec<_> = payees
+        .iter()
+        .map(|&(person, amount)| {
+            let account = insert_account(
+                &mut state,
+                FinancialAccountDraft {
+                    owner: FinancialOwner::Character(person),
+                    kind: AccountKind::AccountedFunds,
+                },
+            )
+            .unwrap();
+            (person, account, amount)
+        })
+        .collect();
+    let mut alternatives = Vec::new();
+    // Each alternate transfer has valid balanced ledger provenance and the
+    // exact settlement memo and timestamp. Only the payee contract is false.
+    // The third pays all subordinates uniformly but not at the authored wage.
+    for mode in 0..3 {
+        let mut total = 0;
+        let mut postings = Vec::new();
+        for &(person, account, amount) in &destinations {
+            if mode == 0 && person == member {
+                continue;
+            }
+            let cents = amount.cents()
+                - i64::from((mode == 1 && person == member) || (mode == 2 && person != boss));
+            total += cents;
+            postings.push(LedgerPosting {
+                account,
+                amount: Money::from_cents(cents),
+            });
+        }
+        postings.push(LedgerPosting {
+            account: funding,
+            amount: Money::from_cents(-total),
+        });
+        let payment = validate_record_transaction(
+            &state,
+            LedgerTransactionDraft {
+                occurred_at: state.now(),
+                memo: "Final campaign retirement settlement: leader nest egg and crew severance"
+                    .into(),
+                postings,
+                authorization: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+        alternatives.push(payment);
+    }
+    let outcome = validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement)
+        .unwrap()
+        .commit(&registry, &mut state)
+        .unwrap();
+    let event = state.history().get_event(outcome.history).unwrap();
+    let envelope = build_save(&registry, &state).unwrap();
+    let bytes = bincode::serialize(&envelope).unwrap();
+    let original = bincode::serialize(event).unwrap();
+    let positions: Vec<_> = bytes
+        .windows(original.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original.as_slice()).then_some(index))
+        .collect();
+    assert_eq!(positions.len(), 1);
+    let start = positions[0];
+    for alternative in alternatives {
+        let replacement = bincode::serialize(&(
+            event.id(),
+            event.occurred_at(),
+            HistoryEventKind::CampaignVictory {
+                organization: owner,
+                path: VictoryPath::FundedRetirement,
+                settlement: Some(alternative),
+            },
+            event.summary(),
+            event.entities(),
+        ))
+        .unwrap();
+        assert_eq!(replacement.len(), original.len());
+        let mut corrupt = bytes.clone();
+        corrupt[start..start + original.len()].copy_from_slice(&replacement);
+        let malformed = bincode::deserialize(&corrupt).unwrap();
+        assert_eq!(
+            restore_save(&registry, malformed).err(),
+            Some(LoadError::InvalidState(
+                StateValidationError::InvalidCampaignVictory {
+                    event: outcome.history
+                }
+            ))
+        );
+    }
+    assert_eq!(
+        state.world().get_character(boss).unwrap().supervisor(),
+        None
+    );
+    restore_save(&registry, envelope).unwrap();
 }
 
 #[test]
@@ -1260,6 +1478,71 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         elected.latest_election_won,
         "actual municipal ballot failed: {elected:?}"
     );
+    // A winning ballot is durable even when the current coalition changes
+    // before leadership certifies the result. A held report must not confuse
+    // current standings or a former political manager with the elected record.
+    let ballot = city
+        .state
+        .politics()
+        .organization(city.player)
+        .unwrap()
+        .latest_election()
+        .unwrap()
+        .clone();
+    let mut changed = city.state.clone();
+    let held = validate_claim_victory(&registry, &changed, VictoryPath::PoliticalPower).unwrap();
+    for &manager in &managers {
+        validate_set_character_autonomy(&changed, city.player, manager, AutonomyLevel::Guided)
+            .unwrap()
+            .commit(&mut changed)
+            .unwrap();
+    }
+    assert!(
+        progress(&registry, &changed)
+            .unwrap()
+            .mayoral_majority_districts
+            < ballot.wards_won
+    );
+    let mut fresh = restore_save(&registry, build_save(&registry, &changed).unwrap()).unwrap();
+    let certified = validate_claim_victory(&registry, &fresh, VictoryPath::PoliticalPower)
+        .unwrap()
+        .commit(&registry, &mut fresh)
+        .unwrap();
+    let report = fresh.reports().get_report(certified.report).unwrap();
+    assert!(
+        report.entries()[0].summary.contains(&format!(
+            "{} independently organized districts",
+            ballot.wards_won
+        )),
+        "the certification must describe the recorded ballot, not the current coalition: {}",
+        report.entries()[0].summary
+    );
+    for ward in ballot.ballots.iter().filter(|ward| ward.ward_won) {
+        let name = fresh
+            .world()
+            .get_neighborhood(ward.district)
+            .unwrap()
+            .name();
+        assert!(
+            report
+                .entries()
+                .iter()
+                .any(|entry| entry.summary.contains(name)
+                    && entry
+                        .entities
+                        .contains(&EntityRef::Neighborhood(ward.district))),
+            "a winning ward remains part of the ballot even after it loses its current delegate"
+        );
+    }
+    let held_result = held.commit(&registry, &mut changed).unwrap();
+    assert_eq!(
+        bincode::serialize(fresh.reports().get_report(certified.report).unwrap()).unwrap(),
+        bincode::serialize(changed.reports().get_report(held_result.report).unwrap()).unwrap(),
+        "same-minute changes must be reflected at certification in both held and fresh orders"
+    );
+    validate_invariants(&changed);
+    restore_save(&registry, build_save(&registry, &changed).unwrap()).unwrap();
+
     let outcome = validate_claim_victory(&registry, &city.state, VictoryPath::PoliticalPower)
         .unwrap()
         .commit(&registry, &mut city.state)
