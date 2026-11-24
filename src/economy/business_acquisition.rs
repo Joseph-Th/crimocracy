@@ -49,6 +49,7 @@ use thiserror::Error;
 
 mod autonomous;
 mod payment;
+mod portfolio_forecast;
 mod seller_strategy;
 pub(crate) use autonomous::apply_due_autonomous_acquisitions;
 use payment::validate_funding_accounts;
@@ -499,11 +500,25 @@ fn plan_institutional_sale_observations(
 /// premium applies to independent listings and negotiated buyouts alike.
 /// It affects the actual balanced purchase payment, not later shop income.
 fn consolidation_percentage(state: &AppState, buyer: OrganizationId) -> i128 {
-    let owned = state
-        .world()
-        .businesses_owned_by_organization(buyer)
-        .count();
-    100 + i128::try_from(owned.saturating_sub(2).min(12)).unwrap_or(12) * 50
+    consolidation_percentage_for_count(
+        state
+            .world()
+            .businesses_owned_by_organization(buyer)
+            .count(),
+    )
+}
+
+fn consolidation_percentage_for_count(owned: usize) -> i128 {
+    100 + i128::try_from(owned.saturating_sub(2).min(12)).expect("bounded holding count") * 50
+}
+
+/// The same consolidation premium applies to listings and voluntary offers. NPCs must
+/// fund the real buyer-specific price, not repeatedly submit an impossible unadjusted bid.
+fn buyer_adjusted_price(base_cents: i128, owned: usize) -> Result<Money, BusinessAcquisitionError> {
+    let quoted = base_cents.saturating_mul(consolidation_percentage_for_count(owned)) / 100;
+    Ok(Money::from_cents(
+        i64::try_from(quoted).map_err(|_| BusinessAcquisitionError::PriceOverflow)?,
+    ))
 }
 
 fn listed_acquisition_price(
@@ -520,10 +535,13 @@ fn listed_acquisition_price(
         .get_business(record.kind())
         .economics()
         .acquisition_cost();
-    let quoted = i128::from(base.cents()) * consolidation_percentage(state, buyer) / 100;
-    Ok(Money::from_cents(
-        i64::try_from(quoted).map_err(|_| BusinessAcquisitionError::PriceOverflow)?,
-    ))
+    buyer_adjusted_price(
+        i128::from(base.cents()),
+        state
+            .world()
+            .businesses_owned_by_organization(buyer)
+            .count(),
+    )
 }
 
 /// Public quote for an independent listing, including the buyer's consolidation premium.

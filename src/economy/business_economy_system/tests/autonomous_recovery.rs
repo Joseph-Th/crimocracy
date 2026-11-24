@@ -270,6 +270,7 @@ fn marginally_profitable_reopening_does_not_destroy_owner_portfolio_income() {
         &registry,
         &fixture.state,
         dormant,
+        0,
     )
     .unwrap();
     assert!(

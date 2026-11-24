@@ -4,11 +4,12 @@
 //! district's customer budget. No owner identity, account balance or criminal status enters
 //! the calculation. Losing a competitor's capacity leaves additional custom for the others.
 
-use super::BusinessEconomyError;
+use super::{BusinessEconomyError, daily_owner_net};
 use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::DAY_MINUTES;
 use crate::economy::{BusinessOperatingStatus, MarketSnapshot};
+use crate::finance::Money;
 use crate::registry::Registry;
 use crate::world::{BusinessKind, BusinessOwner, BusinessRecord};
 
@@ -145,6 +146,7 @@ pub(super) fn owner_reopening_daily_displacement(
     registry: &Registry,
     state: &AppState,
     candidate: BusinessId,
+    overhead: u16,
 ) -> Result<i128, BusinessEconomyError> {
     let business = super::validate_business(state, candidate)?;
     if business.owner() == BusinessOwner::Independent {
@@ -163,6 +165,8 @@ pub(super) fn owner_reopening_daily_displacement(
         business,
         economy.is_disrupted(state.now()),
         business.owner(),
+        overhead,
+        None,
     )
 }
 
@@ -176,6 +180,8 @@ pub(crate) fn acquisition_owner_daily_displacement(
     state: &AppState,
     candidate: BusinessId,
     buyer: OrganizationId,
+    overhead: u16,
+    excluded: Option<BusinessId>,
 ) -> Result<i128, BusinessEconomyError> {
     let economy = state
         .economy()
@@ -191,6 +197,8 @@ pub(crate) fn acquisition_owner_daily_displacement(
         business,
         economy.is_disrupted(state.now()),
         BusinessOwner::Organization(buyer),
+        overhead,
+        excluded,
     )
 }
 
@@ -200,11 +208,12 @@ fn activating_owner_daily_displacement(
     business: &BusinessRecord,
     incoming_damaged: bool,
     owner: BusinessOwner,
+    overhead: u16,
+    excluded: Option<BusinessId>,
 ) -> Result<i128, BusinessEconomyError> {
-    let damage_weight = registry.business_disruption().gross_basis_points();
     let mut lost_daily_net = 0_i128;
     for (peer, relationship) in local_peers(state, business) {
-        if peer.owner() != owner {
+        if peer.owner() != owner || Some(peer.id()) == excluded {
             continue;
         }
         let Some(peer_economy) = state.economy().get_business_economy(peer.id()) else {
@@ -220,30 +229,64 @@ fn activating_owner_daily_displacement(
         let current_market = resolve_market_snapshot(state, peer.id())?;
         let mut reopened_market = current_market;
         reopened_market.add_competitor(relationship, incoming_damaged);
-        let neighborhood = state
-            .world()
-            .get_neighborhood(peer.neighborhood())
-            .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(peer.id()))?;
-        let economics = registry.get_business(peer.kind()).economics();
-        let settled_net = |market| {
-            super::resolve_cycle_financials(
-                peer.id(),
-                economics,
-                neighborhood.profile(),
-                damage_weight,
-                peer_economy.is_disrupted(state.now()),
-                market,
-                0,
-            )
-            .map(|(_, _, net)| net)
-        };
-        let before = settled_net(current_market)?;
-        let after = settled_net(reopened_market)?;
-        lost_daily_net += (i128::from(before.cents()) - i128::from(after.cents()))
-            * i128::from(DAY_MINUTES)
-            / i128::from(economics.cycle().as_minutes());
+        let cycle = registry
+            .get_business(peer.kind())
+            .economics()
+            .cycle()
+            .as_minutes();
+        let disrupted = peer_economy.is_disrupted(state.now());
+        let before = forecast_net_for_market(registry, state, peer, current_market, disrupted)?;
+        let after = forecast_net_for_market(registry, state, peer, reopened_market, disrupted)?;
+        lost_daily_net +=
+            daily_owner_net(before, cycle, overhead) - daily_owner_net(after, cycle, overhead);
     }
     Ok(lost_daily_net)
+}
+
+/// Zero-variance live operating forecast for an owner's own books. Unlike the public
+/// appraisal, this uses current operating competitors and actual disruption.
+pub(crate) fn forecast_live_business_net(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+) -> Result<Money, BusinessEconomyError> {
+    let record = super::validate_business(state, business)?;
+    let economy = state
+        .economy()
+        .get_business_economy(business)
+        .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
+    forecast_net_for_market(
+        registry,
+        state,
+        record,
+        resolve_market_snapshot(state, business)?,
+        economy.is_disrupted(state.now()),
+    )
+}
+
+pub(super) fn forecast_net_for_market(
+    registry: &Registry,
+    state: &AppState,
+    record: &BusinessRecord,
+    market: MarketSnapshot,
+    disrupted: bool,
+) -> Result<Money, BusinessEconomyError> {
+    let neighborhood = state
+        .world()
+        .get_neighborhood(record.neighborhood())
+        .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(
+            record.id(),
+        ))?;
+    super::resolve_cycle_financials(
+        record.id(),
+        registry.get_business(record.kind()).economics(),
+        neighborhood.profile(),
+        registry.business_disruption().gross_basis_points(),
+        disrupted,
+        market,
+        0,
+    )
+    .map(|(_, _, net)| net)
 }
 
 /// Acquisition forecasts must not act as a free live reconnaissance query. Assume all

@@ -1,7 +1,8 @@
 //! Seller-side portfolio decisions. A buyer can quote a public estimate, but may not
 //! inspect the seller's private cash, roster, or infrastructure dependencies.
 
-use super::{BusinessAcquisitionError, acquisition_offer};
+use super::portfolio_forecast::PortfolioForecast;
+use super::{BusinessAcquisitionError, acquisition_offer, appraise_business, buyer_adjusted_price};
 use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::DAY_MINUTES;
@@ -81,13 +82,22 @@ pub(super) fn seller_preserves_earning_base(
         .world()
         .get_business(business)
         .ok_or(BusinessAcquisitionError::MissingBusiness(business))?;
-    let net = daily_net(registry, state, business)?;
-    if net <= 0
-        || state
-            .economy()
-            .get_business_economy(business)
-            .is_none_or(|economy| economy.status() != BusinessOperatingStatus::Active)
+    if state
+        .economy()
+        .get_business_economy(business)
+        .is_none_or(|economy| {
+            economy.status() != BusinessOperatingStatus::Active || economy.next_cycle_at().is_none()
+        })
     {
+        return Ok(false);
+    }
+    let current = PortfolioForecast::new(registry, state, seller, None)?;
+    let retained = PortfolioForecast::new(registry, state, seller, Some(business))?;
+    let remaining = retained.daily_net();
+    let lost_income = current.daily_net() - remaining;
+    // A sale can reduce administration on the retained holdings enough to improve income.
+    // Protect only property that actually contributes to the seller's wage base.
+    if lost_income <= 0 {
         return Ok(false);
     }
     if state
@@ -113,24 +123,13 @@ pub(super) fn seller_preserves_earning_base(
             .get_business(record.kind())
             .economics()
             .acquisition_cost();
+        let net = daily_net(registry, state, business)?.max(0);
         let early_buyout = i128::from(standard_price.cents()) + 2 * VALUATION_DAYS * net;
         if i128::from(offer.cents()) < early_buyout {
             return Ok(true);
         }
     }
     let daily_payroll = i128::from(registry.upkeep().per_member_daily().cents()) * members as i128;
-    let mut remaining = 0_i128;
-    for asset in state.world().businesses_owned_by_organization(seller) {
-        if asset.id() != business
-            && state
-                .economy()
-                .get_business_economy(asset.id())
-                .is_some_and(|e| e.status() == BusinessOperatingStatus::Active)
-        {
-            remaining += daily_net(registry, state, asset.id())?;
-        }
-    }
-    // Do not protect an asset that is redundant for the seller's legitimate wage base.
     if remaining >= daily_payroll {
         return Ok(false);
     }
@@ -163,14 +162,24 @@ pub(super) fn seller_preserves_earning_base(
         return Ok(false);
     }
     let available = accounted - (daily_payroll * 7 - other).max(0);
-    let minimum_replacement = net.min(daily_payroll - remaining);
-    for (id, _, _, _) in state.world().public_business_directory() {
-        if state.economy().get_business_economy(id).is_none() {
+    let minimum_replacement = lost_income.min(daily_payroll - remaining);
+    for (id, _, _, district) in state.world().public_business_directory() {
+        if state
+            .economy()
+            .get_business_economy(id)
+            .is_none_or(|economy| economy.version() >= u32::MAX - 1)
+            || acquisition_offer(registry, state, seller, id).is_none()
+        {
             continue;
         }
-        if let Some((price, _)) = acquisition_offer(registry, state, seller, id)
-            && i128::from(price.cents()) <= available
-            && daily_net(registry, state, id)? >= minimum_replacement
+        let appraisal = appraise_business(registry, state, id)?;
+        let price = buyer_adjusted_price(
+            i128::from(appraisal.standard_price.cents()),
+            retained.administration.property_count(),
+        )?;
+        if i128::from(price.cents()) <= available
+            && retained.purchase_gain(registry, state, id, district, &appraisal)?
+                >= minimum_replacement
         {
             return Ok(false);
         }

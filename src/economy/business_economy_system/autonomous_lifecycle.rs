@@ -7,15 +7,14 @@
 //! owner's entire local portfolio is positive and future settlements remain possible.
 
 use super::{
-    BusinessEconomyError, ValidatedBusinessEconomyStatusChange, resolve_cycle_financials,
-    validate_resume_business_economy,
+    BusinessEconomyError, ValidatedBusinessEconomyStatusChange, daily_owner_net,
+    forecast_live_business_net, portfolio_overhead_basis_points, validate_resume_business_economy,
 };
 use crate::core::id::{BusinessId, NeighborhoodId};
 use crate::core::state::AppState;
-use crate::core::time::DAY_MINUTES;
 use crate::finance::Money;
 use crate::registry::Registry;
-use crate::world::{BusinessKind, BusinessOwner};
+use crate::world::{BusinessKind, BusinessOwner, OrganizationKind};
 
 struct RecoveryCandidate {
     business: BusinessId,
@@ -73,21 +72,7 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
         ) {
             continue;
         }
-        let neighborhood = state
-            .world()
-            .get_neighborhood(business.neighborhood())
-            .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(
-                business_id,
-            ))?;
-        let (_, _, expected_net_cash) = resolve_cycle_financials(
-            business_id,
-            registry.get_business(business.kind()).economics(),
-            neighborhood.profile(),
-            registry.business_disruption().gross_basis_points(),
-            economy.is_disrupted(state.now()),
-            super::market::resolve_market_snapshot(state, business_id)?,
-            0,
-        )?;
+        let expected_net_cash = forecast_live_business_net(registry, state, business_id)?;
         if expected_net_cash <= Money::ZERO {
             continue;
         }
@@ -96,18 +81,30 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
             Ok(resume) => {
                 // Compare earnings on the same time basis even if authored cycles differ.
                 // The i128 intermediate handles every finite Money value without overflow.
-                let daily_net = i128::from(expected_net_cash.cents()) * i128::from(DAY_MINUTES)
-                    / i128::from(
-                        registry
-                            .get_business(business.kind())
-                            .economics()
-                            .cycle()
-                            .as_minutes(),
-                    );
+                let overhead =
+                    match business.owner() {
+                        BusinessOwner::Organization(owner)
+                            if state.world().get_organization(owner).is_some_and(
+                                |organization| organization.kind() == OrganizationKind::Criminal,
+                            ) =>
+                        {
+                            portfolio_overhead_basis_points(state, owner)
+                        }
+                        BusinessOwner::Independent
+                        | BusinessOwner::Organization(_)
+                        | BusinessOwner::Character(_) => 0,
+                    };
+                let cycle = registry
+                    .get_business(business.kind())
+                    .economics()
+                    .cycle()
+                    .as_minutes();
+                let daily_net = daily_owner_net(expected_net_cash, cycle, overhead);
                 let displaced_daily_net = super::market::owner_reopening_daily_displacement(
                     registry,
                     state,
                     business_id,
+                    overhead,
                 )?;
                 let incremental_owner_daily_net = daily_net - displaced_daily_net;
                 if incremental_owner_daily_net <= 0 {

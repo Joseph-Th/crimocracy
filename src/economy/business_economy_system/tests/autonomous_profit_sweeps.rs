@@ -895,6 +895,143 @@ fn multiple_businesses_for_one_owner_share_one_balanced_distribution() {
 }
 
 #[test]
+fn saturated_administration_account_does_not_block_other_owner_distributions() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    let neighborhood = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .unwrap()
+        .neighborhood();
+    let (second_business, second_operating) = add_organized_business(
+        &registry,
+        &mut fixture.state,
+        fixture.organization,
+        neighborhood,
+        "Second Grocery",
+    );
+    insert_business(
+        &registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Additional holding".into(),
+            kind: BusinessKind::Hospitality,
+            functions: BTreeSet::from([BusinessFunction::CustomerAccess]),
+            neighborhood,
+            owner: BusinessOwner::Organization(fixture.organization),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        portfolio_overhead_basis_points(&fixture.state, fixture.organization),
+        300
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(ONE_DAY));
+    for business in [fixture.business, second_business] {
+        let plan = decide_business_cycle(&registry, &fixture.state, business, 0).unwrap();
+        validate_business_cycle_plan(&fixture.state, plan)
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+    }
+    let first_profit = fixture
+        .state
+        .finance()
+        .get_account(fixture.operating)
+        .unwrap()
+        .balance();
+    let second_profit = fixture
+        .state
+        .finance()
+        .get_account(second_operating)
+        .unwrap()
+        .balance();
+    assert!(first_profit > Money::ZERO && second_profit > Money::ZERO);
+    // Legitimate settlement accounts have signed finite balances. Fill the first
+    // source's fee receiver using balanced transactions, without changing its till.
+    loop {
+        let balance = fixture
+            .state
+            .finance()
+            .get_account(fixture.settlement)
+            .unwrap()
+            .balance();
+        let credit =
+            (i128::from(i64::MAX) - i128::from(balance.cents())).min(i128::from(i64::MAX)) as i64;
+        if credit == 0 {
+            break;
+        }
+        let clearing = insert_account(
+            &mut fixture.state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(fixture.organization),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .unwrap();
+        validate_record_business_transaction(
+            &fixture.state,
+            LedgerTransactionDraft {
+                occurred_at: fixture.state.now(),
+                memo: "Fill settlement account".into(),
+                postings: vec![
+                    LedgerPosting {
+                        account: clearing,
+                        amount: Money::from_cents(-credit),
+                    },
+                    LedgerPosting {
+                        account: fixture.settlement,
+                        amount: Money::from_cents(credit),
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    }
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let sweep = apply_due_autonomous_profit_sweeps(state).unwrap().unwrap();
+        let transaction = state.finance().get_transaction(sweep).unwrap();
+        assert!(
+            transaction
+                .postings()
+                .iter()
+                .all(|entry| entry.account != fixture.operating
+                    && entry.account != fixture.settlement)
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(fixture.operating)
+                .unwrap()
+                .balance(),
+            first_profit
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(second_operating)
+                .unwrap()
+                .balance(),
+            Money::ZERO
+        );
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn no_earned_surplus_does_not_create_empty_accounts_or_transactions() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);

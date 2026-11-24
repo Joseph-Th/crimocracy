@@ -1,19 +1,17 @@
 //! Non-player commercial investment. Executives buy from the same market as the player.
 //! Purchases are separate transactions, not one city-wide atomic batch.
 
-use super::seller_strategy::daily_net;
+use super::portfolio_forecast::PortfolioForecast;
 use super::{
-    BusinessAcquisitionDraft, acquisition_offer, appraise_business, validate_acquire_business,
-    validate_offer_business,
+    BusinessAcquisitionDraft, acquisition_offer, appraise_business, buyer_adjusted_price,
+    validate_acquire_business, validate_offer_business,
 };
 use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, is_recurring_boundary};
-use crate::economy::BusinessOperatingStatus;
-use crate::economy::business_economy_system::acquisition_owner_daily_displacement;
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
-use crate::world::OrganizationKind;
+use crate::world::{BusinessOwner, OrganizationKind};
 use std::collections::BTreeSet;
 
 const REVIEW_DAYS: u32 = 7;
@@ -80,20 +78,8 @@ fn invest(
     }) {
         return None;
     }
-    let mut districts = BTreeSet::new();
-    let mut owned = BTreeSet::new();
-    let mut expected_daily_net = 0_i128;
-    for business in state.world.businesses_owned_by_organization(organization) {
-        districts.insert(business.neighborhood());
-        owned.insert(business.id());
-        if state
-            .economy()
-            .get_business_economy(business.id())
-            .is_some_and(|e| e.status() == BusinessOperatingStatus::Active)
-        {
-            expected_daily_net += daily_net(registry, state, business.id()).ok()?;
-        }
-    }
+    let portfolio = PortfolioForecast::new(registry, state, organization, None).ok()?;
+    let expected_daily_net = portfolio.daily_net();
     let daily_payroll =
         i128::from(registry.upkeep().per_member_daily().cents()) * members.len() as i128;
     let wage_gap = (daily_payroll - expected_daily_net).max(0);
@@ -123,7 +109,11 @@ fn invest(
     }
     let mut candidates = Vec::new();
     for (id, _, _, district) in state.world.public_business_directory() {
-        if owned.contains(&id) {
+        if state
+            .world()
+            .get_business(id)
+            .is_some_and(|business| business.owner() == BusinessOwner::Organization(organization))
+        {
             continue;
         }
         // Rival investors buy operating businesses, not empty premises. Both listings
@@ -150,27 +140,24 @@ fn invest(
         let price = if let Some((price, _)) = listing {
             price
         } else {
-            let Ok(cents) = i64::try_from(appraisal.reference_offer_cents) else {
+            let Ok(price) = buyer_adjusted_price(
+                appraisal.reference_offer_cents,
+                portfolio.administration.property_count(),
+            ) else {
                 continue;
             };
-            Money::from_cents(cents)
+            price
         };
         if price <= Money::ZERO || i128::from(price.cents()) > budget {
             continue;
         }
-        let cycle = appraisal.cycle_minutes;
-        let daily_net = i128::from(appraisal.expected_cycle_net.cents()) * i128::from(DAY_MINUTES)
-            / i128::from(cycle);
-        // An operating foreign shop already participates in the district market. By
-        // contrast, purchasing a suspended shop reopens another competitor and can cost
-        // the buyer's current shops more than the incoming shop earns. Rank the actual
-        // incremental portfolio benefit, not the target's isolated headline earnings.
-        let Ok(displaced_daily_net) =
-            acquisition_owner_daily_displacement(registry, state, id, organization)
+        // Assess both the incoming earnings and the new administration rate on all
+        // existing holdings; reopening a dormant listing can also displace their sales.
+        let Ok(incremental_daily_net) =
+            portfolio.purchase_gain(registry, state, id, district, &appraisal)
         else {
             continue;
         };
-        let incremental_daily_net = daily_net - displaced_daily_net;
         if incremental_daily_net <= 0 {
             continue;
         }
@@ -180,7 +167,7 @@ fn invest(
         candidates.push((
             !listed,
             std::cmp::Reverse(incremental_daily_net.min(wage_gap)),
-            !districts.contains(&district),
+            !portfolio.administration.contains_district(district),
             std::cmp::Reverse(return_score),
             price,
             id,

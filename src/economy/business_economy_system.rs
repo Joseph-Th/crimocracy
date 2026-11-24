@@ -7,7 +7,8 @@ mod cycle_planning;
 mod market;
 mod personal_owner_dividends;
 mod portfolio_overhead;
-pub(crate) use market::forecast_competitor_disruption_gain;
+pub(crate) use market::{forecast_competitor_disruption_gain, forecast_live_business_net};
+pub(crate) use portfolio_overhead::{PortfolioAdministration, daily_owner_net};
 pub use portfolio_overhead::{portfolio_overhead_basis_points, portfolio_overhead_charge};
 
 #[cfg(test)]
@@ -34,20 +35,13 @@ pub(crate) fn forecast_normal_business_net(
         .world
         .get_business(business)
         .ok_or(BusinessEconomyError::MissingBusiness(business))?;
-    let neighborhood = state
-        .world
-        .get_neighborhood(record.neighborhood())
-        .ok_or(BusinessEconomyError::MissingBusinessNeighborhood(business))?;
-    let (_, _, net) = resolve_cycle_financials(
-        business,
-        registry.get_business(record.kind()).economics(),
-        neighborhood.profile(),
-        registry.business_disruption().gross_basis_points(),
-        false,
+    market::forecast_net_for_market(
+        registry,
+        state,
+        record,
         market::forecast_market_snapshot(state, record),
-        0,
-    )?;
-    Ok(net)
+        false,
+    )
 }
 
 pub(crate) use autonomous_lifecycle::apply_due_autonomous_business_lifecycle;

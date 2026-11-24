@@ -5,14 +5,11 @@
 //! capital; player-owned fronts participate only under an explicit standing instruction.
 
 use super::profit_sweep::{
-    BusinessProfitSweepDraft, BusinessProfitSweepError, available_business_profit,
-    plan_accounted_receipts, resolve_business_profit_sweep_context,
-    validate_business_profit_sweep_capacity,
+    BusinessProfitSweepError, available_business_profit, plan_accounted_receipts,
+    resolve_business_profit_sweep_context,
 };
 use super::{portfolio_overhead_basis_points, portfolio_overhead_charge};
-use crate::core::id::{
-    BusinessId, FinancialAccountId, IdKind, LedgerTransactionId, OrganizationId,
-};
+use crate::core::id::{IdKind, LedgerTransactionId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::is_day_boundary;
 use crate::finance::finance_system::{
@@ -26,19 +23,10 @@ use crate::finance::{
 use crate::world::{BusinessOwner, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 
-struct PlannedProfitSource {
-    business: BusinessId,
-    operating_account: FinancialAccountId,
-    settlement_account: FinancialAccountId,
-    amount: Money,
-    overhead: Money,
-    business_version: u32,
-    economy_version: u32,
-}
-
 struct OrganizationProfitPlan {
     total: Money,
-    sources: Vec<PlannedProfitSource>,
+    overhead_rate: u16,
+    postings: Vec<LedgerPosting>,
 }
 
 /// Distributes existing legitimate earnings before the daily payroll debit. Reuse the combined
@@ -116,48 +104,9 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
 
     for (organization, group) in &groups {
         let allocations = &destinations[organization];
-        let destination = allocations
-            .first()
-            .expect("each profitable owner has at least one receiving account")
-            .0;
-        for source in &group.sources {
-            let context =
-                resolve_business_profit_sweep_context(state, *organization, source.business)?;
-            if context.business_version != source.business_version {
-                return Err(BusinessProfitSweepError::StaleBusiness {
-                    business: source.business,
-                    expected: source.business_version,
-                    found: context.business_version,
-                });
-            }
-            if context.economy_version != source.economy_version {
-                return Err(BusinessProfitSweepError::StaleEconomy {
-                    business: source.business,
-                    expected: source.economy_version,
-                    found: context.economy_version,
-                });
-            }
-            validate_business_profit_sweep_capacity(
-                &BusinessProfitSweepDraft {
-                    organization: *organization,
-                    business: source.business,
-                    destination,
-                    amount: source.amount,
-                },
-                context.operating_balance,
-                context.capital_floor,
-            )?;
-            postings.push(LedgerPosting {
-                account: source.operating_account,
-                amount: source.amount.checked_neg().expect("earned surplus negates"),
-            });
-            if source.overhead > Money::ZERO {
-                postings.push(LedgerPosting {
-                    account: source.settlement_account,
-                    amount: source.overhead,
-                });
-            }
-        }
+        // Planning and account-opening validation have not changed any account or business.
+        // The atomic ledger validator checks every resulting posting before committing.
+        postings.extend(group.postings.iter().cloned());
         postings.extend(allocations.iter().map(|(account, amount)| LedgerPosting {
             account: *account,
             amount: *amount,
@@ -226,18 +175,35 @@ fn plan_available_profit_sources(
             .entry(organization)
             .or_insert_with(|| OrganizationProfitPlan {
                 total: Money::ZERO,
-                sources: Vec::new(),
+                overhead_rate: portfolio_overhead_basis_points(state, organization),
+                postings: Vec::new(),
             });
         // A destination can hold at most i64::MAX cents. A wealthy owner with several tills
         // withdraws the first representable portion today and keeps the remainder invested
         // rather than overflowing the money model or bricking every later daily tick.
         let remaining_headroom = Money::from_cents(i64::MAX - group.total.cents());
-        let amount = surplus.min(remaining_headroom);
+        let mut amount = surplus.min(remaining_headroom);
+        // Administration is credited to the source's settlement account. A full or
+        // terminal settlement account must not block otherwise independent withdrawals.
+        if group.overhead_rate > 0 {
+            let settlement = state
+                .finance
+                .get_account(context.settlement_account)
+                .expect("owner-sweep context proved its settlement account");
+            if settlement.version() == u32::MAX {
+                continue;
+            }
+            let fee_headroom = i128::from(i64::MAX) - i128::from(settlement.balance().cents());
+            // ceil(gross * rate / 10_000) <= headroom exactly when gross <= this bound.
+            let gross_capacity = fee_headroom * 10_000 / i128::from(group.overhead_rate);
+            amount = amount.min(Money::from_cents(
+                gross_capacity.min(i128::from(i64::MAX)) as i64
+            ));
+        }
         if amount == Money::ZERO {
             continue;
         }
-        let overhead =
-            portfolio_overhead_charge(amount, portfolio_overhead_basis_points(state, organization));
+        let overhead = portfolio_overhead_charge(amount, group.overhead_rate);
         let receipt = amount
             .checked_sub(overhead)
             .expect("owner fee cannot exceed gross");
@@ -248,15 +214,16 @@ fn plan_available_profit_sources(
             .total
             .checked_add(receipt)
             .expect("owner distribution is capped by representable money");
-        group.sources.push(PlannedProfitSource {
-            business: business.id(),
-            operating_account: context.operating_account,
-            settlement_account: context.settlement_account,
-            amount,
-            overhead,
-            business_version: context.business_version,
-            economy_version: context.economy_version,
+        group.postings.push(LedgerPosting {
+            account: context.operating_account,
+            amount: amount.checked_neg().expect("earned surplus negates"),
         });
+        if overhead > Money::ZERO {
+            group.postings.push(LedgerPosting {
+                account: context.settlement_account,
+                amount: overhead,
+            });
+        }
     }
     groups.retain(|_, group| group.total > Money::ZERO);
     Ok(groups)
