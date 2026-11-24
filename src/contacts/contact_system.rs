@@ -870,5 +870,45 @@ pub(crate) fn has_current_contact_relationship_basis(
             .is_some_and(|relationship| has_contact_relationship_basis(relationship.dimensions()))
 }
 
+/// A durable active contact is not necessarily a usable institutional channel.
+/// Strategic consumers share the same live availability and social-basis checks
+/// as disclosure; membership and institutional kind must also remain valid.
+pub(crate) fn contact_is_currently_usable(
+    state: &AppState,
+    contact: &InstitutionalContactRecord,
+) -> bool {
+    contact.status() == ContactStatus::Active
+        && are_channel_endpoints_available(state, contact)
+        && has_current_contact_relationship_basis(state, contact)
+        && state
+            .world()
+            .get_character(contact.handler())
+            .is_some_and(|handler| handler.organization() == Some(contact.sponsor()))
+        && state
+            .world()
+            .get_character(contact.contact())
+            .is_some_and(|person| person.organization() == Some(contact.institution()))
+        && state
+            .world()
+            .get_organization(contact.institution())
+            .is_some_and(|institution| {
+                resolve_contact_kind_for_institution_kind(institution.kind())
+                    == Some(contact.kind())
+            })
+}
+
+pub(crate) fn usable_contacts_of_kind(
+    state: &AppState,
+    sponsor: OrganizationId,
+    kind: ContactKind,
+) -> impl Iterator<Item = &InstitutionalContactRecord> {
+    state
+        .contacts()
+        .contacts_for_sponsor(sponsor)
+        .filter(move |contact| {
+            contact.kind() == kind && contact_is_currently_usable(state, contact)
+        })
+}
+
 #[cfg(test)]
 mod tests;

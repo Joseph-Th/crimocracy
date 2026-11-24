@@ -737,6 +737,225 @@ fn autonomous_rivals_spend_clean_money_weekly_in_the_players_contested_ward() {
 }
 
 #[test]
+fn rival_campaign_requires_available_executive() {
+    use crate::core::entity::EntityRef;
+    use crate::economy::BusinessEconomyDraft;
+    use crate::economy::business_economy_system::validate_establish_business_economy;
+    use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
+    use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+    use crate::legal::{
+        Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability,
+        EvidenceStrength, InvestigationDraft,
+    };
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(6_218)).unwrap();
+    let district = city.home;
+    let rival = insert_organization(
+        &registry,
+        &mut city.state,
+        OrganizationDraft {
+            name: "Leaderless Commercial Rival".into(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let business = insert_business(
+        &registry,
+        &mut city.state,
+        BusinessDraft {
+            name: "Leaderless Retail Holding".into(),
+            kind: BusinessKind::Retail,
+            functions: std::collections::BTreeSet::from([
+                BusinessFunction::CustomerAccess,
+                BusinessFunction::ProfessionalRecords,
+            ]),
+            neighborhood: district,
+            owner: BusinessOwner::Organization(rival),
+        },
+    )
+    .unwrap();
+    let operating = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(business),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_establish_business_economy(
+        &registry,
+        &city.state,
+        BusinessEconomyDraft {
+            business,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    fund(&mut city.state, rival, 2_000_000);
+    fund(&mut city.state, city.player, 1_000_000);
+    validate_invest_influence(&city.state, district, 1_000_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert!(political_system::affordable_rival_campaign_points(&registry, &city.state, rival) > 0);
+    for _ in 0..7 {
+        advance_day(&registry, &mut city.state);
+    }
+    assert!(
+        city.state.politics().organization(rival).is_none(),
+        "a funded organization without any named executive cannot commission political spending"
+    );
+    let cash = city
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(rival))
+        .find(|account| account.kind() == AccountKind::AccountedFunds)
+        .unwrap();
+    assert_eq!(cash.balance(), Money::from_cents(2_000_000));
+
+    let executive = insert_character(
+        &mut city.state,
+        CharacterDraft {
+            name: "New Executive".into(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: Default::default(),
+            traits: Default::default(),
+            drives: Default::default(),
+        },
+    )
+    .unwrap();
+    insert_character(
+        &mut city.state,
+        CharacterDraft {
+            name: "Commercial Subordinate".into(),
+            organization: Some(rival),
+            supervisor: Some(executive),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: Default::default(),
+            traits: Default::default(),
+            drives: Default::default(),
+        },
+    )
+    .unwrap();
+    for _ in 0..7 {
+        advance_day(&registry, &mut city.state);
+    }
+    let spent = city
+        .state
+        .politics()
+        .organization(rival)
+        .unwrap()
+        .spent_cents();
+    assert!(
+        spent > 0,
+        "available leadership can commission a funded campaign"
+    );
+    for _ in 0..6 {
+        advance_day(&registry, &mut city.state);
+    }
+    let prior_influence = rival_pressure(&city.state, city.player, district);
+    assert!(prior_influence > 0);
+    city.state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+    crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, &mut city.state)
+        .unwrap();
+    let police = city
+        .state
+        .world()
+        .organizations()
+        .find(|org| org.kind() == OrganizationKind::LawEnforcement)
+        .unwrap()
+        .id();
+    let investigation = validate_open_investigation(
+        &city.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Executive custody".into(),
+            subjects: std::collections::BTreeSet::from([EntityRef::Character(executive)]),
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    let mut evidence = std::collections::BTreeSet::new();
+    for kind in [EvidenceKind::Document, EvidenceKind::KnownAssociation] {
+        evidence.insert(
+            validate_add_evidence(
+                &city.state,
+                EvidenceDraft {
+                    investigation,
+                    custodian: police,
+                    subject: EntityRef::Character(executive),
+                    origin: None,
+                    kind,
+                    strength: EvidenceStrength::Strong,
+                    reliability: EvidenceReliability::HighlyReliable,
+                    admissibility: Admissibility::Admissible,
+                    discovered_at: city.state.now(),
+                },
+            )
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap(),
+        );
+    }
+    let arrest = validate_arrest(
+        &registry,
+        &city.state,
+        ArrestDraft {
+            character: executive,
+            investigation,
+            evidence,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut restored] {
+        apply_due_political_campaigns(&registry, state);
+        let campaign = state.politics().organization(rival).unwrap();
+        assert_eq!(
+            campaign.spent_cents(),
+            spent,
+            "detained leadership must not authorize a new campaign through an ordinary subordinate"
+        );
+        assert!(
+            campaign.district(district).unwrap().influence() < prior_influence,
+            "existing influence still decays"
+        );
+        validate_release_arrest(state, arrest)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        for _ in 0..7 {
+            advance_day(&registry, state);
+        }
+        assert!(state.politics().organization(rival).unwrap().spent_cents() > spent);
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn financed_rival_counter_campaign_scales_with_visible_player_reach() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(6_218)).unwrap();

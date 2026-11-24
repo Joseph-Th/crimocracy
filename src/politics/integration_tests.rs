@@ -274,6 +274,76 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
     for _ in 0..crate::core::campaign_victory::POLITICAL_CONTACT_DAYS {
         day(&registry, &mut city.state);
     }
+    use crate::core::campaign_victory::progress;
+    use crate::social::RelationshipDimensions;
+    use crate::social::relationship_system::validate_set_relationship;
+
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .established_political_contacts,
+        1
+    );
+    let held_nomination = validate_nominate_mayor(&city.state, city.boss).unwrap();
+    let edges = [(city.boss, official), (official, city.boss)];
+    let previous: Vec<_> = edges
+        .into_iter()
+        .filter_map(|(from, to)| {
+            city.state
+                .social()
+                .get_relationship(from, to)
+                .map(|record| (from, to, record.dimensions()))
+        })
+        .collect();
+    for &(from, to, dimensions) in &previous {
+        let dormant = RelationshipDimensions::zero();
+        if dimensions != dormant {
+            validate_set_relationship(&city.state, from, to, dormant)
+                .unwrap()
+                .commit(&mut city.state)
+                .unwrap();
+        }
+    }
+    let dormant_progress = progress(&registry, &city.state).unwrap();
+    assert_eq!(
+        dormant_progress.active_political_contacts, 0,
+        "an active historical record is not a usable sponsor"
+    );
+    assert_eq!(dormant_progress.established_political_contacts, 0);
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        validate_nominate_mayor(&city.state, city.boss).err(),
+        Some(PoliticalError::IneligibleCandidate)
+    );
+    assert_eq!(
+        held_nomination.commit(&mut city.state).err(),
+        Some(PoliticalError::Stale)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+    city.state = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .established_political_contacts,
+        0
+    );
+    for (from, to, dimensions) in previous {
+        if dimensions != RelationshipDimensions::zero() {
+            validate_set_relationship(&city.state, from, to, dimensions)
+                .unwrap()
+                .commit(&mut city.state)
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        progress(&registry, &city.state)
+            .unwrap()
+            .established_political_contacts,
+        1
+    );
     validate_nominate_mayor(&city.state, city.boss)
         .unwrap()
         .commit(&mut city.state)

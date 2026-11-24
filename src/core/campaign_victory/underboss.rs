@@ -6,11 +6,8 @@ use super::{
     UNDERBOSS_CONTACT_DAYS, UNDERBOSS_OPERATING_RUNWAY_DAYS, UNDERBOSS_SENIOR_MANAGEMENT_RATING,
     VictoryError, established_for,
 };
-use crate::contacts::contact_system::{
-    are_channel_endpoints_available, has_current_contact_relationship_basis,
-    resolve_contact_kind_for_institution_kind,
-};
-use crate::contacts::{ContactKind, ContactStatus};
+use crate::contacts::ContactKind;
+use crate::contacts::contact_system::contact_is_currently_usable;
 use crate::core::id::{CharacterId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::DAY_MINUTES;
@@ -35,29 +32,12 @@ pub(super) fn institutional_reach(state: &AppState, owner: OrganizationId) -> (u
             ContactKind::Professional => 3,
             ContactKind::Police => continue,
         };
-        if contact.status() != ContactStatus::Active
+        if !contact_is_currently_usable(state, contact)
             || !established_for(
                 state.now(),
                 contact.established_at(),
                 UNDERBOSS_CONTACT_DAYS,
             )
-            || !are_channel_endpoints_available(state, contact)
-            || !has_current_contact_relationship_basis(state, contact)
-            || !state
-                .world()
-                .get_character(contact.handler())
-                .is_some_and(|person| person.organization() == Some(owner))
-            || !state
-                .world()
-                .get_character(contact.contact())
-                .is_some_and(|person| person.organization() == Some(contact.institution()))
-            || !state
-                .world()
-                .get_organization(contact.institution())
-                .is_some_and(|institution| {
-                    resolve_contact_kind_for_institution_kind(institution.kind())
-                        == Some(contact.kind())
-                })
         {
             continue;
         }

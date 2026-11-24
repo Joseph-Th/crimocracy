@@ -2,7 +2,8 @@
 //! the player must explicitly claim a qualified victory. A typed history event freezes the result
 //! through the current-schema history and persistence owners.
 
-use crate::contacts::{ContactKind, ContactStatus};
+use crate::contacts::ContactKind;
+use crate::contacts::contact_system::usable_contacts_of_kind;
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
@@ -31,7 +32,7 @@ use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::territory_influence::{
     NeighborhoodInfluenceSummary, resolve_neighborhood_influence,
 };
-use crate::world::{BusinessKind, BusinessOwner, OrganizationKind};
+use crate::world::{BusinessKind, BusinessOwner};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -832,22 +833,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .values()
         .map(|standing| standing.window_net)
         .sum::<i128>();
-    let political_contacts = state
-        .contacts()
-        .contacts_for_sponsor(organization)
-        .filter(|contact| {
-            contact.kind() == ContactKind::Political
-                && contact.status() == ContactStatus::Active
-                && state
-                    .world()
-                    .get_organization(contact.institution())
-                    .is_some_and(|institution| institution.kind() == OrganizationKind::Political)
-                && state
-                    .world()
-                    .get_character(contact.handler())
-                    .is_some_and(|handler| handler.organization() == Some(organization))
-        })
-        .collect::<Vec<_>>();
+    let political_contacts =
+        usable_contacts_of_kind(state, organization, ContactKind::Political).collect::<Vec<_>>();
     let active_political_contacts = political_contacts.len();
     let established_political_contacts = political_contacts
         .iter()
@@ -1407,27 +1394,13 @@ pub fn validate_claim_victory(
             standing.legitimate_daily_net.cents(),
             standing.daily_payroll.cents(),
         );
-        if let Some(sponsor) = state
-            .contacts()
-            .contacts_for_sponsor(owner)
-            .find(|contact| {
-                contact.kind() == ContactKind::Political
-                    && contact.status() == ContactStatus::Active
-                    && established_for(
-                        state.now(),
-                        contact.established_at(),
-                        POLITICAL_CONTACT_DAYS,
-                    )
-                    && state
-                        .world()
-                        .get_organization(contact.institution())
-                        .is_some_and(|organization| {
-                            organization.kind() == OrganizationKind::Political
-                        })
-                    && state
-                        .world()
-                        .get_character(contact.handler())
-                        .is_some_and(|handler| handler.organization() == Some(owner))
+        if let Some(sponsor) =
+            usable_contacts_of_kind(state, owner, ContactKind::Political).find(|contact| {
+                established_for(
+                    state.now(),
+                    contact.established_at(),
+                    POLITICAL_CONTACT_DAYS,
+                )
             })
         {
             let contact = state
