@@ -4,8 +4,8 @@ use crimocracy::core::campaign_victory::{
     VICTORY_PROFITABLE_CYCLES, political_business_progress, political_district_progress,
 };
 use crimocracy::politics::political_system::{
-    campaign_salary_commitment, daily_campaign_erosion, dismiss_specialist, initiative_available,
-    next_municipal_election_day, specialist_manager_available, specialist_output,
+    campaign_salary_commitment, daily_campaign_erosion, dismiss_specialist, eligible_manager,
+    initiative_available, next_municipal_election_day, specialist_output,
     validate_civic_initiative, validate_hire_specialist, validate_invest_influence,
     validate_nominate_mayor,
 };
@@ -102,18 +102,13 @@ impl Session<'_> {
                 );
                 writeln!(out, "    Next daily erosion before specialist output: -{machine} machine, -{grassroots} grassroots, -{institutions} institutions").unwrap();
                 for (kind, manager) in office.specialists() {
-                    if specialist_manager_available(
-                        &self.state,
-                        self.player,
-                        district.id(),
-                        *manager,
-                    ) {
+                    if eligible_manager(&self.state, self.player, district.id(), *manager) {
                         let (machine, grassroots, institutions) =
                             specialist_output(&self.state, *manager, *kind);
                         writeln!(out, "    {:?} under char-{} | salary {} cents/day | funded daily +{} machine, +{} grassroots, +{} institutions",
                             kind, manager.raw(), kind.daily_salary(), machine, grassroots, institutions).unwrap();
                     } else {
-                        writeln!(out, "    {:?} under char-{} | contract {} cents/day | paused: manager unavailable, lacks local authority or has a conflicting office; no current salary or output",
+                        writeln!(out, "    {:?} under char-{} | contract {} cents/day | paused: manager unavailable or lacks local authority; no current salary or output",
                             kind, manager.raw(), kind.daily_salary()).unwrap();
                     }
                 }

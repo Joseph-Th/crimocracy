@@ -102,10 +102,12 @@ pub fn eligible_manager(
             && state.legal().active_arrest_for_character(manager).is_none()
     }) && state
         .delegation()
-        .active_for_scope(ResponsibilityScope::Neighborhood(district))
-        .any(|mandate| {
+        .active_for_manager(manager)
+        .is_some_and(|mandate| {
             mandate.organization() == owner
-                && mandate.manager() == manager
+                && mandate
+                    .scopes()
+                    .contains(&ResponsibilityScope::Neighborhood(district))
                 && mandate.scopes().contains(&ResponsibilityScope::Function(
                     ResponsibilityFunction::Political,
                 ))
@@ -132,19 +134,6 @@ pub fn campaign_office_available(
     })
 }
 
-/// Contract output and salary use exactly the same live availability rule.
-/// A conflicting assignment in a restored older state produces neither wages
-/// nor support until its contracts are reorganized.
-pub fn specialist_manager_available(
-    state: &AppState,
-    owner: OrganizationId,
-    district: NeighborhoodId,
-    manager: CharacterId,
-) -> bool {
-    eligible_manager(state, owner, district, manager)
-        && campaign_office_available(state, owner, district, manager)
-}
-
 /// Full daily contractual salary and the currently payable subset, before
 /// affordability is checked at the daily settlement. Both use authored wages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -163,7 +152,7 @@ pub fn campaign_salary_commitment(
         for (&district, office) in &campaign.districts {
             for (&kind, &manager) in &office.specialists {
                 contracted = contracted.saturating_add(kind.daily_salary());
-                if specialist_manager_available(state, owner, district, manager) {
+                if eligible_manager(state, owner, district, manager) {
                     payable = payable.saturating_add(kind.daily_salary());
                 }
             }
@@ -609,7 +598,8 @@ impl ValidatedPoliticalOrder {
                 return Err(PoliticalError::Stale);
             }
             CampaignAction::Hire(kind, manager)
-                if !specialist_manager_available(state, self.owner, self.district, manager)
+                if !eligible_manager(state, self.owner, self.district, manager)
+                    || !campaign_office_available(state, self.owner, self.district, manager)
                     || campaign
                         .and_then(|c| c.district(self.district))
                         .is_some_and(|d| d.specialists.contains_key(&kind)) =>
@@ -804,7 +794,7 @@ fn pay_campaign_staff(state: &mut AppState) {
     for (owner, district, specialists) in offices {
         let active = specialists
             .into_iter()
-            .filter(|(_, manager)| specialist_manager_available(state, owner, district, *manager))
+            .filter(|(_, manager)| eligible_manager(state, owner, district, *manager))
             .map(|(kind, manager)| (kind, specialist_output(state, manager, kind)))
             .collect::<Vec<_>>();
         let cents: i64 = active.iter().map(|(kind, _)| kind.daily_salary()).sum();
@@ -1332,6 +1322,10 @@ pub fn valid_political_state(state: &AppState) -> bool {
         {
             return false;
         }
+        // A manager can retain several specialist contracts in one ward, but
+        // never multiple offices within the same employer's campaign. Current
+        // saves must satisfy the same restriction as hiring and held-order commit.
+        let mut manager_offices = BTreeMap::new();
         for (&district, office) in &campaign.districts {
             if state.world().get_neighborhood(district).is_none()
                 || office.influence > INFLUENCE_CAP
@@ -1340,10 +1334,12 @@ pub fn valid_political_state(state: &AppState) -> bool {
                 || office
                     .leading_since
                     .is_some_and(|start| start > state.now())
-                || office
-                    .specialists
-                    .values()
-                    .any(|manager| state.world().get_character(*manager).is_none())
+                || office.specialists.values().any(|manager| {
+                    state.world().get_character(*manager).is_none()
+                        || manager_offices
+                            .insert(*manager, district)
+                            .is_some_and(|previous| previous != district)
+                })
                 || office.initiatives.values().any(|time| *time > state.now())
             {
                 return false;

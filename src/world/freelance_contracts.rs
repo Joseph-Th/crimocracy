@@ -230,6 +230,18 @@ fn ensure_eligible(
     Ok(())
 }
 
+/// Read-only discovery of a presently actionable personal contact. Funding and
+/// duration belong to the eventual contract, not the contact directory.
+pub fn freelance_contact_available(
+    state: &AppState,
+    sponsor: OrganizationId,
+    freelancer: CharacterId,
+    manager: CharacterId,
+) -> bool {
+    ensure_eligible(state, sponsor, freelancer, manager).is_ok()
+        && validate_reassign_character(state, freelancer, Some(sponsor), Some(manager)).is_ok()
+}
+
 pub fn validate_hire_freelancer(
     state: &AppState,
     sponsor: OrganizationId,
@@ -241,6 +253,7 @@ pub fn validate_hire_freelancer(
         return Err(FreelanceError::InvalidDuration);
     }
     ensure_eligible(state, sponsor, freelancer, manager)?;
+    let membership = validate_reassign_character(state, freelancer, Some(sponsor), Some(manager))?;
     let person = state
         .world()
         .get_character(freelancer)
@@ -329,7 +342,6 @@ pub fn validate_hire_freelancer(
         Some(openings) => validate_record_transaction_with_openings(state, openings, draft)?,
         None => validate_record_transaction(state, draft)?,
     };
-    let membership = validate_reassign_character(state, freelancer, Some(sponsor), Some(manager))?;
     let expires_at = state
         .now()
         .checked_add(crate::core::time::SimDuration::from_minutes(

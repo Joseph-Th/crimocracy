@@ -297,6 +297,97 @@ fn specialist_requires_delegated_political_manager_and_paid_salary_to_grow() {
 }
 
 #[test]
+fn current_save_rejects_one_manager_assigned_to_two_campaign_offices() {
+    use crate::core::invariants::StateValidationError;
+    use crate::core::persistence::LoadError;
+    use crate::delegation::MandateDraft;
+    use crate::delegation::delegation_system::validate_assign_mandate;
+    use std::collections::BTreeSet;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(5_611)).unwrap();
+    let first = city.home;
+    let second = city
+        .state
+        .world()
+        .neighborhoods()
+        .find(|ward| ward.id() != first)
+        .unwrap()
+        .id();
+    fund(&mut city.state, city.player, 1_000_000);
+    let mut managers = Vec::new();
+    for district in [first, second] {
+        let manager = insert_character(
+            &mut city.state,
+            CharacterDraft {
+                name: format!("Office manager {district}"),
+                organization: Some(city.player),
+                supervisor: Some(city.boss),
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        validate_assign_mandate(
+            &city.state,
+            MandateDraft {
+                organization: city.player,
+                manager,
+                scopes: BTreeSet::from([
+                    ResponsibilityScope::Neighborhood(district),
+                    ResponsibilityScope::Function(ResponsibilityFunction::Political),
+                ]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+        validate_hire_specialist(&city.state, district, manager, SpecialistKind::Organizer)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        managers.push(manager);
+    }
+    let envelope = build_save(&registry, &city.state).unwrap();
+    restore_save(&registry, envelope.clone()).unwrap();
+    let office = city
+        .state
+        .politics()
+        .organization(city.player)
+        .unwrap()
+        .district(second)
+        .unwrap();
+    // Corrupt only the second office's serialized assignment. Both identities
+    // still exist, so reference checks alone would accept this invalid save.
+    let office_bytes = bincode::serialize(&(second, office)).unwrap();
+    let assignment = bincode::serialize(&(SpecialistKind::Organizer, managers[1])).unwrap();
+    let replacement = bincode::serialize(&(SpecialistKind::Organizer, managers[0])).unwrap();
+    let mut bytes = bincode::serialize(&envelope).unwrap();
+    let unique_offset = |haystack: &[u8], needle: &[u8]| {
+        let offsets: Vec<_> = haystack
+            .windows(needle.len())
+            .enumerate()
+            .filter_map(|(i, window)| (window == needle).then_some(i))
+            .collect();
+        assert_eq!(offsets.len(), 1);
+        offsets[0]
+    };
+    let offset = unique_offset(&bytes, &office_bytes) + unique_offset(&office_bytes, &assignment);
+    bytes[offset..offset + replacement.len()].copy_from_slice(&replacement);
+    let malformed = bincode::deserialize(&bytes).unwrap();
+    assert!(matches!(
+        restore_save(&registry, malformed),
+        Err(LoadError::InvalidState(
+            StateValidationError::InvalidPoliticalCampaign
+        ))
+    ));
+}
+
+#[test]
 fn permanent_campaign_offices_need_distinct_supervisors_and_reserve_real_contract_payroll() {
     use crate::core::campaign_victory::{UNDERBOSS_OPERATING_RUNWAY_DAYS, progress};
     use crate::politics::political_system::campaign_salary_commitment;

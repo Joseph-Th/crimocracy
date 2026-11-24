@@ -11,7 +11,7 @@ use crate::core::id::{CharacterId, OrganizationId};
 use crate::core::state::AppState;
 use crate::delegation::delegation_system::validate_revoke_mandate;
 use crate::enterprises::EnterpriseStatus;
-use crate::enterprises::enterprise_execution::validate_retire_enterprise;
+use crate::enterprises::enterprise_execution::validate_suspend_enterprise;
 use crate::legal::LegalRepresentationEndReason;
 use crate::legal::legal_representation_system::validate_end_legal_representation;
 use crate::operations::OperationStatus;
@@ -219,27 +219,26 @@ fn stage_departure(
         }
         apply_transition(registry, state, operation, OperationTransition::Abort).ok()?;
     }
-    let mut retired = 0;
+    let mut suspended = 0;
     if let Some(mandate) = state
         .delegation()
         .active_for_manager(member)
         .map(|record| record.id())
     {
+        // Live work must stop before its authority can be revoked. A captain's
+        // departure does not destroy the organization's sites or historical earnings;
+        // suspended rackets can be reassigned through the ordinary succession path.
         let enterprises: Vec<_> = state
             .enterprises()
-            .enterprises_for_organization(organization)
-            .filter(|record| {
-                record.authority().mandate == mandate
-                    && record.status() != EnterpriseStatus::Retired
-            })
+            .active_for_mandate(mandate)
             .map(|record| record.id())
             .collect();
         for enterprise in enterprises {
-            validate_retire_enterprise(state, enterprise)
+            validate_suspend_enterprise(state, enterprise)
                 .ok()?
                 .commit(state)
                 .ok()?;
-            retired += 1;
+            suspended += 1;
         }
         validate_revoke_mandate(state, mandate)
             .ok()?
@@ -300,7 +299,7 @@ fn stage_departure(
             )
         } else {
             format!(
-                "{name} walked away after wage nonpayment and accumulated resentment. {remaining} member(s) remain; {retired} managed racket(s) retired and {channel_count} institutional channel(s) lost.{}",
+                "{name} walked away after wage nonpayment and accumulated resentment. {remaining} member(s) remain; {suspended} active managed racket(s) suspended for reassignment and {channel_count} institutional channel(s) lost.{}",
                 if no_crew {
                     " The supervised crew has disintegrated; any remaining leadership must rebuild its organization."
                 } else {

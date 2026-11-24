@@ -203,6 +203,119 @@ fn suspended_enterprise_can_change_manager_but_stays_suspended_until_resumed() {
 }
 
 #[test]
+fn unpaid_captain_leaves_active_racket_recoverable_after_restore() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let former = fixture.authority;
+    let boss = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Executive successor".into(),
+            organization: Some(fixture.organization),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(92))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_reassign_character(
+        &fixture.state,
+        former.manager,
+        Some(fixture.organization),
+        Some(boss),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    crate::world::world_system::designate_player_organization(
+        &mut fixture.state,
+        fixture.organization,
+    )
+    .unwrap();
+    for _ in 0..4 {
+        fixture.state.advance_clock(SimDuration::from_minutes(1439));
+        let tick = run_tick(&registry, &mut fixture.state);
+        assert!(tick.payroll_departures.is_empty());
+    }
+    fixture.state.advance_clock(SimDuration::from_minutes(1439));
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let tick = run_tick(&registry, state);
+        assert_eq!(tick.payroll_departures, vec![former.manager]);
+        assert_eq!(
+            state
+                .world()
+                .get_character(former.manager)
+                .unwrap()
+                .organization(),
+            None
+        );
+        assert!(
+            state
+                .delegation()
+                .active_for_manager(former.manager)
+                .is_none()
+        );
+        let racket = state.enterprises().get_enterprise(enterprise).unwrap();
+        assert_eq!(racket.status(), EnterpriseStatus::Suspended);
+        assert_eq!(racket.next_cycle_at(), None);
+        assert_eq!(racket.cash_account(), fixture.cash);
+        assert_eq!(racket.settlement_account(), fixture.settlement);
+        assert_eq!(racket.authority(), former);
+        let scope = former.scope;
+        let mandate = validate_assign_mandate(
+            state,
+            MandateDraft {
+                organization: fixture.organization,
+                manager: boss,
+                scopes: BTreeSet::from([scope]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .unwrap()
+        .commit(state)
+        .unwrap();
+        let successor = MandateAuthority {
+            mandate,
+            manager: boss,
+            scope,
+        };
+        validate_reassign_enterprise(state, enterprise, successor)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        validate_resume_enterprise(&registry, state, enterprise)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        assert_eq!(
+            state
+                .enterprises()
+                .get_enterprise(enterprise)
+                .unwrap()
+                .status(),
+            EnterpriseStatus::Active
+        );
+        assert!(
+            state
+                .history()
+                .latest_payroll_departure(former.manager, fixture.organization)
+                .is_some()
+        );
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn reassignment_does_not_retroactively_transfer_due_cycle_or_accept_ineligible_authority() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();

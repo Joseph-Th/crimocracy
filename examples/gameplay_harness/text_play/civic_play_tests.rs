@@ -91,6 +91,79 @@ fn generated_city_has_hundreds_of_real_people_and_hires_a_freelancer_for_a_fixed
             .active_freelance_contract(worker)
             .is_some()
     );
+    // Establish a trusting freelance acquaintance with the hired worker.
+    // The directory must not advertise a route through a temporary supervisor.
+    let home = session
+        .state
+        .world()
+        .get_character(worker)
+        .unwrap()
+        .life()
+        .home()
+        .unwrap();
+    let other = crimocracy::world::world_system::insert_character(
+        &mut session.state,
+        crimocracy::world::CharacterDraft {
+            name: "Independent acquaintance".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: crimocracy::world::AutonomyLevel::Guided,
+            capabilities: std::collections::BTreeMap::new(),
+            traits: std::collections::BTreeSet::new(),
+            drives: std::collections::BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    crimocracy::world::character_life::validate_set_civic_occupation(
+        &session.state,
+        other,
+        home,
+        IndependentVocation::FreelanceCriminal,
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    let mut dimensions = crimocracy::social::RelationshipDimensions::zero();
+    dimensions.trust = crimocracy::social::RelationshipLevel::try_new(80).unwrap();
+    crimocracy::social::relationship_system::validate_set_relationship(
+        &session.state,
+        other,
+        worker,
+        dimensions,
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    let listing = session.execute("freelancers").unwrap().0;
+    let temporary_manager = format!("char-{}", worker.raw());
+    assert!(
+        !listing
+            .split_whitespace()
+            .any(|token| token.trim_end_matches(',') == temporary_manager),
+        "{listing}"
+    );
+    assert!(
+        !crimocracy::world::freelance_contracts::freelance_contact_available(
+            &session.state,
+            session.player,
+            other,
+            worker,
+        )
+    );
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(
+        session
+            .execute(&format!(
+                "contract char-{} char-{} 1",
+                other.raw(),
+                worker.raw()
+            ))
+            .is_err()
+    );
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap(),
+        before
+    );
     let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
     assert_eq!(
         restored

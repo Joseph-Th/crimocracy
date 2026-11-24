@@ -3,7 +3,9 @@
 //! assignments and unknown criminal membership are never exposed.
 
 use super::*;
-use crimocracy::world::freelance_contracts::validate_hire_freelancer;
+use crimocracy::world::freelance_contracts::{
+    freelance_contact_available, validate_hire_freelancer,
+};
 use crimocracy::world::{CivicActivity, CivicProfession, IndependentVocation, OrganizationKind};
 use std::collections::BTreeMap;
 
@@ -282,29 +284,15 @@ impl Session<'_> {
     fn known_freelancers(&self) -> BTreeMap<CharacterId, Vec<CharacterId>> {
         let mut available = BTreeMap::new();
         for member in self.state.world().characters_in_organization(self.player) {
-            if self
-                .state
-                .legal()
-                .active_arrest_for_character(member.id())
-                .is_some()
-            {
-                continue;
-            }
             for relationship in self.state.social().relationships_to(member.id()) {
-                let Some(person) = self.state.world().get_character(relationship.from()) else {
-                    continue;
-                };
-                if person.organization().is_none()
-                    && person.life().vocation() == IndependentVocation::FreelanceCriminal
-                    && self
-                        .state
-                        .legal()
-                        .active_arrest_for_character(person.id())
-                        .is_none()
-                    && relationship.dimensions().trust.value() >= 30
-                {
+                if freelance_contact_available(
+                    &self.state,
+                    self.player,
+                    relationship.from(),
+                    member.id(),
+                ) {
                     available
-                        .entry(person.id())
+                        .entry(relationship.from())
                         .or_insert_with(Vec::new)
                         .push(member.id());
                 }
