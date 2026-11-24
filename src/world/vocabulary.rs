@@ -116,6 +116,22 @@ pub const ALL_POLICY_KINDS: [PolicyKind; 2] = [
 pub enum ApprovalPolicy {
     RequireApproval,
     Delegated,
+    /// Independent recruitment is delegated only below this total named roster.
+    /// Zero pauses independent recruitment without revoking any other authority.
+    DelegatedUpTo(u16),
+}
+
+impl ApprovalPolicy {
+    pub const fn is_delegated(self) -> bool {
+        matches!(self, Self::Delegated | Self::DelegatedUpTo(_))
+    }
+
+    pub const fn recruitment_limit(self) -> Option<u16> {
+        match self {
+            Self::DelegatedUpTo(limit) => Some(limit),
+            Self::RequireApproval | Self::Delegated => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

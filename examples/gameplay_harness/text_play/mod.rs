@@ -163,8 +163,8 @@ const HELP: &str = "Commands:
   end-counsel <representation-id> <concluded|replace|withdraw>
                          End representation through the legal owner
   policies               Organization standing policies
-  policy <recruitment|legal> <approve|delegate|case|automatic>
-                         Change organization-level governance
+  policy <recruitment|legal> <approve|delegate|pause|cap-N|case|automatic>
+                         Change organization-level governance; cap-N targets total named roster
   districts              Public district names and IDs for delegated scopes
   turf                   Your active rackets and negotiated district standstills
   contest <enterprise-N>  Challenge an identified rival racket using local associates; the loser closes for seven days
@@ -177,7 +177,7 @@ const HELP: &str = "Commands:
   autonomy <member-id> <tight|guided|delegated|broad>  Set freedom to act independently
   supervise <member-id> <supervisor-id>  Reassign a subordinate within your organization
   mandate <id> <add|remove> <scope>  Adjust an active mandate's scope
-  mandate <id> order <recruitment|legal> <approve|delegate|case|automatic|inherit>
+  mandate <id> order <recruitment|legal> <approve|delegate|pause|cap-N|case|automatic|inherit>
   mandate <id> budget <daily|weekly> <account-id> <cents>
   mandate <id> budget clear
   mandate <id> revoke    Revoke authority when no active racket depends on it

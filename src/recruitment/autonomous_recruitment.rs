@@ -175,6 +175,11 @@ fn plan_due_autonomous_recruitment(
     let mut actions = Vec::new();
     let mut id_budget = Vec::new();
     let mut decision_count = 0_u32;
+    // Cohort planning must account for earlier accepted hires across all managers
+    // of a crew. Only actual accepted plans consume headroom; pending approvals
+    // and refusals do not. Departures to other organizations are conservatively
+    // ignored until the next daily pass, so no speculative slot is promised.
+    let mut projected_admissions = BTreeMap::<OrganizationId, usize>::new();
 
     while let Some((authority_index, candidate, approach)) =
         select_next_recruitment_action(&authorities, &claimed_this_pass)
@@ -186,6 +191,20 @@ fn plan_due_autonomous_recruitment(
             prepared.manager,
             prepared.policy,
         );
+        if let Some(limit) = policy.recruitment_limit() {
+            let current = state
+                .world()
+                .characters_in_organization(organization)
+                .count();
+            let admissions = projected_admissions
+                .get(&organization)
+                .copied()
+                .unwrap_or(0);
+            if current.saturating_add(admissions) >= usize::from(limit) {
+                authorities.remove(authority_index);
+                continue;
+            }
+        }
         let authority = MandateAuthority {
             mandate,
             manager,
@@ -200,19 +219,21 @@ fn plan_due_autonomous_recruitment(
             .is_ok();
 
         let action = match policy {
-            ApprovalPolicy::Delegated => PlannedAutonomousRecruitmentAction::Delegated(
-                validate_delegated_recruitment_attempt(
-                    registry,
-                    state,
-                    authority,
-                    RecruitmentDraft {
-                        target_organization: organization,
-                        recruiter: manager,
-                        candidate,
-                        approach,
-                    },
-                )?,
-            ),
+            ApprovalPolicy::Delegated | ApprovalPolicy::DelegatedUpTo(_) => {
+                PlannedAutonomousRecruitmentAction::Delegated(
+                    validate_delegated_recruitment_attempt(
+                        registry,
+                        state,
+                        authority,
+                        RecruitmentDraft {
+                            target_organization: organization,
+                            recruiter: manager,
+                            candidate,
+                            approach,
+                        },
+                    )?,
+                )
+            }
             ApprovalPolicy::RequireApproval => {
                 let request = validate_request_recruitment_approval(
                     registry,
@@ -273,6 +294,9 @@ fn plan_due_autonomous_recruitment(
         }
         decision_count = next_decision_count;
         id_budget.extend(action_budget);
+        if action.admits_member() {
+            *projected_admissions.entry(organization).or_default() += 1;
+        }
         actions.push(action);
         claimed_this_pass.insert(candidate);
         authorities.remove(authority_index);
@@ -283,6 +307,14 @@ fn plan_due_autonomous_recruitment(
 }
 
 impl PlannedAutonomousRecruitmentAction {
+    fn admits_member(&self) -> bool {
+        match self {
+            Self::Delegated(attempt) => attempt.admits_member(),
+            Self::PlayerApproval(_) => false,
+            Self::AutonomousApproval(prepared) => prepared.admits_member(),
+        }
+    }
+
     fn id_budget(&self) -> Vec<(IdKind, u32)> {
         match self {
             Self::Delegated(attempt) => attempt.id_budget(),
@@ -354,6 +386,15 @@ fn prepare_recruitment_authorities(
         let PolicySetting::IndependentRecruitment(policy) = resolved_policy.setting else {
             unreachable!("independent-recruitment policy lookup returned another policy kind");
         };
+        if policy.recruitment_limit().is_some_and(|limit| {
+            state
+                .world()
+                .characters_in_organization(organization)
+                .count()
+                >= usize::from(limit)
+        }) {
+            continue;
+        }
         // The shared recruitment query already filters pending organization-candidate approvals
         // through the world's canonical reassignment guard. Do not maintain a second, subtly
         // different availability policy here.

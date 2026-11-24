@@ -172,6 +172,14 @@ pub enum RecruitmentError {
         manager: CharacterId,
         policy: ApprovalPolicy,
     },
+    #[error(
+        "independent recruitment for {organization} is at its named roster limit ({current}/{limit}); executive recruitment remains available"
+    )]
+    RecruitmentLimitReached {
+        organization: OrganizationId,
+        current: usize,
+        limit: u16,
+    },
     #[error("manager {manager} cannot use an approval decision under policy {policy:?}")]
     IndependentRecruitmentApprovalNotRequired {
         manager: CharacterId,
@@ -495,12 +503,13 @@ pub fn validate_delegated_recruitment_attempt(
 ) -> Result<ValidatedRecruitmentAttempt, RecruitmentError> {
     let (resolved_authority, policy) = validate_personnel_authority(state, authority, &draft)?;
     let approval = policy.independent_recruitment_approval();
-    if approval != ApprovalPolicy::Delegated {
+    if !approval.is_delegated() {
         return Err(RecruitmentError::IndependentRecruitmentNotDelegated {
             manager: authority.manager,
             policy: approval,
         });
     }
+    ensure_recruitment_limit(state, draft.target_organization, approval)?;
     // One exclusive route per (organization, candidate): while an approval request sits
     // pending, the delegated channel must not race it; an attempt landing first would
     // strand the request against a candidate who is already a member, permanently blocking
@@ -528,7 +537,7 @@ pub fn validate_delegated_recruitment_attempt(
         Some(MandateRecruitmentGuard {
             authority: resolved_authority,
             policy,
-            required_policy: ApprovalPolicy::Delegated,
+            required_policy: approval,
         }),
     )
 }
@@ -620,7 +629,34 @@ pub struct ValidatedRecruitmentAttempt {
     recruiting_report: Option<ReportDraft>,
 }
 
+/// The ceiling counts current named members, including detained personnel.
+/// Executive orders are intentionally independent of a manager's standing order.
+fn ensure_recruitment_limit(
+    state: &AppState,
+    organization: OrganizationId,
+    policy: ApprovalPolicy,
+) -> Result<(), RecruitmentError> {
+    if let Some(limit) = policy.recruitment_limit() {
+        let current = state
+            .world()
+            .characters_in_organization(organization)
+            .count();
+        if current >= usize::from(limit) {
+            return Err(RecruitmentError::RecruitmentLimitReached {
+                organization,
+                current,
+                limit,
+            });
+        }
+    }
+    Ok(())
+}
+
 impl ValidatedRecruitmentAttempt {
+    pub(crate) fn admits_member(&self) -> bool {
+        self.plan.context.outcome == RecruitmentOutcome::Accepted
+    }
+
     pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
         let mut budget = Vec::new();
         if self.history.is_some() {
@@ -664,6 +700,11 @@ impl ValidatedRecruitmentAttempt {
                     found: current_policy,
                 });
             }
+            ensure_recruitment_limit(
+                state,
+                self.plan.draft.target_organization,
+                guard.required_policy,
+            )?;
         }
         validate_plan_state_snapshot(state, &self.plan)?;
         // Character versions do not cover every availability dependency. Re-prove the world

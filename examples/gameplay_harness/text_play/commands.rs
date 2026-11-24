@@ -697,9 +697,20 @@ impl Session<'_> {
                             crimocracy::world::PolicyKind::IndependentRecruitment,
                         )
                         .map_err(|error| error.to_string())?;
+                    let approval = policy.independent_recruitment_approval();
+                    let roster = state
+                        .world()
+                        .characters_in_organization(self.player)
+                        .count();
+                    let status = match (approval.recruitment_limit(), member.autonomy()) {
+                        (Some(0), _) => "independent recruitment paused by effective policy",
+                        (Some(limit), _) if roster >= usize::from(limit) => {
+                            "independent recruitment at named roster cap"
+                        }
+                        _ => status,
+                    };
                     for candidate in candidates {
-                        let status = if policy.independent_recruitment_approval()
-                            == crimocracy::world::ApprovalPolicy::RequireApproval
+                        let status = if approval == crimocracy::world::ApprovalPolicy::RequireApproval
                             && approval_refusals
                                 .get_or_insert_with(|| {
                                     crimocracy::recruitment::recruitment_system::recent_recruitment_approval_refusals(

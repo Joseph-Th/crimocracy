@@ -253,6 +253,12 @@ impl ValidatedRecruitmentApprovalRequest {
 }
 
 impl ValidatedAutonomousRecruitmentApproval {
+    pub(crate) fn admits_member(&self) -> bool {
+        self.attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.admits_member())
+    }
+
     pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
         let mut budget = vec![(IdKind::DecisionRequest, 1)];
         if let Some(attempt) = &self.attempt {

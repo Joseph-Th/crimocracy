@@ -15,13 +15,27 @@ fn parse_policy_setting(name: &str, choice: &str) -> Result<PolicySetting, Strin
         ("recruitment", "delegate") => Ok(PolicySetting::IndependentRecruitment(
             ApprovalPolicy::Delegated,
         )),
+        ("recruitment", "pause") => Ok(PolicySetting::IndependentRecruitment(
+            ApprovalPolicy::DelegatedUpTo(0),
+        )),
+        ("recruitment", value) if value.starts_with("cap-") => {
+            let limit = value[4..]
+                .parse::<u16>()
+                .map_err(|_| "recruitment cap must be a whole number from 0 to 65535")?;
+            Ok(PolicySetting::IndependentRecruitment(
+                ApprovalPolicy::DelegatedUpTo(limit),
+            ))
+        }
         ("legal", "case") => Ok(PolicySetting::AssociateLegalSupport(
             LegalSupportPolicy::CaseByCase,
         )),
         ("legal", "automatic") => Ok(PolicySetting::AssociateLegalSupport(
             LegalSupportPolicy::Automatic,
         )),
-        _ => Err("policies: recruitment <approve|delegate>, legal <case|automatic>".to_owned()),
+        _ => Err(
+            "policies: recruitment <approve|delegate|pause|cap-N>, legal <case|automatic>"
+                .to_owned(),
+        ),
     }
 }
 
@@ -111,6 +125,25 @@ impl Session<'_> {
                         .policy(kind)
                         .ok_or("organization policy missing")?;
                     writeln!(out, "{kind:?}: {setting:?}").unwrap();
+                    if let PolicySetting::IndependentRecruitment(policy) = setting
+                        && let Some(limit) = policy.recruitment_limit()
+                    {
+                        let current = self
+                            .state
+                            .world()
+                            .characters_in_organization(self.player)
+                            .count();
+                        let headroom = usize::from(limit).saturating_sub(current);
+                        let target_payroll =
+                            i128::from(self.registry.upkeep().per_member_daily().cents())
+                                * i128::from(limit);
+                        if limit == 0 {
+                            out.push_str("  Independent recruitment paused. Explicit executive recruitment remains available.\n");
+                        } else {
+                            writeln!(out, "  Named roster: {current} / {limit}; {headroom} independent hiring slots; payroll at target: {target_payroll} cents/day.").unwrap();
+                        }
+                        out.push_str("  Personnel mandates with their own standing orders can override this organization policy; a cap never dismisses existing members.\n");
+                    }
                 }
             }
             "policy" => {
@@ -194,6 +227,22 @@ impl Session<'_> {
                         if !record.standing_orders().is_empty() {
                             writeln!(out, "  Standing orders: {:?}", record.standing_orders())
                                 .unwrap();
+                        }
+                        if record.scopes().contains(&ResponsibilityScope::Function(
+                            ResponsibilityFunction::Personnel,
+                        )) {
+                            let policy = crimocracy::delegation::delegation_system::resolve_policy_for_manager(
+                                &self.state, member.id(), PolicyKind::IndependentRecruitment,
+                            ).map_err(|error| error.to_string())?.independent_recruitment_approval();
+                            if let Some(limit) = policy.recruitment_limit() {
+                                let current = self
+                                    .state
+                                    .world()
+                                    .characters_in_organization(self.player)
+                                    .count();
+                                let remaining = usize::from(limit).saturating_sub(current);
+                                writeln!(out, "  Effective independent recruitment: {remaining} slots at current roster {current} / cap {limit}").unwrap();
+                            }
                         }
                         if let Some(budget) = record.budget() {
                             writeln!(

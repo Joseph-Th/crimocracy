@@ -247,8 +247,16 @@ unrelated third gang. A gang may hold only one such agreement per district at a 
 
 Leadership decisions include `policies`, `policy`, `mandates`, `delegate`, and
 `mandate` for organization-level recruitment and legal-support rules, managerial
-territory/functions, standing orders, budgets, and revocation. `districts` and
-`directory` expose public district IDs needed for territorial delegation.
+territory/functions, standing orders, budgets, and revocation. Use
+`policy recruitment cap-N` to delegate recruitment until the organization has
+N named members, or `policy recruitment pause` to stop independent pitches and
+approval requests while keeping mandates intact. Multiple managers share the
+remaining roster space; refusals do not consume a hiring slot. The `policies`
+view shows remaining slots and named payroll at the target, while `mandates`
+shows effective caps. A Personnel mandate may explicitly override the organization
+policy with its own standing order; an executive's direct recruitment order is
+also independent of the cap. Lowering a target never dismisses existing members.
+`districts` and `directory` expose public district IDs needed for territorial delegation.
 `operation-kinds` lists the authored operation vocabulary, required crew skills,
 supported approaches, and relevant intelligence topics. `plan <kind> <target-id>`
 authorizes operations against eligible business targets. Surveillance and

@@ -1048,7 +1048,10 @@ fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_
         .find(|member| member.name() == "Danny Ferro")
         .unwrap()
         .id();
-    session.execute("policy recruitment delegate").unwrap();
+    session.execute("policy recruitment cap-6").unwrap();
+    assert!(session.execute("policies").unwrap().0.contains(
+        "Named roster: 5 / 6; 1 independent hiring slots; payroll at target: 24000 cents/day."
+    ));
     session.execute("advance 1d").unwrap();
     let recruited = session
         .state
@@ -1066,6 +1069,47 @@ fn underboss_requires_a_command_network_and_recruitment_can_expand_the_authored_
             .unwrap()
             .0
             .contains("Available named command staff: 6 / 24 required")
+    );
+    assert!(
+        session
+            .execute("policies")
+            .unwrap()
+            .0
+            .contains("Named roster: 6 / 6; 0 independent hiring slots")
+    );
+    assert!(
+        session
+            .execute("prospects")
+            .unwrap()
+            .0
+            .contains("independent recruitment at named roster cap")
+    );
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(session.execute("policy recruitment cap-65536").is_err());
+    assert!(session.execute("policy recruitment cap--1").is_err());
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    session.execute("policy recruitment pause").unwrap();
+    let paused = session.execute("policies").unwrap().0;
+    assert!(paused.contains("Independent recruitment paused."));
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(session.execute("policies").unwrap().0, paused);
+    assert!(
+        session
+            .execute("prospects")
+            .unwrap()
+            .0
+            .contains("independent recruitment paused by effective policy")
+    );
+    assert!(
+        session
+            .state
+            .delegation()
+            .active_for_manager(personnel_manager)
+            .is_some()
     );
 }
 

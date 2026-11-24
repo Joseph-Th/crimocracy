@@ -507,7 +507,9 @@ fn recruitment_authority_snapshot_is_valid(
         || mandate_version > mandate_record.version()
         || manager_version == 0
         || manager_version > recruiter_version
-        || policy != expected_policy
+        || !(policy == expected_policy
+            || (expected_policy == ApprovalPolicy::Delegated
+                && matches!(policy, ApprovalPolicy::DelegatedUpTo(1..))))
         || (mandate_version == mandate_record.version()
             && !mandate_record.scopes().contains(&personnel_scope))
     {
@@ -524,7 +526,7 @@ fn recruitment_authority_snapshot_is_valid(
                     .get_organization(organization)
                     .is_some_and(|record| {
                         record.policy_at_version(PolicyKind::IndependentRecruitment, version)
-                            == Some(PolicySetting::IndependentRecruitment(expected_policy))
+                            == Some(PolicySetting::IndependentRecruitment(policy))
                     })
         }
         RecruitmentPolicySource::Mandate {

@@ -1281,6 +1281,284 @@ fn delegated_recruitment_requires_personnel_authority_and_delegated_policy() {
 }
 
 #[test]
+fn bounded_recruitment_cohort_shares_one_remaining_slot_across_managers() {
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, None);
+    let manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second personnel director".into(),
+            organization: Some(fixture.target),
+            supervisor: Some(fixture.recruiter),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Negotiation, rating(100))]),
+            traits: BTreeSet::from([TraitKind::Charismatic]),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: fixture.target,
+            manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            )]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let second = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second available prospect".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    for (candidate, recruiter) in [(fixture.candidate, fixture.recruiter), (second, manager)] {
+        validate_set_relationship(
+            &fixture.state,
+            candidate,
+            recruiter,
+            relationship(100, 100, 0, 100, 100, 0, 100),
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    }
+    validate_set_policy(
+        &fixture.registry,
+        &fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::DelegatedUpTo(3)),
+    )
+    .unwrap()
+    .commit(&fixture.registry, &mut fixture.state)
+    .unwrap();
+    let cadence = fixture.registry.recruitment().autonomous_attempt_cadence();
+    fixture.state.advance_clock(cadence);
+
+    // The same two managers and candidates would both produce real admissions
+    // in the absence of the shared roster ceiling.
+    let mut unlimited = fixture.state.clone();
+    validate_set_policy(
+        &fixture.registry,
+        &unlimited,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::Delegated),
+    )
+    .unwrap()
+    .commit(&fixture.registry, &mut unlimited)
+    .unwrap();
+    let unrestricted = apply_due_autonomous_recruitment(&fixture.registry, &mut unlimited).unwrap();
+    assert_eq!(unrestricted.attempts.len(), 2);
+    assert_eq!(
+        unlimited
+            .world()
+            .characters_in_organization(fixture.target)
+            .count(),
+        4
+    );
+
+    let bounded = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+    assert_eq!(bounded.attempts.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .characters_in_organization(fixture.target)
+            .count(),
+        3
+    );
+    let attempt = fixture
+        .state
+        .recruitment()
+        .get_attempt(bounded.attempts[0])
+        .unwrap();
+    assert_eq!(attempt.outcome(), RecruitmentOutcome::Accepted);
+    assert!(matches!(
+        attempt.authority(),
+        RecruitmentAuthority::Delegated {
+            policy: ApprovalPolicy::DelegatedUpTo(3),
+            ..
+        }
+    ));
+    validate_state_against_registry(&fixture.registry, &fixture.state).unwrap();
+    fixture.state = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    fixture.state.advance_clock(cadence);
+    let before =
+        bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap();
+    let quiet = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+    assert!(quiet.attempts.is_empty() && quiet.approval_requests.is_empty());
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn held_bounded_recruitment_token_rechecks_roster_and_pause_preserves_executive_authority() {
+    let mut fixture = fixture();
+    let mandate = assign_personnel_mandate(&mut fixture, None);
+    validate_set_policy(
+        &fixture.registry,
+        &fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::DelegatedUpTo(2)),
+    )
+    .unwrap()
+    .commit(&fixture.registry, &mut fixture.state)
+    .unwrap();
+    validate_set_relationship(
+        &fixture.state,
+        fixture.candidate,
+        fixture.recruiter,
+        relationship(100, 100, 0, 100, 100, 0, 100),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let second = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second executive prospect".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_set_relationship(
+        &fixture.state,
+        second,
+        fixture.recruiter,
+        relationship(100, 100, 0, 100, 100, 0, 100),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let second_draft = RecruitmentDraft {
+        candidate: second,
+        ..protection_draft(&fixture)
+    };
+    let held = validate_delegated_recruitment_attempt(
+        &fixture.registry,
+        &fixture.state,
+        personnel_authority(&fixture, mandate),
+        second_draft,
+    )
+    .unwrap();
+    let first = validate_delegated_recruitment_attempt(
+        &fixture.registry,
+        &fixture.state,
+        personnel_authority(&fixture, mandate),
+        protection_draft(&fixture),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .get_attempt(first)
+            .unwrap()
+            .outcome(),
+        RecruitmentOutcome::Accepted
+    );
+    let before =
+        bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap();
+    assert_eq!(
+        held.commit(&mut fixture.state).err(),
+        Some(RecruitmentError::RecruitmentLimitReached {
+            organization: fixture.target,
+            current: 2,
+            limit: 2
+        })
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&fixture.registry, &fixture.state).unwrap()).unwrap()
+    );
+
+    validate_set_policy(
+        &fixture.registry,
+        &fixture.state,
+        fixture.target,
+        PolicySetting::IndependentRecruitment(ApprovalPolicy::DelegatedUpTo(0)),
+    )
+    .unwrap()
+    .commit(&fixture.registry, &mut fixture.state)
+    .unwrap();
+    fixture
+        .state
+        .advance_clock(fixture.registry.recruitment().autonomous_attempt_cadence());
+    let quiet = apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+    assert!(quiet.attempts.is_empty() && quiet.approval_requests.is_empty());
+    assert!(
+        fixture
+            .state
+            .delegation()
+            .active_for_manager(fixture.recruiter)
+            .is_some()
+    );
+    let second = validate_recruitment_attempt(&fixture.registry, &fixture.state, second_draft)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .recruitment()
+            .get_attempt(second)
+            .unwrap()
+            .outcome(),
+        RecruitmentOutcome::Accepted
+    );
+    assert_eq!(
+        fixture
+            .state
+            .world()
+            .characters_in_organization(fixture.target)
+            .count(),
+        3
+    );
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .world()
+            .get_organization(fixture.target)
+            .unwrap()
+            .policy(PolicyKind::IndependentRecruitment),
+        Some(PolicySetting::IndependentRecruitment(
+            ApprovalPolicy::DelegatedUpTo(0)
+        ))
+    );
+    validate_state_against_registry(&fixture.registry, &restored).unwrap();
+}
+
+#[test]
 fn delegated_manager_prefers_the_stronger_relationship_not_a_random_prospect() {
     let registry = build_registry();
     let mut fixture = fixture();
