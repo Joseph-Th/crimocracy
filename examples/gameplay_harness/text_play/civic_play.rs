@@ -6,7 +6,7 @@ use super::*;
 use crimocracy::world::freelance_contracts::{
     freelance_contact_available, validate_hire_freelancer,
 };
-use crimocracy::world::{CivicActivity, CivicProfession, IndependentVocation, OrganizationKind};
+use crimocracy::world::{CivicActivity, CivicProfession, OrganizationKind};
 use std::collections::BTreeMap;
 
 impl Session<'_> {
@@ -22,24 +22,24 @@ impl Session<'_> {
                     .ok_or_else(|| "unknown public district".to_owned())
             })
             .transpose()?;
-        let mut counts = BTreeMap::new();
-        for person in self.state.world().public_civic_people() {
-            *counts
-                .entry(format!(
-                    "{:?}",
-                    self.state
-                        .world()
-                        .civic_profession(person.id())
-                        .expect("listed person exists")
-                ))
-                .or_insert(0_usize) += 1;
-        }
         let mut out = if let Some(ward) = ward {
             format!("Public civic roster in district-{}\n", ward.raw())
         } else {
             "Public civic city roster\n".to_owned()
         };
         if ward.is_none() {
+            let mut counts = BTreeMap::new();
+            for person in self.state.world().public_civic_people() {
+                *counts
+                    .entry(format!(
+                        "{:?}",
+                        self.state
+                            .world()
+                            .civic_profession(person.id())
+                            .expect("listed person exists")
+                    ))
+                    .or_insert(0_usize) += 1;
+            }
             for (profession, count) in counts {
                 writeln!(out, "  {profession}: {count} named people").unwrap();
             }
@@ -67,13 +67,18 @@ impl Session<'_> {
             }
         }
         for person in self.state.world().public_civic_people() {
+            let profession = self
+                .state
+                .world()
+                .civic_profession(person.id())
+                .expect("listed person exists");
             if person.organization().is_none() {
                 if person.life().home() == Some(ward)
                     && matches!(
-                        person.life().vocation(),
-                        IndependentVocation::BusinessEmployee(_)
-                            | IndependentVocation::Journalist
-                            | IndependentVocation::IndependentLawyer
+                        profession,
+                        CivicProfession::BusinessEmployee
+                            | CivicProfession::Journalist
+                            | CivicProfession::IndependentLawyer
                     )
                 {
                     writeln!(
@@ -81,10 +86,7 @@ impl Session<'_> {
                         "  char-{} {} | {:?} | independent local career {} day(s)",
                         person.id().raw(),
                         person.name(),
-                        self.state
-                            .world()
-                            .civic_profession(person.id())
-                            .unwrap_or(CivicProfession::Resident),
+                        profession,
                         person.life().career_days()
                     )
                     .unwrap();
@@ -118,10 +120,7 @@ impl Session<'_> {
                     "  char-{} {} | {:?} | {} | career {} day(s)",
                     person.id().raw(),
                     person.name(),
-                    self.state
-                        .world()
-                        .civic_profession(person.id())
-                        .unwrap_or(CivicProfession::Resident),
+                    profession,
                     organization.name(),
                     person.life().career_days()
                 )
@@ -156,17 +155,28 @@ impl Session<'_> {
             .world()
             .civic_profession(person.id())
             .expect("identified person exists");
+        let own_member = person.organization() == Some(self.player);
         let owner = person
             .organization()
-            .and_then(|owner| self.state.world().get_organization(owner));
-        let criminal_member =
-            profession == CivicProfession::Criminal && person.organization() == Some(self.player);
-        let mut out = if criminal_member {
+            .and_then(|owner| self.state.world().get_organization(owner))
+            .filter(|organization| own_member || organization.kind() != OrganizationKind::Criminal);
+        // A registered title is public, but a criminal affiliation is not. An
+        // unaffiliated proprietor and a hidden rival use the same neutral label.
+        let public_affiliation = owner.map_or(
+            if profession == CivicProfession::BusinessOwner {
+                "not disclosed"
+            } else {
+                "none"
+            },
+            |organization| organization.name(),
+        );
+        let criminal_only = own_member && profession == CivicProfession::Criminal;
+        let mut out = if criminal_only {
             format!(
                 "char-{} {} | Criminal | organization {} | civilian workdays not applicable\n",
                 person.id().raw(),
                 person.name(),
-                owner.map_or("none", |organization| organization.name())
+                public_affiliation
             )
         } else {
             format!(
@@ -174,11 +184,11 @@ impl Session<'_> {
                 person.id().raw(),
                 person.name(),
                 profession,
-                owner.map_or("none", |organization| organization.name()),
+                public_affiliation,
                 person.life().career_days()
             )
         };
-        if criminal_member {
+        if own_member {
             let operations = self
                 .state
                 .operations()
@@ -235,7 +245,11 @@ impl Session<'_> {
             )
             .unwrap();
         }
-        if let Some((at, action)) = person.life().last_activity() {
+        if let Some((at, action)) = person.life().last_activity().filter(|(_, action)| {
+            own_member
+                || profession == CivicProfession::FreelanceCriminal
+                || !matches!(action, CivicActivity::FreelanceWork(_))
+        }) {
             let public_action = match action {
                 CivicActivity::BusinessManagement(business) => {
                     format!("personally managed business-{}", business.raw())
@@ -264,10 +278,10 @@ impl Session<'_> {
                 time_label(at.as_minutes())
             )
             .unwrap();
-        } else if !criminal_member {
-            out.push_str("  No recorded civilian professional duty yet.\n");
+        } else if !criminal_only {
+            out.push_str("  No disclosed civilian professional duty yet.\n");
         }
-        if person.organization() == Some(self.player) {
+        if own_member {
             writeln!(
                 out,
                 "  Own member condition: professional standing {}/100, fatigue {}/100",

@@ -11,6 +11,65 @@ use crate::world::freelance_contracts::{
 use crate::world::{CivicProfession, IndependentVocation};
 
 #[test]
+fn freelance_contact_and_prepared_hire_expire_when_person_becomes_proprietor() {
+    use crate::world::BusinessOwner;
+    use crate::world::freelance_contracts::freelance_contact_available;
+    use crate::world::world_system::validate_transfer_business_ownership;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let freelancer = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            freelance_contact_available(&city.state, city.player, person.id(), city.boss)
+        })
+        .unwrap()
+        .id();
+    let hire =
+        validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 2).unwrap();
+    let business = city
+        .state
+        .world()
+        .businesses()
+        .find(|business| matches!(business.owner(), BusinessOwner::Character(_)))
+        .unwrap()
+        .id();
+    validate_transfer_business_ownership(
+        &city.state,
+        business,
+        BusinessOwner::Character(freelancer),
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    assert_eq!(
+        city.state.world().civic_profession(freelancer),
+        Some(CivicProfession::BusinessOwner)
+    );
+    let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    assert!(!freelance_contact_available(
+        &city.state,
+        city.player,
+        freelancer,
+        city.boss
+    ));
+    assert!(
+        matches!(validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 2), Err(FreelanceError::Unavailable(id)) if id == freelancer)
+    );
+    assert_eq!(
+        hire.commit(&mut city.state),
+        Err(FreelanceError::Unavailable(freelancer))
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap()
+    );
+    validate_invariants(&city.state);
+}
+
+#[test]
 fn freelance_contract_uses_committed_ledger_id_after_unrelated_payment() {
     use crate::finance::finance_system::{insert_account, validate_record_transaction};
     use crate::finance::{

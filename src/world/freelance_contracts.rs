@@ -18,7 +18,9 @@ use crate::finance::{
 use crate::world::world_system::{
     ValidatedCharacterReassignment, WorldError, validate_reassign_character,
 };
-use crate::world::{CapabilityKind, IndependentVocation, OrganizationKind, WorldState};
+use crate::world::{
+    CapabilityKind, CivicProfession, IndependentVocation, OrganizationKind, WorldState,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -202,7 +204,8 @@ fn ensure_eligible(
         .get_character(freelancer)
         .filter(|person| {
             person.organization().is_none()
-                && person.life().vocation() == IndependentVocation::FreelanceCriminal
+                && state.world().civic_profession(freelancer)
+                    == Some(CivicProfession::FreelanceCriminal)
                 && state
                     .legal()
                     .active_arrest_for_character(person.id())

@@ -131,13 +131,17 @@ impl WorldState {
     /// A person who changes jobs or acquires a storefront changes profession
     /// immediately without an inert occupation flag to keep synchronized.
     pub fn civic_profession(&self, character: CharacterId) -> Option<CivicProfession> {
-        let person = self.get_character(character)?;
+        self.get_character(character)
+            .map(|person| self.profession_for_person(person))
+    }
+
+    fn profession_for_person(&self, person: &super::CharacterRecord) -> CivicProfession {
         if self
-            .businesses_owned_by_character(character)
+            .businesses_owned_by_character(person.id())
             .next()
             .is_some()
         {
-            return Some(CivicProfession::BusinessOwner);
+            return CivicProfession::BusinessOwner;
         }
         let profession = person.organization().and_then(|organization| {
             self.get_organization(organization)
@@ -155,36 +159,34 @@ impl WorldState {
                     OrganizationKind::Criminal => CivicProfession::Criminal,
                 })
         });
-        Some(profession.unwrap_or(match person.life().vocation() {
+        profession.unwrap_or(match person.life().vocation() {
             IndependentVocation::Resident => CivicProfession::Resident,
             IndependentVocation::FreelanceCriminal => CivicProfession::FreelanceCriminal,
             IndependentVocation::BusinessEmployee(_) => CivicProfession::BusinessEmployee,
             IndependentVocation::Journalist => CivicProfession::Journalist,
             IndependentVocation::IndependentLawyer => CivicProfession::IndependentLawyer,
-        }))
+        })
     }
 
     /// Public appointments and registered sole proprietors; this is not an
     /// intelligence feed for rival organizations' private personnel.
     pub fn public_civic_people(&self) -> impl Iterator<Item = &super::CharacterRecord> {
-        self.characters().filter(|person| {
-            self.businesses_owned_by_character(person.id())
-                .next()
-                .is_some()
-                || person
-                    .organization()
-                    .and_then(|owner| self.get_organization(owner))
-                    .is_some_and(|organization| {
-                        !matches!(organization.kind(), OrganizationKind::Criminal)
-                    })
-                || (person.organization().is_none()
-                    && matches!(
-                        person.life().vocation(),
-                        IndependentVocation::BusinessEmployee(_)
-                            | IndependentVocation::Journalist
-                            | IndependentVocation::IndependentLawyer
-                    ))
-        })
+        self.characters()
+            .filter(|person| match self.profession_for_person(person) {
+                CivicProfession::BusinessOwner
+                | CivicProfession::PoliceOfficer
+                | CivicProfession::Politician
+                | CivicProfession::Lawyer
+                | CivicProfession::Prosecutor
+                | CivicProfession::LaborRepresentative
+                | CivicProfession::MerchantRepresentative
+                | CivicProfession::BusinessEmployee
+                | CivicProfession::Journalist
+                | CivicProfession::IndependentLawyer => true,
+                CivicProfession::Resident
+                | CivicProfession::FreelanceCriminal
+                | CivicProfession::Criminal => false,
+            })
     }
 }
 
@@ -214,9 +216,12 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
             detained,
         };
     }
-    let owned = state
+    let mut properties = state
         .world()
         .businesses_owned_by_character(character)
+        .peekable();
+    let proprietor = properties.peek().is_some();
+    let owned = properties
         .filter(|business| {
             state
                 .economy()
@@ -248,6 +253,15 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
             } else {
                 0
             },
+            detained,
+        };
+    }
+    // A title defines the current profession even when every property is closed.
+    // The old independent vocation is a fallback only after ownership ends.
+    if proprietor {
+        return DayWork {
+            action: None,
+            business_profit: 0,
             detained,
         };
     }
@@ -492,11 +506,94 @@ mod business_work_tests {
     use crate::core::persistence::{build_save, restore_save};
     use crate::core::time::SimDuration;
     use crate::economy::business_economy_system::{
-        decide_business_cycle, validate_business_cycle_plan,
+        decide_business_cycle, validate_business_cycle_plan, validate_suspend_business_economy,
     };
     use crate::finance::Money;
     use crate::world::BusinessOwner;
     use crate::world::world_system::validate_transfer_business_ownership;
+
+    #[test]
+    fn suspended_proprietor_does_not_resume_an_old_vocation() {
+        let registry = build_registry();
+        let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+        let business = city
+            .state
+            .world()
+            .businesses()
+            .find(|shop| {
+                matches!(shop.owner(), BusinessOwner::Character(_))
+                    && city
+                        .state
+                        .economy()
+                        .get_business_economy(shop.id())
+                        .is_some_and(|economy| economy.status() == BusinessOperatingStatus::Active)
+            })
+            .unwrap()
+            .id();
+        let worker = city
+            .state
+            .world()
+            .characters()
+            .find(|person| {
+                let IndependentVocation::BusinessEmployee(workplace) = person.life().vocation()
+                else {
+                    return false;
+                };
+                workplace != business
+                    && city.state.world().civic_profession(person.id())
+                        == Some(CivicProfession::BusinessEmployee)
+                    && city
+                        .state
+                        .economy()
+                        .get_business_economy(workplace)
+                        .is_some_and(|economy| economy.status() == BusinessOperatingStatus::Active)
+            })
+            .unwrap()
+            .id();
+        validate_transfer_business_ownership(
+            &city.state,
+            business,
+            BusinessOwner::Character(worker),
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+        validate_suspend_business_economy(&city.state, business)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        assert_eq!(
+            city.state.world().civic_profession(worker),
+            Some(CivicProfession::BusinessOwner)
+        );
+        let day = (1..=7)
+            .find(|day| !(*day + u64::from(worker.raw())).is_multiple_of(7))
+            .unwrap();
+        let life = city.state.world().get_character(worker).unwrap().life();
+        city.state
+            .advance_clock(SimDuration::from_minutes((day * DAY_MINUTES) as u32));
+        crate::opportunities::opportunity_system::apply_opportunity_expiry(
+            &registry,
+            &mut city.state,
+        )
+        .unwrap();
+        apply_due_character_lives(&mut city.state);
+        let after = city.state.world().get_character(worker).unwrap().life();
+        assert_eq!(after.career_days(), life.career_days());
+        assert_eq!(after.professional_standing(), life.professional_standing());
+        assert_eq!(
+            after.last_activity(),
+            life.last_activity(),
+            "a closed proprietor must not work at a previous employer"
+        );
+        validate_invariants(&city.state);
+        let restored =
+            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+        assert_eq!(
+            restored.world().get_character(worker).unwrap().life(),
+            after
+        );
+    }
 
     #[test]
     fn new_proprietor_does_not_inherit_previous_owners_earnings_record() {

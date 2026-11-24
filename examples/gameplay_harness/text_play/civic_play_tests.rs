@@ -1,5 +1,136 @@
 use super::*;
-use crimocracy::world::IndependentVocation;
+use crimocracy::world::{
+    BusinessDraft, BusinessOwner, CivicProfession, IndependentVocation, OrganizationKind,
+};
+
+#[test]
+fn public_proprietor_dossier_hides_rival_affiliation() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new_generated(
+        &registry,
+        EvaluationSeeds::new(562_365, 562_365),
+        CityScale::Small,
+    )
+    .unwrap();
+    use crimocracy::world::world_system::{insert_character, insert_organization};
+    use crimocracy::world::{AutonomyLevel, CharacterDraft, OrganizationDraft};
+
+    let rival_name = "Undisclosed rival affiliation";
+    let rival = insert_organization(
+        &registry,
+        &mut session.state,
+        OrganizationDraft {
+            name: rival_name.into(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let member = insert_character(
+        &mut session.state,
+        CharacterDraft {
+            name: "Private rival member".into(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Tight,
+            capabilities: Default::default(),
+            traits: Default::default(),
+            drives: Default::default(),
+        },
+    )
+    .unwrap();
+    let ward = session.state.world().neighborhoods().next().unwrap().id();
+    let shop = session
+        .state
+        .world()
+        .businesses_in_neighborhood(ward)
+        .next()
+        .unwrap();
+    let draft = BusinessDraft {
+        name: "Publicly registered rival shop".into(),
+        kind: shop.kind(),
+        functions: shop.functions().clone(),
+        neighborhood: shop.neighborhood(),
+        owner: BusinessOwner::Character(member),
+    };
+    let business =
+        crimocracy::world::world_system::insert_business(&registry, &mut session.state, draft)
+            .unwrap();
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let dossier = session
+        .execute(&format!("civic-person char-{}", member.raw()))
+        .unwrap()
+        .0;
+    assert!(
+        dossier.contains(&format!("Registered owner: business-{}", business.raw())),
+        "{dossier}"
+    );
+    assert!(
+        !dossier.contains(rival_name),
+        "a public title does not disclose secret membership: {dossier}"
+    );
+    assert!(dossier.contains("organization not disclosed"), "{dossier}");
+    assert!(!dossier.contains("Own member condition"), "{dossier}");
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn district_proprietor_is_not_listed_as_an_independent_worker() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new_generated(
+        &registry,
+        EvaluationSeeds::new(562_365, 562_365),
+        CityScale::Small,
+    )
+    .unwrap();
+    let worker = session
+        .state
+        .world()
+        .public_civic_people()
+        .find(|person| {
+            session.state.world().civic_profession(person.id())
+                == Some(CivicProfession::BusinessEmployee)
+        })
+        .unwrap();
+    let member = worker.id();
+    let ward = worker.life().home().unwrap();
+    let shop = session
+        .state
+        .world()
+        .businesses_in_neighborhood(ward)
+        .next()
+        .unwrap();
+    let draft = BusinessDraft {
+        name: "Former worker's shop".into(),
+        kind: shop.kind(),
+        functions: shop.functions().clone(),
+        neighborhood: ward,
+        owner: BusinessOwner::Character(member),
+    };
+    crimocracy::world::world_system::insert_business(&registry, &mut session.state, draft).unwrap();
+    let roster = session
+        .execute(&format!("civics district-{}", ward.raw()))
+        .unwrap()
+        .0;
+    let prefix = format!("  char-{} ", member.raw());
+    let entries: Vec<_> = roster
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "one owned title, not a second entry for an old job: {entries:?}"
+    );
+    assert!(entries[0].contains("proprietor"));
+    let dossier = session
+        .execute(&format!("civic-person char-{}", member.raw()))
+        .unwrap()
+        .0;
+    assert!(dossier.contains("organization not disclosed"), "{dossier}");
+}
 
 #[test]
 fn generated_city_has_hundreds_of_real_people_and_hires_a_freelancer_for_a_fixed_term() {
