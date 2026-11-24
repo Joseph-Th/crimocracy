@@ -1738,6 +1738,10 @@ The organization remains criminal but deliberately reduces visibility, violence,
 
 These should not be simple buttons. They represent different strategic paths requiring different forms of power.
 
+Criminal operations must be an economically sustainable engine of progression, not merely an opening source of danger that an optimal player abandons to collect passive commercial dividends. Rackets should outperform comparably accessible legitimate storefronts in short-term returns and territorial leverage, in exchange for real, manageable costs: investigations, evidentiary exposure, manager arrest, rival conflict, laundering losses, and disrupted cycles. More police cases must not automatically compound their recurring operating costs without bound, and routine re-arrests must not become clockwork shutdowns faster than a crew can build an established criminal command. Skilled delegation, district selection, defense and a diversified portfolio should make sustained racketeering strategically viable without granting immunity from actual new crimes or evidence.
+
+Funded retirement is the payoff to a substantive recent criminal career followed by a funded exit, not a passive property-investment win. Require a real crew and a recent record of profitable criminal settlements plus net criminal proceeds even if the outfit has closed its rackets before claiming. The separately demanding political outcome remains the appropriate path for a long-term legitimate organization. Underworld dominance should remain reachable by a living, operationally effective criminal syndicate that can fund and defend its territories.
+
 ---
 
 # 51. Failure States

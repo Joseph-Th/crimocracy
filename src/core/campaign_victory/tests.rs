@@ -3,11 +3,23 @@ use crate::build_registry;
 use crate::core::invariants::{validate_invariants, validate_state_against_registry};
 use crate::core::persistence::{build_save, restore_save};
 use crate::core::simulation::{TickError, run_tick};
+use crate::core::time::SimDuration;
+use crate::delegation::delegation_system::validate_assign_mandate;
+use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
+use crate::enterprises::enterprise_execution::{
+    EnterpriseCycleRandomness, decide_enterprise_cycle, validate_enterprise_cycle_plan,
+    validate_establish_enterprise, validate_retire_enterprise, validate_suspend_enterprise,
+};
+use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::world::world_system::{
-    designate_player_organization, insert_character, insert_organization,
+    designate_player_organization, insert_character, insert_neighborhood, insert_organization,
 };
-use crate::world::{AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind};
+use crate::world::{
+    AutonomyLevel, CapabilityKind, CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile,
+    NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
+    Rating,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn retirement_fixture() -> (Registry, AppState, OrganizationId, CharacterId, CharacterId) {
@@ -30,7 +42,10 @@ fn retirement_fixture() -> (Registry, AppState, OrganizationId, CharacterId, Cha
             organization: Some(owner),
             supervisor: None,
             autonomy: AutonomyLevel::Tight,
-            capabilities: BTreeMap::new(),
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(88).unwrap(),
+            )]),
             traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
@@ -42,13 +57,115 @@ fn retirement_fixture() -> (Registry, AppState, OrganizationId, CharacterId, Cha
             name: "Member".into(),
             organization: Some(owner),
             supervisor: Some(boss),
-            autonomy: AutonomyLevel::Guided,
-            capabilities: BTreeMap::new(),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(80).unwrap(),
+            )]),
             traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
     )
     .unwrap();
+    (registry, state, owner, boss, member)
+}
+
+/// A qualifying boss actually runs a local racket for 90 profitable days before
+/// collecting the clean nest egg. These are canonical enterprise settlements,
+/// not constructed revenue records or a victory-validator bypass.
+fn retirement_ready_fixture() -> (Registry, AppState, OrganizationId, CharacterId, CharacterId) {
+    let (registry, mut state, owner, boss, member) = retirement_fixture();
+    hire_additional_staff(&mut state, owner, boss, RETIREMENT_MIN_KEY_PERSONNEL - 2);
+    let rating = |value| Rating::try_new(value).unwrap();
+    let neighborhood = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Criminal retirement proving ground".into(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(60),
+                    commercial_activity: rating(70),
+                    illicit_demand: rating(60),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(30),
+                },
+            },
+        },
+    )
+    .unwrap();
+    let mandate = validate_assign_mandate(
+        &state,
+        MandateDraft {
+            organization: owner,
+            manager: member,
+            scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(neighborhood)]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let cash = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    let racket = validate_establish_enterprise(
+        &registry,
+        &state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization: owner,
+            authority: MandateAuthority {
+                mandate,
+                manager: member,
+                scope: ResponsibilityScope::Neighborhood(neighborhood),
+            },
+            location: EnterpriseLocation::Neighborhood(neighborhood),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: cash,
+            settlement_account: settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    for _ in 0..RETIREMENT_MIN_PROFITABLE_RACKET_CYCLES {
+        state.advance_clock(SimDuration::from_minutes(1_440));
+        let plan = decide_enterprise_cycle(
+            &registry,
+            &state,
+            racket,
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
+        )
+        .unwrap();
+        validate_enterprise_cycle_plan(&state, plan)
+            .unwrap()
+            .commit(&mut state)
+            .unwrap();
+    }
+    let standing = progress(&registry, &state).unwrap();
+    assert_eq!(
+        standing.retirement_profitable_racket_cycles,
+        RETIREMENT_MIN_PROFITABLE_RACKET_CYCLES
+    );
+    assert!(standing.retirement_racket_net >= RETIREMENT_MIN_RACKET_NET);
     (registry, state, owner, boss, member)
 }
 
@@ -155,9 +272,64 @@ fn retirement_rejects_unfunded_settlement_without_mutating_books() {
 }
 
 #[test]
-fn retirement_requires_a_million_for_the_leader_plus_staff_severance() {
+fn passive_millionaire_with_a_named_crew_cannot_retire_without_a_criminal_career() {
     let (registry, mut state, owner, boss, _) = retirement_fixture();
-    hire_additional_staff(&mut state, owner, boss, 6);
+    hire_additional_staff(&mut state, owner, boss, RETIREMENT_MIN_KEY_PERSONNEL - 2);
+    let required = progress(&registry, &state).unwrap().retirement_total;
+    fund(&mut state, owner, required.cents() + 100_000);
+    let standing = progress(&registry, &state).unwrap();
+    assert_eq!(standing.key_personnel, RETIREMENT_MIN_KEY_PERSONNEL);
+    assert_eq!(standing.retirement_profitable_racket_cycles, 0);
+    assert_eq!(standing.retirement_racket_net, Money::ZERO);
+    let before = bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(
+        validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).err(),
+        Some(VictoryError::RetirementNotReady)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn retirement_recognizes_retired_racket_results_but_not_ancient_illicit_earnings() {
+    let (registry, mut state, owner, _, _) = retirement_ready_fixture();
+    let racket = state
+        .enterprises()
+        .enterprises_for_organization(owner)
+        .next()
+        .unwrap()
+        .id();
+    validate_suspend_enterprise(&state, racket)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    validate_retire_enterprise(&state, racket)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let required = progress(&registry, &state).unwrap().retirement_total;
+    fund(&mut state, owner, required.cents());
+    validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement)
+        .expect("a recently retired criminal operation should count");
+
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(RETIREMENT_CRIME_WINDOW_DAYS * DAY_MINUTES + 1).unwrap(),
+    ));
+    let standing = progress(&registry, &state).unwrap();
+    assert_eq!(standing.retirement_profitable_racket_cycles, 0);
+    assert_eq!(standing.retirement_racket_net, Money::ZERO);
+    assert_eq!(
+        validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).err(),
+        Some(VictoryError::RetirementNotReady)
+    );
+}
+
+#[test]
+fn retirement_requires_a_million_for_the_leader_plus_staff_severance() {
+    let (registry, mut state, owner, boss, _) = retirement_ready_fixture();
+    hire_additional_staff(&mut state, owner, boss, 4);
     let old_requirement = 10_040_000;
     let expected_requirement = 105_040_000;
     assert_eq!(RETIREMENT_NEST_EGG.cents(), 100_000_000);
@@ -216,13 +388,15 @@ fn retirement_requires_a_million_for_the_leader_plus_staff_severance() {
 
 #[test]
 fn funded_retirement_pays_boss_and_staff_and_survives_reload_as_terminal() {
-    let (registry, mut state, owner, boss, member) = retirement_fixture();
+    let (registry, mut state, owner, boss, member) = retirement_ready_fixture();
     let severance = registry
         .upkeep()
         .per_member_daily()
         .checked_mul(RETIREMENT_SEVERANCE_DAYS)
         .unwrap();
-    let required = RETIREMENT_NEST_EGG.checked_add(severance).unwrap();
+    let required = RETIREMENT_NEST_EGG
+        .checked_add(severance.checked_mul(3).unwrap())
+        .unwrap();
     fund(&mut state, owner, required.cents() + 200_000);
     let plan = validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).unwrap();
     let result = plan.commit(&registry, &mut state).unwrap();
@@ -278,13 +452,13 @@ fn funded_retirement_pays_boss_and_staff_and_survives_reload_as_terminal() {
 
 #[test]
 fn victory_token_rejects_clock_drift_without_paying_anyone() {
-    let (registry, mut state, owner, _, _) = retirement_fixture();
+    let (registry, mut state, owner, _, _) = retirement_ready_fixture();
     let required = RETIREMENT_NEST_EGG
         .checked_add(
             registry
                 .upkeep()
                 .per_member_daily()
-                .checked_mul(RETIREMENT_SEVERANCE_DAYS)
+                .checked_mul(RETIREMENT_SEVERANCE_DAYS * 3)
                 .unwrap(),
         )
         .unwrap();

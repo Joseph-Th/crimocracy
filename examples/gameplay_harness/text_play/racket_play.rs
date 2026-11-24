@@ -12,8 +12,8 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
     .unwrap();
     match outlook.nonpositive_at_cases {
         Some(0) => writeln!(out, "  Expected net is nonpositive even without case pressure.").unwrap(),
-        Some(cases) => writeln!(out, "  Expected net becomes nonpositive at {cases} own-operation case equivalent(s); each adds {} cents to cycle cost.", outlook.heat_surcharge_per_case.cents()).unwrap(),
-        None => writeln!(out, "  No authored per-case operating surcharge.").unwrap(),
+        Some(cases) => writeln!(out, "  Expected net becomes nonpositive with {cases} own-operation case equivalent(s). District heat adds at most one {}-cent operating surcharge.", outlook.heat_surcharge_per_case.cents()).unwrap(),
+        None => writeln!(out, "  Expected net remains positive even with the maximum one-case district heat surcharge ({} cents).", outlook.heat_surcharge_per_case.cents()).unwrap(),
     }
     match outlook.observed_pressure {
         Some((at, cases)) => writeln!(out, "  Last observed own-operation pressure in district: {cases} case equivalent(s) at {}", time_label(at.as_minutes())).unwrap(),
@@ -25,7 +25,7 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
         let conditional_risk = baseline_risk
             .saturating_add(
                 u32::from(outlook.inquiry_risk_basis_points_per_source)
-                    .saturating_mul(observed_cases),
+                    .saturating_mul(observed_cases.min(2)),
             )
             .min(10_000);
         writeln!(out, "  At last observed case pressure: {}.{:02}% per cycle, if still current (not a live police forecast)", conditional_risk / 100, conditional_risk % 100).unwrap();
@@ -38,16 +38,15 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
         outlook.estimated_net_cash.cents()
     )
     .unwrap();
-    // Show a one- and two-case sensitivity without disclosing the actual police case graph.
-    // These scenarios keep gross and staffing fixed; they are not omniscient forecasts.
+    // Case pressure saturates the daily operating surcharge at one case.
+    // Additional cases still carry investigation and arrest consequences.
     let surcharge = i128::from(outlook.heat_surcharge_per_case.cents());
     if surcharge > 0 {
-        let conditional_net = i128::from(outlook.estimated_net_cash.cents());
+        let conditional_net = i128::from(outlook.baseline_net_cash.cents());
         writeln!(
             out,
-            "  If district case pressure rises by 1: {} cents net; by 2: {} cents net (before variance)",
+            "  Net with one or more own-operation cases: {} cents (before variance); additional open cases do not multiply this overhead",
             conditional_net - surcharge,
-            conditional_net - 2 * surcharge
         )
         .unwrap();
     }

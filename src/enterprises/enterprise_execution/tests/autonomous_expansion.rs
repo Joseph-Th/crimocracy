@@ -2059,9 +2059,9 @@ fn same_tick_racket_fear_blocks_due_autonomous_expansion() {
         neighborhood,
     );
 
-    // Enough independent district-pressure cases make this enterprise's due enforcement roll certain.
-    // They deliberately target the neighborhood rather than the enterprise so they create heat
-    // without already counting as the dedicated inquiry the cycle should draw.
+    // Two district cases create the maximum additional exposure. Case proliferation
+    // cannot guarantee a vice inquiry. Pick a reproducible enterprise-stream seed
+    // whose actual next roll draws attention, without bypassing the tick scheduler.
     let per_source = u32::from(
         registry
             .get_enterprise(EnterpriseKind::Protection)
@@ -2072,9 +2072,7 @@ fn same_tick_racket_fear_blocks_due_autonomous_expansion() {
         per_source > 0,
         "the authored protection racket must carry vice risk"
     );
-    // The racket contributes the first exposure source even before any police case exists.
-    let pressure_case_count = 10_000_u32.div_ceil(per_source) - 1;
-    for index in 0..pressure_case_count {
+    for index in 0..2 {
         validate_incident_intake(
             &fixture.state,
             IncidentIntakeDraft {
@@ -2120,6 +2118,34 @@ fn same_tick_racket_fear_blocks_due_autonomous_expansion() {
         setup_delta,
     )
     .expect("pre-tick fear setup should apply");
+    use rand_core::SeedableRng;
+    let exposure_chance = crate::world::organization_pressure::vice_inquiry_chance_basis_points(
+        &fixture.state,
+        fixture.organization,
+        1,
+        2,
+        u16::try_from(per_source).unwrap(),
+    );
+    let variance_width = usize::from(
+        registry
+            .get_enterprise(EnterpriseKind::Protection)
+            .economics()
+            .gross_variance_basis_points(),
+    ) * 2
+        + 1;
+    let matching_seed = (0_u64..1_000)
+        .find(|seed| {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(*seed);
+            let _ = crate::core::simulation::draw_index(&mut rng, variance_width).unwrap();
+            crate::core::simulation::draw_index(
+                &mut rng,
+                usize::from(EnterpriseCycleRandomness::ENFORCEMENT_ATTENTION_ROLL_COUNT),
+            )
+            .unwrap()
+                < usize::try_from(exposure_chance).unwrap()
+        })
+        .expect("an independently seeded vice exposure must occasionally draw an inquiry");
+    *fixture.state.enterprise_rng_mut() = rand_chacha::ChaCha8Rng::seed_from_u64(matching_seed);
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(1_439));
@@ -2154,7 +2180,7 @@ fn same_tick_racket_fear_blocks_due_autonomous_expansion() {
             .get_cycle(outcome.enterprise_cycles[0])
             .expect("due enterprise cycle should persist")
             .drew_enforcement_attention(),
-        "certainty-level district pressure must draw the same-tick racket inquiry"
+        "the selected actual vice roll must open the same-tick racket inquiry"
     );
     assert_eq!(
         crate::reputation::reputation_system::resolve_score(

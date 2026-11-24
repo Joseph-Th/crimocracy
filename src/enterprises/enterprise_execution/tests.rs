@@ -3580,16 +3580,10 @@ fn a_drawn_racket_inquiry_settles_notable_and_stays_registry_valid_across_save()
         .enterprises()
         .get_cycle(third)
         .expect("third cycle should exist");
-    let per_case_heat = registry
-        .get_enterprise(EnterpriseKind::Protection)
-        .economics()
-        .heat_surcharge_per_active_case();
     assert_eq!(
         third_record.investigation_heat(),
-        second_heat
-            .checked_add(per_case_heat)
-            .expect("two bounded authored heat charges should add"),
-        "the original bureau's still-active enterprise inquiry must keep contributing heat after intake priority moves elsewhere"
+        second_heat,
+        "more active cases must not compound the capped district heat charge after an intake handoff"
     );
     assert!(
         !third_record.drew_enforcement_attention(),
@@ -4056,9 +4050,13 @@ fn sustained_identical_heat_reports_once_then_routine_until_it_changes() {
     );
 
     open_case(&mut fixture, "Second ward inquiry");
-    let escalated = settle_cycle(&mut fixture);
-    assert_eq!(escalated, AttentionClass::Notable);
-    assert_eq!(financial_report_count(&fixture), 2);
+    let still_hot = settle_cycle(&mut fixture);
+    assert_eq!(still_hot, AttentionClass::Routine);
+    assert_eq!(
+        financial_report_count(&fixture),
+        1,
+        "additional cases do not create another recurring heat surcharge or redundant report"
+    );
 
     validate_state(&fixture.state).expect("sustained heat state should validate");
     validate_invariants(&fixture.state);
@@ -6314,8 +6312,8 @@ fn same_minute_peer_racket_inquiry_does_not_retroactively_raise_cycle_heat() {
     .expect("next-day source cycle should resolve");
     assert_eq!(
         source_next_day.economics.investigation_heat,
-        Money::from_cents(24_000),
-        "the preexisting pressure case and yesterday's racket inquiry should both apply to the source racket"
+        Money::from_cents(12_000),
+        "a preexisting case and yesterday's inquiry still incur only one district heat charge"
     );
     let source_cycle = validate_enterprise_cycle_plan(&fixture.state, source_next_day)
         .expect("next-day source cycle should validate")
@@ -6342,8 +6340,8 @@ fn same_minute_peer_racket_inquiry_does_not_retroactively_raise_cycle_heat() {
     .expect("next-day peer cycle should resolve");
     assert_eq!(
         next_day.economics.investigation_heat,
-        Money::from_cents(24_000),
-        "on the next cycle the preexisting case and yesterday's racket inquiry must both apply"
+        Money::from_cents(12_000),
+        "a second active case must not double the next day's district overhead"
     );
     validate_state(&fixture.state).expect("peer settlement pressure state should validate");
     validate_state_against_registry(&registry, &fixture.state)
@@ -6459,20 +6457,20 @@ fn sustained_district_heat_draws_a_racket_inquiry_onto_the_racket_itself() {
     );
     assert!(!manager_information.summary().contains("case stays open"));
 
-    // The next cycle pays compounded street heat: the pressure case and the new inquiry both
-    // tax the district while they stay open, and the changed cost is manager-report-worthy.
+    // The next cycle still has two active cases, but the one-case street-heat
+    // ceiling prevents compounded operating costs and redundant manager reports.
     let pressure = settle_cycle_inner(&registry, &mut fixture, enterprise);
-    assert_eq!(pressure, AttentionClass::Notable);
+    assert_eq!(pressure, AttentionClass::Routine);
     let settled_cycle = fixture
         .state
         .enterprises()
         .cycles_for(enterprise)
         .max_by_key(|cycle| cycle.occurred_at())
-        .expect("compounded cycle should persist");
+        .expect("hot cycle should persist");
     assert_eq!(
         settled_cycle.investigation_heat(),
-        Money::from_cents(24_000),
-        "two active district cases must compound the authored surcharge"
+        Money::from_cents(12_000),
+        "two active district cases must not compound the capped surcharge"
     );
 
     validate_state(&fixture.state).expect("vice-attention state should validate");

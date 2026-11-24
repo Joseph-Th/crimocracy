@@ -29,7 +29,9 @@ fn established_public_business_network_draws_more_vice_scrutiny_without_fabricat
     .unwrap();
     assert!(quiet_plan.enforcement_incident.is_none());
 
-    for index in 0..8 {
+    // The low public footprint tiers do not multiply vice risk; a genuinely
+    // city-significant collection of storefronts still raises inquiry odds.
+    for index in 0..13 {
         let owner = fixture.organization;
         insert_support_business(
             &registry,
@@ -47,7 +49,7 @@ fn established_public_business_network_draws_more_vice_scrutiny_without_fabricat
         crate::world::organization_pressure::public_prominence_tier(
             &fixture.state,
             fixture.organization
-        ) >= 2
+        ) >= 3
     );
     fixture.state.advance_clock(DAY_DURATION);
     let exposed = decide_enterprise_cycle(
@@ -369,6 +371,56 @@ fn vice_inquiry_observes_distinct_operating_cycles_then_detains_and_refers_manag
             .unwrap()
             .status(),
         EnterpriseStatus::Suspended
+    );
+
+    // An old vice file cannot recycle daily observations of the very same
+    // racket into an automatic second arrest when the manager resumes trading.
+    // Test beyond the former 60-day cooldown with genuine, distinct new
+    // observations, not forged arrest evidence or a hand-edited case graph.
+    let mut repeated_vice = fixture.state.clone();
+    repeated_vice.advance_clock(SimDuration::ONE_MINUTE);
+    crate::legal::arrest_system::validate_release_arrest(&repeated_vice, arrest)
+        .unwrap()
+        .commit(&mut repeated_vice)
+        .unwrap();
+    validate_resume_enterprise(&registry, &repeated_vice, enterprise)
+        .unwrap()
+        .commit(&mut repeated_vice)
+        .unwrap();
+    let mut subsequent_observations = 0;
+    for _ in 0..5 {
+        let tick = advance_day(&registry, &mut repeated_vice);
+        subsequent_observations += tick.enterprise_observations.len();
+        if subsequent_observations >= 2 {
+            break;
+        }
+    }
+    assert!(
+        subsequent_observations >= 2,
+        "the police must have fresh surveillance of operating crime after release"
+    );
+    // Crossing the former mechanical 60-day boundary without a new operation
+    // cannot turn two fresh observations of the old racket into new custody.
+    repeated_vice.advance_clock(SimDuration::from_minutes(61 * 1_440));
+    assert!(
+        crate::legal::arrest_system::apply_autonomous_evidence_arrests(
+            &registry,
+            &mut repeated_vice,
+        )
+        .unwrap()
+        .is_empty(),
+        "observing the same already-cited racket must not create clockwork repeat custody"
+    );
+    let mut restored_repeated_vice =
+        restore_save(&registry, build_save(&registry, &repeated_vice).unwrap()).unwrap();
+    assert!(
+        crate::legal::arrest_system::apply_autonomous_evidence_arrests(
+            &registry,
+            &mut restored_repeated_vice,
+        )
+        .unwrap()
+        .is_empty(),
+        "save/load must retain the repeat-vice arrest rule"
     );
 
     // Daily prosecutorial intake is downstream of actual custody, never manufactured here.

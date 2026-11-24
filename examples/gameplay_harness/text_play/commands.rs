@@ -220,6 +220,14 @@ impl Session<'_> {
                     standing.accounted_net.cents(), standing.retirement_total.cents(),
                     crimocracy::core::campaign_victory::RETIREMENT_NEST_EGG.cents() / 100,
                     crimocracy::core::campaign_victory::RETIREMENT_SEVERANCE_DAYS).unwrap();
+                writeln!(out, "    Criminal career: {} / {} profitable racket cycles and {} / {} cents net racket proceeds over {} days; named crew {} / {} required. Passive storefronts alone cannot earn retirement.",
+                    standing.retirement_profitable_racket_cycles,
+                    crimocracy::core::campaign_victory::RETIREMENT_MIN_PROFITABLE_RACKET_CYCLES,
+                    standing.retirement_racket_net.cents(),
+                    crimocracy::core::campaign_victory::RETIREMENT_MIN_RACKET_NET.cents(),
+                    crimocracy::core::campaign_victory::RETIREMENT_CRIME_WINDOW_DAYS,
+                    standing.key_personnel,
+                    crimocracy::core::campaign_victory::RETIREMENT_MIN_KEY_PERSONNEL).unwrap();
                 writeln!(out, "  Underboss: active rackets in {} districts, {} productive mature districts ({} required); local majority and superior strength relative to rivals required",
                     standing.own_active_racket_districts, standing.established_racket_districts,
                     standing.required_underboss_districts).unwrap();

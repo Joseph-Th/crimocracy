@@ -13,6 +13,14 @@ use crate::world::{CapabilityKind, NeighborhoodProfile, Rating};
 /// associates earn $15 per cycle and generate demand-dependent additional gross.
 pub const ASSOCIATE_ADDITIONAL_DAILY_WAGE: Money = Money::from_cents(1_500);
 
+/// One hot district carries one police-pressure operating surcharge, regardless
+/// of how many cases the authorities open there. Investigations still each
+/// generate evidence, detention risks, and further inquiry opportunities. A
+/// single surveillance lead must not compound into an unbounded daily cash tax
+/// on every racket in the same neighborhood. Old cycles retain their recorded
+/// case counts for historical re-derivation.
+pub(crate) const MAX_CURRENT_HEAT_CASE_EQUIVALENTS: u32 = 1;
+
 pub(crate) fn additional_associate_economics(
     kind: EnterpriseKind,
     profile: NeighborhoodProfile,
@@ -113,7 +121,9 @@ pub(super) fn resolve_operating_cost(
 ) -> Result<OperatingCostBreakdown, EnterpriseError> {
     let heat = economics
         .heat_surcharge_per_active_case()
-        .checked_mul(i64::from(active_district_cases))
+        .checked_mul(i64::from(
+            active_district_cases.min(MAX_CURRENT_HEAT_CASE_EQUIVALENTS),
+        ))
         .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
     resolve_operating_cost_with_heat(
         economics,
@@ -163,7 +173,9 @@ pub(crate) fn resolve_enterprise_operating_cost_projection(
             .ok_or_else(projection_overflow)?;
     let heat = economics
         .heat_surcharge_per_active_case()
-        .checked_mul(i64::from(observed_active_cases))
+        .checked_mul(i64::from(
+            observed_active_cases.min(MAX_CURRENT_HEAT_CASE_EQUIVALENTS),
+        ))
         .ok_or_else(projection_overflow)?;
     predictable
         .checked_add(heat)

@@ -63,6 +63,12 @@ impl VictoryPath {
 /// A late-game personal retirement fund. Crew severance is additional, not part of this amount.
 pub const RETIREMENT_NEST_EGG: Money = Money::from_cents(100_000_000);
 pub const RETIREMENT_SEVERANCE_DAYS: i64 = 180;
+/// Retirement is an exit from a criminal career, not an idle landlord ending.
+/// Political transition is the separate route for a long-term clean operator.
+pub const RETIREMENT_MIN_KEY_PERSONNEL: usize = 4;
+pub const RETIREMENT_CRIME_WINDOW_DAYS: u64 = 180;
+pub const RETIREMENT_MIN_PROFITABLE_RACKET_CYCLES: usize = 90;
+pub const RETIREMENT_MIN_RACKET_NET: Money = Money::from_cents(1_000_000);
 /// Economic and territorial coalitions must prove they can sustain operations.
 pub const VICTORY_ESTABLISHMENT_DAYS: u64 = 90;
 /// Civic districts need three years of stable ownership; underbosses still use
@@ -153,6 +159,9 @@ pub struct VictoryProgress {
     pub required_underboss_liquid_reserve: Money,
     pub accounted_net: Money,
     pub retirement_total: Money,
+    /// Recent settled proceeds and profitable cycles, including retired rackets.
+    pub retirement_racket_net: Money,
+    pub retirement_profitable_racket_cycles: usize,
     /// Only valid in a full simulation context; do not expose hidden rival standing in the player client.
     underboss_ready: bool,
 }
@@ -217,7 +226,7 @@ pub enum VictoryError {
     )]
     PoliticalNotReady,
     #[error(
-        "funded retirement needs one leader, no pending decisions or active operations, and enough accounted money for the leader's $1,000,000 nest egg plus 180 days of wages for each subordinate"
+        "funded retirement needs four named crew, 90 profitable racket settlements and $10,000 net racket income in the last 180 days, one leader, no pending decisions or active operations, and clean money for the $1,000,000 nest egg plus crew severance"
     )]
     RetirementNotReady,
     #[error(
@@ -340,6 +349,33 @@ fn recent_racket_net(state: &AppState, racket: &crate::enterprises::EnterpriseRe
         .filter(|cycle| cycle.occurred_at() <= state.now())
         .map(|cycle| i128::from(cycle.net_cash().cents()))
         .sum()
+}
+
+/// Criminal proceeds earned recently, not money from property ownership or sales.
+/// Past settlements remain relevant when a racket has been shut down or retired.
+fn retirement_racket_record(state: &AppState, owner: OrganizationId) -> (i128, usize) {
+    let cutoff = state
+        .now()
+        .as_minutes()
+        .saturating_sub(RETIREMENT_CRIME_WINDOW_DAYS * DAY_MINUTES);
+    let mut net = 0_i128;
+    let mut profitable = 0_usize;
+    for racket in state.enterprises().enterprises_for_organization(owner) {
+        for cycle in state
+            .enterprises()
+            .cycles_for(racket.id())
+            .rev()
+            .take_while(|cycle| cycle.occurred_at().as_minutes() > cutoff)
+        {
+            if cycle.occurred_at() <= state.now() {
+                net += i128::from(cycle.net_cash().cents());
+                if cycle.net_cash() > Money::ZERO {
+                    profitable += 1;
+                }
+            }
+        }
+    }
+    (net, profitable)
 }
 
 fn mature_business_title(state: &AppState, business: BusinessId, owner: OrganizationId) -> bool {
@@ -1085,6 +1121,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
     let retirement_total = retirement_members(registry, state, organization)
         .map(|(_, total)| total)
         .unwrap_or(RETIREMENT_NEST_EGG);
+    let (retirement_net, retirement_profitable_racket_cycles) =
+        retirement_racket_record(state, organization);
     Ok(VictoryProgress {
         total_districts,
         key_personnel,
@@ -1136,6 +1174,10 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         ),
         accounted_net: Money::from_cents(net as i64),
         retirement_total,
+        retirement_racket_net: Money::from_cents(
+            retirement_net.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+        ),
+        retirement_profitable_racket_cycles,
         underboss_ready: total_districts > 0
             && uncontested_districts.len() >= required_underboss_districts
             && key_personnel >= required_underboss_personnel
@@ -1204,7 +1246,11 @@ fn ensure_eligible(
                 .filter(|account| account.kind() == AccountKind::AccountedFunds)
                 .map(|account| i128::from(account.available_payment_balance().cents()))
                 .sum();
-            if standing.accounted_net < required
+            if standing.key_personnel < RETIREMENT_MIN_KEY_PERSONNEL
+                || standing.retirement_profitable_racket_cycles
+                    < RETIREMENT_MIN_PROFITABLE_RACKET_CYCLES
+                || standing.retirement_racket_net < RETIREMENT_MIN_RACKET_NET
+                || standing.accounted_net < required
                 || spendable < i128::from(required.cents())
                 || state
                     .decisions()
@@ -1356,8 +1402,15 @@ pub fn validate_claim_victory(
         summary: match path {
             VictoryPath::PoliticalPower =>
                 "The organization won the mayoral election through sustained local influence, professional campaign staff, funded operations and established civic alliances.".to_owned(),
-            VictoryPath::FundedRetirement =>
-                "The leader retired with a funded nest egg; each subordinate received 180 days of wages in an accounted personal account.".to_owned(),
+            VictoryPath::FundedRetirement => {
+                let standing = progress(registry, state)?;
+                format!(
+                    "The leader retired after {} profitable racket settlements and {} cents in net criminal proceeds over the last {} days, with a funded nest egg; each subordinate received 180 days of wages in an accounted personal account.",
+                    standing.retirement_profitable_racket_cycles,
+                    standing.retirement_racket_net.cents(),
+                    RETIREMENT_CRIME_WINDOW_DAYS,
+                )
+            },
             VictoryPath::CityUnderboss =>
                 "Uncontested economic influence across the city's districts and superior underworld strength secured the underboss position.".to_owned(),
         },

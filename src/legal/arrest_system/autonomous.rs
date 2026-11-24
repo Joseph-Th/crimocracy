@@ -11,7 +11,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime};
-use crate::legal::{ArrestDraft, InvestigationStatus};
+use crate::legal::{ArrestDraft, ArrestRecord, InvestigationStatus};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,11 +25,73 @@ struct AutonomousArrestCandidate {
     strong_sources: usize,
 }
 
-/// Routine vice casework may continue after release, but police should consolidate those
-/// observations rather than impose a new detention on every daily settlement. A newly
-/// completed criminal operation is a distinct event and can still justify immediate custody.
+/// Routine vice casework may continue after release, but the same already-cited
+/// racket must not create another arrest merely by being observed each day.
+/// New racket evidence and completed criminal operations remain actionable. Other routine arrests retain a minimum cooldown.
 /// This policy is reconstructed from persisted arrests and never alters direct arrest validity.
-const ROUTINE_REARREST_INTERVAL_DAYS: u64 = 14;
+const ROUTINE_REARREST_INTERVAL_DAYS: u64 = 60;
+
+/// Ordinary surveillance of the enterprise already cited in a prior arrest
+/// can deepen its case, but does not create a new criminal incident. Even
+/// derivative casework does not convert the same racket into another crime.
+/// Evidence of a different racket or an actual new operation is separate.
+fn repeats_previous_racket_case(
+    state: &AppState,
+    prior: &ArrestRecord,
+    case_id: InvestigationId,
+    released_at: SimTime,
+    evidence: &BTreeSet<EvidenceId>,
+) -> bool {
+    let Some(EntityRef::Enterprise(case_racket)) = state
+        .legal()
+        .get_investigation(case_id)
+        .and_then(|case| case.origin())
+    else {
+        return false;
+    };
+    let prior_case_racket = state
+        .legal()
+        .get_investigation(prior.investigation())
+        .and_then(|case| case.origin())
+        .and_then(|origin| {
+            if let EntityRef::Enterprise(id) = origin {
+                Some(id)
+            } else {
+                None
+            }
+        });
+    let previously_cited =
+        prior_case_racket == Some(case_racket) || prior.investigation() == case_id;
+    if !previously_cited {
+        return false;
+    }
+    // A case may cite a stronger derivative instead of the original observed
+    // trade. Resolve the independent root when testing for evidence of a
+    // genuinely different racket rather than treating that derivative as new.
+    !evidence.iter().any(|id| {
+        state.legal().get_evidence(*id).is_some_and(|record| {
+            if record.discovered_at() <= released_at {
+                return false;
+            }
+            let source = if record.derived_from().len() == 1 {
+                record
+                    .derived_from()
+                    .iter()
+                    .next()
+                    .and_then(|id| state.legal().get_evidence(*id))
+                    .unwrap_or(record)
+            } else {
+                record
+            };
+            crate::legal::investigation_system::enterprise_observation_origin(
+                source.kind(),
+                source.subject(),
+                source.origin(),
+            )
+            .is_some_and(|racket| Some(racket) != prior_case_racket && racket != case_racket)
+        })
+    })
+}
 
 fn has_distinct_post_release_operation(
     state: &AppState,
@@ -53,14 +115,16 @@ fn has_distinct_post_release_operation(
 
 fn most_recent_release_by_subject_and_authority(
     state: &AppState,
-) -> BTreeMap<(CharacterId, OrganizationId), SimTime> {
+) -> BTreeMap<(CharacterId, OrganizationId), &ArrestRecord> {
     let mut latest = BTreeMap::new();
     for arrest in state.legal().arrests() {
-        if let Some(released_at) = arrest.released_at() {
+        if arrest.released_at().is_some() {
             let entry = latest
                 .entry((arrest.character(), arrest.authority()))
-                .or_insert(released_at);
-            *entry = (*entry).max(released_at);
+                .or_insert(arrest);
+            if (arrest.released_at(), arrest.id()) > (entry.released_at(), entry.id()) {
+                *entry = arrest;
+            }
         }
     }
     latest
@@ -248,17 +312,22 @@ pub fn apply_autonomous_evidence_arrests(
                 .owner();
             !most_recent_release
                 .get(&(candidate.character, authority))
-                .is_some_and(|released_at| {
-                    state
-                        .now()
-                        .as_minutes()
-                        .saturating_sub(released_at.as_minutes())
-                        < ROUTINE_REARREST_INTERVAL_DAYS * DAY_MINUTES
-                        && !has_distinct_post_release_operation(
+                .is_some_and(|prior| {
+                    let released_at = prior
+                        .released_at()
+                        .expect("the last released arrest has a release instant");
+                    !has_distinct_post_release_operation(state, released_at, &candidate.evidence)
+                        && (repeats_previous_racket_case(
                             state,
-                            *released_at,
+                            prior,
+                            candidate.investigation,
+                            released_at,
                             &candidate.evidence,
-                        )
+                        ) || state
+                            .now()
+                            .as_minutes()
+                            .saturating_sub(released_at.as_minutes())
+                            < ROUTINE_REARREST_INTERVAL_DAYS * DAY_MINUTES)
                 })
         });
     }

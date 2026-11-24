@@ -55,8 +55,9 @@ pub enum EnterpriseReportingError {
 pub struct EnterpriseOutlook {
     pub baseline_net_cash: Money,
     pub heat_surcharge_per_case: Money,
-    /// First number of case equivalents at which expected net is nonpositive.
-    /// None means no finite threshold under the authored surcharge.
+    /// First case count that would make expected net nonpositive under the
+    /// current one-surcharge district-heat ceiling. None means profitability
+    /// survives even the maximum current district heat.
     pub nonpositive_at_cases: Option<u64>,
     pub estimated_operating_cost: Money,
     pub estimated_net_cash: Money,
@@ -221,8 +222,8 @@ fn nonpositive_case_threshold(net: Money, surcharge: Money) -> Option<u64> {
     let surcharge = surcharge.cents();
     if net <= 0 {
         Some(0)
-    } else if surcharge > 0 {
-        Some((net as u64).div_ceil(surcharge as u64))
+    } else if surcharge > 0 && net <= surcharge {
+        Some(1)
     } else {
         None
     }
@@ -385,12 +386,14 @@ mod tests {
         let threshold = |net, surcharge| {
             nonpositive_case_threshold(Money::from_cents(net), Money::from_cents(surcharge))
         };
-        assert_eq!(threshold(24_000, 12_000), Some(2));
-        assert_eq!(threshold(24_001, 12_000), Some(3));
+        assert_eq!(threshold(24_000, 12_000), None);
+        assert_eq!(threshold(24_001, 12_000), None);
+        assert_eq!(threshold(12_000, 12_000), Some(1));
+        assert_eq!(threshold(11_999, 12_000), Some(1));
         assert_eq!(threshold(0, 0), Some(0));
         assert_eq!(threshold(-1, 12_000), Some(0));
         assert_eq!(threshold(1, 0), None);
-        assert_eq!(threshold(i64::MAX, 1), Some(i64::MAX as u64));
+        assert_eq!(threshold(i64::MAX, 1), None);
     }
 
     #[test]

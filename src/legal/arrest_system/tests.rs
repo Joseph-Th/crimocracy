@@ -2145,7 +2145,7 @@ fn repeat_custody_requires_new_post_release_evidence_for_direct_and_autonomous_p
             .is_empty()
     );
     fixture.state.advance_clock(SimDuration::from_minutes(
-        14 * u32::try_from(crate::core::time::DAY_MINUTES).unwrap() - 1,
+        60 * u32::try_from(crate::core::time::DAY_MINUTES).unwrap() - 1,
     ));
     let rearrests = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
         .expect("new evidence should permit routine custody after the consolidation interval");
@@ -2292,7 +2292,7 @@ fn routine_autonomous_custody_waits_across_distinct_cases_after_restored_release
     let save = build_save(&fixture.registry, &fixture.state).unwrap();
     fixture.state = restore_save(&fixture.registry, save).unwrap();
     fixture.state.advance_clock(SimDuration::from_minutes(
-        14 * u32::try_from(crate::core::time::DAY_MINUTES).unwrap() - 2,
+        60 * u32::try_from(crate::core::time::DAY_MINUTES).unwrap() - 2,
     ));
     assert!(
         apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
@@ -2543,7 +2543,7 @@ fn repeat_custody_forensic_reanalysis_of_old_source_is_not_new_independent_evide
     );
     fixture
         .state
-        .advance_clock(SimDuration::from_minutes(14 * 1440));
+        .advance_clock(SimDuration::from_minutes(60 * 1440));
     let second = apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
         .expect("independent fresh evidence should permit new custody after the interval");
     assert_eq!(second.len(), 1);

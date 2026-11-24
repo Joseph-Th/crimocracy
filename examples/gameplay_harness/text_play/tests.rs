@@ -370,7 +370,7 @@ fn player_can_cover_suspended_rackets_atomically_without_automatic_manager_selec
         .unwrap()
         .0;
     assert!(
-        outlook.contains("If district case pressure rises by 1"),
+        outlook.contains("Net with one or more own-operation cases"),
         "{outlook}"
     );
     let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap())
