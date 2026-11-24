@@ -772,18 +772,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .politics()
         .organization(organization)
         .and_then(|campaign| campaign.latest_election());
-    let mayoral_leader_eligible = state
-        .world()
-        .characters_in_organization(organization)
-        .filter(|person| {
-            person.supervisor().is_none()
-                && state
-                    .legal()
-                    .active_arrest_for_character(person.id())
-                    .is_none()
-        })
-        .count()
-        == 1;
+    let mayoral_leader_eligible =
+        crate::world::world_system::sole_available_executive(state, organization).is_some();
     let legitimate_window_net = business_standings
         .values()
         .map(|standing| standing.window_net)

@@ -1,6 +1,7 @@
 //! Deterministic simulation time measured in campaign-relative minutes.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::ops::Add;
 
 #[derive(
@@ -20,6 +21,19 @@ impl SimTime {
         self.0
     }
 
+    /// Convert an elapsed day count to its midnight, without overflowing the clock.
+    pub const fn from_elapsed_days(days: u64) -> Option<Self> {
+        match days.checked_mul(DAY_MINUTES) {
+            Some(minutes) => Some(Self(minutes)),
+            None => None,
+        }
+    }
+
+    /// The player-facing calendar begins on day one, at elapsed minute zero.
+    pub const fn calendar_day(self) -> u64 {
+        self.0 / DAY_MINUTES + 1
+    }
+
     /// Checked future scheduling. Canonical validators use this before persisting a due time so
     /// an otherwise valid state near the finite clock horizon returns a typed domain error
     /// instead of reaching the panicking `Add` convenience implementation.
@@ -28,6 +42,19 @@ impl SimTime {
             Some(minutes) => Some(Self(minutes)),
             None => None,
         }
+    }
+}
+
+impl fmt::Display for SimTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let clock = self.0 % DAY_MINUTES;
+        write!(
+            f,
+            "day {} {:02}:{:02}",
+            self.calendar_day(),
+            clock / 60,
+            clock % 60
+        )
     }
 }
 
@@ -103,6 +130,20 @@ mod tests {
             SimTime::from_minutes(DAY_MINUTES),
             DAY_DURATION,
         ));
+    }
+
+    #[test]
+    fn calendar_times_format_one_based_and_preserve_finite_horizon() {
+        assert_eq!(SimTime::ZERO.to_string(), "day 1 00:00");
+        assert_eq!(SimTime::from_minutes(1439).to_string(), "day 1 23:59");
+        assert_eq!(SimTime::from_minutes(1440).to_string(), "day 2 00:00");
+        assert_eq!(SimTime::from_minutes(12960).to_string(), "day 10 00:00");
+        assert_eq!(
+            SimTime::from_elapsed_days(180).unwrap().to_string(),
+            "day 181 00:00"
+        );
+        assert_eq!(SimTime::from_elapsed_days(u64::MAX), None);
+        assert_eq!(SimTime::MAX.calendar_day(), u64::MAX / DAY_MINUTES + 1);
     }
 
     #[test]

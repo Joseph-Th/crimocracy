@@ -18,7 +18,7 @@ use crimocracy::core::id::{
 use crimocracy::core::persistence::{SaveEnvelope, build_save, restore_save};
 use crimocracy::core::simulation::run_tick;
 use crimocracy::core::state::AppState;
-use crimocracy::core::time::{DAY_MINUTES, SimDuration};
+use crimocracy::core::time::{DAY_MINUTES, SimDuration, SimTime};
 use crimocracy::decisions::DecisionResponse;
 use crimocracy::decisions::decision_system::validate_resolve_decision;
 use crimocracy::delegation::delegation_system::{
@@ -448,13 +448,13 @@ fn publish_save(path: &Path, data: &[u8]) -> Result<(), String> {
 }
 
 fn time_label(minutes: u64) -> String {
-    let clock = minutes % DAY_MINUTES;
-    format!(
-        "day {} {:02}:{:02}",
-        minutes / DAY_MINUTES + 1,
-        clock / 60,
-        clock % 60
-    )
+    SimTime::from_minutes(minutes).to_string()
+}
+
+fn election_date_label(elapsed_days: Option<u64>) -> String {
+    elapsed_days
+        .and_then(SimTime::from_elapsed_days)
+        .map_or_else(|| "none".to_owned(), |time| time.to_string())
 }
 
 fn parse_number(raw: &str, kind: &str) -> Result<u32, String> {

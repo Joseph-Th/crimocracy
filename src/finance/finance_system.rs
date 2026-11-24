@@ -42,6 +42,8 @@ pub enum FinanceError {
         "business operating account {0} is attached to a legitimate economy and cannot be posted through the generic ledger path"
     )]
     ProtectedBusinessOperatingAccount(FinancialAccountId),
+    #[error("municipal campaign clearing account {0} is dedicated to its political spending owner")]
+    ProtectedCampaignClearingAccount(FinancialAccountId),
     #[error("ledger transaction postings do not balance to zero; net cents {net_cents}")]
     Unbalanced { net_cents: i64 },
     #[error("ledger transaction posting sum overflowed the balance accumulator")]
@@ -434,10 +436,29 @@ pub(crate) fn validate_record_transaction_with_openings(
     )
 }
 
+/// Political spending alone can post to its dedicated municipal clearing pocket.
+pub(crate) fn validate_record_campaign_transaction(
+    state: &AppState,
+    clearing: FinancialAccountId,
+    openings: Option<ValidatedFinancialAccountOpenings>,
+    draft: LedgerTransactionDraft,
+) -> Result<ValidatedLedgerTransaction, FinanceError> {
+    if let Some(openings) = &openings {
+        openings.ensure_current(state)?;
+    }
+    validate_record_transaction_with_optional_openings(
+        state,
+        draft,
+        openings,
+        LedgerTransactionAccess::PoliticalCampaign(clearing),
+    )
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LedgerTransactionAccess {
     Generic,
     BusinessOperating,
+    PoliticalCampaign(FinancialAccountId),
 }
 
 fn validate_record_transaction_with_optional_openings(
@@ -539,7 +560,7 @@ fn ensure_transaction_account_access(
     kind: AccountKind,
     access: LedgerTransactionAccess,
 ) -> Result<(), FinanceError> {
-    if access == LedgerTransactionAccess::Generic
+    if access != LedgerTransactionAccess::BusinessOperating
         && kind == AccountKind::LegitimateOperating
         && let FinancialOwner::Business(business) = owner
         && state
@@ -548,6 +569,15 @@ fn ensure_transaction_account_access(
             .is_some_and(|economy| economy.operating_account() == account)
     {
         return Err(FinanceError::ProtectedBusinessOperatingAccount(account));
+    }
+    if kind == AccountKind::Settlement
+        && matches!(owner, FinancialOwner::Organization(organization)
+            if state.world().get_organization(organization).is_some_and(|record|
+                record.kind() == crate::world::OrganizationKind::Political))
+        && access != LedgerTransactionAccess::PoliticalCampaign(account)
+        && state.politics().uses_clearing_account(account)
+    {
+        return Err(FinanceError::ProtectedCampaignClearingAccount(account));
     }
     Ok(())
 }

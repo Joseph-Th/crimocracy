@@ -91,7 +91,7 @@ pub enum OperationError {
         organization: OrganizationId,
     },
     #[error(
-        "operation would finish at {planned_end:?}, after freelancer {character}'s term ends at {expires_at:?}"
+        "operation would finish at {planned_end}, after freelancer {character}'s term ends at {expires_at}"
     )]
     FreelanceWindow {
         character: CharacterId,
@@ -168,7 +168,7 @@ pub enum OperationError {
     )]
     StaleWitnessPressureBasis { character: CharacterId },
     #[error(
-        "extraction for detainee {character} would finish at {planned_end:?}, but custody ends at {custody_ends_at:?} and must still be active through completion"
+        "extraction for detainee {character} would finish at {planned_end}, but custody ends at {custody_ends_at} and must still be active through completion"
     )]
     ExtractionMissesCustodyWindow {
         character: CharacterId,
@@ -282,7 +282,7 @@ pub enum OperationError {
         now: SimTime,
     },
     #[error(
-        "operation {operation} cannot begin because linked opportunity {opportunity} expired at {valid_until:?} before {now:?}"
+        "operation {operation} cannot begin because linked opportunity {opportunity} expired at {valid_until} before {now}"
     )]
     OpportunityWindowExpired {
         operation: OperationId,

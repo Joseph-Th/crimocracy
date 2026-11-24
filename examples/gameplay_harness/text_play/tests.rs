@@ -283,6 +283,54 @@ fn recovery_and_brief_are_read_only_and_explain_dormant_rackets() {
 }
 
 #[test]
+fn territorial_recovery_explains_the_exact_calendar_reopening_deadline() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let racket = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .find(|enterprise| enterprise.status() == EnterpriseStatus::Active)
+        .unwrap()
+        .id();
+    session.execute("treasury daily").unwrap();
+    let advanced = session.execute("advance 2d uninterrupted").unwrap().0;
+    assert!(
+        advanced.contains("leadership decision pending"),
+        "{advanced}"
+    );
+    assert_eq!(
+        session
+            .state
+            .enterprises()
+            .get_enterprise(racket)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Suspended
+    );
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let recovery = session.execute("recovery").unwrap().0;
+    assert!(
+        recovery.contains("cannot reopen until day 10 00:00"),
+        "{recovery}"
+    );
+    let error = session
+        .execute(&format!("racket {} resume", racket.raw()))
+        .unwrap_err();
+    assert!(
+        error.contains("cannot reopen until day 10 00:00"),
+        "{error}"
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(session.execute("recovery").unwrap().0, recovery);
+}
+
+#[test]
 fn player_can_cover_suspended_rackets_atomically_without_automatic_manager_selection() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new_generated(

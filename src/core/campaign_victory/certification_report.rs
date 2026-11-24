@@ -37,9 +37,9 @@ pub(super) fn prepare_victory_report(
                     .get_character(election.candidate)
                     .ok_or(VictoryError::PoliticalNotReady)?;
                 format!(
-                    "{} was elected mayor on day {} after winning {} independently organized districts ({} required). At certification, {} districts currently meet the coalition requirements; established legitimate income is {} cents/day against {} cents/day in named-member wages.",
+                    "{} was elected mayor on {} after winning {} independently organized districts ({} required). At certification, {} districts currently meet the coalition requirements; established legitimate income is {} cents/day against {} cents/day in named-member wages.",
                     candidate.name(),
-                    election.election_day,
+                    election.held_at,
                     election.wards_won,
                     election.wards_needed,
                     standing.mayoral_majority_districts,
@@ -111,9 +111,9 @@ pub(super) fn prepare_victory_report(
                 .name();
             let mut entities = BTreeSet::from([EntityRef::Neighborhood(ward.district)]);
             let mut summary = format!(
-                "{}: winning ballot on day {} ({} nominee, {} incumbent, {} rival votes).",
+                "{}: winning ballot on {} ({} nominee, {} incumbent, {} rival votes).",
                 name,
-                election.election_day,
+                election.held_at,
                 ward.candidate_votes,
                 ward.incumbent_votes,
                 ward.rival_votes,

@@ -187,14 +187,15 @@ pub(super) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
 
     // The public election notice is an ordinary Standing report; the full
     // verified ballot ledger remains inspectable even if report IDs run out.
+    let ballot_at = state.now();
     let summary = if elected {
         format!(
-            "Municipal election day {day}: the nominated leader won {wards_won} of {} wards and is mayor-elect. Certify with 'claim-victory political'.",
+            "Municipal election {ballot_at}: the nominated leader won {wards_won} of {} wards and is mayor-elect. Certify with 'claim-victory political'.",
             progress.total_districts
         )
     } else {
         format!(
-            "Municipal election day {day}: the nominated leader won {wards_won} of {} wards; {} needed. The mayoral campaign was defeated; another election can be contested.",
+            "Municipal election {ballot_at}: the nominated leader won {wards_won} of {} wards; {} needed. The mayoral campaign was defeated; another election can be contested.",
             progress.total_districts, progress.required_political_districts
         )
     };
@@ -203,7 +204,7 @@ pub(super) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
         crate::reports::ReportDraft {
             recipient: owner,
             kind: crate::reports::ReportKind::Standing,
-            title: format!("Municipal election day {day}"),
+            title: format!("Municipal election {ballot_at}"),
             entries: vec![crate::reports::ReportEntry {
                 attention: if elected {
                     crate::core::attention::AttentionClass::Crisis

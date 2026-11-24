@@ -59,11 +59,12 @@ impl Session<'_> {
             salaries.contracted.cents(), salaries.payable.cents()).unwrap();
         writeln!(
             out,
-            "Next election day {} | nomination {:?} | latest election {:?}, won {}",
+            "Next election: {} | nomination {} | latest election {}, won {}",
             next_municipal_election_day(self.state.now())
-                .map_or_else(|| "unavailable".to_owned(), |day| day.to_string()),
-            progress.mayoral_nominated_for_day,
-            progress.latest_election_day,
+                .and_then(SimTime::from_elapsed_days)
+                .map_or_else(|| "unavailable".to_owned(), |time| time.to_string()),
+            election_date_label(progress.mayoral_nominated_for_day),
+            election_date_label(progress.latest_election_day),
             progress.latest_election_won
         )
         .unwrap();
@@ -125,19 +126,21 @@ impl Session<'_> {
             .organization(self.player)
             .and_then(|campaign| campaign.latest_election())
         else {
-            let Some(day) = next_municipal_election_day(self.state.now()) else {
+            let Some(time) =
+                next_municipal_election_day(self.state.now()).and_then(SimTime::from_elapsed_days)
+            else {
                 return Ok(
                     "No future municipal ballot fits within the remaining simulation clock; nomination is unavailable."
                         .to_owned(),
                 );
             };
             return Ok(format!(
-                "No mayoral ballot yet. Next election day {day}. File your leader at least 30 days in advance using 'nominate-mayor char-N'."
+                "No mayoral ballot yet. Next election: {time}. File your leader at least 30 days in advance using 'nominate-mayor char-N'."
             ));
         };
         let mut out = format!(
-            "Municipal election day {} | nominee char-{} | qualified {} | wards won {}/{} | elected {}\n",
-            result.election_day,
+            "Municipal election {} | nominee char-{} | qualified {} | wards won {}/{} | elected {}\n",
+            result.held_at,
             result.candidate.raw(),
             result.eligible,
             result.wards_won,
@@ -187,7 +190,8 @@ impl Session<'_> {
                 .expect("nomination was recorded")
                 .election_day;
             return Ok(format!(
-                "char-{raw} nominated for the mayoral election on day {day}. Filing fee: 2000000 accounted cents."
+                "char-{raw} nominated for the mayoral election on {}. Filing fee: 2000000 accounted cents.",
+                election_date_label(Some(day))
             ));
         }
         let raw = parse_number(words[1], "district")?;

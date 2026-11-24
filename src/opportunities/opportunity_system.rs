@@ -56,9 +56,7 @@ pub enum OpportunityError {
     },
     #[error("opportunity target {0:?} has no usable direct source-information record")]
     UncoveredTarget(EntityRef),
-    #[error(
-        "opportunity validity deadline {valid_until:?} must be later than discovery time {now:?}"
-    )]
+    #[error("opportunity validity deadline {valid_until} must be later than discovery time {now}")]
     InvalidValidityWindow { now: SimTime, valid_until: SimTime },
     #[error("matching open opportunity {0} already exists")]
     ExistingOpenOpportunity(OpportunityId),
@@ -77,7 +75,7 @@ pub enum OpportunityError {
         opportunity: OpportunityId,
         status: OpportunityStatus,
     },
-    #[error("opportunity {opportunity} expired at {valid_until:?}")]
+    #[error("opportunity {opportunity} expired at {valid_until}")]
     OpportunityExpired {
         opportunity: OpportunityId,
         valid_until: SimTime,
@@ -85,7 +83,7 @@ pub enum OpportunityError {
     #[error("opportunity {0} has no validity deadline and cannot expire automatically")]
     MissingValidityDeadline(OpportunityId),
     #[error(
-        "operation {operation} cannot begin until {earliest_start:?}, at or after opportunity validity deadline {valid_until:?}"
+        "operation {operation} cannot begin until {earliest_start}, at or after opportunity validity deadline {valid_until}"
     )]
     OperationStartsAfterWindow {
         operation: OperationId,
@@ -100,9 +98,7 @@ pub enum OpportunityError {
         scheduled_for: SimTime,
         now: SimTime,
     },
-    #[error(
-        "opportunity {opportunity} does not expire until {valid_until:?}; current time is {now:?}"
-    )]
+    #[error("opportunity {opportunity} does not expire until {valid_until}; current time is {now}")]
     ExpiryNotDue {
         opportunity: OpportunityId,
         valid_until: SimTime,

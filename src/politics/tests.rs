@@ -168,6 +168,166 @@ fn political_investment_requires_clean_funds_and_loses_influence_without_staff()
 }
 
 #[test]
+fn political_spending_is_bound_to_the_paying_organization_and_actual_ledger() {
+    use crate::core::invariants::StateValidationError;
+    use crate::core::persistence::LoadError;
+    use crate::finance::finance_system::FinanceError;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(8_731)).unwrap();
+    let rival = city.rivals[0];
+    let home = city.home;
+    for owner in [city.player, rival] {
+        fund(&mut city.state, owner, 1_000_000);
+        political_system::validate_invest_for(&city.state, owner, home, 500_000)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    let original = city.state.politics().organization(city.player).unwrap();
+    let clearing = original.clearing_account.unwrap();
+    let rival_clearing = city
+        .state
+        .politics()
+        .organization(rival)
+        .unwrap()
+        .clearing_account
+        .unwrap();
+    assert_ne!(clearing, rival_clearing);
+    let envelope = build_save(&registry, &city.state).unwrap();
+    let bytes = bincode::serialize(&envelope).unwrap();
+    let campaign_bytes = bincode::serialize(&(city.player, original)).unwrap();
+    let offsets: Vec<_> = bytes
+        .windows(campaign_bytes.len())
+        .enumerate()
+        .filter_map(|(i, window)| (window == campaign_bytes.as_slice()).then_some(i))
+        .collect();
+    assert_eq!(offsets.len(), 1);
+    for mode in 0..3 {
+        // Corrupt only campaign metadata in a serialized envelope, leaving
+        // both real organizations' balanced ledger histories untouched.
+        let mut malformed = original.clone();
+        match mode {
+            0 => malformed.spent_cents += MAYORAL_CAMPAIGN_SPEND_REQUIRED,
+            1 => malformed.spent_cents = 0,
+            2 => malformed.clearing_account = Some(rival_clearing),
+            _ => unreachable!(),
+        }
+        let replacement = bincode::serialize(&(city.player, malformed)).unwrap();
+        let mut damaged = bytes.clone();
+        damaged[offsets[0]..offsets[0] + campaign_bytes.len()].copy_from_slice(&replacement);
+        assert_eq!(
+            restore_save(&registry, bincode::deserialize(&damaged).unwrap()).err(),
+            Some(LoadError::InvalidState(
+                StateValidationError::InvalidPoliticalCampaign
+            )),
+            "campaign corruption mode {mode} must not survive restoration",
+        );
+    }
+    let restored = restore_save(&registry, envelope).unwrap();
+    assert_eq!(restored.politics(), city.state.politics());
+
+    // A lower-level balanced transfer must not credit or drain an already
+    // attached clearing account outside the political spending owner.
+    let funding = city
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(city.player))
+        .find(|account| {
+            account.kind() == AccountKind::AccountedFunds
+                && account.available_payment_balance() >= Money::from_cents(5000)
+        })
+        .unwrap()
+        .id();
+    let before = bincode::serialize(&city.state).unwrap();
+    for cents in [-5000, 5000] {
+        let draft = LedgerTransactionDraft {
+            occurred_at: city.state.now(),
+            memo: "Unrelated treasury transfer".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: clearing,
+                    amount: Money::from_cents(cents),
+                },
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-cents),
+                },
+            ],
+            authorization: None,
+        };
+        assert_eq!(
+            validate_record_transaction(&city.state, draft).err(),
+            Some(FinanceError::ProtectedCampaignClearingAccount(clearing))
+        );
+        assert_eq!(before, bincode::serialize(&city.state).unwrap());
+    }
+    // Non-campaign municipal settlement accounts are still ordinary ledger
+    // counterparties. Protection is specific to the assigned account.
+    let institution = city.state.finance().get_account(clearing).unwrap().owner();
+    let unrelated = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner: institution,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &city.state,
+        LedgerTransactionDraft {
+            occurred_at: city.state.now(),
+            memo: "Unrelated municipal settlement".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: unrelated,
+                    amount: Money::from_cents(5000),
+                },
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-5000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut restored] {
+        validate_invest_influence(state, home, 5000)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        assert_eq!(
+            state
+                .politics()
+                .organization(city.player)
+                .unwrap()
+                .spent_cents(),
+            505_000
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(clearing)
+                .unwrap()
+                .balance()
+                .cents(),
+            505_000
+        );
+        validate_invariants(state);
+        build_save(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn specialist_requires_delegated_political_manager_and_paid_salary_to_grow() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(5_611)).unwrap();

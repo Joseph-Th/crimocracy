@@ -344,6 +344,132 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
             .established_political_contacts,
         1
     );
+    // A rival claim to executive authority remains a split command even
+    // while the second executive is temporarily detained.
+    {
+        use crate::core::entity::EntityRef;
+        use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
+        use crate::legal::investigation_system::{
+            validate_add_evidence, validate_open_investigation,
+        };
+        use crate::legal::{
+            Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability,
+            EvidenceStrength, InvestigationDraft,
+        };
+        use crate::world::CharacterDraft;
+        use crate::world::world_system::{insert_character, validate_set_character_supervisor};
+        use std::collections::BTreeSet;
+
+        let mut divided = city.state.clone();
+        let held = validate_nominate_mayor(&divided, city.boss).unwrap();
+        let rival_executive = insert_character(
+            &mut divided,
+            CharacterDraft {
+                name: "Second claimant to leadership".into(),
+                organization: Some(city.player),
+                supervisor: None,
+                autonomy: AutonomyLevel::Tight,
+                capabilities: Default::default(),
+                traits: Default::default(),
+                drives: Default::default(),
+            },
+        )
+        .unwrap();
+        assert!(
+            !progress(&registry, &divided)
+                .unwrap()
+                .mayoral_leader_eligible
+        );
+        let police = divided
+            .world()
+            .organizations()
+            .find(|org| org.kind() == OrganizationKind::LawEnforcement)
+            .unwrap()
+            .id();
+        let investigation = validate_open_investigation(
+            &divided,
+            InvestigationDraft {
+                owner: police,
+                title: "Second claimant's custody".into(),
+                subjects: BTreeSet::from([EntityRef::Character(rival_executive)]),
+            },
+        )
+        .unwrap()
+        .commit(&mut divided)
+        .unwrap();
+        let mut evidence = BTreeSet::new();
+        for kind in [EvidenceKind::Document, EvidenceKind::KnownAssociation] {
+            evidence.insert(
+                validate_add_evidence(
+                    &divided,
+                    EvidenceDraft {
+                        investigation,
+                        custodian: police,
+                        subject: EntityRef::Character(rival_executive),
+                        origin: None,
+                        kind,
+                        strength: EvidenceStrength::Strong,
+                        reliability: EvidenceReliability::HighlyReliable,
+                        admissibility: Admissibility::Admissible,
+                        discovered_at: divided.now(),
+                    },
+                )
+                .unwrap()
+                .commit(&mut divided)
+                .unwrap(),
+            );
+        }
+        let arrest = validate_arrest(
+            &registry,
+            &divided,
+            ArrestDraft {
+                character: rival_executive,
+                investigation,
+                evidence,
+            },
+        )
+        .unwrap()
+        .commit(&mut divided)
+        .unwrap();
+        assert!(
+            !progress(&registry, &divided)
+                .unwrap()
+                .mayoral_leader_eligible,
+            "one free executive plus a detained second root is not a unified leadership"
+        );
+        assert_eq!(
+            validate_nominate_mayor(&divided, city.boss).err(),
+            Some(PoliticalError::IneligibleCandidate),
+        );
+        let before = bincode::serialize(&build_save(&registry, &divided).unwrap()).unwrap();
+        assert_eq!(held.commit(&mut divided).err(), Some(PoliticalError::Stale));
+        assert_eq!(
+            before,
+            bincode::serialize(&build_save(&registry, &divided).unwrap()).unwrap()
+        );
+        let mut restored =
+            restore_save(&registry, build_save(&registry, &divided).unwrap()).unwrap();
+        for state in [&mut divided, &mut restored] {
+            validate_release_arrest(state, arrest)
+                .unwrap()
+                .commit(state)
+                .unwrap();
+            validate_set_character_supervisor(state, rival_executive, Some(city.boss))
+                .unwrap()
+                .commit(state)
+                .unwrap();
+            assert!(progress(&registry, state).unwrap().mayoral_leader_eligible);
+            validate_nominate_mayor(state, city.boss)
+                .unwrap()
+                .commit(state)
+                .unwrap();
+            validate_invariants(state);
+        }
+        assert_eq!(
+            bincode::serialize(&divided).unwrap(),
+            bincode::serialize(&restored).unwrap()
+        );
+    }
     validate_nominate_mayor(&city.state, city.boss)
         .unwrap()
         .commit(&mut city.state)

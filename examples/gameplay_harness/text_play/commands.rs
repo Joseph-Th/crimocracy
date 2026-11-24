@@ -146,8 +146,8 @@ impl Session<'_> {
                     if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
                 writeln!(out, "    Sustained contested electoral majorities: {} / {} districts (800/1000 local influence, stronger than rivals for 90 days)",
                     standing.mayoral_majority_districts, standing.required_political_districts).unwrap();
-                writeln!(out, "    Nomination filed for election day: {:?}; latest election: {:?}, elected: {}. Only an actual winning municipal ballot permits the political victory claim.",
-                    standing.mayoral_nominated_for_day, standing.latest_election_day,
+                writeln!(out, "    Nomination filed for: {}; latest election: {}, elected: {}. Only an actual winning municipal ballot permits the political victory claim.",
+                    election_date_label(standing.mayoral_nominated_for_day), election_date_label(standing.latest_election_day),
                     standing.latest_election_won).unwrap();
                 writeln!(out, "    Campaign spending: {} / {} cents; remaining clean reserve: {} / {} cents; leader eligible: {}",
                     standing.campaign_spent_cents, standing.required_campaign_spent_cents,

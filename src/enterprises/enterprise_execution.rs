@@ -107,7 +107,7 @@ pub enum EnterpriseError {
     },
     #[error("district {0} is under a binding territorial standstill; no new rackets may open")]
     TerritoryStandstill(NeighborhoodId),
-    #[error("racket {enterprise} lost a territorial clash and cannot reopen until {until:?}")]
+    #[error("racket {enterprise} lost a territorial clash and cannot reopen until {until}")]
     TerritorySuppressed {
         enterprise: EnterpriseId,
         until: SimTime,

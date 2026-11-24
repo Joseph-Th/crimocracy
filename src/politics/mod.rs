@@ -181,6 +181,14 @@ impl PoliticsState {
     pub fn organization(&self, id: OrganizationId) -> Option<&OrganizationCampaign> {
         self.organizations.get(&id)
     }
+
+    /// A clearing pocket is permanently dedicated to one campaign's spending.
+    /// Check only for municipal settlement accounts in the finance owner.
+    pub(crate) fn uses_clearing_account(&self, id: FinancialAccountId) -> bool {
+        self.organizations
+            .values()
+            .any(|campaign| campaign.clearing_account == Some(id))
+    }
 }
 
 #[cfg(test)]

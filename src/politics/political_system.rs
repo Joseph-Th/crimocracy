@@ -13,16 +13,10 @@ use crate::contacts::contact_system::usable_contacts_of_kind;
 use crate::core::campaign_victory::POLITICAL_CONTACT_DAYS;
 use crate::core::id::{CharacterId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
-use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current};
+use crate::core::time::{DAY_MINUTES, SimTime};
 use crate::delegation::{ResponsibilityFunction, ResponsibilityScope};
-use crate::finance::finance_system::{
-    FinanceError, ValidatedLedgerTransaction, validate_open_accounts, validate_record_transaction,
-    validate_record_transaction_with_openings,
-};
-use crate::finance::{
-    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
-    Money,
-};
+use crate::finance::Money;
+use crate::finance::finance_system::FinanceError;
 use crate::world::{
     AutonomyLevel, BusinessFunction, BusinessKind, CapabilityKind, OrganizationKind,
 };
@@ -31,9 +25,12 @@ use thiserror::Error;
 
 mod daily;
 mod election;
+mod expenditure;
 #[cfg(test)]
 pub(super) use daily::affordable_rival_campaign_points;
 pub use daily::{apply_due_political_campaigns, daily_campaign_erosion};
+pub use expenditure::ValidatedPoliticalOrder;
+use expenditure::{CampaignAction, valid_campaign_expenditure, validate_spend};
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum PoliticalError {
@@ -169,11 +166,12 @@ pub fn campaign_salary_commitment(
 
 /// The next ballot must actually fit on the finite simulation clock. Returning
 /// `None` also keeps read-only campaign views from advertising an impossible date.
+/// Next ballot's elapsed-day ordinal, not the one-based display date.
 pub fn next_municipal_election_day(now: SimTime) -> Option<u64> {
     let day = (now.as_minutes() / DAY_MINUTES / MUNICIPAL_ELECTION_INTERVAL_DAYS)
         .checked_add(1)?
         .checked_mul(MUNICIPAL_ELECTION_INTERVAL_DAYS)?;
-    day.checked_mul(DAY_MINUTES).map(|_| day)
+    SimTime::from_elapsed_days(day).map(|_| day)
 }
 
 fn established_contact(state: &AppState, owner: OrganizationId, kind: ContactKind) -> bool {
@@ -192,17 +190,7 @@ fn established_contact(state: &AppState, owner: OrganizationId, kind: ContactKin
 }
 
 fn eligible_candidate(state: &AppState, owner: OrganizationId, leader: CharacterId) -> bool {
-    state
-        .world()
-        .characters_in_organization(owner)
-        .filter(|person| person.supervisor().is_none())
-        .count()
-        == 1
-        && state.world().get_character(leader).is_some_and(|person| {
-            person.organization() == Some(owner)
-                && person.supervisor().is_none()
-                && state.legal().active_arrest_for_character(leader).is_none()
-        })
+    crate::world::world_system::sole_available_executive(state, owner) == Some(leader)
         && established_contact(state, owner, ContactKind::Political)
 }
 
@@ -385,116 +373,6 @@ pub fn specialist_output(
     (adjust(machine), adjust(residents), adjust(institutions))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CampaignAction {
-    Invest(u16),
-    Hire(SpecialistKind, CharacterId),
-    Initiative(CivicInitiative, CharacterId),
-    Nominate(MayoralCandidacy),
-    Salary,
-}
-
-pub struct ValidatedPoliticalOrder {
-    owner: OrganizationId,
-    district: NeighborhoodId,
-    action: CampaignAction,
-    cents: i64,
-    at: SimTime,
-    transaction: ValidatedLedgerTransaction,
-    clearing: crate::core::id::FinancialAccountId,
-}
-
-fn validate_spend(
-    state: &AppState,
-    owner: OrganizationId,
-    district: NeighborhoodId,
-    cents: i64,
-    action: CampaignAction,
-) -> Result<ValidatedPoliticalOrder, PoliticalError> {
-    if !valid_scope(state, owner, district) || cents <= 0 {
-        return Err(PoliticalError::InvalidScope);
-    }
-    let campaign = state.politics().organization(owner);
-    let spent = campaign.map_or(0, OrganizationCampaign::spent_cents);
-    spent
-        .checked_add(cents)
-        .ok_or(PoliticalError::BudgetOverflow)?;
-    let mut remaining = cents;
-    let mut postings = Vec::new();
-    for account in state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(owner))
-        .filter(|account| account.kind() == AccountKind::AccountedFunds)
-    {
-        let contribution = remaining.min(account.available_payment_balance().cents());
-        if contribution > 0 {
-            postings.push(LedgerPosting {
-                account: account.id(),
-                amount: Money::from_cents(-contribution),
-            });
-            remaining -= contribution;
-        }
-        if remaining == 0 {
-            break;
-        }
-    }
-    if remaining > 0 {
-        return Err(PoliticalError::InsufficientFunds);
-    }
-    // Campaign expenditure must actually leave the organization's treasury.
-    // A same-owner settlement credit would only park money in its own ledger.
-    let municipal_institution = state
-        .world()
-        .organizations()
-        .find(|organization| organization.kind() == OrganizationKind::Political)
-        .ok_or(PoliticalError::MissingMunicipalInstitution)?
-        .id();
-    let (clearing, openings) = if let Some(id) = campaign.and_then(|c| c.clearing_account) {
-        (id, None)
-    } else {
-        let opening = validate_open_accounts(
-            state,
-            vec![FinancialAccountDraft {
-                owner: FinancialOwner::Organization(municipal_institution),
-                kind: AccountKind::Settlement,
-            }],
-        )?;
-        (
-            opening
-                .account_id(0)
-                .expect("one campaign clearing account"),
-            Some(opening),
-        )
-    };
-    postings.push(LedgerPosting {
-        account: clearing,
-        amount: Money::from_cents(cents),
-    });
-    let transaction_draft = LedgerTransactionDraft {
-        occurred_at: state.now(),
-        memo: format!(
-            "Municipal political campaign in district-{}",
-            district.raw()
-        ),
-        postings,
-        authorization: None,
-    };
-    let transaction = if let Some(openings) = openings {
-        validate_record_transaction_with_openings(state, openings, transaction_draft)?
-    } else {
-        validate_record_transaction(state, transaction_draft)?
-    };
-    Ok(ValidatedPoliticalOrder {
-        owner,
-        district,
-        action,
-        cents,
-        at: state.now(),
-        transaction,
-        clearing,
-    })
-}
-
 pub(crate) fn validate_invest_for(
     state: &AppState,
     owner: OrganizationId,
@@ -570,107 +448,6 @@ pub fn validate_hire_specialist(
         kind.signing_cost(),
         CampaignAction::Hire(kind, manager),
     )
-}
-
-impl ValidatedPoliticalOrder {
-    pub fn commit(self, state: &mut AppState) -> Result<(), PoliticalError> {
-        ensure_time_current(state.now(), self.at).map_err(|_| PoliticalError::Stale)?;
-        if !valid_scope(state, self.owner, self.district) {
-            return Err(PoliticalError::Stale);
-        }
-        let campaign = state.politics().organization(self.owner);
-        let current = campaign
-            .and_then(|campaign| campaign.district(self.district))
-            .map_or(0, DistrictCampaign::influence);
-        match self.action {
-            CampaignAction::Invest(points)
-                if current
-                    .checked_add(points)
-                    .is_none_or(|v| v > INFLUENCE_CAP) =>
-            {
-                return Err(PoliticalError::Stale);
-            }
-            CampaignAction::Hire(kind, manager)
-                if !eligible_manager(state, self.owner, self.district, manager)
-                    || !campaign_office_available(state, self.owner, self.district, manager)
-                    || campaign
-                        .and_then(|c| c.district(self.district))
-                        .is_some_and(|d| d.specialists.contains_key(&kind)) =>
-            {
-                return Err(PoliticalError::Stale);
-            }
-            CampaignAction::Initiative(kind, manager)
-                if initiative_ready(state, self.owner, self.district, manager, kind).is_err() =>
-            {
-                return Err(PoliticalError::Stale);
-            }
-            CampaignAction::Nominate(candidacy)
-                if !eligible_candidate(state, self.owner, candidacy.candidate)
-                    || state
-                        .politics()
-                        .organization(self.owner)
-                        .and_then(OrganizationCampaign::candidacy)
-                        .is_some()
-                    || next_municipal_election_day(state.now())
-                        .is_none_or(|day| day > candidacy.election_day) =>
-            {
-                return Err(PoliticalError::Stale);
-            }
-            CampaignAction::Invest(_)
-            | CampaignAction::Hire(..)
-            | CampaignAction::Initiative(..)
-            | CampaignAction::Nominate(_)
-            | CampaignAction::Salary => {}
-        }
-        if campaign
-            .map_or(0, OrganizationCampaign::spent_cents)
-            .checked_add(self.cents)
-            .is_none()
-            || campaign
-                .and_then(|c| c.clearing_account)
-                .is_some_and(|account| account != self.clearing)
-        {
-            return Err(PoliticalError::Stale);
-        }
-        self.transaction.commit(state)?;
-        let campaign = state.politics.organizations.entry(self.owner).or_default();
-        campaign.clearing_account = Some(self.clearing);
-        campaign.spent_cents += self.cents;
-        match self.action {
-            CampaignAction::Invest(points) => {
-                campaign
-                    .districts
-                    .entry(self.district)
-                    .or_default()
-                    .influence += points;
-            }
-            CampaignAction::Hire(kind, manager) => {
-                campaign
-                    .districts
-                    .entry(self.district)
-                    .or_default()
-                    .specialists
-                    .insert(kind, manager);
-            }
-            CampaignAction::Initiative(kind, _) => {
-                let office = campaign.districts.entry(self.district).or_default();
-                let (machine, grassroots, institutions) = kind.boosts();
-                office.influence = office.influence.saturating_add(machine).min(INFLUENCE_CAP);
-                office.grassroots = office
-                    .grassroots
-                    .saturating_add(grassroots)
-                    .min(INFLUENCE_CAP);
-                office.institutions = office
-                    .institutions
-                    .saturating_add(institutions)
-                    .min(INFLUENCE_CAP);
-                office.initiatives.insert(kind, self.at);
-            }
-            CampaignAction::Nominate(candidacy) => campaign.candidacy = Some(candidacy),
-            CampaignAction::Salary => {}
-        }
-        Ok(())
-    }
 }
 
 pub fn dismiss_specialist(
@@ -750,23 +527,20 @@ pub fn held_electoral_majority(
 /// Release-safe save/invariant checks. Historical contracts may refer to
 /// former or detained employees, but the daily phase never pays them.
 pub fn valid_political_state(state: &AppState) -> bool {
+    let mut clearing_accounts = BTreeSet::new();
     for (&owner, campaign) in &state.politics().organizations {
         if state
             .world()
             .get_organization(owner)
             .is_none_or(|record| record.kind() != OrganizationKind::Criminal)
-            || campaign.spent_cents < 0
-            || (campaign.spent_cents > 0 && campaign.clearing_account.is_none())
         {
             return false;
         }
-        if let Some(id) = campaign.clearing_account
-            && state.finance().get_account(id).is_none_or(|account| {
-                !matches!(account.owner(), FinancialOwner::Organization(institution)
-                    if state.world().get_organization(institution).is_some_and(
-                        |organization| organization.kind() == OrganizationKind::Political))
-                    || account.kind() != AccountKind::Settlement
-            })
+        let Some(clearing) = campaign.clearing_account else {
+            return false;
+        };
+        if !clearing_accounts.insert(clearing)
+            || !valid_campaign_expenditure(state, owner, campaign.spent_cents, clearing)
         {
             return false;
         }

@@ -14,13 +14,16 @@ fn real_text_campaign_orders_expose_funded_civic_work_and_official_election_sche
     let saved = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
     let campaign = session.execute("campaign").unwrap().0;
     assert!(campaign.contains("grassroots 0/1000"), "{campaign}");
-    assert!(campaign.contains("Next election day 180"), "{campaign}");
+    assert!(
+        campaign.contains("Next election: day 181 00:00"),
+        "{campaign}"
+    );
     assert!(
         session
             .execute("election")
             .unwrap()
             .0
-            .contains("No mayoral ballot yet")
+            .contains("No mayoral ballot yet. Next election: day 181 00:00.")
     );
     assert!(
         session

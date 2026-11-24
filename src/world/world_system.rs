@@ -234,6 +234,23 @@ pub fn designate_player_organization(
     Ok(())
 }
 
+/// Resolve the one undetained head of a unified command hierarchy. A detained
+/// second root is still a competing executive, not an ordinary subordinate.
+pub(crate) fn sole_available_executive(
+    state: &AppState,
+    organization: OrganizationId,
+) -> Option<CharacterId> {
+    let mut leaders = state
+        .world()
+        .characters_in_organization(organization)
+        .filter(|person| person.supervisor().is_none());
+    let leader = leaders.next()?.id();
+    if leaders.next().is_some() || state.legal().active_arrest_for_character(leader).is_some() {
+        return None;
+    }
+    Some(leader)
+}
+
 pub fn insert_neighborhood(
     state: &mut AppState,
     draft: NeighborhoodDraft,
