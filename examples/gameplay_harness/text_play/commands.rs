@@ -1147,8 +1147,16 @@ impl Session<'_> {
                 if let Some(raw) = words.get(2) {
                     explicit.insert(RoleKind::Surveillance, self.requested_member(raw)?);
                 }
-                let roles =
-                    self.select_operation_roles(OperationKind::Surveillance, &explicit, at, &[])?;
+                let objective = OperationObjective::GatherInformation {
+                    target: EntityRef::Business(business),
+                };
+                let roles = self.select_operation_roles(
+                    OperationKind::Surveillance,
+                    &objective,
+                    &explicit,
+                    at,
+                    &[],
+                )?;
                 let scout = roles[&RoleKind::Surveillance];
                 let name = state
                     .world()
@@ -1164,9 +1172,7 @@ impl Session<'_> {
                         kind: OperationKind::Surveillance,
                         responsible_organization: self.player,
                         leader: scout,
-                        objective: OperationObjective::GatherInformation {
-                            target: EntityRef::Business(business),
-                        },
+                        objective,
                         approach: OperationApproach::Covert,
                         roles,
                         intelligence: BTreeSet::new(),
@@ -1235,12 +1241,17 @@ impl Session<'_> {
                 {
                     explicit.insert(role, self.requested_member(raw)?);
                 }
-                let roles =
-                    self.select_operation_roles(OperationKind::Burglary, &explicit, at, &[])?;
-                let coordinator = roles[&RoleKind::Coordinator];
                 let objective = OperationObjective::AcquireProperty {
                     target: EntityRef::Business(target),
                 };
+                let roles = self.select_operation_roles(
+                    OperationKind::Burglary,
+                    &objective,
+                    &explicit,
+                    at,
+                    &[],
+                )?;
+                let coordinator = roles[&RoleKind::Coordinator];
                 let coverage = planning_information(
                     self.registry,
                     &self.state,

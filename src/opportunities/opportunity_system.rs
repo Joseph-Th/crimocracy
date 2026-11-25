@@ -800,11 +800,7 @@ pub(crate) fn operation_matches_opportunity_basis(
             // A multi-target opening can include contextual witnesses whose information is not
             // an actionable legal-status fact. A case match on another target must not make
             // that contextual witness's separately authorized operation eligible for conversion.
-            let Some(character) =
-                crate::operations::operation_objective::character_objective_target(
-                    operation.objective(),
-                )
-            else {
+            let Some(character) = operation.objective().character_target() else {
                 return false;
             };
             let pinned_investigations: BTreeSet<_> = operation

@@ -233,6 +233,25 @@ impl OperationObjective {
         }
     }
 
+    /// A direct person target cannot participate in the operation against themself.
+    /// Crew selection and authorization use the same semantic target projection.
+    pub const fn character_target(&self) -> Option<CharacterId> {
+        match self {
+            Self::GatherInformation {
+                target: EntityRef::Character(character),
+            }
+            | Self::Frighten {
+                target: EntityRef::Character(character),
+            } => Some(*character),
+            Self::FreeDetainee { target } => Some(*target),
+            Self::AcquireProperty { .. }
+            | Self::GatherInformation { .. }
+            | Self::ObtainCash { .. }
+            | Self::Frighten { .. }
+            | Self::DisruptBusiness { .. } => None,
+        }
+    }
+
     pub(crate) fn referenced_entities(&self) -> Vec<EntityRef> {
         match self {
             Self::AcquireProperty { target }

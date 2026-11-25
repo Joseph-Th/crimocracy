@@ -227,10 +227,11 @@ const HELP: &str = "Commands:
   intel <information-id> Inspect one held observation, typed finding and provenance
   debriefs               Your members and counts of unreported personal observations
   debrief <member-id>    Transfer one new member observation to organization knowledge
-  operation-kinds        Authorized operation families and required crew roles
+  operation-kinds        Authorized operation families, required and optional crew roles
   plan <kind> <target-id> [approach=...] [leader=char-id] [Role=char-id...] [police=press|ask|abort]
                          [delay=Nh] [deadline=Nh] [need=InformationTopic]
-                         Authorize with optional crew, contingency, schedule and knowledge gates.
+                         Auto-fill required roles; explicitly assign any supported role.
+                         Authorize with contingency, schedule and knowledge gates.
                          Surveillance/infiltration also target
                          known org-, char-, district-, operation-, investigation-, enterprise-IDs
   preview <kind> <target-id> [same options as plan]

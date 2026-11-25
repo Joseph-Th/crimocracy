@@ -145,18 +145,19 @@ impl Session<'_> {
                 .map(|approach| format!("{approach:?}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let roles = definition
-                .required_roles()
-                .iter()
-                .map(|role| {
-                    let skill = definition
-                        .execution()
-                        .capability_for_role(*role)
-                        .map_or("Unspecified".to_owned(), |skill| format!("{skill:?}"));
-                    format!("{role:?} ({skill})")
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+            let (required, optional): (Vec<_>, Vec<_>) = definition
+                .execution()
+                .supported_roles()
+                .partition(|(role, _)| definition.required_roles().contains(role));
+            let role_labels = |roles: Vec<(RoleKind, _)>| {
+                roles
+                    .into_iter()
+                    .map(|(role, skill)| format!("{role:?} ({skill:?})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let required_roles = role_labels(required);
+            let optional_roles = role_labels(optional);
             let topics = definition
                 .execution()
                 .relevant_intelligence_topics()
@@ -178,7 +179,8 @@ impl Session<'_> {
             };
             writeln!(
                 output,
-                "{kind:?} | roles: {roles} | approaches: {approaches} | intelligence: {topics} | {}m | {target}",
+                "{kind:?} | required roles: {required_roles} | optional roles: {} | approaches: {approaches} | intelligence: {topics} | {}m | {target}",
+                if optional_roles.is_empty() { "none" } else { &optional_roles },
                 definition.execution().duration().as_minutes()
             )
             .unwrap();
@@ -192,6 +194,7 @@ impl Session<'_> {
     pub(super) fn select_operation_roles(
         &self,
         kind: OperationKind,
+        objective: &OperationObjective,
         explicit: &BTreeMap<RoleKind, CharacterId>,
         at: crimocracy::core::time::SimTime,
         constraints: &[OperationConstraint],
@@ -201,6 +204,7 @@ impl Session<'_> {
             .state
             .world()
             .characters_in_organization(self.player)
+            .filter(|person| objective.character_target() != Some(person.id()))
             .filter(|person| {
                 participant_available_for_plan(
                     self.registry,
@@ -421,11 +425,12 @@ impl Session<'_> {
                 None
             } else {
                 Some(
-                    *definition
-                        .required_roles()
-                        .iter()
+                    definition
+                        .execution()
+                        .supported_roles()
+                        .map(|(role, _)| role)
                         .find(|role| normalized(&format!("{role:?}")) == key)
-                        .ok_or_else(|| format!("role '{key}' is not required for {kind:?}"))?,
+                        .ok_or_else(|| format!("role '{key}' is not supported for {kind:?}"))?,
                 )
             };
             let id = parse_number(value, "char")?;
@@ -473,7 +478,7 @@ impl Session<'_> {
         let objective = kind
             .objective_for_target(target)
             .ok_or("this operation requires a different target type")?;
-        let roles = self.select_operation_roles(kind, &explicit, at, &constraints)?;
+        let roles = self.select_operation_roles(kind, &objective, &explicit, at, &constraints)?;
         let leader = requested_leader
             .or_else(|| roles.get(&RoleKind::Coordinator).copied())
             .or_else(|| {
@@ -481,6 +486,7 @@ impl Session<'_> {
                 self.state
                     .world()
                     .characters_in_organization(self.player)
+                    .filter(|person| objective.character_target() != Some(person.id()))
                     .filter(|person| {
                         participant_available_for_plan(
                             self.registry,

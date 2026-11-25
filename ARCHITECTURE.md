@@ -265,6 +265,11 @@ uses a bounded maximum-weight role-mask matching over current member skills
 and supervisory preference, without inventing trained personnel or assigning
 the same person twice. Ties select the lowest IDs in stable role order.
 Explicit role assignments remain fixed and can knowingly use untrained members.
+The general plan/preview commands also admit optional registry-supported seats; only
+required seats are auto-filled, and the operation catalog distinguishes the two.
+Automatic roles and leadership exclude a direct person target using the same objective
+projection as authorization and save validation; explicit self-target assignments are
+rejected, not silently replaced.
 Business directories are public; named people are selectable through current
 membership, established contacts, recruitment prospects, or personally
 identified information held by the organization. Sensitive witness and

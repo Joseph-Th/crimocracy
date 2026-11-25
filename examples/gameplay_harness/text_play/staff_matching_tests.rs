@@ -80,6 +80,152 @@ fn matching_does_not_fabricate_untrained_people_or_reuse_a_member() {
 }
 
 #[test]
+fn person_target_is_excluded_from_automatic_crew_and_leadership() {
+    use crimocracy::world::world_system::insert_character;
+    use crimocracy::world::{AutonomyLevel, CapabilityKind, CharacterDraft, Rating};
+
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let target = session
+        .state
+        .world()
+        .characters_in_organization(session.player)
+        .find(|person| person.capability(CapabilityKind::Surveillance).is_some())
+        .unwrap()
+        .id();
+    let fallback = insert_character(
+        &mut session.state,
+        CharacterDraft {
+            name: "Alternative scout".to_owned(),
+            organization: Some(session.player),
+            supervisor: Some(id(2)),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Surveillance,
+                Rating::try_new(1).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let preview = session
+        .execute(&format!("preview surveillance char-{}", target.raw()))
+        .unwrap()
+        .0;
+    assert!(preview.contains("Alternative scout"), "{preview}");
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+
+    // Explicitly assigning the forbidden person is still rejected; do not silently replace them.
+    for assignment in ["Surveillance", "leader"] {
+        assert!(
+            session
+                .execute(&format!(
+                    "plan surveillance char-{} {assignment}=char-{}",
+                    target.raw(),
+                    target.raw()
+                ))
+                .is_err()
+        );
+        assert_eq!(
+            before,
+            bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+        );
+    }
+    session
+        .execute(&format!("plan surveillance char-{}", target.raw()))
+        .unwrap();
+    let operation = session
+        .state
+        .operations()
+        .operations_for_organization(session.player)
+        .find(|operation| operation.kind() == OperationKind::Surveillance)
+        .unwrap();
+    assert_eq!(operation.leader(), fallback);
+    assert_eq!(operation.roles()[&RoleKind::Surveillance], fallback);
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        bincode::serialize(&session.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
+fn optional_authored_roles_are_available_to_manual_plans() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let scout = id(4);
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let command = format!("hijacking business-1 Lookout=char-{}", scout.raw());
+    let preview = session.execute(&format!("preview {command}")).unwrap().0;
+    assert!(preview.contains("Lookout:"), "{preview}");
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+
+    let catalog = session.execute("operation-kinds").unwrap().0;
+    let hijacking = catalog
+        .lines()
+        .find(|line| line.starts_with("Hijacking |"))
+        .unwrap();
+    assert!(hijacking.contains("optional roles:"), "{hijacking}");
+    assert!(hijacking.contains("Lookout (Surveillance)"), "{hijacking}");
+    for invalid in [
+        format!(
+            "plan hijacking business-1 SafeSpecialist=char-{}",
+            scout.raw()
+        ),
+        format!(
+            "plan hijacking business-1 Lookout=char-{} Driver=char-{}",
+            scout.raw(),
+            scout.raw()
+        ),
+    ] {
+        assert!(session.execute(&invalid).is_err(), "{invalid}");
+        assert_eq!(
+            before,
+            bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+        );
+    }
+
+    session.execute(&format!("plan {command}")).unwrap();
+    let operation = session
+        .state
+        .operations()
+        .operations_for_organization(session.player)
+        .find(|op| op.kind() == OperationKind::Hijacking)
+        .unwrap();
+    assert_eq!(operation.roles()[&RoleKind::Lookout], scout);
+    assert_eq!(
+        operation.roles().len(),
+        registry
+            .get_operation(OperationKind::Hijacking)
+            .required_roles()
+            .len()
+            + 1
+    );
+    assert_eq!(
+        operation
+            .roles()
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        operation.roles().len()
+    );
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        bincode::serialize(&session.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn manual_role_assignment_reduces_the_auto_matching_pool_without_override() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();

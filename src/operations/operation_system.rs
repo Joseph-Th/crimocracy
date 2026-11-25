@@ -703,8 +703,7 @@ pub fn validate_authorize_operation<'registry>(
                 expires_at,
             ));
     }
-    if let Some(character) =
-        crate::operations::operation_objective::character_objective_target(&draft.objective)
+    if let Some(character) = draft.objective.character_target()
         && participants.contains(&character)
     {
         return Err(OperationError::ObjectiveTargetIsParticipant { character });

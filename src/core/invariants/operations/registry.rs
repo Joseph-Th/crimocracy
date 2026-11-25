@@ -259,7 +259,9 @@ fn validate_authored_operation_plan(
                 })
         })
     });
-    let objective_target_is_participant = character_objective_target(operation.objective())
+    let objective_target_is_participant = operation
+        .objective()
+        .character_target()
         .is_some_and(|target| operation.participants().contains(&target));
     let legal_basis_is_valid = match (operation.kind(), operation.objective()) {
         (

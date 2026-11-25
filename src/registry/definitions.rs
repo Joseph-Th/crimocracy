@@ -420,6 +420,13 @@ impl OperationExecutionDefinition {
     pub fn business_target(&self) -> Option<&OperationBusinessTargetDefinition> {
         self.business_target.as_ref()
     }
+    /// All authored seats, including optional roles, in stable role order.
+    pub fn supported_roles(&self) -> impl Iterator<Item = (RoleKind, CapabilityKind)> + '_ {
+        self.difficulty
+            .role_capabilities
+            .iter()
+            .map(|(&role, &skill)| (role, skill))
+    }
     pub fn capability_for_role(&self, role: RoleKind) -> Option<CapabilityKind> {
         self.difficulty.role_capabilities.get(&role).copied()
     }
