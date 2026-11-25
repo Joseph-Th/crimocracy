@@ -1262,6 +1262,7 @@ mod reconnaissance_tests;
 mod staff_matching_tests;
 mod time_play;
 mod treasury_play;
+mod victory_play;
 
 pub fn run(registry: &Registry, args: &[String]) -> Result<(), String> {
     let stdin = std::io::stdin();

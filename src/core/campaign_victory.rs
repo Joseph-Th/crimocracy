@@ -430,9 +430,9 @@ impl BusinessDistrictStanding {
     }
 }
 
-/// Own-books political readiness by district. This excludes unknown rival
-/// operations and shares the same mature-title, settlement and income rules
-/// as the authoritative victory validator.
+/// Own-books political readiness for every public district, including wards
+/// without owned storefronts. Personnel candidates are live; only mature
+/// commercial constituencies receive counted teams for victory.
 pub fn political_district_progress(
     registry: &Registry,
     state: &AppState,
@@ -461,9 +461,13 @@ fn political_district_rows(
         .map(|(&district, _)| district)
         .collect();
     let staffing = political_staffing::allocate(state, organization, &economically_ready);
-    standings
-        .iter()
-        .map(|(&district, standing)| {
+    let empty = BusinessDistrictStanding::default();
+    state
+        .world()
+        .neighborhoods()
+        .map(|ward| {
+            let district = ward.id();
+            let standing = standings.get(&district).unwrap_or(&empty);
             let economically_qualified = standing.qualifies(local_income_floor);
             let team = staffing.assigned.get(&district);
             let steward = team.map(|(political, _)| *political);
@@ -721,6 +725,16 @@ fn proven_racket_associates(
 }
 
 pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress, VictoryError> {
+    Ok(progress_and_political_districts(registry, state)?.0)
+}
+
+/// Single assessment for consumers that need aggregate victory progress
+/// and the district teams that produced it. Do not solve the same exact
+/// citywide matching twice for one election or dossier.
+pub fn progress_and_political_districts(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(VictoryProgress, Vec<PoliticalDistrictProgress>), VictoryError> {
     let organization = state.player_organization().ok_or(VictoryError::NoPlayer)?;
     let total_districts = state.world().neighborhoods().count();
     let key_personnel = state
@@ -1017,7 +1031,7 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
         .unwrap_or(RETIREMENT_NEST_EGG);
     let (retirement_net, retirement_profitable_racket_cycles) =
         retirement_racket_record(state, organization);
-    Ok(VictoryProgress {
+    let standing = VictoryProgress {
         total_districts,
         key_personnel,
         required_political_personnel,
@@ -1098,7 +1112,8 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
             && daily_payroll > 0
             && racket_window_net >= daily_payroll * income_window
             && underboss_liquid_reserve >= required_underboss_reserve,
-    })
+    };
+    Ok((standing, political_rows))
 }
 
 /// Campaign readiness is tested at the municipal ballot, not rewarded as an

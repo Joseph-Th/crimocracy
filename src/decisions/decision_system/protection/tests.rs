@@ -184,6 +184,95 @@ fn named_muscle_is_distributed_not_multiplied_across_legitimate_wards() {
 }
 
 #[test]
+fn executing_operation_temporarily_removes_enforcer_from_local_defense() {
+    use crate::core::entity::EntityRef;
+    use crate::operations::operation_system::{
+        OperationTransition, apply_transition, validate_authorize_operation,
+    };
+    use crate::operations::{
+        OperationApproach, OperationDraft, OperationKind, OperationObjective, OperationStatus,
+        RoleKind,
+    };
+    let (registry, mut city, exposed) = exposed_city();
+    let defender = insert_character(
+        &mut city.state,
+        CharacterDraft {
+            name: "Mobile defender".into(),
+            organization: Some(city.player),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([
+                (CapabilityKind::Violence, Rating::try_new(90).unwrap()),
+                (CapabilityKind::Surveillance, Rating::try_new(90).unwrap()),
+            ]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let force = |state: &AppState| {
+        local_defensive_force(state, city.player, city.home)
+            + local_defensive_force(state, city.player, exposed)
+    };
+    let before = force(&city.state);
+    let op = validate_authorize_operation(
+        &registry,
+        &city.state,
+        OperationDraft {
+            title: "Off-site reconnaissance".into(),
+            kind: OperationKind::Surveillance,
+            responsible_organization: city.player,
+            leader: defender,
+            objective: OperationObjective::GatherInformation {
+                target: EntityRef::Neighborhood(exposed),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Surveillance, defender)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: city.state.now() + SimDuration::ONE_MINUTE,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    assert_eq!(
+        force(&city.state),
+        before,
+        "a future order is not current field work"
+    );
+    assert!(
+        run_test_tick(&registry, &mut city.state)
+            .started_operations
+            .contains(&op)
+    );
+    assert_eq!(
+        city.state.operations().get_operation(op).unwrap().status(),
+        OperationStatus::InProgress
+    );
+    assert_eq!(
+        force(&city.state),
+        before - 1,
+        "one committed enforcer cannot simultaneously defend the holdings"
+    );
+    let mut replay = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(force(&replay), before - 1);
+    for state in [&mut city.state, &mut replay] {
+        apply_transition(&registry, state, op, OperationTransition::Abort).unwrap();
+        assert_eq!(
+            force(state),
+            before,
+            "terminal operations free the enforcer"
+        );
+    }
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
+}
+
+#[test]
 fn protection_quotes_scale_to_large_portfolios_without_a_token_fee_cap() {
     let (registry, city, district) = exposed_city();
     let shops = active_shops(&city.state, city.player);

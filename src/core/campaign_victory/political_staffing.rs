@@ -26,10 +26,12 @@ pub(super) struct PoliticalStaffing {
 pub(super) fn allocate(
     state: &AppState,
     owner: OrganizationId,
-    districts: &BTreeSet<NeighborhoodId>,
+    economically_ready: &BTreeSet<NeighborhoodId>,
 ) -> PoliticalStaffing {
     let mut candidates = BTreeMap::new();
-    for &district in districts {
+    // Personnel eligibility is independent of the age or profitability of
+    // local properties. Show the real planning pool even in an unowned ward.
+    for district in state.world().neighborhoods().map(|ward| ward.id()) {
         let mut local = DistrictCandidates::default();
         for mandate in state
             .delegation()
@@ -61,12 +63,18 @@ pub(super) fn allocate(
         }
         candidates.insert(district, local);
     }
-    let electoral = districts
+    let electoral = economically_ready
         .iter()
         .filter(|&&district| held_electoral_majority(state, owner, district))
         .copied()
         .collect();
-    let assigned = solve(&candidates, &electoral);
+    // Only economically qualified districts can consume a counted team.
+    let assigned = solve(
+        candidates
+            .iter()
+            .filter(|(district, _)| economically_ready.contains(district)),
+        &electoral,
+    );
     PoliticalStaffing {
         candidates,
         assigned,
@@ -81,12 +89,12 @@ struct Choice<'a> {
 
 type Score = (usize, usize);
 
-fn solve(
-    candidates: &BTreeMap<NeighborhoodId, DistrictCandidates>,
+fn solve<'a>(
+    candidates: impl IntoIterator<Item = (&'a NeighborhoodId, &'a DistrictCandidates)>,
     electoral: &BTreeSet<NeighborhoodId>,
 ) -> Assignments {
     let mut choices = candidates
-        .iter()
+        .into_iter()
         .filter(|(_, local)| {
             !local.political.is_empty()
                 && !local.finance.is_empty()

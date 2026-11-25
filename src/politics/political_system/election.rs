@@ -57,10 +57,8 @@ pub(super) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
 
     // Ballots use only current world state, the real campaign ledger, local
     // support and crime reputation. There is no preselected winning candidate.
-    let Ok(progress) = crate::core::campaign_victory::progress(registry, state) else {
-        return;
-    };
-    let Ok(districts) = crate::core::campaign_victory::political_district_progress(registry, state)
+    let Ok((progress, districts)) =
+        crate::core::campaign_victory::progress_and_political_districts(registry, state)
     else {
         return;
     };

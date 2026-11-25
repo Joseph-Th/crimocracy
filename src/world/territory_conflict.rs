@@ -21,6 +21,7 @@ use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::history::history_system::{
     HistoryError, ValidatedHistoryEvent, validate_territory_clash_event,
 };
+use crate::operations::OperationStatus;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::territory_influence::active_standstill;
@@ -64,7 +65,9 @@ pub fn active_district_force(
 /// where their racket operates. Capable named members can cover other wards,
 /// but must divide their attention across the organization's active commercial
 /// districts and active racket posts rather than guarding every business at
-/// full strength from anywhere in the city.
+/// full strength from anywhere in the city. People actually executing an
+/// operation (including a decision pause) cannot defend another location.
+/// Merely authorizing future work does not remove current defensive capacity.
 ///
 /// The allocation is deterministic and recomputed from live world state:
 /// sorted district IDs receive the remainder when named muscle cannot be
@@ -83,6 +86,15 @@ pub fn local_defensive_force(
                 .legal()
                 .active_arrest_for_character(member.id())
                 .is_none()
+                && !state
+                    .operations()
+                    .active_operations_for_participant(member.id())
+                    .any(|operation| {
+                        matches!(
+                            operation.status(),
+                            OperationStatus::InProgress | OperationStatus::AwaitingDecision
+                        )
+                    })
         })
         .filter(|member| {
             [CapabilityKind::Violence, CapabilityKind::Intimidation]

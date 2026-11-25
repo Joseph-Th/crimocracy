@@ -3,6 +3,79 @@ use crimocracy::core::invariants::validate_invariants;
 use crimocracy::finance::finance_system::{insert_account, validate_record_transaction};
 
 #[test]
+fn political_dossier_reports_real_directors_before_commerce_qualifies() {
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new_generated(
+        &registry,
+        EvaluationSeeds::new(562_365, 562_365),
+        CityScale::Small,
+    )
+    .unwrap();
+    session.execute("mandate 3 add political").unwrap();
+    session.execute("mandate 3 add finance").unwrap();
+    session.execute("mandate 3 add district-2").unwrap();
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    for district in [1, 2] {
+        let dossier = session
+            .execute(&format!("political district-{district}"))
+            .unwrap()
+            .0;
+        assert!(
+            dossier.contains("Current readiness: incomplete"),
+            "{dossier}"
+        );
+        assert!(
+            dossier.contains("Local eligible directors: 1 political, 1 financial"),
+            "{dossier}"
+        );
+        assert!(
+            dossier.contains(
+                "citywide counted organizer: not assigned | financial director: not assigned"
+            ),
+            "{dossier}"
+        );
+        assert!(dossier.contains("Electoral contest:"), "{dossier}");
+        assert!(dossier.contains("meetings:"), "{dossier}");
+        if district == 2 {
+            assert!(dossier.contains("No owned storefronts here"), "{dossier}");
+        }
+    }
+    use crimocracy::core::campaign_victory::{
+        political_district_progress, progress, progress_and_political_districts,
+    };
+    let (standing, rows) = progress_and_political_districts(&registry, &session.state).unwrap();
+    assert_eq!(standing, progress(&registry, &session.state).unwrap());
+    assert_eq!(
+        rows,
+        political_district_progress(&registry, &session.state).unwrap()
+    );
+    assert_eq!(rows.len(), session.state.world().neighborhoods().count());
+    assert_eq!(standing.staffed_political_districts, 0);
+    assert_eq!(standing.mayoral_majority_districts, 0);
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(
+        session
+            .execute("political district-2")
+            .unwrap()
+            .0
+            .contains("Local eligible directors: 1 political, 1 financial")
+    );
+    session.execute("autonomy 9 tight").unwrap();
+    assert!(
+        session
+            .execute("political district-2")
+            .unwrap()
+            .0
+            .contains("Local eligible directors: 0 political, 0 financial")
+    );
+}
+
+#[test]
 fn real_text_campaign_orders_expose_funded_civic_work_and_official_election_schedule() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new_generated(

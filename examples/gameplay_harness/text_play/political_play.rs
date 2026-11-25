@@ -41,10 +41,12 @@ fn initiative_kind(raw: &str) -> Result<CivicInitiative, String> {
 
 impl Session<'_> {
     pub(super) fn campaign_readiness(&self) -> Result<String, String> {
-        let progress = crimocracy::core::campaign_victory::progress(self.registry, &self.state)
+        let (progress, rows) =
+            crimocracy::core::campaign_victory::progress_and_political_districts(
+                self.registry,
+                &self.state,
+            )
             .map_err(|e| e.to_string())?;
-        let rows =
-            political_district_progress(self.registry, &self.state).map_err(|e| e.to_string())?;
         let mut out = format!(
             "Mayoral campaign | lifetime spend {} / {} cents | clean reserve {} / {} cents | sustained electoral districts {} / {}\n",
             progress.campaign_spent_cents,
@@ -70,30 +72,35 @@ impl Session<'_> {
         .unwrap();
         writeln!(out, "Legitimate transition: {} | days since last racket settlement: {:?} (365 required; no active rackets)",
             progress.legitimate_transition_ready, progress.days_since_last_racket_cycle).unwrap();
-        for district in self.state.world().neighborhoods() {
+        for row in rows {
+            let district = self
+                .state
+                .world()
+                .get_neighborhood(row.district)
+                .expect("political row references a public district");
             let own = self
                 .state
                 .politics()
                 .organization(self.player)
                 .and_then(|campaign| campaign.district(district.id()));
-            let row = rows.iter().find(|row| row.district == district.id());
-            let rival = crimocracy::politics::political_system::rival_pressure(
-                &self.state,
-                self.player,
-                district.id(),
-            );
-            if own.is_none() && row.is_none() {
+            if own.is_none()
+                && row.active_owned == 0
+                && row.suspended_owned == 0
+                && row.available_stewards == 0
+                && row.available_financial_stewards == 0
+                && row.mature_window_net == Money::ZERO
+            {
                 continue;
             }
             writeln!(out,
                 "  district-{} {} | machine {}/1000 | grassroots {}/1000 | institutions {}/1000 | rival activity {} | majority held {} day(s) | election-ready {}",
                 district.id().raw(), district.name(),
-                own.map_or(0, |office| office.influence()),
-                own.map_or(0, |office| office.grassroots()),
-                own.map_or(0, |office| office.institutions()),
-                pressure_label(rival),
-                row.map_or(0, |row| row.majority_held_days),
-                row.is_some_and(|row| row.mayoral_ready),
+                row.own_influence,
+                row.grassroots_support,
+                row.institutional_support,
+                pressure_label(row.rival_influence),
+                row.majority_held_days,
+                row.mayoral_ready,
             ).unwrap();
             if let Some(office) = own {
                 let (machine, grassroots, institutions) = daily_campaign_erosion(
@@ -277,7 +284,10 @@ impl Session<'_> {
             .ok_or("no public district with that ID")?;
         let progress = political_district_progress(self.registry, &self.state)
             .map_err(|error| error.to_string())?;
-        let local = progress.iter().find(|row| row.district == district.id());
+        let local = progress
+            .iter()
+            .find(|row| row.district == district.id())
+            .expect("every public district has a readiness row");
         let mut out = String::new();
         writeln!(
             out,
@@ -285,58 +295,56 @@ impl Session<'_> {
             district.name()
         )
         .unwrap();
-        if let Some(local) = local {
-            writeln!(out,
-                "Current readiness: {} | {} mature owned shops, {} recently proven, {} distinct proven kinds | citywide counted organizer: {} | financial director: {}",
-                if local.qualifies { "qualified" } else { "incomplete" },
-                local.mature_active,
-                local.established_active,
-                local.established_kinds,
-                local.steward.map_or("not assigned".to_owned(), |id| format!("char-{}", id.raw())),
-                local.financial_steward.map_or("not assigned".to_owned(), |id| format!("char-{}", id.raw())),
-            ).unwrap();
-            writeln!(out, "Local eligible directors: {} political, {} financial; both must be distinct and assigned citywide", local.available_stewards, local.available_financial_stewards).unwrap();
+        writeln!(out,
+            "Current readiness: {} | {} mature owned shops, {} recently proven, {} distinct proven kinds | citywide counted organizer: {} | financial director: {}",
+            if local.qualifies { "qualified" } else { "incomplete" },
+            local.mature_active,
+            local.established_active,
+            local.established_kinds,
+            local.steward.map_or("not assigned".to_owned(), |id| format!("char-{}", id.raw())),
+            local.financial_steward.map_or("not assigned".to_owned(), |id| format!("char-{}", id.raw())),
+        ).unwrap();
+        writeln!(out, "Local eligible directors: {} political, {} financial; both must be distinct and assigned citywide", local.available_stewards, local.available_financial_stewards).unwrap();
+        writeln!(
+            out,
+            "Electoral contest: machine {}/1000 | grassroots {}/1000 | institutions {}/1000 | rival pressure {} | majority held {} day(s) / 90 | mayoral-ready {}",
+            local.own_influence, local.grassroots_support, local.institutional_support,
+            pressure_label(local.rival_influence), local.majority_held_days, local.mayoral_ready,
+        ).unwrap();
+        for (kind, command) in [
+            (CivicInitiative::PublicMeetings, "meetings"),
+            (CivicInitiative::NeighborhoodServices, "services"),
+            (CivicInitiative::LaborCoalition, "labor"),
+            (CivicInitiative::LocalPress, "press"),
+        ] {
+            let office = self
+                .state
+                .politics()
+                .organization(self.player)
+                .and_then(|campaign| campaign.district(district.id()));
+            let last = office.and_then(|office| office.initiative_last_held(kind));
+            let days_left = last.map_or(0, |at| {
+                (7 * DAY_MINUTES)
+                    .saturating_sub(
+                        self.state
+                            .now()
+                            .as_minutes()
+                            .saturating_sub(at.as_minutes()),
+                    )
+                    .div_ceil(DAY_MINUTES)
+            });
             writeln!(
                 out,
-                "Electoral contest: machine {}/1000 | grassroots {}/1000 | institutions {}/1000 | rival pressure {} | majority held {} day(s) / 90 | mayoral-ready {}",
-                local.own_influence, local.grassroots_support, local.institutional_support,
-                pressure_label(local.rival_influence), local.majority_held_days, local.mayoral_ready,
-            ).unwrap();
-            for (kind, command) in [
-                (CivicInitiative::PublicMeetings, "meetings"),
-                (CivicInitiative::NeighborhoodServices, "services"),
-                (CivicInitiative::LaborCoalition, "labor"),
-                (CivicInitiative::LocalPress, "press"),
-            ] {
-                let office = self
-                    .state
-                    .politics()
-                    .organization(self.player)
-                    .and_then(|campaign| campaign.district(district.id()));
-                let last = office.and_then(|office| office.initiative_last_held(kind));
-                let days_left = last.map_or(0, |at| {
-                    (7 * DAY_MINUTES)
-                        .saturating_sub(
-                            self.state
-                                .now()
-                                .as_minutes()
-                                .saturating_sub(at.as_minutes()),
-                        )
-                        .div_ceil(DAY_MINUTES)
-                });
-                writeln!(
-                    out,
-                    "  {command}: {} | cost {} cents | cooldown {} day(s)",
-                    if initiative_available(&self.state, self.player, district.id(), kind) {
-                        "venue/contact ready"
-                    } else {
-                        "needs compatible venue or labor contact"
-                    },
-                    kind.cost_cents(),
-                    days_left
-                )
-                .unwrap();
-            }
+                "  {command}: {} | cost {} cents | cooldown {} day(s)",
+                if initiative_available(&self.state, self.player, district.id(), kind) {
+                    "venue/contact ready"
+                } else {
+                    "needs compatible venue or labor contact"
+                },
+                kind.cost_cents(),
+                days_left
+            )
+            .unwrap();
         }
         let political_mandates = self
             .state
