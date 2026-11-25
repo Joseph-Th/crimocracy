@@ -1604,6 +1604,95 @@ fn restore_rejects_overlapping_active_operation_bookings() {
 }
 
 #[test]
+fn restore_rejects_two_live_commitments_even_with_disjoint_planned_windows() {
+    let (registry, mut state, organization, leader, target) = make_test_operation_state();
+    let other = insert_test_operation_leader(&mut state, organization, "Independent Observer");
+    let draft = |leader, scheduled_for| OperationDraft {
+        title: "Observation".to_owned(),
+        kind: OperationKind::Surveillance,
+        responsible_organization: organization,
+        leader,
+        objective: OperationObjective::GatherInformation { target },
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for,
+    };
+    let first = validate_authorize_operation(&registry, &state, draft(leader, SimTime::ZERO))
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let boundary = SimTime::from_minutes(1)
+        + registry
+            .get_operation(OperationKind::Surveillance)
+            .execution()
+            .duration();
+    let second = validate_authorize_operation(&registry, &state, draft(other, boundary))
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    apply_transition(&registry, &mut state, first, OperationTransition::Begin).unwrap();
+    state.advance_clock(
+        registry
+            .get_operation(OperationKind::Surveillance)
+            .execution()
+            .duration(),
+    );
+    apply_transition(&registry, &mut state, second, OperationTransition::Begin).unwrap();
+    assert_eq!(state.now(), boundary);
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(first)
+            .unwrap()
+            .resolution_due_at(),
+        Some(boundary)
+    );
+    assert_eq!(
+        state
+            .operations()
+            .get_operation(second)
+            .unwrap()
+            .started_at(),
+        Some(boundary)
+    );
+
+    // Both independent live operations are valid. Corrupt only the second crew's identity
+    // in the serialized save; restoration reconstructs indexes from the altered record.
+    let original = state.operations().get_operation(second).unwrap().clone();
+    let mut replacement = original.clone();
+    replacement.command.leader = leader;
+    replacement
+        .command
+        .roles
+        .insert(RoleKind::Surveillance, leader);
+    let original_bytes = bincode::serialize(&original).unwrap();
+    let replacement_bytes = bincode::serialize(&replacement).unwrap();
+    assert_eq!(original_bytes.len(), replacement_bytes.len());
+    let mut bytes = bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap();
+    let matches: Vec<_> = bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(matches.len(), 1);
+    let offset = matches[0];
+    bytes[offset..offset + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    let corrupted: SaveEnvelope = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(
+        restore_save(&registry, corrupted).unwrap_err(),
+        LoadError::InvalidState(StateValidationError::ActiveOperationParticipantOverlap {
+            participant: leader,
+            first,
+            second,
+        })
+    );
+}
+
+#[test]
 fn restore_rejects_impossible_high_version_authorized_operation() {
     let (registry, mut state, organization, leader, target) = make_test_operation_state();
     let operation = validate_authorize_operation(

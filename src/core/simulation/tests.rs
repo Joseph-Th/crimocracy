@@ -1215,6 +1215,33 @@ fn due_operation_resolution_treats_allocator_exhaustion_as_terminal_without_rng_
     .expect("resolution operation should validate")
     .commit(&mut state)
     .expect("resolution operation should commit");
+    let follow_up_start = SimTime::from_minutes(1)
+        + registry
+            .get_operation(OperationKind::Surveillance)
+            .execution()
+            .duration();
+    let follow_up = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Back-to-back surveillance".to_owned(),
+            kind: OperationKind::Surveillance,
+            responsible_organization: crew,
+            leader,
+            objective: OperationObjective::GatherInformation {
+                target: EntityRef::Business(target),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: follow_up_start,
+        },
+    )
+    .expect("back-to-back booking should authorize")
+    .commit(&mut state)
+    .expect("follow-up booking should commit");
     state.advance_clock(SimDuration::ONE_MINUTE);
     apply_transition(&registry, &mut state, operation, OperationTransition::Begin)
         .expect("resolution operation should begin at its canonical earliest start");
@@ -1223,13 +1250,65 @@ fn due_operation_resolution_treats_allocator_exhaustion_as_terminal_without_rng_
         .get_operation(operation)
         .and_then(|record| record.resolution_due_at())
         .expect("in-progress operation must have a due time");
+    assert_eq!(due_at, follow_up_start);
     state.advance_clock(SimDuration::from_minutes(
-        u32::try_from(due_at.as_minutes() - state.now().as_minutes())
+        u32::try_from(due_at.as_minutes() - state.now().as_minutes() - 1)
             .expect("fixture execution duration must fit SimDuration"),
     ));
+    let mut healthy = state.clone();
+    let outcome = run_test_tick(&registry, &mut healthy);
+    assert_eq!(outcome.resolved_operations, vec![operation]);
+    assert_eq!(outcome.started_operations, vec![follow_up]);
+
     state
         .ids
         .set_next_raw_for_test(crate::core::id::IdKind::Report, u32::MAX);
+    let mut restored = crate::core::persistence::restore_save(
+        &registry,
+        crate::core::persistence::build_save(&registry, &state).unwrap(),
+    )
+    .unwrap();
+    // Direct begin must not infer release from a due timestamp, even before the
+    // resolution phase has had a chance to run.
+    let mut direct = state.clone();
+    direct.advance_clock(SimDuration::ONE_MINUTE);
+    let before = bincode::serialize(&direct).unwrap();
+    assert_eq!(
+        apply_transition(
+            &registry,
+            &mut direct,
+            follow_up,
+            OperationTransition::Begin
+        ),
+        Err(
+            crate::operations::operation_system::OperationError::ParticipantBusy {
+                character: leader,
+                operation,
+            }
+        )
+    );
+    assert_eq!(bincode::serialize(&direct).unwrap(), before);
+
+    // The real boundary tick cannot complete the earlier operation. A later
+    // booking must remain queued rather than using the still-committed crew.
+    for _ in 0..2 {
+        let outcome = run_test_tick(&registry, &mut state);
+        assert_eq!(outcome, run_test_tick(&registry, &mut restored));
+        assert!(outcome.resolved_operations.is_empty());
+        assert!(outcome.started_operations.is_empty());
+        assert_eq!(
+            state
+                .operations()
+                .get_operation(follow_up)
+                .unwrap()
+                .status(),
+            OperationStatus::Authorized
+        );
+        assert_eq!(
+            bincode::serialize(&state).unwrap(),
+            bincode::serialize(&restored).unwrap()
+        );
+    }
     let before =
         bincode::serialize(&state).expect("pre-exhaustion operation state should serialize");
 

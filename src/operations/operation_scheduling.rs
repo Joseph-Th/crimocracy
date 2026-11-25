@@ -226,10 +226,9 @@ pub(crate) fn find_busy_participant(
 }
 
 /// Begin-time availability is stricter than authorization-time interval projection. A future
-/// follow-up may be authorized exactly at another operation's projected end because the earlier
-/// decision might be resolved before that boundary. Once the follow-up actually tries to begin,
-/// however, any still-pending operation decision remains an active personnel commitment even when
-/// its unshifted half-open window ends exactly at this minute.
+/// follow-up may be authorized exactly at another operation's projected end, but the crew is
+/// released only when that earlier operation actually completes or aborts. An unresolved decision
+/// or a due operation whose resolution is blocked still owns its participants after that boundary.
 pub(crate) fn find_busy_participant_for_begin(
     registry: &Registry,
     state: &AppState,
@@ -270,7 +269,10 @@ pub(crate) fn find_busy_participant_for_begin(
                     .active_operations_for_participant(*participant)
                     .find(|other| {
                         other.id() != operation
-                            && other.status() == OperationStatus::AwaitingDecision
+                            && matches!(
+                                other.status(),
+                                OperationStatus::InProgress | OperationStatus::AwaitingDecision
+                            )
                     })
                     .map(|other| (*participant, other.id()))
             })

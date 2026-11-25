@@ -15,8 +15,26 @@ struct OperationInvariantContext {
 
 pub(super) fn validate_operations(state: &AppState) -> Result<(), StateValidationError> {
     let mut context = OperationInvariantContext::default();
+    let mut live_by_participant = BTreeMap::new();
     for operation in state.operations.operations() {
         validate_operation(state, operation, &mut context)?;
+        // A projected end is not a terminal event. Even disjoint scheduled windows cannot
+        // justify two simultaneously live commitments; authorized reservations remain eligible
+        // to queue behind either an in-progress or a decision-blocked operation.
+        if matches!(
+            operation.status(),
+            OperationStatus::InProgress | OperationStatus::AwaitingDecision
+        ) {
+            for participant in operation.participants() {
+                if let Some(first) = live_by_participant.insert(participant, operation.id()) {
+                    return Err(StateValidationError::ActiveOperationParticipantOverlap {
+                        participant,
+                        first,
+                        second: operation.id(),
+                    });
+                }
+            }
+        }
     }
     Ok(())
 }

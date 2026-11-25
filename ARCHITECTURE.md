@@ -641,6 +641,9 @@ restore_save(registry, envelope) ─► format check → schema check → conten
 - Restore re-derives cross-record rules that a rebuilt set index cannot prove by itself: operation
   participant booking exclusivity, one active investigation lead seat per investigator, one
   non-retired enterprise kind/location slot, and globally monotone report chronology.
+  Authorized operations reserve projected windows, but live work owns its crew until actual
+  completion or abort, even after its scheduled resolution time. Structural validation rejects
+  multiple live commitments for one participant independently of projected-window overlap.
 - Missing future-affecting values are not silently defaulted to make old data load.
 - Compatibility policy is in [`STATUS.md`](STATUS.md): current-version only, no implicit migration.
 - Core systems do not perform implicit filesystem IO (`src/core/persistence.rs` returns data; adapters do IO).
