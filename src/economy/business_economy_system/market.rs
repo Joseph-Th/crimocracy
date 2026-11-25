@@ -116,6 +116,28 @@ fn local_peers<'a>(
         .filter_map(move |peer| competition(business.kind(), peer.kind()).map(|kind| (peer, kind)))
 }
 
+/// The known condition of a productive storefront; closed or terminal books
+/// do not contribute to future local sales.
+fn operating_condition(state: &AppState, business: BusinessId) -> Option<bool> {
+    let economy = state.economy().get_business_economy(business)?;
+    (economy.status() == BusinessOperatingStatus::Active && economy.next_cycle_at().is_some())
+        .then(|| economy.is_disrupted(state.now()))
+}
+
+fn market_snapshot(
+    state: &AppState,
+    record: &BusinessRecord,
+    mut condition: impl FnMut(&BusinessRecord) -> Option<bool>,
+) -> MarketSnapshot {
+    let mut snapshot = MarketSnapshot::default();
+    for (peer, kind) in local_peers(state, record) {
+        if let Some(disrupted) = condition(peer) {
+            snapshot.add_competitor(kind, disrupted);
+        }
+    }
+    snapshot
+}
+
 /// The subject is counted hypothetically as open even when forecasting a resumption.
 /// Other stores with no established operating books, a suspended economy, or an exhausted
 /// recurrence cannot compete for future sales. Capture facts before the same-minute cohort settles.
@@ -124,18 +146,9 @@ pub(super) fn resolve_market_snapshot(
     business: BusinessId,
 ) -> Result<MarketSnapshot, BusinessEconomyError> {
     let record = super::validate_business(state, business)?;
-    let mut snapshot = MarketSnapshot::default();
-    for (peer, kind) in local_peers(state, record) {
-        let Some(economy) = state.economy().get_business_economy(peer.id()) else {
-            continue;
-        };
-        if economy.status() != BusinessOperatingStatus::Active || economy.next_cycle_at().is_none()
-        {
-            continue;
-        }
-        snapshot.add_competitor(kind, economy.is_disrupted(state.now()));
-    }
-    Ok(snapshot)
+    Ok(market_snapshot(state, record, |peer| {
+        operating_condition(state, peer.id())
+    }))
 }
 
 /// Revenue an owner's *other* productive storefronts would lose if this suspended
@@ -296,16 +309,13 @@ pub(super) fn forecast_market_snapshot(
     state: &AppState,
     record: &BusinessRecord,
 ) -> MarketSnapshot {
-    let mut snapshot = MarketSnapshot::default();
-    for (_, kind) in local_peers(state, record) {
-        snapshot.add_competitor(kind, false);
-    }
-    snapshot
+    market_snapshot(state, record, |_| Some(false))
 }
 
 /// Aggregate the forecast additional daily revenue across the planner's own active
-/// businesses if the target loses capacity. Only public directory peers enter the
-/// counterfactual; private foreign books or damage are never consulted.
+/// businesses if a foreign target loses capacity. Use actual operating conditions for
+/// the planner's own portfolio and public directory assumptions for foreign peers.
+/// Both sides of the counterfactual use the canonical settlement calculation.
 pub(crate) fn forecast_competitor_disruption_gain(
     registry: &Registry,
     state: &AppState,
@@ -313,34 +323,44 @@ pub(crate) fn forecast_competitor_disruption_gain(
     active_stakes: &[BusinessId],
 ) -> Result<i128, BusinessEconomyError> {
     let target_record = super::validate_business(state, target)?;
-    let damage_weight = registry.business_disruption().gross_basis_points();
     let mut total = 0_i128;
     for &stake in active_stakes {
         let record = super::validate_business(state, stake)?;
-        if stake == target || record.neighborhood() != target_record.neighborhood() {
+        if record.owner() == target_record.owner()
+            || record.neighborhood() != target_record.neighborhood()
+        {
             continue;
         }
         let Some(kind) = competition(record.kind(), target_record.kind()) else {
             continue;
         };
-        let healthy = forecast_market_snapshot(state, record);
+        let Some(disrupted) = operating_condition(state, stake) else {
+            continue;
+        };
+        let healthy = market_snapshot(state, record, |peer| {
+            if peer.owner() == record.owner() {
+                operating_condition(state, peer.id())
+            } else {
+                Some(false)
+            }
+        });
         let mut damaged = healthy;
         match kind {
             Competition::Direct => damaged.healthy_competitors -= 1,
             Competition::Related => damaged.related_healthy_competitors -= 1,
         }
         damaged.add_competitor(kind, true);
-        let improvement = damaged.gross_basis_points(false, damage_weight)
-            - healthy.gross_basis_points(false, damage_weight);
-        let gross = super::resolve_business_gross_potential(registry, state, stake)?;
+        // Operating costs are identical in both forecasts, so the difference in
+        // net settlements is also the difference in gross receipts, including rounding.
+        let before = forecast_net_for_market(registry, state, record, healthy, disrupted)?;
+        let after = forecast_net_for_market(registry, state, record, damaged, disrupted)?;
         let cycle = registry
             .get_business(record.kind())
             .economics()
             .cycle()
             .as_minutes();
-        total += i128::from(gross.cents()) * i128::from(improvement) * i128::from(DAY_MINUTES)
-            / i128::from(cycle)
-            / i128::from(FULL);
+        total += (i128::from(after.cents()) - i128::from(before.cents())) * i128::from(DAY_MINUTES)
+            / i128::from(cycle);
     }
     Ok(total)
 }

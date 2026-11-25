@@ -221,6 +221,57 @@ fn finish_operation(registry: &Registry, state: &mut AppState, id: crate::core::
 }
 
 #[test]
+fn rival_market_forecast_accounts_for_damage_to_its_own_stake_not_foreign_damage() {
+    use crate::economy::business_economy_system::{
+        resolve_business_current_gross, validate_disrupt_business_economy,
+    };
+
+    let Fixture {
+        registry,
+        mut state,
+        rival,
+        competitor,
+        ..
+    } = fixture();
+    let stake = state
+        .world()
+        .businesses_owned_by_organization(rival)
+        .next()
+        .unwrap()
+        .id();
+    let healthy_gain =
+        forecast_competitor_disruption_gain(&registry, &state, competitor, &[stake]).unwrap();
+    validate_disrupt_business_economy(&registry, &state, stake)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let before = resolve_business_current_gross(&registry, &state, stake).unwrap();
+    let forecast =
+        forecast_competitor_disruption_gain(&registry, &state, competitor, &[stake]).unwrap();
+
+    // With only two local shops, the public healthy-competitor assumption is true
+    // before the hypothetical attack. Compare with the actual economy after it.
+    validate_disrupt_business_economy(&registry, &state, competitor)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let after = resolve_business_current_gross(&registry, &state, stake).unwrap();
+    let cycle = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .cycle();
+    let expected = i128::from(after.cents() - before.cents()) * i128::from(DAY_MINUTES)
+        / i128::from(cycle.as_minutes());
+    assert_eq!(forecast, expected);
+    assert!(forecast > 0 && forecast < healthy_gain);
+    assert_eq!(
+        forecast_competitor_disruption_gain(&registry, &state, competitor, &[stake]).unwrap(),
+        forecast,
+        "private foreign disruption cannot change the planner's forecast"
+    );
+}
+
+#[test]
 fn refused_protection_prioritizes_the_refusing_owner_not_other_ward_businesses() {
     use crate::decisions::DecisionResponse;
     use crate::decisions::decision_system::{
@@ -698,7 +749,35 @@ fn paid_rival_crew_can_pressure_undefended_shops_without_active_rackets_or_compe
         }),
         "two named people cannot project enough criminal force"
     );
-    for index in 0..3 {
+    let mut office_only = state.clone();
+    for index in 0..4 {
+        insert_character(
+            &mut office_only,
+            CharacterDraft {
+                name: format!("Raider Administrator {index}"),
+                organization: Some(raiders),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([(CapabilityKind::Management, rating(70))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    }
+    let office_tick = next_day(&registry, &mut office_only);
+    assert!(
+        office_tick.autonomous_operations.iter().all(|id| {
+            office_only
+                .operations()
+                .get_operation(*id)
+                .unwrap()
+                .responsible_organization()
+                != raiders
+        }),
+        "a payroll of administrators cannot create territorial fighting strength"
+    );
+    for index in 0..4 {
         insert_character(
             &mut state,
             CharacterDraft {

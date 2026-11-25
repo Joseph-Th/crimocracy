@@ -30,7 +30,7 @@ use crate::registry::Registry;
 use crate::reputation::{AudienceKind, reputation_system::resolve_score};
 use crate::world::organization_pressure::public_prominence_tier;
 use crate::world::territory_conflict::{
-    DEFENSIVE_ADVANTAGE, district_of_racket, local_defensive_force,
+    DEFENSIVE_ADVANTAGE, available_named_enforcers, district_of_racket, local_defensive_force,
 };
 use crate::world::{AutonomyLevel, BusinessKind, BusinessOwner, OrganizationKind};
 use std::cmp::Reverse;
@@ -136,7 +136,7 @@ fn crew(
 }
 
 /// Criminal storefront owners cannot shed every local racket and retain its protection for
-/// free. A rival with an operating racket or a substantial paid named crew can send
+/// free. A rival with an operating racket or substantial available named muscle can send
 /// personnel to pressure an under-defended shop, even without a competing local business.
 /// A local foothold carries full strength; projecting from elsewhere costs one associate.
 /// The defender's actual local operating force and available enforcers deter predation;
@@ -224,22 +224,11 @@ fn choose_plan<'r>(
             *force_by_district.entry(district).or_insert(0_u32) += u32::from(racket.associates());
         }
     }
-    // A gang whose rackets are temporarily closed can still send its *named* paid
-    // organization against a competitor. Do not require a profitable racket before
-    // a rival is capable of hostile operations; detained members contribute nothing.
-    // Actual scouting and sabotage still require available trained characters.
-    let named_force = state
-        .world()
-        .characters_in_organization(organization)
-        .filter(|member| {
-            state
-                .legal()
-                .active_arrest_for_character(member.id())
-                .is_none()
-        })
-        .count()
-        .try_into()
-        .unwrap_or(u32::MAX);
+    // A gang whose rackets are temporarily closed can still project its available
+    // named enforcers. Use the territory owner's same qualification as defenders;
+    // office staff and unavailable members cannot substitute for street muscle.
+    let named_force =
+        u32::try_from(available_named_enforcers(state, organization)).unwrap_or(u32::MAX);
     let strongest_force = force_by_district
         .values()
         .copied()
@@ -439,6 +428,10 @@ fn choose_plan<'r>(
         ));
     }
     candidates.sort_unstable_by_key(|item| (item.0, item.1, item.2, item.3));
+    // Crew feasibility depends on the operation kind and manager, not the target.
+    // The whole selection is read-only, so even a failed booking check can be
+    // reused while considering alternate storefronts.
+    let mut crews = BTreeMap::new();
     for (_, _, _, id, name, kind) in candidates {
         let target = EntityRef::Business(id);
         let objective = if kind == OperationKind::Surveillance {
@@ -447,32 +440,39 @@ fn choose_plan<'r>(
             debug_assert_eq!(kind, OperationKind::Sabotage);
             OperationObjective::DisruptBusiness { target }
         };
+        let mut intelligence = None;
         for manager in managers {
-            let Some((leader, roles)) =
-                crew(registry, state, organization, *manager, kind, scheduled_for)
+            let Some((leader, roles)) = crews
+                .entry((kind, *manager))
+                .or_insert_with(|| {
+                    crew(registry, state, organization, *manager, kind, scheduled_for)
+                })
+                .as_ref()
             else {
                 continue;
             };
-            let intelligence = planning_information(
-                registry,
-                state,
-                organization,
-                kind,
-                &objective,
-                scheduled_for,
-            )
-            .into_values()
-            .map(|(id, _)| id)
-            .collect();
+            let intelligence = intelligence.get_or_insert_with(|| {
+                planning_information(
+                    registry,
+                    state,
+                    organization,
+                    kind,
+                    &objective,
+                    scheduled_for,
+                )
+                .into_values()
+                .map(|(id, _)| id)
+                .collect::<BTreeSet<_>>()
+            });
             let draft = OperationDraft {
                 title: format!("{}: {name}", registry.get_operation(kind).display_name()),
                 kind,
                 responsible_organization: organization,
-                leader,
+                leader: *leader,
                 objective: objective.clone(),
                 approach: OperationApproach::Covert,
-                roles,
-                intelligence,
+                roles: roles.clone(),
+                intelligence: intelligence.clone(),
                 constraints: Vec::new(),
                 // NPCs must not create unresolved player-style leadership decisions.
                 // Normal exposure, police arrivals and criminal evidence still apply.

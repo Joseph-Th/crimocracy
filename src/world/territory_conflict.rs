@@ -61,24 +61,11 @@ pub fn active_district_force(
         .sum()
 }
 
-/// Street muscle is geographically finite. Associates defend only the ward
-/// where their racket operates. Capable named members can cover other wards,
-/// but must divide their attention across the organization's active commercial
-/// districts and active racket posts rather than guarding every business at
-/// full strength from anywhere in the city. People actually executing an
-/// operation (including a decision pause) cannot defend another location.
-/// Merely authorizing future work does not remove current defensive capacity.
-///
-/// The allocation is deterministic and recomputed from live world state:
-/// sorted district IDs receive the remainder when named muscle cannot be
-/// divided evenly. It is not an extra mutable staffing or territory currency.
-pub fn local_defensive_force(
-    state: &AppState,
-    organization: OrganizationId,
-    district: NeighborhoodId,
-) -> u32 {
-    let active = active_district_force(state, organization, district);
-    let named = state
+/// Named muscle available for either defense or projecting force. Administrative
+/// headcount, detained members, and personnel already in the field do not add
+/// territorial fighting capacity.
+pub(crate) fn available_named_enforcers(state: &AppState, organization: OrganizationId) -> usize {
+    state
         .world()
         .characters_in_organization(organization)
         .filter(|member| {
@@ -105,7 +92,27 @@ pub fn local_defensive_force(
                         .is_some_and(|rating| rating.value() >= 60)
                 })
         })
-        .count();
+        .count()
+}
+
+/// Street muscle is geographically finite. Associates defend only the ward
+/// where their racket operates. Capable named members can cover other wards,
+/// but must divide their attention across the organization's active commercial
+/// districts and active racket posts rather than guarding every business at
+/// full strength from anywhere in the city. People actually executing an
+/// operation (including a decision pause) cannot defend another location.
+/// Merely authorizing future work does not remove current defensive capacity.
+///
+/// The allocation is deterministic and recomputed from live world state:
+/// sorted district IDs receive the remainder when named muscle cannot be
+/// divided evenly. It is not an extra mutable staffing or territory currency.
+pub fn local_defensive_force(
+    state: &AppState,
+    organization: OrganizationId,
+    district: NeighborhoodId,
+) -> u32 {
+    let active = active_district_force(state, organization, district);
+    let named = available_named_enforcers(state, organization);
     let mut districts = BTreeSet::new();
     for racket in state.enterprises().active_for_organization(organization) {
         if let Some(ward) = district_of_racket(state, racket.location()) {
