@@ -38,7 +38,7 @@ use commercial_standing::{business_district_standings, political_district_rows};
 pub use commercial_standing::{political_business_progress, political_district_progress};
 pub(crate) use retirement::retirement_settlement_matches;
 use retirement::{ValidatedRetirementSettlement, prepare_retirement_payment, retirement_members};
-use underboss::{institutional_reach, operating_reserve, senior_command_count};
+use underboss::{institutional_reach, operating_reserve, racket_standing, senior_command_count};
 
 /// These are ending choices, not automatic achievements. Variant order is persistent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,17 +299,6 @@ fn mature_territorial_majority(
             < mature_count
 }
 
-fn recent_racket_net(state: &AppState, racket: &crate::enterprises::EnterpriseRecord) -> i128 {
-    state
-        .enterprises()
-        .cycles_for(racket.id())
-        .rev()
-        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
-        .filter(|cycle| cycle.occurred_at() <= state.now())
-        .map(|cycle| i128::from(cycle.net_cash().cents()))
-        .sum()
-}
-
 /// Criminal proceeds earned recently, not money from property ownership or sales.
 /// Past settlements remain relevant when a racket has been shut down or retired.
 fn retirement_racket_record(state: &AppState, owner: OrganizationId) -> (i128, usize) {
@@ -335,73 +324,6 @@ fn retirement_racket_record(state: &AppState, owner: OrganizationId) -> (i128, u
         }
     }
     (net, profitable)
-}
-
-fn established_racket(state: &AppState, racket: &crate::enterprises::EnterpriseRecord) -> bool {
-    if !established_for(
-        state.now(),
-        racket.established_at(),
-        VICTORY_ESTABLISHMENT_DAYS,
-    ) || !racket
-        .last_cycle_at()
-        .is_some_and(|at| settled_recently(state.now(), at))
-    {
-        return false;
-    }
-    state
-        .enterprises()
-        .cycles_for(racket.id())
-        .rev()
-        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
-        .filter(|cycle| cycle.occurred_at() <= state.now() && cycle.net_cash() > Money::ZERO)
-        .take(VICTORY_PROFITABLE_CYCLES)
-        .count()
-        == VICTORY_PROFITABLE_CYCLES
-}
-
-/// The current captain must have personally directed a recent profitable run.
-/// Reassigning a mature racket cannot confer an instant record of local command.
-fn proven_racket_captain(state: &AppState, racket: &crate::enterprises::EnterpriseRecord) -> bool {
-    state
-        .enterprises()
-        .cycles_for(racket.id())
-        .rev()
-        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
-        .filter(|cycle| {
-            cycle.occurred_at() <= state.now()
-                && racket.authority_for_cycle_at(cycle.occurred_at()).manager == racket.manager()
-                && cycle.net_cash() > Money::ZERO
-        })
-        .take(VICTORY_PROFITABLE_CYCLES)
-        .count()
-        == VICTORY_PROFITABLE_CYCLES
-}
-
-/// Extra people hired today do not confer instant territorial strength.
-/// The current captain must have directed this actual complement through
-/// twenty profitable settlements in the most recent thirty days.
-fn proven_racket_associates(
-    state: &AppState,
-    racket: &crate::enterprises::EnterpriseRecord,
-) -> u64 {
-    let proven_cycles = state
-        .enterprises()
-        .cycles_for(racket.id())
-        .rev()
-        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
-        .filter(|cycle| {
-            cycle.occurred_at() <= state.now()
-                && cycle.net_cash() > Money::ZERO
-                && racket.associates_at(cycle.occurred_at()) >= racket.associates()
-                && racket.authority_for_cycle_at(cycle.occurred_at()).manager == racket.manager()
-        })
-        .take(VICTORY_PROFITABLE_CYCLES)
-        .count();
-    if proven_cycles == VICTORY_PROFITABLE_CYCLES {
-        u64::from(racket.associates())
-    } else {
-        0
-    }
 }
 
 pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress, VictoryError> {
@@ -524,30 +446,26 @@ pub fn progress_and_political_districts(
         .enterprises_for_organization(organization)
     {
         if let Some(district) = racket_district(racket) {
-            let recent_net = recent_racket_net(state, racket);
+            let standing = racket_standing(state, racket);
             let (net, count) = rackets_by_district.entry(district).or_default();
-            let established =
-                racket.status() == EnterpriseStatus::Active && established_racket(state, racket);
-            *net += if established {
-                recent_net
+            *net += if standing.established {
+                standing.net
             } else {
-                recent_net.min(0)
+                standing.net.min(0)
             };
-            if established && recent_net > 0 {
+            if standing.established && standing.net > 0 {
                 *count += 1;
-                if proven_racket_captain(state, racket) {
+                if standing.proven_associates > 0 {
                     captains_by_district
                         .entry(district)
                         .or_default()
                         .insert(racket.manager());
-                    let proven_workers = proven_racket_associates(state, racket);
-                    *mature_workers_by_district.entry(district).or_default() += proven_workers;
-                    if proven_workers > 0 {
-                        mature_kinds_by_district
-                            .entry(district)
-                            .or_default()
-                            .insert(racket.kind());
-                    }
+                    *mature_workers_by_district.entry(district).or_default() +=
+                        standing.proven_associates;
+                    mature_kinds_by_district
+                        .entry(district)
+                        .or_default()
+                        .insert(racket.kind());
                 }
             }
         }

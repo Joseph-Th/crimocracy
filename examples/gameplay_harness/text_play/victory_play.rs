@@ -158,7 +158,7 @@ impl Session<'_> {
             UNDERBOSS_LIQUID_RUNWAY_DAYS, UNDERBOSS_OPERATING_RUNWAY_DAYS, standing.underboss_operating_buffer.cents(),
             standing.campaign_daily_payroll.cents(), standing.underboss_campaign_buffer.cents()).unwrap();
         out.push_str("    Both route income figures deduct recent net losses from ventures that are not eligible to contribute positive mature earnings, even after closure or title transfer.\n");
-        out.push_str("    A captain must direct 20 profitable settlements in 30 days; associate strength must have operated for 20 profitable cycles. Named personnel lead rank-and-file workers, whose compensation is paid through racket operating costs.\n");
+        out.push_str("    A captain must direct 20 profitable settlements in 30 days. Proven associate strength is the largest staffing complement demonstrated in at least 20 such settlements, capped by current staffing; extra hires need their own operating proof. Named personnel lead rank-and-file workers, whose compensation is paid through racket operating costs.\n");
         writeln!(out, "  Underboss rackets require 90 days of operation; mayoral businesses require 1080 days of ownership. Both require 20 profitable settlements in the last 30 days, a settlement within 7 days, and 30-day net income sufficient for one crew member's daily wage ({} cents/day).",
             self.registry.upkeep().per_member_daily().cents()).unwrap();
         out.push_str("Reaching a threshold does not end sandbox play until you claim the victory.");

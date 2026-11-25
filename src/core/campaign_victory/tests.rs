@@ -2091,8 +2091,8 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         ready.required_underboss_districts
     );
     assert!(ready.racket_self_sufficient);
-    // New hires need operating history; buying a field crew after day 90
-    // cannot instantly transform the same mature income into territorial force.
+    // New hires need operating history, but expanding an established field crew
+    // must not erase the strength its existing workers have already demonstrated.
     let mut instant_hiring =
         restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     let home_expansion = instant_hiring
@@ -2120,12 +2120,65 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
         instant.established_racket_districts,
         ready.established_racket_districts
     );
-    assert_eq!(instant.workforce_ready_districts, 2);
+    assert_eq!(instant.mature_associates, ready.mature_associates);
     assert_eq!(
-        validate_claim_victory(&registry, &instant_hiring, VictoryPath::CityUnderboss).err(),
-        Some(VictoryError::UnderbossNotReady)
+        instant.workforce_ready_districts,
+        ready.workforce_ready_districts
     );
     validate_state_against_registry(&registry, &instant_hiring).unwrap();
+    let mut instant_hiring =
+        restore_save(&registry, build_save(&registry, &instant_hiring).unwrap()).unwrap();
+    assert_eq!(progress(&registry, &instant_hiring).unwrap(), instant);
+    for earned in 1..=VICTORY_PROFITABLE_CYCLES {
+        instant_hiring.advance_clock(crate::core::time::DAY_DURATION);
+        let plan = decide_enterprise_cycle(
+            &registry,
+            &instant_hiring,
+            home_expansion,
+            EnterpriseCycleRandomness::new(
+                0,
+                EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+            ),
+        )
+        .unwrap();
+        let cycle = validate_enterprise_cycle_plan(&instant_hiring, plan)
+            .unwrap()
+            .commit(&mut instant_hiring)
+            .unwrap();
+        assert!(
+            instant_hiring
+                .enterprises()
+                .get_cycle(cycle)
+                .unwrap()
+                .net_cash()
+                > Money::ZERO
+        );
+        let racket = instant_hiring
+            .enterprises()
+            .get_enterprise(home_expansion)
+            .unwrap();
+        assert_eq!(
+            racket_standing(&instant_hiring, racket).proven_associates,
+            if earned < VICTORY_PROFITABLE_CYCLES {
+                12
+            } else {
+                13
+            },
+            "the additional worker earns credit only after twenty profitable cycles"
+        );
+    }
+    validate_staff_enterprise(&instant_hiring, home_expansion, 11)
+        .unwrap()
+        .commit(&mut instant_hiring)
+        .unwrap();
+    let racket = instant_hiring
+        .enterprises()
+        .get_enterprise(home_expansion)
+        .unwrap();
+    assert_eq!(
+        racket_standing(&instant_hiring, racket).proven_associates,
+        11
+    );
     // Reassigning one established district's second racket to its first
     // captain leaves the same profits, payroll, membership and territory,
     // but destroys the independent local command structure.

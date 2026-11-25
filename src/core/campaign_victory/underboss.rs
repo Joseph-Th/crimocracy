@@ -4,20 +4,76 @@
 
 use super::{
     UNDERBOSS_CONTACT_DAYS, UNDERBOSS_OPERATING_RUNWAY_DAYS, UNDERBOSS_SENIOR_MANAGEMENT_RATING,
-    VictoryError, established_for,
+    VICTORY_ESTABLISHMENT_DAYS, VICTORY_PROFITABLE_CYCLES, VictoryError, established_for,
+    recent_income_start, settled_recently,
 };
 use crate::contacts::ContactKind;
 use crate::contacts::contact_system::contact_is_currently_usable;
 use crate::core::id::{CharacterId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::DAY_MINUTES;
-use crate::enterprises::EnterpriseRecord;
 use crate::enterprises::enterprise_execution::{
     EnterpriseProjectionStaffing, manager_workload, resolve_enterprise_financial_projection,
 };
+use crate::enterprises::{EnterpriseRecord, EnterpriseStatus};
+use crate::finance::Money;
 use crate::registry::Registry;
 use crate::world::{AutonomyLevel, CapabilityKind};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Recent earned income, operating maturity and demonstrated staffing capacity are
+/// derived from the same settlement window. No separate workforce credit is stored.
+pub(super) struct RacketStanding {
+    pub(super) net: i128,
+    pub(super) established: bool,
+    pub(super) proven_associates: u64,
+}
+
+pub(super) fn racket_standing(state: &AppState, racket: &EnterpriseRecord) -> RacketStanding {
+    let now = state.now();
+    let maturity_possible = racket.status() == EnterpriseStatus::Active
+        && established_for(now, racket.established_at(), VICTORY_ESTABLISHMENT_DAYS)
+        && racket
+            .last_cycle_at()
+            .is_some_and(|at| settled_recently(now, at));
+    let cutoff = recent_income_start(now);
+    let mut net = 0_i128;
+    let mut profitable = 0;
+    let mut commanded_workforces = Vec::new();
+    for cycle in state
+        .enterprises()
+        .cycles_for(racket.id())
+        .rev()
+        .take_while(|cycle| cycle.occurred_at().as_minutes() > cutoff)
+        .filter(|cycle| cycle.occurred_at() <= now)
+    {
+        net += i128::from(cycle.net_cash().cents());
+        if maturity_possible && cycle.net_cash() > Money::ZERO {
+            profitable += 1;
+            if racket.authority_for_cycle_at(cycle.occurred_at()).manager == racket.manager() {
+                commanded_workforces.push(racket.associates_at(cycle.occurred_at()));
+            }
+        }
+    }
+    // The current captain must have demonstrated a workforce at least this
+    // large in twenty profitable settlements. A hire adds unproven capacity,
+    // not a penalty to the existing workforce; a layoff cannot count workers
+    // that are no longer employed. The historical measure is aggregate staffing,
+    // not individual employment tenure. The twentieth-largest complement is
+    // exactly the largest size supported by the required number of settlements.
+    let proven_associates = commanded_workforces
+        .len()
+        .checked_sub(VICTORY_PROFITABLE_CYCLES)
+        .map_or(0, |index| {
+            let (_, proven, _) = commanded_workforces.select_nth_unstable(index);
+            u64::from((*proven).min(racket.associates()))
+        });
+    RacketStanding {
+        net,
+        established: maturity_possible && profitable >= VICTORY_PROFITABLE_CYCLES,
+        proven_associates,
+    }
+}
 
 /// Longstanding, currently usable civic relationships, not purchased reputation.
 /// Police contacts are optional; an organization need not cultivate law enforcement.
