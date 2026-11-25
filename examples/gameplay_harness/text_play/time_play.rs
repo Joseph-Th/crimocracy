@@ -17,6 +17,29 @@ fn bounded_advance_span(
 }
 
 impl Session<'_> {
+    fn own_suspended_assets(&self) -> BTreeSet<EntityRef> {
+        let storefronts = self
+            .state
+            .world()
+            .businesses_owned_by_organization(self.player)
+            .filter_map(|business| {
+                self.state
+                    .economy()
+                    .get_business_economy(business.id())
+                    .filter(|books| {
+                        books.status() == crimocracy::economy::BusinessOperatingStatus::Suspended
+                    })
+                    .map(|_| EntityRef::Business(business.id()))
+            });
+        let rackets = self
+            .state
+            .enterprises()
+            .enterprises_for_organization(self.player)
+            .filter(|racket| racket.status() == EnterpriseStatus::Suspended)
+            .map(|racket| EntityRef::Enterprise(racket.id()));
+        storefronts.chain(rackets).collect()
+    }
+
     pub(super) fn execute_advance(
         &mut self,
         duration: &str,
@@ -46,7 +69,10 @@ impl Session<'_> {
         let mut deferred_releases = 0_u32;
         let mut deferred_contracts = 0_usize;
         let mut deferred_departures = 0_usize;
-        let mut deferred_shutdowns = 0_u32;
+        // Player assets cannot autonomously reopen or retire during advancement.
+        // Compare the endpoints instead of guessing every possible shutdown cause
+        // from individual tick fields or rescanning the player's holdings every minute.
+        let initially_suspended = uninterrupted.then(|| self.own_suspended_assets());
         let mut deferred_losses = 0_u32;
         let mut deferred_payroll = 0_u32;
         let mut deferred_operations = 0_u32;
@@ -176,9 +202,6 @@ impl Session<'_> {
                 deferred_releases += u32::from(own_release);
                 deferred_contracts += own_contract_expirations;
                 deferred_departures += own_payroll_departures;
-                deferred_shutdowns += u32::from(
-                    own_business_suspended || own_managerial_shutdown || own_racket_suspended,
-                );
                 deferred_losses += u32::from(own_new_racket_loss);
                 deferred_payroll += u32::from(own_payroll_shortfall);
                 deferred_operations += u32::from(operation_ended);
@@ -241,7 +264,11 @@ impl Session<'_> {
         if let Some(reason) = reason {
             writeln!(out, "Paused: {reason}.").unwrap();
         }
-        if uninterrupted {
+        if let Some(initially_suspended) = initially_suspended {
+            let deferred_shutdowns = self
+                .own_suspended_assets()
+                .difference(&initially_suspended)
+                .count();
             writeln!(
                 out,
                 "Uninterrupted review: {deferred_custody} custody event(s), {deferred_releases} release(s), {deferred_contracts} freelance contract end(s), {deferred_departures} unpaid-wage departure(s), {deferred_shutdowns} shutdown event(s), {deferred_losses} new loss streak(s), {deferred_payroll} payroll shortfall(s), {deferred_operations} completed/aborted operation minute(s), {deferred_urgent} priority-report minute(s). All events were simulated. Review 'reports', 'people', 'freelancers', 'counsel', 'recovery' and 'accounts'."
@@ -272,6 +299,28 @@ impl Session<'_> {
 mod tests {
     use super::*;
     use crimocracy::core::time::SimTime;
+
+    #[test]
+    fn uninterrupted_advance_counts_custody_shutdown_once() {
+        let registry = crimocracy::build_registry();
+        let mut session =
+            Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small)
+                .unwrap();
+        let result = session.execute("advance 7d uninterrupted").unwrap().0;
+        assert!(result.contains("1 custody event(s)"), "{result}");
+        assert!(result.contains("1 release(s)"), "{result}");
+        assert!(
+            session
+                .state
+                .enterprises()
+                .enterprises_for_organization(session.player)
+                .any(|racket| racket.status() == EnterpriseStatus::Suspended)
+        );
+        assert!(result.contains("1 shutdown event(s)"), "{result}");
+
+        let next = session.execute("advance 1m uninterrupted").unwrap().0;
+        assert!(next.contains("0 shutdown event(s)"), "{next}");
+    }
 
     #[test]
     fn unfunded_payroll_interrupts_once_per_boundary_and_respects_preference() {

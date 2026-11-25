@@ -385,7 +385,11 @@ finite clock, reporting actual minutes advanced instead of rejecting after
 partial progress. Explicit `advance 30d uninterrupted` suppresses optional
 attention, custody and operation-completion interruptions but still runs every
 canonical minute, halts for pending leadership decisions or terminal states,
-and summarizes deferred events. Exact-save comparison against 180 individual
+and summarizes deferred events. The shutdown tally counts distinct newly suspended
+player storefronts and rackets, including custody, dependent-front closures, payroll
+departures, and territorial displacement. The generated seed-12 seven-day regression
+checks custody suspension and verifies that the next advance does not recount it.
+Exact-save comparison against 180 individual
 production ticks proves the longer interactive command cannot skip simulation.
 Operation plan delays and deadlines independently retain their seven-day cap. Enterprise succession tests exercise active and suspended transfers, stale tokens, mandate indexes, historical settlement attribution and exact save restoration. The text client exercises reassignment and preserves the same settlement account and cycle IDs. The management-concentration test checks read-only warnings before investment, after establishment, and after suspension. The leadership brief distinguishes active and suspended rackets, excluding retired
 history still visible in `enterprises`. Treasury tests cover explicit daily
