@@ -11,7 +11,7 @@ use super::{
     planning_information, validate_authorize_operation,
 };
 use crate::core::entity::EntityRef;
-use crate::core::id::{BusinessId, CharacterId, IdKind, OrganizationId};
+use crate::core::id::{BusinessId, CharacterId, IdKind, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, SimTime, is_day_boundary};
 use crate::decisions::decision_system::{recently_refused_protection, rival_pressure_blocked};
@@ -30,7 +30,7 @@ use crate::registry::Registry;
 use crate::reputation::{AudienceKind, reputation_system::resolve_score};
 use crate::world::organization_pressure::public_prominence_tier;
 use crate::world::territory_conflict::{
-    DEFENSIVE_ADVANTAGE, available_named_enforcers, district_of_racket, local_defensive_force,
+    DEFENSIVE_ADVANTAGE, available_named_enforcers, district_of_racket, local_defensive_forces,
 };
 use crate::world::{AutonomyLevel, BusinessKind, BusinessOwner, OrganizationKind};
 use std::cmp::Reverse;
@@ -147,11 +147,14 @@ fn predatory_stake(
     state: &AppState,
     attacker: OrganizationId,
     target: BusinessId,
-    owner: BusinessOwner,
-    force_by_district: &BTreeMap<crate::core::id::NeighborhoodId, u32>,
+    force_by_district: &BTreeMap<NeighborhoodId, u32>,
     strongest_force: u32,
+    defenses: &mut BTreeMap<OrganizationId, BTreeMap<NeighborhoodId, u32>>,
 ) -> i128 {
-    let BusinessOwner::Organization(defender) = owner else {
+    let Some(shop) = state.world().get_business(target) else {
+        return 0;
+    };
+    let BusinessOwner::Organization(defender) = shop.owner() else {
         return 0;
     };
     if defender == attacker
@@ -162,16 +165,18 @@ fn predatory_stake(
     {
         return 0;
     }
-    let Some(shop) = state.world().get_business(target) else {
-        return 0;
-    };
     let district = shop.neighborhood();
     let local_force = force_by_district.get(&district).copied().unwrap_or(0);
     let projected_force = local_force.max(strongest_force.saturating_sub(1));
     // The same finite local defense used for protection demands must deter
     // opportunistic strikes. Using only baseline racket associates here would
     // make extra paid crew and named violent enforcers meaningless to the AI.
-    let visible_defense = local_defensive_force(state, defender, district);
+    let visible_defense = defenses
+        .entry(defender)
+        .or_insert_with(|| local_defensive_forces(state, defender))
+        .get(&district)
+        .copied()
+        .unwrap_or(0);
     if projected_force <= visible_defense.saturating_add(DEFENSIVE_ADVANTAGE) {
         return 0;
     }
@@ -289,6 +294,9 @@ fn choose_plan<'r>(
     let mut candidates = Vec::new();
     let mut gains = BTreeMap::<(_, BusinessKind), i128>::new();
     let mut prominence_by_owner = BTreeMap::<OrganizationId, u8>::new();
+    // The entire candidate search is read-only. Reuse each defender's finite
+    // force allocation across its storefronts instead of rescanning the roster.
+    let mut defenses = BTreeMap::new();
     for (id, name, kind, district) in state.world().public_business_directory() {
         let target_owner = state
             .world()
@@ -317,17 +325,15 @@ fn choose_plan<'r>(
                 forecast_competitor_disruption_gain(registry, state, id, stakes).unwrap_or(0)
             })
         });
-        let predatory_gain = target_owner.map_or(0, |owner| {
-            predatory_stake(
-                registry,
-                state,
-                organization,
-                id,
-                owner,
-                &force_by_district,
-                strongest_force,
-            )
-        });
+        let predatory_gain = predatory_stake(
+            registry,
+            state,
+            organization,
+            id,
+            &force_by_district,
+            strongest_force,
+            &mut defenses,
+        );
         // Rival businesses also have a political reason to oppose a local
         // challenger: displacing an established civic venue can interrupt the
         // commercial constituency behind a public campaign. This requires an

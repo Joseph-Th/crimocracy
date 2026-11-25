@@ -8,6 +8,7 @@ use crate::core::time::SimDuration;
 use crate::economy::BusinessEconomyDraft;
 use crate::economy::business_economy_system::validate_establish_business_economy;
 use crate::finance::finance_system::insert_account;
+use crate::world::territory_conflict::local_defensive_force;
 use crate::world::world_system::{insert_business, insert_character};
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, CapabilityKind, CharacterDraft,
@@ -635,6 +636,201 @@ fn rival_demands_actual_money_and_respects_paid_30_day_protection_after_restore(
     assert_eq!(
         bincode::serialize(&city.state).unwrap(),
         bincode::serialize(&next).unwrap()
+    );
+}
+
+#[test]
+fn latest_protection_history_preserves_each_gangs_terms_across_renewal_and_restore() {
+    use crate::delegation::delegation_system::validate_assign_mandate;
+    use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
+    use crate::enterprises::enterprise_execution::{
+        validate_establish_enterprise, validate_retire_enterprise, validate_suspend_enterprise,
+    };
+    use crate::enterprises::{
+        EnterpriseDraft, EnterpriseKind, EnterpriseLocation, EnterpriseStatus,
+    };
+
+    let (registry, mut city, district) = exposed_city();
+    // Isolate this daily owner from concurrent expansion by the other outfits.
+    city.state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+    crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, &mut city.state)
+        .unwrap();
+    let first = apply_due_protection_demands(&registry, &mut city.state)[0].decision;
+    let DecisionContext::ProtectionDemand(terms) = city
+        .state
+        .decisions()
+        .get_decision(first)
+        .unwrap()
+        .context()
+    else {
+        panic!("expected a protection demand");
+    };
+    assert_eq!(terms.district(), district);
+    let first_gang = terms.attacker();
+    super::super::validate_resolve_decision(
+        &registry,
+        &city.state,
+        first,
+        city.player,
+        DecisionResponse::Reject,
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+
+    // Replace the local coercive footprint through ordinary enterprise operations.
+    // The old gang's refusal remains meaningful even after a different gang demands money.
+    let local: Vec<_> = city
+        .state
+        .enterprises()
+        .enterprises_for_organization(first_gang)
+        .filter(|racket| district_of_racket(&city.state, racket.location()) == Some(district))
+        .filter(|racket| racket.status() != EnterpriseStatus::Retired)
+        .map(|racket| (racket.id(), racket.status()))
+        .collect();
+    for (racket, status) in local {
+        if status == EnterpriseStatus::Active {
+            validate_suspend_enterprise(&city.state, racket)
+                .unwrap()
+                .commit(&mut city.state)
+                .unwrap();
+        }
+        validate_retire_enterprise(&city.state, racket)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    let second_gang = city
+        .rivals
+        .iter()
+        .copied()
+        .find(|rival| *rival != first_gang)
+        .unwrap();
+    let captain = insert_character(
+        &mut city.state,
+        CharacterDraft {
+            name: "Second gang local captain".into(),
+            organization: Some(second_gang),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(100).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let scope = ResponsibilityScope::Neighborhood(district);
+    let mandate = validate_assign_mandate(
+        &city.state,
+        MandateDraft {
+            organization: second_gang,
+            manager: captain,
+            scopes: BTreeSet::from([scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    let owner = FinancialOwner::Organization(second_gang);
+    let cash_account = city
+        .state
+        .finance()
+        .accounts_for(owner)
+        .find(|account| account.kind() == AccountKind::StreetCash)
+        .unwrap()
+        .id();
+    let settlement_account = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_establish_enterprise(
+        &registry,
+        &city.state,
+        EnterpriseDraft {
+            organization: second_gang,
+            kind: EnterpriseKind::Protection,
+            authority: MandateAuthority {
+                mandate,
+                manager: captain,
+                scope,
+            },
+            location: EnterpriseLocation::Neighborhood(district),
+            supporting_businesses: BTreeSet::new(),
+            cash_account,
+            settlement_account,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    city.state.advance_clock(SimDuration::from_minutes(
+        (REFUSAL_COOLDOWN_DAYS * DAY_MINUTES) as u32,
+    ));
+    crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, &mut city.state)
+        .unwrap();
+    let new_offer = apply_due_protection_demands(&registry, &mut city.state);
+    assert_eq!(new_offer.len(), 1);
+    let second = new_offer[0].decision;
+    let second_terms = match city
+        .state
+        .decisions()
+        .get_decision(second)
+        .unwrap()
+        .context()
+    {
+        DecisionContext::ProtectionDemand(terms) => terms,
+        _ => panic!("expected a new protection demand"),
+    };
+    assert_eq!(second_terms.attacker(), second_gang);
+    assert_eq!(second_terms.district(), district);
+    let latest = |state: &AppState, attacker| {
+        state
+            .decisions()
+            .latest_protection_demand(district, attacker)
+            .map(|record| record.id())
+    };
+    assert_eq!(latest(&city.state, None), Some(second));
+    assert_eq!(latest(&city.state, Some(first_gang)), Some(first));
+    assert_eq!(latest(&city.state, Some(second_gang)), Some(second));
+    assert!(recently_refused_protection(
+        &city.state,
+        first_gang,
+        district
+    ));
+    assert!(!rival_pressure_blocked(&city.state, first_gang, district));
+    assert!(rival_pressure_blocked(&city.state, second_gang, district));
+
+    fund_protection_payment(&mut city, second_terms.amount().cents());
+    super::super::validate_resolve_decision(
+        &registry,
+        &city.state,
+        second,
+        city.player,
+        DecisionResponse::Approve,
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(latest(&restored, None), Some(second));
+    assert_eq!(latest(&restored, Some(first_gang)), Some(first));
+    assert_eq!(latest(&restored, Some(second_gang)), Some(second));
+    assert!(recently_refused_protection(&restored, first_gang, district));
+    assert!(rival_pressure_blocked(&restored, second_gang, district));
+    assert!(!rival_pressure_blocked(&restored, first_gang, district));
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
     );
 }
 

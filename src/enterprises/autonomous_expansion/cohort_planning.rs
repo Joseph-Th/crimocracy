@@ -25,7 +25,7 @@ use crate::enterprises::enterprise_execution::{
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseStatus};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
-use crate::world::territory_conflict::{DEFENSIVE_ADVANTAGE, local_defensive_force};
+use crate::world::territory_conflict::{DEFENSIVE_ADVANTAGE, local_defensive_forces};
 use crate::world::territory_influence::{resolve_neighborhood_influence, unique_economic_leader};
 use crate::world::{AutonomyLevel, BusinessRecord, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -418,6 +418,7 @@ impl ProjectedTerritoryInfluence {
                 .get_organization(player)
                 .is_some_and(|org| org.kind() == OrganizationKind::Criminal)
         {
+            let defenses = local_defensive_forces(state, player);
             for shop in state.world().businesses_owned_by_organization(player) {
                 let ward = shop.neighborhood();
                 if counts[&ward].contains_key(&player)
@@ -432,7 +433,7 @@ impl ProjectedTerritoryInfluence {
                 }
                 exposed_commerce_defense
                     .entry(ward)
-                    .or_insert_with(|| local_defensive_force(state, player, ward));
+                    .or_insert_with(|| defenses.get(&ward).copied().unwrap_or(0));
             }
         }
         Self {

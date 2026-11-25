@@ -106,17 +106,16 @@ pub(crate) fn available_named_enforcers(state: &AppState, organization: Organiza
 /// The allocation is deterministic and recomputed from live world state:
 /// sorted district IDs receive the remainder when named muscle cannot be
 /// divided evenly. It is not an extra mutable staffing or territory currency.
-pub fn local_defensive_force(
+pub(crate) fn local_defensive_forces(
     state: &AppState,
     organization: OrganizationId,
-    district: NeighborhoodId,
-) -> u32 {
-    let active = active_district_force(state, organization, district);
+) -> BTreeMap<NeighborhoodId, u32> {
     let named = available_named_enforcers(state, organization);
-    let mut districts = BTreeSet::new();
+    let mut districts = BTreeMap::<NeighborhoodId, u32>::new();
     for racket in state.enterprises().active_for_organization(organization) {
         if let Some(ward) = district_of_racket(state, racket.location()) {
-            districts.insert(ward);
+            let force = districts.entry(ward).or_default();
+            *force = force.saturating_add(u32::from(racket.associates()));
         }
     }
     for shop in state.world().businesses_owned_by_organization(organization) {
@@ -127,16 +126,30 @@ pub fn local_defensive_force(
                 economy.status() == crate::economy::BusinessOperatingStatus::Active
             })
         {
-            districts.insert(shop.neighborhood());
+            districts.entry(shop.neighborhood()).or_default();
         }
     }
-    let Some(rank) = districts.iter().position(|ward| *ward == district) else {
-        return active;
-    };
-    let per_district = named / districts.len();
-    let remainder = named % districts.len();
-    let assigned = per_district + usize::from(rank < remainder);
-    active.saturating_add(u32::try_from(assigned).unwrap_or(u32::MAX))
+    if !districts.is_empty() {
+        let per_district = named / districts.len();
+        let remainder = named % districts.len();
+        for (rank, force) in districts.values_mut().enumerate() {
+            let assigned = per_district + usize::from(rank < remainder);
+            *force = force.saturating_add(u32::try_from(assigned).unwrap_or(u32::MAX));
+        }
+    }
+    districts
+}
+
+/// Single-ward read of the same finite-force projection used by rival planners.
+pub fn local_defensive_force(
+    state: &AppState,
+    organization: OrganizationId,
+    district: NeighborhoodId,
+) -> u32 {
+    local_defensive_forces(state, organization)
+        .get(&district)
+        .copied()
+        .unwrap_or(0)
 }
 
 pub fn suppression_ends_at(state: &AppState, racket: EnterpriseId) -> Option<SimTime> {

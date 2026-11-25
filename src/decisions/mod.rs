@@ -309,6 +309,40 @@ pub struct DecisionState {
     pending_by_recipient: BTreeMap<OrganizationId, BTreeSet<DecisionRequestId>>,
     #[serde(skip)]
     pending_by_context: BTreeMap<DecisionPendingKey, DecisionRequestId>,
+    #[serde(skip)]
+    latest_protection: ProtectionDemandIndex,
+}
+
+/// The latest ward demand governs the ward-wide cooldown; the latest demand
+/// from each gang independently governs its retaliation and paid coverage.
+/// Only immutable request chronology is indexed, so resolving a request
+/// changes its terms without changing either index.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ProtectionDemandIndex {
+    latest: BTreeMap<(NeighborhoodId, Option<OrganizationId>), (SimTime, DecisionRequestId)>,
+}
+
+impl ProtectionDemandIndex {
+    fn include(&mut self, record: &DecisionRequestRecord) {
+        let DecisionContext::ProtectionDemand(context) = record.context() else {
+            return;
+        };
+        let candidate = (record.requested_at(), record.id());
+        for attacker in [None, Some(context.attacker())] {
+            self.latest
+                .entry((context.district(), attacker))
+                .and_modify(|latest| *latest = (*latest).max(candidate))
+                .or_insert(candidate);
+        }
+    }
+
+    fn get(
+        &self,
+        district: NeighborhoodId,
+        attacker: Option<OrganizationId>,
+    ) -> Option<DecisionRequestId> {
+        self.latest.get(&(district, attacker)).map(|(_, id)| *id)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -332,7 +366,9 @@ impl DecisionState {
         self.by_operation.clear();
         self.pending_by_recipient.clear();
         self.pending_by_context.clear();
+        self.latest_protection = ProtectionDemandIndex::default();
         for record in self.records.values() {
+            self.latest_protection.include(record);
             if let Some(operation) = record.context().operation() {
                 self.by_operation
                     .entry(operation)
@@ -413,6 +449,20 @@ impl DecisionState {
             .copied()
     }
 
+    /// Most recent protection demand in a ward, optionally restricted to one gang.
+    /// Pending and terminal decisions both retain their original request ordering.
+    pub(crate) fn latest_protection_demand(
+        &self,
+        district: NeighborhoodId,
+        attacker: Option<OrganizationId>,
+    ) -> Option<&DecisionRequestRecord> {
+        self.latest_protection.get(district, attacker).map(|id| {
+            self.records
+                .get(&id)
+                .expect("protection index must reference a decision")
+        })
+    }
+
     pub(crate) fn decisions(&self) -> impl Iterator<Item = &DecisionRequestRecord> {
         self.records.values()
     }
@@ -452,6 +502,7 @@ impl DecisionState {
                 "Index Uniqueness: decision context already has a pending decision"
             );
         }
+        self.latest_protection.include(&record);
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -507,6 +558,15 @@ impl DecisionState {
             && self.operation_index_is_consistent()
             && self.pending_recipient_index_is_consistent()
             && self.pending_context_index_is_consistent()
+            && self.protection_index_is_consistent()
+    }
+
+    fn protection_index_is_consistent(&self) -> bool {
+        let mut expected = ProtectionDemandIndex::default();
+        for record in self.records.values() {
+            expected.include(record);
+        }
+        self.latest_protection == expected
     }
 
     /// Every decision must occupy the operation and pending projections implied by its record.

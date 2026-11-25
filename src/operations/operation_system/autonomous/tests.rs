@@ -601,16 +601,15 @@ fn abandoned_rackets_expose_clean_stores_to_gangs_without_local_commercial_compe
     let rival_district = district_of_racket(&city.state, rival_racket.location()).unwrap();
     let strongest_force = u32::from(rival_racket.associates());
     let force_by_district = BTreeMap::from([(rival_district, strongest_force)]);
-    let owner = BusinessOwner::Organization(player);
     assert_eq!(
         predatory_stake(
             &registry,
             &city.state,
             rival,
             target,
-            owner,
             &force_by_district,
             strongest_force,
+            &mut BTreeMap::new(),
         ),
         0,
         "an operating home racket keeps its affiliated shops out of predatory reach"
@@ -640,9 +639,9 @@ fn abandoned_rackets_expose_clean_stores_to_gangs_without_local_commercial_compe
             &city.state,
             rival,
             target,
-            owner,
             &force_by_district,
             strongest_force,
+            &mut BTreeMap::new(),
         ) > 0,
         "suspending the last local racket must expose real, still-operating storefronts"
     );

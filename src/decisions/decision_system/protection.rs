@@ -27,7 +27,7 @@ use crate::finance::{
 };
 use crate::registry::Registry;
 use crate::world::territory_conflict::{
-    DEFENSIVE_ADVANTAGE, active_district_force, district_of_racket, local_defensive_force,
+    DEFENSIVE_ADVANTAGE, active_district_force, district_of_racket, local_defensive_forces,
 };
 use crate::world::territory_influence::active_standstill;
 use crate::world::{BusinessOwner, OrganizationKind};
@@ -36,24 +36,6 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const PROTECTION_DAYS: u64 = 30;
 const REFUSAL_COOLDOWN_DAYS: u64 = 7;
 const NEGOTIATION_GRACE_DAYS: u64 = 1;
-
-/// Per-ward cooldowns avoid overlapping demands. Per-gang histories preserve
-/// prior retaliation and paid agreements when another rival demands money.
-fn latest_demand(
-    state: &AppState,
-    district: NeighborhoodId,
-    attacker: Option<OrganizationId>,
-) -> Option<&crate::decisions::DecisionRequestRecord> {
-    state
-        .decisions()
-        .decisions()
-        .filter(|record| {
-            matches!(record.context(), DecisionContext::ProtectionDemand(context)
-                if context.district() == district
-                    && attacker.is_none_or(|gang| context.attacker() == gang))
-        })
-        .max_by_key(|record| (record.requested_at(), record.id()))
-}
 
 fn within_days(now: u64, at: u64, days: u64) -> bool {
     now.saturating_sub(at) < days * DAY_MINUTES
@@ -68,12 +50,11 @@ pub(crate) fn rival_pressure_blocked(
     attacker: OrganizationId,
     district: NeighborhoodId,
 ) -> bool {
-    latest_demand(state, district, Some(attacker)).is_some_and(|record| {
-        let DecisionContext::ProtectionDemand(context) = record.context() else {
-            return false;
-        };
-        context.attacker() == attacker
-            && ((record.status() == DecisionStatus::Pending
+    state
+        .decisions()
+        .latest_protection_demand(district, Some(attacker))
+        .is_some_and(|record| {
+            (record.status() == DecisionStatus::Pending
                 && within_days(
                     state.now().as_minutes(),
                     record.requested_at().as_minutes(),
@@ -86,8 +67,8 @@ pub(crate) fn rival_pressure_blocked(
                             resolution.resolved_at().as_minutes(),
                             PROTECTION_DAYS,
                         )
-                }))
-    })
+                })
+        })
 }
 
 /// When the target rejects an offer, the same gang has a concrete reason
@@ -98,10 +79,11 @@ pub(crate) fn recently_refused_protection(
     attacker: OrganizationId,
     district: NeighborhoodId,
 ) -> bool {
-    latest_demand(state, district, Some(attacker)).is_some_and(|record| {
-        matches!(record.context(), DecisionContext::ProtectionDemand(context)
-            if context.attacker() == attacker)
-            && record.resolution().is_some_and(|resolution| {
+    state
+        .decisions()
+        .latest_protection_demand(district, Some(attacker))
+        .is_some_and(|record| {
+            record.resolution().is_some_and(|resolution| {
                 resolution.response() == DecisionResponse::Reject
                     && within_days(
                         state.now().as_minutes(),
@@ -109,7 +91,7 @@ pub(crate) fn recently_refused_protection(
                         PROTECTION_DAYS,
                     )
             })
-    })
+        })
 }
 
 /// An owned commercial ward with no believable defense is a claimable
@@ -156,6 +138,7 @@ struct Candidate {
     business: BusinessId,
     amount: Money,
     force: u32,
+    defense: u32,
 }
 
 /// Deterministic local coercion: strongest actual rival foot soldiers in the ward
@@ -172,6 +155,10 @@ pub(crate) fn apply_due_protection_demands(
         return Vec::new();
     };
     let shops = active_shops(state, defender);
+    if shops.is_empty() {
+        return Vec::new();
+    }
+    let defenses = local_defensive_forces(state, defender);
     // Even the original two storefronts become vulnerable if their criminal
     // workforce leaves and a rival actually takes a stronger local position.
     // Legitimate ownership alone is never proof of defensible territory.
@@ -184,7 +171,7 @@ pub(crate) fn apply_due_protection_demands(
         {
             continue;
         }
-        if let Some(previous) = latest_demand(state, district, None) {
+        if let Some(previous) = state.decisions().latest_protection_demand(district, None) {
             let (since, interval) = match previous.resolution() {
                 Some(resolution) if resolution.response() == DecisionResponse::Approve => {
                     (resolution.resolved_at().as_minutes(), PROTECTION_DAYS)
@@ -196,7 +183,7 @@ pub(crate) fn apply_due_protection_demands(
                 continue;
             }
         }
-        let defense = local_defensive_force(state, defender, district);
+        let defense = defenses.get(&district).copied().unwrap_or(0);
         let amount = Money::from_cents(offer_cents(registry, state, &holdings));
         let Some(business) = holdings.first().copied() else {
             continue;
@@ -234,6 +221,7 @@ pub(crate) fn apply_due_protection_demands(
                     business,
                     amount,
                     force,
+                    defense,
                 });
             }
         }
@@ -272,7 +260,7 @@ pub(crate) fn apply_due_protection_demands(
             rival.name(),
             format_money_cents(offer.amount.cents()),
             ward.name(),
-            local_defensive_force(state, defender, offer.district),
+            offer.defense,
         ),
     };
     if state
