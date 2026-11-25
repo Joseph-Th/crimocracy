@@ -15,6 +15,212 @@ use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 
 #[test]
+fn due_hearing_takes_priority_over_supplementing_a_newer_review() {
+    let mut fixture = fixture();
+    // The first arrest is older, but its review opens later. A prosecutor with
+    // both matters must not postpone an already prepared hearing to file an
+    // ordinary exhibit for the newer review.
+    let other = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second defendant awaiting hearing".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let other_arrest = detain_character(&mut fixture, other, "Second defendant");
+    let other_record = fixture.state.legal().get_arrest(other_arrest).unwrap();
+    let investigation = other_record.investigation();
+    let mut evidence = other_record.evidence().clone();
+    evidence.insert(add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        investigation,
+        other,
+        EvidenceKind::FinancialRecord,
+    ));
+    let hearing = validate_open_prosecution_case(
+        &fixture.state,
+        ProsecutionCaseDraft {
+            arrest: other_arrest,
+            prosecutor_office: fixture.office,
+            prosecutor: fixture.lead,
+            evidence,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    for arrest in [fixture.arrest, other_arrest] {
+        validate_release_arrest(&fixture.state, arrest)
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+    }
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(13 * DAY_DURATION.as_minutes()));
+    let newer = open_case(&mut fixture);
+    let before = fixture
+        .state
+        .legal()
+        .get_prosecution_case(newer)
+        .unwrap()
+        .evidence()
+        .clone();
+    let tick = daily_boundary(&fixture.registry, &mut fixture.state);
+    assert_eq!(tick.adjudicated_prosecution_cases, vec![hearing]);
+    assert!(tick.prosecution_supplements.is_empty());
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(hearing)
+            .unwrap()
+            .status(),
+        ProsecutionCaseStatus::Convicted
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(newer)
+            .unwrap()
+            .evidence(),
+        &before
+    );
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    let next = daily_boundary(&fixture.registry, &mut fixture.state);
+    assert_eq!(next, daily_boundary(&fixture.registry, &mut restored));
+    assert_eq!(next.prosecution_supplements.len(), 1);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(newer)
+            .unwrap()
+            .evidence()
+            .contains(&fixture.supplemental_evidence)
+    );
+}
+
+#[test]
+fn prosecution_supplements_rotate_to_the_longest_waiting_review() {
+    let mut fixture = fixture();
+    let first = open_case(&mut fixture);
+    let other = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second defendant with pending evidence".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let arrest = detain_character(&mut fixture, other, "Second defendant");
+    let record = fixture.state.legal().get_arrest(arrest).unwrap();
+    let investigation = record.investigation();
+    let evidence = record.evidence().clone();
+    let second = validate_open_prosecution_case(
+        &fixture.state,
+        ProsecutionCaseDraft {
+            arrest,
+            prosecutor_office: fixture.office,
+            prosecutor: fixture.lead,
+            evidence,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let waiting = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        investigation,
+        other,
+        EvidenceKind::FinancialRecord,
+    );
+    let tick = daily_boundary(&fixture.registry, &mut fixture.state);
+    assert_eq!(tick.prosecution_supplements.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_referral(tick.prosecution_supplements[0])
+            .unwrap()
+            .prosecution_case(),
+        first
+    );
+    // The first matter has another real exhibit on the next day. It must not
+    // consume the second day's sole prosecutor slot as well.
+    let additional = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.defendant,
+        EvidenceKind::Document,
+    );
+    let tick = daily_boundary(&fixture.registry, &mut fixture.state);
+    assert_eq!(tick.prosecution_supplements.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_referral(tick.prosecution_supplements[0])
+            .unwrap()
+            .prosecution_case(),
+        second
+    );
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(second)
+            .unwrap()
+            .evidence()
+            .contains(&waiting)
+    );
+    assert!(
+        !fixture
+            .state
+            .legal()
+            .get_prosecution_case(first)
+            .unwrap()
+            .evidence()
+            .contains(&additional)
+    );
+    let tick = daily_boundary(&fixture.registry, &mut fixture.state);
+    assert_eq!(tick.prosecution_supplements.len(), 1);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(first)
+            .unwrap()
+            .evidence()
+            .contains(&additional)
+    );
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
 fn later_review_cannot_impose_second_fine_from_already_adjudicated_evidence() {
     let mut fixture = fixture();
     let first = daily_boundary(&fixture.registry, &mut fixture.state).opened_prosecution_cases[0];

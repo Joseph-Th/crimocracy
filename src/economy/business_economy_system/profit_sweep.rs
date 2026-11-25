@@ -1,14 +1,17 @@
-//! Owner withdrawals from legitimate business tills into organization accounted funds.
+//! Owner withdrawals from legitimate business tills into accounted funds.
 
 use super::{portfolio_overhead_basis_points, portfolio_overhead_charge};
-use crate::core::id::{BusinessId, FinancialAccountId, OrganizationId};
+use crate::core::id::{
+    BusinessId, FinancialAccountId, IdKind, LedgerTransactionId, OrganizationId,
+};
 use crate::core::state::AppState;
 use crate::finance::finance_system::{
-    FinanceError, ValidatedLedgerTransaction, validate_record_business_transaction,
+    FinanceError, ValidatedLedgerTransaction, validate_open_accounts,
+    validate_record_business_transaction, validate_record_business_transaction_with_openings,
 };
 use crate::finance::{
-    AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
-    helpers::format_money_cents,
+    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+    Money, helpers::format_money_cents,
 };
 use thiserror::Error;
 
@@ -16,7 +19,7 @@ use thiserror::Error;
 /// proprietors. Combine existing accounted-funds capacity before opening another
 /// account; prefer the largest pocket to minimize ledger postings and version use.
 /// The caller opens at most one new account for any unpaid remainder.
-pub(super) fn plan_accounted_receipts(
+fn plan_accounted_receipts(
     state: &AppState,
     owner: FinancialOwner,
     total: Money,
@@ -42,6 +45,96 @@ pub(super) fn plan_accounted_receipts(
         remaining -= amount;
     }
     (allocations, Money::from_cents(remaining))
+}
+
+/// Sources and net receipt for one eligible owner. Source selection and fees
+/// remain the responsibility of the calling distribution policy.
+#[derive(Default)]
+pub(super) struct ProfitDistribution {
+    pub(super) total: Money,
+    pub(super) postings: Vec<LedgerPosting>,
+}
+
+/// Settle one complete owner cohort atomically. Reuse existing receipt capacity
+/// first, and reserve every required account and ledger ID before mutation.
+/// The caller supplies distinct owners in deterministic order.
+pub(super) fn settle_profit_distributions(
+    state: &mut AppState,
+    groups: impl IntoIterator<Item = (FinancialOwner, ProfitDistribution)>,
+    memo: &str,
+) -> Result<Option<LedgerTransactionId>, BusinessProfitSweepError> {
+    let mut distributions = Vec::new();
+    let mut drafts = Vec::new();
+    for (owner, group) in groups {
+        if group.total == Money::ZERO {
+            continue;
+        }
+        let (receipts, remaining) = plan_accounted_receipts(state, owner, group.total);
+        let new_account = if remaining > Money::ZERO {
+            let index = drafts.len();
+            drafts.push(FinancialAccountDraft {
+                owner,
+                kind: AccountKind::AccountedFunds,
+            });
+            Some((index, remaining))
+        } else {
+            None
+        };
+        distributions.push((group.postings, receipts, new_account));
+    }
+    if distributions.is_empty() {
+        return Ok(None);
+    }
+    let openings_count = u32::try_from(drafts.len()).expect("owner count fits account ID width");
+    if state
+        .ids
+        .reserve_many(&[
+            (IdKind::FinancialAccount, openings_count),
+            (IdKind::LedgerTransaction, 1),
+        ])
+        .is_err()
+    {
+        return Ok(None);
+    }
+
+    let openings = if drafts.is_empty() {
+        None
+    } else {
+        Some(validate_open_accounts(state, drafts)?)
+    };
+    let mut postings = Vec::new();
+    for (sources, receipts, new_account) in distributions {
+        postings.extend(sources);
+        postings.extend(
+            receipts
+                .into_iter()
+                .map(|(account, amount)| LedgerPosting { account, amount }),
+        );
+        if let Some((index, amount)) = new_account {
+            postings.push(LedgerPosting {
+                account: openings
+                    .as_ref()
+                    .expect("a new receipt account has been prevalidated")
+                    .account_id(index)
+                    .expect("prevalidated opening has its projected account ID"),
+                amount,
+            });
+        }
+    }
+    let draft = LedgerTransactionDraft {
+        occurred_at: state.now(),
+        // The shared memo must not disclose other owners' participation.
+        memo: memo.to_owned(),
+        postings,
+        authorization: None,
+    };
+    let transaction = match openings {
+        Some(openings) => {
+            validate_record_business_transaction_with_openings(state, openings, draft)?
+        }
+        None => validate_record_business_transaction(state, draft)?,
+    };
+    Ok(Some(transaction.commit(state)?))
 }
 
 /// An owner's draw on a business it owns: legitimate till cash becomes spendable organization

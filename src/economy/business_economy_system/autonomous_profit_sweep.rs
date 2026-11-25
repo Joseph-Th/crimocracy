@@ -5,28 +5,20 @@
 //! capital; player-owned fronts participate only under an explicit standing instruction.
 
 use super::profit_sweep::{
-    BusinessProfitSweepError, available_business_profit, plan_accounted_receipts,
-    resolve_business_profit_sweep_context,
+    BusinessProfitSweepError, ProfitDistribution, available_business_profit,
+    resolve_business_profit_sweep_context, settle_profit_distributions,
 };
 use super::{portfolio_overhead_basis_points, portfolio_overhead_charge};
-use crate::core::id::{IdKind, LedgerTransactionId, OrganizationId};
+use crate::core::id::{LedgerTransactionId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::is_day_boundary;
-use crate::finance::finance_system::{
-    validate_open_accounts, validate_record_business_transaction,
-    validate_record_business_transaction_with_openings,
-};
-use crate::finance::{
-    AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
-    Money,
-};
+use crate::finance::{FinancialOwner, LedgerPosting, Money};
 use crate::world::{BusinessOwner, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 struct OrganizationProfitPlan {
-    total: Money,
+    distribution: ProfitDistribution,
     overhead_rate: u16,
-    postings: Vec<LedgerPosting>,
 }
 
 /// Distributes existing legitimate earnings before the daily payroll debit. Reuse the combined
@@ -43,90 +35,13 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
         return Ok(None);
     }
     let groups = plan_available_profit_sources(state)?;
-    if groups.is_empty() {
-        return Ok(None);
-    }
-
-    let mut destinations = BTreeMap::new();
-    let mut opening_owners = Vec::new();
-    for (organization, group) in &groups {
-        let (allocations, remaining) = plan_accounted_receipts(
-            state,
-            FinancialOwner::Organization(*organization),
-            group.total,
-        );
-        if remaining > Money::ZERO {
-            opening_owners.push((*organization, remaining));
-        }
-        destinations.insert(*organization, allocations);
-    }
-
-    let openings_count =
-        u32::try_from(opening_owners.len()).expect("organization count fits account ID width");
-    if state
-        .ids
-        .reserve_many(&[
-            (IdKind::FinancialAccount, openings_count),
-            (IdKind::LedgerTransaction, 1),
-        ])
-        .is_err()
-    {
-        return Ok(None);
-    }
-
-    let openings = if opening_owners.is_empty() {
-        None
-    } else {
-        let drafts = opening_owners
-            .iter()
-            .map(|(organization, _)| FinancialAccountDraft {
-                owner: FinancialOwner::Organization(*organization),
-                kind: AccountKind::AccountedFunds,
-            })
-            .collect();
-        Some(validate_open_accounts(state, drafts)?)
-    };
-    if let Some(openings) = &openings {
-        for (index, (organization, remaining)) in opening_owners.iter().enumerate() {
-            destinations
-                .get_mut(organization)
-                .expect("an opening belongs to a planned profitable owner")
-                .push((
-                    openings
-                        .account_id(index)
-                        .expect("prevalidated opening has its projected account ID"),
-                    *remaining,
-                ));
-        }
-    }
-
-    let mut postings = Vec::new();
-
-    for (organization, group) in &groups {
-        let allocations = &destinations[organization];
-        // Planning and account-opening validation have not changed any account or business.
-        // The atomic ledger validator checks every resulting posting before committing.
-        postings.extend(group.postings.iter().cloned());
-        postings.extend(allocations.iter().map(|(account, amount)| LedgerPosting {
-            account: *account,
-            amount: *amount,
-        }));
-    }
-
-    let draft = LedgerTransactionDraft {
-        occurred_at: state.now(),
-        // The shared ledger memo must not disclose other owners' participation.
-        memo: "Daily owner profit distribution".to_owned(),
-        postings,
-        authorization: None,
-    };
-    let transaction = match openings {
-        Some(openings) => {
-            validate_record_business_transaction_with_openings(state, openings, draft)?
-        }
-        None => validate_record_business_transaction(state, draft)?,
-    };
-    Ok(Some(transaction.commit(state)?))
+    settle_profit_distributions(
+        state,
+        groups
+            .into_iter()
+            .map(|(owner, group)| (FinancialOwner::Organization(owner), group.distribution)),
+        "Daily owner profit distribution",
+    )
 }
 
 fn plan_available_profit_sources(
@@ -174,14 +89,13 @@ fn plan_available_profit_sources(
         let group = groups
             .entry(organization)
             .or_insert_with(|| OrganizationProfitPlan {
-                total: Money::ZERO,
+                distribution: ProfitDistribution::default(),
                 overhead_rate: portfolio_overhead_basis_points(state, organization),
-                postings: Vec::new(),
             });
         // A destination can hold at most i64::MAX cents. A wealthy owner with several tills
         // withdraws the first representable portion today and keeps the remainder invested
         // rather than overflowing the money model or bricking every later daily tick.
-        let remaining_headroom = Money::from_cents(i64::MAX - group.total.cents());
+        let remaining_headroom = Money::from_cents(i64::MAX - group.distribution.total.cents());
         let mut amount = surplus.min(remaining_headroom);
         // Administration is credited to the source's settlement account. A full or
         // terminal settlement account must not block otherwise independent withdrawals.
@@ -210,21 +124,21 @@ fn plan_available_profit_sources(
         if receipt == Money::ZERO {
             continue;
         }
-        group.total = group
+        group.distribution.total = group
+            .distribution
             .total
             .checked_add(receipt)
             .expect("owner distribution is capped by representable money");
-        group.postings.push(LedgerPosting {
+        group.distribution.postings.push(LedgerPosting {
             account: context.operating_account,
             amount: amount.checked_neg().expect("earned surplus negates"),
         });
         if overhead > Money::ZERO {
-            group.postings.push(LedgerPosting {
+            group.distribution.postings.push(LedgerPosting {
                 account: context.settlement_account,
                 amount: overhead,
             });
         }
     }
-    groups.retain(|_, group| group.total > Money::ZERO);
     Ok(groups)
 }

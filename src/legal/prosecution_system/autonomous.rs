@@ -19,7 +19,7 @@ use crate::core::id::{
     ProsecutionReferralId,
 };
 use crate::core::state::AppState;
-use crate::core::time::is_day_boundary;
+use crate::core::time::{SimTime, is_day_boundary};
 use crate::intelligence::intelligence_system::{
     ValidatedInformation, validate_record_information_with_signal,
 };
@@ -27,7 +27,9 @@ use crate::intelligence::{
     InformationDraft, InformationSignal, InformationSourceKind, InformationTopic, KnowledgeHolder,
     LegalPersonStatusSignal, Reliability, Specificity,
 };
-use crate::legal::{ArrestRecord, ArrestStatus, InvestigationStatus, ProsecutionCaseStatus};
+use crate::legal::{
+    ArrestRecord, ArrestStatus, InvestigationStatus, ProsecutionCaseRecord, ProsecutionCaseStatus,
+};
 use crate::registry::Registry;
 use crate::reports::report_system::{ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
@@ -187,6 +189,66 @@ enum Action {
     ),
 }
 
+struct ReviewCandidate<'a> {
+    arrest: &'a ArrestRecord,
+    case: &'a ProsecutionCaseRecord,
+    lead: CharacterId,
+    hearing_due: bool,
+    waiting_since: SimTime,
+}
+
+impl ReviewCandidate<'_> {
+    fn priority(&self) -> (bool, SimTime, ProsecutionCaseId) {
+        (!self.hearing_due, self.waiting_since, self.case.id())
+    }
+
+    fn plan_action(
+        &self,
+        registry: &Registry,
+        state: &AppState,
+    ) -> Result<Option<Action>, ProsecutionError> {
+        if self.hearing_due {
+            return Ok(Some(Action::Judgment(validate_judgment(
+                registry,
+                state,
+                self.case.id(),
+            )?)));
+        }
+        let evidence = defendant_evidence(state, self.arrest)?;
+        let additions: BTreeSet<_> = evidence.difference(self.case.evidence()).copied().collect();
+        if !additions.is_empty() {
+            return Ok(Some(Action::Supplement(
+                validate_supplement_prosecution_case(
+                    state,
+                    ProsecutionReferralDraft {
+                        prosecution_case: self.case.id(),
+                        evidence: additions,
+                    },
+                )?,
+            )));
+        }
+        // Screening is conservative: an insufficient file can close only after
+        // release and the end of active police work.
+        let investigation = state
+            .legal()
+            .get_investigation(self.arrest.investigation())
+            .ok_or(ProsecutionError::MissingInvestigation(
+                self.arrest.investigation(),
+            ))?;
+        if self.arrest.status() != ArrestStatus::Released
+            || investigation.status() == InvestigationStatus::Active
+            || screened_case(registry, state, self.case, state.now())
+        {
+            return Ok(None);
+        }
+        Ok(Some(Action::Decline(
+            self.case.id(),
+            validate_decline_prosecution_case(state, self.case.id())?,
+            decline_notice(state, self.arrest)?,
+        )))
+    }
+}
+
 impl Action {
     fn id_budget(&self) -> Vec<(IdKind, u32)> {
         match self {
@@ -273,7 +335,11 @@ pub(crate) fn apply_due_prosecution_referrals(
     let mut used = BTreeSet::new();
     let mut reviewing_subjects = BTreeSet::new();
     let mut acted_subjects = BTreeSet::new();
-    // Plan each already-open review first. Supplemental work has priority over new intake.
+    // Prepared hearings outrank ordinary referrals. Other reviews rotate by
+    // their last actual referral rather than letting the oldest arrest monopolize
+    // a prosecutor whenever its investigation discovers another exhibit.
+    // Existing reviews still have priority over new intake.
+    let mut reviews = Vec::new();
     for arrest_id in state.legal().arrests_with_open_prosecutions() {
         let arrest = state
             .legal()
@@ -281,7 +347,6 @@ pub(crate) fn apply_due_prosecution_referrals(
             .expect("open review owns its arrest");
         let subject = (arrest.investigation(), arrest.character());
         reviewing_subjects.insert(subject);
-        let evidence = defendant_evidence(state, arrest)?;
         for case in state
             .legal()
             .prosecution_cases_for_arrest(arrest_id)
@@ -290,58 +355,47 @@ pub(crate) fn apply_due_prosecution_referrals(
             let Some(lead) = case.assigned_prosecutor() else {
                 continue;
             };
-            if !prosecutors.contains_key(&lead)
-                || used.contains(&lead)
-                || acted_subjects.contains(&subject)
-                || case.version() > u32::MAX - 2
-            {
+            if !prosecutors.contains_key(&lead) || case.version() > u32::MAX - 2 {
                 continue;
             }
-            let additions: BTreeSet<_> = evidence.difference(case.evidence()).copied().collect();
-            let screened = screened_case(registry, state, case, state.now());
-            // Once a screened file has had its defense preparation window, the court
-            // can adjudicate the evidence already referred, even if later police work
-            // continues. Continuous supplements must not postpone a hearing forever.
-            let action = if screened && judgment_due(state, case) {
-                Action::Judgment(validate_judgment(registry, state, case.id())?)
-            } else if !additions.is_empty() {
-                Action::Supplement(validate_supplement_prosecution_case(
-                    state,
-                    ProsecutionReferralDraft {
-                        prosecution_case: case.id(),
-                        evidence: additions,
-                    },
-                )?)
+            let hearing_due =
+                judgment_due(state, case) && screened_case(registry, state, case, state.now());
+            let waiting_since = if hearing_due {
+                case.opened_at()
             } else {
-                // The case is ready for a conservative screening decision only after release
-                // and after police stop active work. Unknown admissibility is not proof.
-                // Sufficient files proceed to the court after preparation; screening
-                // is not itself a conviction or a way to extend arrest custody.
-                let investigation = state
+                // Referrals are allocated in chronological order, including the initial one.
+                let latest = case
+                    .referrals()
+                    .last()
+                    .expect("review retains its initial referral");
+                state
                     .legal()
-                    .get_investigation(arrest.investigation())
-                    .ok_or(ProsecutionError::MissingInvestigation(
-                        arrest.investigation(),
-                    ))?;
-                if arrest.status() != ArrestStatus::Released
-                    || investigation.status() == InvestigationStatus::Active
-                {
-                    continue;
-                }
-                if screened {
-                    continue;
-                }
-                Action::Decline(
-                    case.id(),
-                    validate_decline_prosecution_case(state, case.id())?,
-                    decline_notice(state, arrest)?,
-                )
+                    .get_prosecution_referral(*latest)
+                    .expect("review referral must exist")
+                    .referred_at()
             };
-            if state.ids.reserve_many(&action.id_budget()).is_ok() {
-                used.insert(lead);
-                acted_subjects.insert(subject);
-                plans.push(action);
-            }
+            reviews.push(ReviewCandidate {
+                arrest,
+                case,
+                lead,
+                hearing_due,
+                waiting_since,
+            });
+        }
+    }
+    reviews.sort_unstable_by_key(ReviewCandidate::priority);
+    for review in reviews {
+        let subject = (review.arrest.investigation(), review.arrest.character());
+        if used.contains(&review.lead) || acted_subjects.contains(&subject) {
+            continue;
+        }
+        let Some(action) = review.plan_action(registry, state)? else {
+            continue;
+        };
+        if state.ids.reserve_many(&action.id_budget()).is_ok() {
+            used.insert(review.lead);
+            acted_subjects.insert(subject);
+            plans.push(action);
         }
     }
 
