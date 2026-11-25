@@ -96,11 +96,21 @@ impl Session<'_> {
                 .world()
                 .get_character(enterprise.manager())
                 .expect("owned racket manager must exist");
-            let detained = self
+            // A suspended enterprise retains its historical manager even after
+            // departure. Do not present a former member as available or query
+            // their current private custody status.
+            let manager_status = if manager.organization() != Some(self.player) {
+                "former member"
+            } else if self
                 .state
                 .legal()
                 .active_arrest_for_character(manager.id())
-                .is_some();
+                .is_some()
+            {
+                "detained"
+            } else {
+                "not detained"
+            };
             writeln!(
                 out,
                 "  enterprise-{} {:?} at {} | manager {} (char-{}, {})",
@@ -109,7 +119,7 @@ impl Session<'_> {
                 self.enterprise_location_label(enterprise.location()),
                 manager.name(),
                 manager.id().raw(),
-                if detained { "detained" } else { "available" }
+                manager_status
             )
             .unwrap();
             if let Some(cycle) = self.state.enterprises().latest_cycle(enterprise.id()) {

@@ -402,10 +402,13 @@ mod tests {
     fn uninterrupted_advance_discloses_player_crew_departures_not_just_shortfalls() {
         let registry = crimocracy::build_registry();
         use crimocracy::world::world_system::{
-            designate_player_organization, insert_character, insert_organization,
+            designate_player_organization, insert_character, insert_neighborhood,
+            insert_organization,
         };
         use crimocracy::world::{
-            AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind,
+            AutonomyLevel, CapabilityKind, CharacterDraft, NeighborhoodDraft,
+            NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
+            OrganizationDraft, OrganizationKind, Rating,
         };
         let mut state = AppState::new(17);
         let player = insert_organization(
@@ -431,14 +434,17 @@ mod tests {
             },
         )
         .unwrap();
-        insert_character(
+        let captain = insert_character(
             &mut state,
             CharacterDraft {
                 name: "Associate".to_owned(),
                 organization: Some(player),
                 supervisor: Some(boss),
-                autonomy: AutonomyLevel::Guided,
-                capabilities: BTreeMap::new(),
+                autonomy: AutonomyLevel::Delegated,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Management,
+                    Rating::try_new(90).unwrap(),
+                )]),
                 traits: BTreeSet::new(),
                 drives: BTreeMap::new(),
             },
@@ -460,6 +466,79 @@ mod tests {
             },
         )
         .unwrap();
+        let rating = Rating::try_new(50).unwrap();
+        let district = insert_neighborhood(
+            &mut state,
+            NeighborhoodDraft {
+                name: "Test ward".into(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating,
+                        commercial_activity: rating,
+                        illicit_demand: rating,
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating,
+                    },
+                },
+            },
+        )
+        .unwrap();
+        let scope = ResponsibilityScope::Neighborhood(district);
+        let mandate = validate_assign_mandate(
+            &state,
+            MandateDraft {
+                organization: player,
+                manager: captain,
+                scopes: BTreeSet::from([scope]),
+                standing_orders: BTreeMap::new(),
+                budget: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+        let cash_account = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(player),
+                kind: AccountKind::StreetCash,
+            },
+        )
+        .unwrap();
+        let settlement_account = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(player),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .unwrap();
+        let racket = validate_establish_enterprise(
+            &registry,
+            &state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Protection,
+                organization: player,
+                authority: MandateAuthority {
+                    mandate,
+                    manager: captain,
+                    scope,
+                },
+                location: EnterpriseLocation::Neighborhood(district),
+                supporting_businesses: BTreeSet::new(),
+                cash_account,
+                settlement_account,
+            },
+        )
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+        validate_suspend_enterprise(&state, racket)
+            .unwrap()
+            .commit(&mut state)
+            .unwrap();
+
         // All lead-up minutes use the production pipeline. The fifth wage boundary
         // must reach the text client with a real departure event.
         for _ in 0..5 * DAY_MINUTES - 1 {
@@ -508,9 +587,32 @@ mod tests {
             "the unpaid associate should depart: {review}"
         );
         assert!(!session.state.player_organization_defeated());
+        assert_ne!(
+            session
+                .state
+                .world()
+                .get_character(captain)
+                .unwrap()
+                .organization(),
+            Some(player)
+        );
+        let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+        let recovery = session.execute("recovery").unwrap().0;
+        assert!(
+            recovery.contains(&format!("char-{}, former member", captain.raw())),
+            "{recovery}"
+        );
+        assert!(recovery.contains("Resumption blocked:"), "{recovery}");
+        assert!(!recovery.contains("Can resume manually:"), "{recovery}");
+        assert_eq!(
+            before,
+            bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+        );
         let restored =
             restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
         crimocracy::core::invariants::validate_state(&restored).unwrap();
+        session.state = restored;
+        assert_eq!(session.execute("recovery").unwrap().0, recovery);
     }
 
     #[test]
