@@ -56,7 +56,13 @@ deterministic save/restore. The failed-assault regression also retires the
 defeated racket, proves that the same gang cannot establish an identical
 replacement after save/restore, rejects a held pre-clash establishment token
 without mutation, preserves establishment at an unrelated venue, and permits
-replacement exactly when the seven-day penalty expires. A post-clash agreement must remain negotiable after
+replacement exactly when the seven-day penalty expires.
+`autonomous_expansion_respects_retired_racket_suppression_until_expiry` compares
+voluntary retirement with forced closure, advances the actual daily governance
+ticks through the seven-day penalty, checks matched save/restore continuation at
+the first and last boundaries, and rejects a serialized successor whose otherwise
+valid establishment and cycle schedule predate expiry by one minute.
+A post-clash agreement must remain negotiable after
 the loser is disabled, and the treaty must not forbid reopening a preexisting
 racket when the seven-day clash penalty ends. The generated text-play tests
 `generated_rival_clash_then_postwar_negotiation_uses_actual_player_orders`

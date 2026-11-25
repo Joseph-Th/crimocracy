@@ -1384,6 +1384,208 @@ fn autonomous_expansion_can_reenter_a_slot_released_by_retirement() {
 }
 
 #[test]
+fn autonomous_expansion_respects_retired_racket_suppression_until_expiry() {
+    use crate::core::time::DAY_MINUTES;
+    use crate::world::territory_conflict::{
+        CLASH_SUPPRESSION_DAYS, suppression_ends_at, validate_territory_clash,
+    };
+
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    let defeated = establish_protection(&registry, &mut fixture);
+    let EnterpriseLocation::Neighborhood(district) = fixture.location else {
+        unreachable!()
+    };
+    let player = designate_player(&registry, &mut fixture.state);
+    let manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Defending captain".into(),
+            organization: Some(player),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let mandate = validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: player,
+            manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(district)]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Defending card room",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(player),
+    );
+    let cash = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(player),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Defender operating capital".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: cash,
+                    amount: Money::from_cents(100_000),
+                },
+                LedgerPosting {
+                    account: settlement,
+                    amount: Money::from_cents(-100_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let rival = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Gambling,
+            organization: player,
+            authority: MandateAuthority {
+                mandate,
+                manager,
+                scope: ResponsibilityScope::Neighborhood(district),
+            },
+            location: EnterpriseLocation::Business(venue),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: cash,
+            settlement_account: settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+
+    // Matched branch: voluntary retirement alone must not restrict new growth.
+    let mut voluntary = fixture.state.clone();
+    validate_suspend_enterprise(&voluntary, defeated)
+        .unwrap()
+        .commit(&mut voluntary)
+        .unwrap();
+    validate_retire_enterprise(&voluntary, defeated)
+        .unwrap()
+        .commit(&mut voluntary)
+        .unwrap();
+    voluntary.advance_clock(SimDuration::from_minutes(1439));
+    let outcome = run_tick(&registry, &mut voluntary);
+    assert_eq!(outcome.autonomous_enterprises.len(), 1);
+    assert_eq!(
+        voluntary
+            .enterprises()
+            .get_enterprise(outcome.autonomous_enterprises[0])
+            .unwrap()
+            .kind(),
+        EnterpriseKind::Protection,
+    );
+
+    let result = validate_territory_clash(&fixture.state, fixture.organization, rival)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(result.suspended_racket, defeated);
+    assert!(!result.attacker_won);
+    let until = suppression_ends_at(&fixture.state, defeated).unwrap();
+    validate_retire_enterprise(&fixture.state, defeated)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+
+    fixture.state.advance_clock(SimDuration::from_minutes(1439));
+    let mut replay =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    // Use the canonical daily phase, including payroll, recruitment, lifecycle and
+    // expansion, on both the original state and its restored continuation.
+    let first = run_tick(&registry, &mut fixture.state);
+    assert_eq!(first, run_tick(&registry, &mut replay));
+    assert!(first.autonomous_enterprises.is_empty());
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
+    for _ in DAY_MINUTES..CLASH_SUPPRESSION_DAYS * DAY_MINUTES - 1 {
+        let outcome = run_tick(&registry, &mut fixture.state);
+        assert!(outcome.autonomous_enterprises.is_empty());
+    }
+    assert_eq!(fixture.state.now().as_minutes() + 1, until.as_minutes());
+    let mut replay =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    let expiry = run_tick(&registry, &mut fixture.state);
+    assert_eq!(expiry, run_tick(&registry, &mut replay));
+    assert_eq!(expiry.autonomous_enterprises.len(), 1);
+    let replacement = fixture
+        .state
+        .enterprises()
+        .get_enterprise(expiry.autonomous_enterprises[0])
+        .unwrap();
+    assert_eq!(replacement.organization(), fixture.organization);
+    assert_eq!(replacement.kind(), EnterpriseKind::Protection);
+    assert_eq!(replacement.location(), fixture.location);
+    assert_eq!(replacement.established_at(), until);
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
+    let save = build_save(&registry, &fixture.state).unwrap();
+    restore_save(&registry, save.clone()).unwrap();
+
+    // Move only the successor's establishment and first scheduled cycle back
+    // one minute in serialized data. Ordinary cadence remains valid, but the
+    // predecessor's clash history must now make this save unacceptable.
+    let mut forged = enterprise_wire(replacement);
+    forged.runtime.established_at = SimTime::from_minutes(until.as_minutes() - 1);
+    forged.runtime.next_cycle_at = replacement
+        .next_cycle_at()
+        .map(|next| SimTime::from_minutes(next.as_minutes() - 1));
+    let corrupted = replace_serialized_enterprise(save, replacement, &forged);
+    assert_eq!(
+        restore_save(&registry, corrupted).err(),
+        Some(LoadError::InvalidState(
+            StateValidationError::InvalidTerritoryClash {
+                event: result.history,
+            }
+        ))
+    );
+}
+
+#[test]
 fn autonomous_expansion_allocates_scarce_runway_to_stronger_same_day_mandate() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
