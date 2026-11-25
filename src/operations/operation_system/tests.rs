@@ -232,6 +232,51 @@ fn make_test_draft(
 }
 
 #[test]
+fn crew_availability_matches_authorization_at_schedule_boundaries() {
+    let (registry, state, organization, leader, target) = make_test_operation_state();
+    let draft = make_test_draft(organization, leader, target);
+    assert!(validate_authorize_operation(&registry, &state, draft.clone()).is_ok());
+    assert!(
+        participant_available_for_plan(&registry, &state, leader, draft.kind, state.now(), &[],),
+        "an immediate order has a legal earliest start on the next minute"
+    );
+
+    let mut terminal = draft.clone();
+    terminal.scheduled_for = SimTime::MAX;
+    assert_eq!(
+        validate_authorize_operation(&registry, &state, terminal.clone()).unwrap_err(),
+        OperationError::SimulationTimeOverflow
+    );
+    assert!(!participant_available_for_plan(
+        &registry,
+        &state,
+        leader,
+        terminal.kind,
+        terminal.scheduled_for,
+        &[],
+    ));
+
+    let mut impossible = draft;
+    impossible.scheduled_for = SimTime::from_minutes(1);
+    impossible.constraints = vec![crate::operations::OperationConstraint::CompleteBy(
+        impossible.scheduled_for,
+    )];
+    assert_eq!(
+        validate_authorize_operation(&registry, &state, impossible.clone()).unwrap_err(),
+        OperationError::DeadlineLeavesNoExecutionWindow
+    );
+    assert!(!participant_available_for_plan(
+        &registry,
+        &state,
+        leader,
+        impossible.kind,
+        impossible.scheduled_for,
+        &impossible.constraints,
+    ));
+    assert_eq!(state.operations().operations().count(), 0);
+}
+
+#[test]
 fn kidnapping_authorizes_a_ransom_take_against_a_foreign_business() {
     // The 1932-33 kidnapping wave is the period crime the racket roster was missing:
     // a ransom seizure billed to the victim family's business, with the largest cash

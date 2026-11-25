@@ -2072,10 +2072,10 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
     assert_eq!(
         restored
             .legal()
-            .arrests()
-            .filter(|record| record.character() == fixture.suspect)
-            .count(),
-        2
+            .arrests_for_character(fixture.suspect)
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        vec![arrest, rearrest]
     );
     assert_eq!(
         restored
@@ -2111,10 +2111,10 @@ fn arrest_and_release_are_durable_indexed_lifecycle_records() {
         fixture
             .state
             .legal()
-            .arrests()
-            .filter(|record| record.character() == fixture.suspect)
-            .count(),
-        1
+            .arrests_for_character(fixture.suspect)
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        vec![arrest]
     );
     validate_state(&fixture.state).expect("released custody history should validate");
     validate_invariants(&fixture.state);

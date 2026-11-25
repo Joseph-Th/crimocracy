@@ -348,23 +348,27 @@ pub(crate) fn validate_judgment_history(
         .saturating_sub(case.opened_at().as_minutes())
         < PREPARATION_DAYS * DAY_MINUTES
         || !screened_case(registry, state, case, at)
-        || state.legal().arrests().any(|arrest| {
-            arrest.character() == case.defendant()
-                && arrest.arrested_at() < at
-                && arrest.released_at().is_none_or(|release| release > at)
-        })
+        || state
+            .legal()
+            .arrests_for_character(case.defendant())
+            .any(|arrest| {
+                arrest.arrested_at() < at && arrest.released_at().is_none_or(|release| release > at)
+            })
     {
         return false;
     }
     // Representation history is append-only. A retainer spanning the verdict
     // unambiguously must be reflected in the frozen assessment; same-minute
     // boundary ties remain governed by the explicit recorded defense.
-    if state.legal().legal_representations().any(|rep| {
-        rep.arrest() == case.arrest()
-            && rep.retained_at() < at
-            && rep.ended_at().is_none_or(|end| end > at)
-            && Some(rep.id()) != judgment.defense
-    }) {
+    if state
+        .legal()
+        .representations_for_arrest(case.arrest())
+        .any(|rep| {
+            rep.retained_at() < at
+                && rep.ended_at().is_none_or(|end| end > at)
+                && Some(rep.id()) != judgment.defense
+        })
+    {
         return false;
     }
     if let Some(id) = judgment.defense {

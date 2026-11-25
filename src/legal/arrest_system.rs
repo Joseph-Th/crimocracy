@@ -16,17 +16,14 @@ pub(crate) use custody::{apply_due_custody_releases, custody_release_at};
 /// detention status report was never transferred into the organization's intelligence store.
 /// This projection never returns arrests of outsiders or foreign criminal-organization members.
 pub fn member_arrest_history(state: &AppState, organization: OrganizationId) -> Vec<ArrestId> {
-    state
-        .legal()
-        .arrests()
-        .filter(|arrest| {
-            state
-                .world()
-                .get_character(arrest.character())
-                .is_some_and(|character| character.organization() == Some(organization))
-        })
+    let mut arrests: Vec<_> = state
+        .world()
+        .characters_in_organization(organization)
+        .flat_map(|person| state.legal().arrests_for_character(person.id()))
         .map(|arrest| arrest.id())
-        .collect()
+        .collect();
+    arrests.sort_unstable();
+    arrests
 }
 
 use crate::core::entity::EntityRef;

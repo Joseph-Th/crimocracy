@@ -16,6 +16,12 @@ impl LegalState {
             .entry(record.investigation())
             .or_default()
             .insert(id);
+        self.indexes
+            .arrests
+            .by_character
+            .entry(record.character())
+            .or_default()
+            .insert(id);
         let previous_active = self
             .indexes
             .arrests
@@ -92,6 +98,12 @@ impl LegalState {
             LegalRepresentationStatus::Active,
             "Lifecycle Validity: new legal representation must begin active"
         );
+        self.indexes
+            .representations
+            .by_arrest
+            .entry(record.arrest())
+            .or_default()
+            .insert(id);
         if record.origin() == LegalRepresentationOrigin::AutomaticPolicy {
             self.indexes
                 .representations

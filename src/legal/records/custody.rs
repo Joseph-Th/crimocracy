@@ -72,6 +72,8 @@ pub struct ArrestDraft {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(in crate::legal) struct ArrestIndexes {
     pub(in crate::legal) by_investigation: BTreeMap<InvestigationId, BTreeSet<ArrestId>>,
+    /// Complete custody history per person, including released episodes.
+    pub(in crate::legal) by_character: BTreeMap<CharacterId, BTreeSet<ArrestId>>,
     pub(in crate::legal) active_by_character: BTreeMap<CharacterId, ArrestId>,
     /// Every currently detained arrest, so custody-wide consumers such as automatic legal
     /// support scan live detainees instead of the full arrest history.

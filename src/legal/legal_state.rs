@@ -353,6 +353,12 @@ impl LegalState {
                 .entry(arrest.investigation())
                 .or_default()
                 .insert(arrest.id());
+            self.indexes
+                .arrests
+                .by_character
+                .entry(arrest.character())
+                .or_default()
+                .insert(arrest.id());
             if arrest.status() == ArrestStatus::Detained {
                 self.indexes
                     .arrests
@@ -371,6 +377,12 @@ impl LegalState {
 
     fn rebuild_representation_indexes(&mut self) {
         for representation in self.legal_representations.values() {
+            self.indexes
+                .representations
+                .by_arrest
+                .entry(representation.arrest())
+                .or_default()
+                .insert(representation.id());
             if representation.status() == LegalRepresentationStatus::Active {
                 self.indexes
                     .representations

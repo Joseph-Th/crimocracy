@@ -525,13 +525,21 @@ pub fn participant_available_for_plan(
     scheduled_for: SimTime,
     constraints: &[crate::operations::OperationConstraint],
 ) -> bool {
+    let participants = BTreeSet::from([character]);
     state.world.get_character(character).is_some()
         && state.legal.active_arrest_for_character(character).is_none()
-        && scheduled_for > state.now()
+        && scheduled_for >= state.now()
+        && validate_deadline_execution_window(
+            registry.get_operation(kind).execution(),
+            state.now(),
+            scheduled_for,
+            constraints,
+        )
+        .is_ok()
         && freelance_plan_deadline(
             registry,
             state,
-            &BTreeSet::from([character]),
+            &participants,
             kind,
             scheduled_for,
             constraints,
@@ -540,7 +548,7 @@ pub fn participant_available_for_plan(
         && find_busy_participant(
             registry,
             state,
-            &BTreeSet::from([character]),
+            &participants,
             kind,
             scheduled_for,
             constraints,

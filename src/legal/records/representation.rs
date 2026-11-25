@@ -182,6 +182,8 @@ pub struct LegalRepresentationDraft {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(in crate::legal) struct LegalRepresentationIndexes {
+    /// Complete retainer history for each arrest, including ended engagements.
+    pub(in crate::legal) by_arrest: BTreeMap<ArrestId, BTreeSet<LegalRepresentationId>>,
     pub(in crate::legal) active_by_arrest: BTreeMap<ArrestId, LegalRepresentationId>,
     pub(in crate::legal) active_by_contact: BTreeMap<ContactId, BTreeSet<LegalRepresentationId>>,
     /// Active automatic-policy retentions, so the per-tick legal-matter sweep concludes only

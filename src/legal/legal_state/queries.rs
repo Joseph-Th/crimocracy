@@ -138,6 +138,23 @@ impl LegalState {
                     .expect("active-arrest index must reference an arrest")
             })
     }
+    /// All custody episodes for one character in arrest-ID order.
+    pub(crate) fn arrests_for_character(
+        &self,
+        character: CharacterId,
+    ) -> impl Iterator<Item = &ArrestRecord> {
+        self.indexes
+            .arrests
+            .by_character
+            .get(&character)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.arrests
+                    .get(id)
+                    .expect("arrest-by-character index must reference an arrest")
+            })
+    }
     pub fn arrests_for_investigation(
         &self,
         investigation: InvestigationId,
@@ -159,6 +176,23 @@ impl LegalState {
         id: LegalRepresentationId,
     ) -> Option<&LegalRepresentationRecord> {
         self.legal_representations.get(&id)
+    }
+    /// Complete retained-counsel history for one arrest in representation-ID order.
+    pub(crate) fn representations_for_arrest(
+        &self,
+        arrest: ArrestId,
+    ) -> impl Iterator<Item = &LegalRepresentationRecord> {
+        self.indexes
+            .representations
+            .by_arrest
+            .get(&arrest)
+            .into_iter()
+            .flatten()
+            .map(|id| {
+                self.legal_representations
+                    .get(id)
+                    .expect("representation-by-arrest index must reference a representation")
+            })
     }
     pub fn active_representation_for_arrest(
         &self,

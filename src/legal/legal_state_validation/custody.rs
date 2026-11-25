@@ -139,6 +139,15 @@ impl LegalState {
     pub(super) fn has_consistent_legal_representation_indexes(&self) -> bool {
         for record in self.legal_representations.values() {
             let id = record.id();
+            if !self
+                .indexes
+                .representations
+                .by_arrest
+                .get(&record.arrest())
+                .is_some_and(|ids| ids.contains(&id))
+            {
+                return false;
+            }
             let arrest_active = self
                 .indexes
                 .representations
@@ -170,6 +179,18 @@ impl LegalState {
                 .contains(&id)
                 != (record.status() == LegalRepresentationStatus::Active
                     && record.origin() == LegalRepresentationOrigin::AutomaticPolicy)
+            {
+                return false;
+            }
+        }
+        for (arrest, ids) in &self.indexes.representations.by_arrest {
+            if ids.is_empty()
+                || ids.iter().any(|id| {
+                    !self
+                        .legal_representations
+                        .get(id)
+                        .is_some_and(|record| record.arrest() == *arrest)
+                })
             {
                 return false;
             }
@@ -213,6 +234,15 @@ impl LegalState {
             {
                 return false;
             }
+            if !self
+                .indexes
+                .arrests
+                .by_character
+                .get(&arrest.character())
+                .is_some_and(|ids| ids.contains(&id))
+            {
+                return false;
+            }
             let active = self
                 .indexes
                 .arrests
@@ -245,6 +275,18 @@ impl LegalState {
                     .get(id)
                     .is_some_and(|record| record.investigation() == *investigation)
             }) {
+                return false;
+            }
+        }
+        for (character, ids) in &self.indexes.arrests.by_character {
+            if ids.is_empty()
+                || ids.iter().any(|id| {
+                    !self
+                        .arrests
+                        .get(id)
+                        .is_some_and(|record| record.character() == *character)
+                })
+            {
                 return false;
             }
         }

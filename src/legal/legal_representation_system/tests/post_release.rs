@@ -223,6 +223,22 @@ fn completed_automatic_defense_concludes_when_new_retainers_cannot_allocate() {
             .active_representation_for_arrest(fixture.arrest)
             .is_none()
     );
+    assert_eq!(
+        restored
+            .legal()
+            .representations_for_arrest(fixture.arrest)
+            .map(|record| record.id())
+            .collect::<Vec<_>>(),
+        retained,
+        "ended retainers remain indexed after restoring the save"
+    );
+    assert_eq!(
+        restored
+            .legal()
+            .representations_for_arrest(second_arrest)
+            .count(),
+        0
+    );
     validate_invariants(&restored);
 }
 

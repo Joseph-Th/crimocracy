@@ -187,9 +187,15 @@ fn release_history_by_subject_and_authority(
             )
         })
         .collect();
-    for arrest in state.legal().arrests() {
-        if let Some(prior) = history.get_mut(&(arrest.character(), arrest.authority())) {
-            prior.record(state, arrest);
+    let subjects: BTreeSet<_> = candidates
+        .iter()
+        .map(|candidate| candidate.character)
+        .collect();
+    for subject in subjects {
+        for arrest in state.legal().arrests_for_character(subject) {
+            if let Some(prior) = history.get_mut(&(subject, arrest.authority())) {
+                prior.record(state, arrest);
+            }
         }
     }
     history
