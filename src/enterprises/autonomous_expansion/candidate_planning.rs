@@ -167,7 +167,15 @@ fn build_ranked_candidate(
     location: EnterpriseLocation,
     supporting_businesses: BTreeSet<BusinessId>,
 ) -> Result<Option<AutonomousExpansionPlan>, AutonomousEnterpriseError> {
-    if economics.occupied_locations.contains(&(kind, location)) {
+    if economics.occupied_locations.contains(&(kind, location))
+        || crate::world::territory_conflict::replacement_suppression(
+            economics.state,
+            economics.organization,
+            kind,
+            location,
+        )
+        .is_some()
+    {
         return Ok(None);
     }
     // A gang cannot offer a planned expansion on a district it just agreed

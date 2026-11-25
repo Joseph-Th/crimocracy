@@ -3,12 +3,13 @@
 //! Suspension is operational, not terminal history. Governed rivals therefore reconsider a
 //! suspended racket on day boundaries using the same information and runway constraints as new
 //! expansion. Temporary pressure leaves it suspended; revoked or re-scoped authority, lost
-//! required venue/support ownership, or Tight/Guided manager autonomy at the maintenance boundary cause autonomous
-//! rivals to abandon that stale frozen configuration so dead records cannot reserve a location
-//! forever.
+//! required venue/support ownership, or Tight/Guided manager autonomy at the maintenance
+//! boundary cause rivals to abandon that frozen configuration, even if a temporary blocker
+//! would also prevent resumption.
 
 use crate::core::id::{EnterpriseId, FinancialAccountId, IdKind, MandateId, OrganizationId};
 use crate::core::state::AppState;
+use crate::delegation::MandateStatus;
 use crate::delegation::delegation_system::DelegationError;
 use crate::enterprises::autonomous_planning::{
     AutonomousEnterpriseError, available_working_capital, reserve_working_capital,
@@ -21,14 +22,15 @@ use crate::enterprises::enterprise_execution::{
     resolve_enterprise_financial_projection, validate_resume_enterprise,
     validate_retire_enterprise,
 };
+use crate::enterprises::{EnterpriseLocation, EnterpriseRecord};
 use crate::finance::finance_system::{
     StreetCapitalizationError, ValidatedLedgerTransaction,
     validate_capitalize_street_cash_from_reserves,
 };
 use crate::finance::{AccountKind, Money};
 use crate::registry::Registry;
-use crate::world::{AutonomyLevel, CapabilityKind};
-use std::collections::BTreeSet;
+use crate::world::{AutonomyLevel, BusinessOwner, CapabilityKind};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AutonomousEnterpriseLifecycleOutcome {
@@ -106,16 +108,19 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             .get_enterprise(enterprise_id)
             .expect("suspended enterprise collected from authoritative state must persist");
         let organization = enterprise.organization();
+        // Retirement is an NPC governance decision, not a side effect of whichever
+        // resume validator happens to report its first error. Test obsolete frozen
+        // dependencies even when custody, capacity, or closure also blocks reopening.
+        if stale_configuration_requires_retirement(state, enterprise) {
+            if let Some(retirement) =
+                plan_stale_autonomous_enterprise_retirement(state, enterprise_id)?
+            {
+                retirements.push((enterprise_id, retirement));
+            }
+            continue;
+        }
         let resume = match validate_resume_enterprise(registry, state, enterprise_id) {
             Ok(resume) => resume,
-            Err(error) if stale_configuration_requires_retirement(&error) => {
-                if let Some(retirement) =
-                    plan_stale_autonomous_enterprise_retirement(state, enterprise_id)?
-                {
-                    retirements.push((enterprise_id, retirement));
-                }
-                continue;
-            }
             Err(EnterpriseError::Delegation(DelegationError::DetainedManager { .. }))
             | Err(EnterpriseError::HostBusinessSuspended { .. })
             | Err(EnterpriseError::SupportingBusinessSuspended { .. })
@@ -125,30 +130,12 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             | Err(EnterpriseError::SimulationTimeOverflow) => continue,
             Err(error) => return Err(error.into()),
         };
-
         let manager = enterprise.manager();
         let manager_record = state
             .world()
             .get_character(manager)
             .expect("validated enterprise authority must reference a live manager");
-        if !matches!(
-            manager_record.autonomy(),
-            AutonomyLevel::Delegated | AutonomyLevel::Broad
-        ) {
-            // Autonomy is authored character state, not a temporary operational blocker. An NPC
-            // manager without delegated discretion has no autonomous route that can ever reopen
-            // this suspended racket, so retaining the frozen record would reserve its slot
-            // forever. Abandon it through the same terminal lifecycle used for stale authority.
-            if let Some(retirement) =
-                plan_stale_autonomous_enterprise_retirement(state, enterprise_id)?
-            {
-                retirements.push((enterprise_id, retirement));
-            }
-            continue;
-        }
-        // Police posture is a temporary operating choice, so evaluate it only after canonical
-        // resume validation has had a chance to retire a frozen configuration whose authority
-        // or required assets no longer belong to this racket.
+        // Police posture is a temporary operating choice, not a reason to abandon a site.
         let police_fear = crate::reputation::reputation_system::resolve_score(
             registry,
             state.reputation(),
@@ -213,20 +200,25 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
     });
     let mut resumed_mandates = BTreeSet::new();
     let mut capitalized_organizations = BTreeSet::new();
-    let mut projected_jobs = Vec::new();
+    let mut projected_jobs = BTreeMap::<OrganizationId, Vec<ProjectedCommandJob>>::new();
     let mut resumptions = Vec::new();
     for candidate in candidates {
         if resumed_mandates.contains(&candidate.mandate) {
             continue;
         }
-        let mut prospective_jobs = projected_jobs.clone();
-        prospective_jobs.push(candidate.command_job);
-        // Distinct mandates can share a superior. Just as in new expansion, the entire
-        // selected cohort must fit the actual command chain before any funding is moved.
-        if !projected_command_jobs_fit(state, &prospective_jobs) {
-            continue;
-        }
         let organization = candidate.command_job.organization;
+        let jobs = projected_jobs.entry(organization).or_default();
+        // Individual resume validation already proves the first job fits. Only jobs
+        // within this organization can share its command chain. Reuse the projection
+        // buffer for later candidates, without cloning or rechecking unrelated cohorts.
+        if !jobs.is_empty() {
+            jobs.push(candidate.command_job);
+            let fits = projected_command_jobs_fit(state, jobs);
+            jobs.pop();
+            if !fits {
+                continue;
+            }
+        }
         let funded = state
             .finance()
             .get_account(candidate.cash_account)
@@ -269,7 +261,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             candidate.cash_account,
             candidate.required_working_capital,
         );
-        projected_jobs = prospective_jobs;
+        jobs.push(candidate.command_job);
         resumed_mandates.insert(candidate.mandate);
         resumptions.push(PlannedResumption {
             enterprise: candidate.enterprise,
@@ -371,14 +363,42 @@ fn plan_stale_autonomous_enterprise_retirement(
     }
 }
 
-fn stale_configuration_requires_retirement(error: &EnterpriseError) -> bool {
-    matches!(
-        error,
-        EnterpriseError::Delegation(
-            DelegationError::InactiveMandate(_) | DelegationError::ScopeOutsideMandate { .. }
-        ) | EnterpriseError::SupportingBusinessOwnershipMismatch { .. }
-            | EnterpriseError::HostBusinessOwnershipMismatch { .. }
-    )
+/// Frozen ownership and mandate identity are independent of temporary operation readiness.
+/// The canonical retirement token still owns the mutation and its version/lifecycle checks.
+fn stale_configuration_requires_retirement(
+    state: &AppState,
+    enterprise: &EnterpriseRecord,
+) -> bool {
+    let authority = enterprise.authority();
+    let mandate = state
+        .delegation()
+        .get_mandate(authority.mandate)
+        .expect("persisted enterprise references its mandate");
+    let manager = state
+        .world()
+        .get_character(authority.manager)
+        .expect("persisted enterprise references its manager");
+    let owner = BusinessOwner::Organization(enterprise.organization());
+    let lost_asset = |id| {
+        state
+            .world()
+            .get_business(id)
+            .expect("persisted enterprise references its business")
+            .owner()
+            != owner
+    };
+    mandate.status() != MandateStatus::Active
+        || !mandate.scopes().contains(&authority.scope)
+        || !matches!(
+            manager.autonomy(),
+            AutonomyLevel::Delegated | AutonomyLevel::Broad
+        )
+        || matches!(enterprise.location(), EnterpriseLocation::Business(id) if lost_asset(id))
+        || enterprise
+            .supporting_businesses()
+            .iter()
+            .copied()
+            .any(lost_asset)
 }
 
 #[cfg(test)]

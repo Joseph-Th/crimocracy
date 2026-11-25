@@ -1008,6 +1008,22 @@ fn a_failed_turf_challenge_closes_the_attacker_and_recovers_after_seven_days() {
         BusinessOwner::Organization(fixture.challenger),
         hospitality_functions(),
     );
+    let cash = org_cash(&mut fixture.state, fixture.dominant);
+    let settlement = fresh_settlement(&mut fixture.state, fixture.dominant);
+    let draft = EnterpriseDraft {
+        kind: EnterpriseKind::Gambling,
+        organization: fixture.dominant,
+        authority: MandateAuthority {
+            mandate: fixture.mandate,
+            manager: fixture.manager,
+            scope: ResponsibilityScope::Neighborhood(fixture.neighborhood),
+        },
+        location: EnterpriseLocation::Business(own_venue),
+        supporting_businesses: BTreeSet::new(),
+        cash_account: cash,
+        settlement_account: settlement,
+    };
+    let held = validate_establish_enterprise(&registry, &fixture.state, draft.clone()).unwrap();
     let own = establish_gambling_at_venue(
         &registry,
         &mut fixture.state,
@@ -1039,6 +1055,70 @@ fn a_failed_turf_challenge_closes_the_attacker_and_recovers_after_seven_days() {
         validate_territory_clash(&fixture.state, fixture.dominant, rival),
         Err(TerritoryConflictError::Cooldown(_))
     ));
+    // Retirement releases the slot, but must not let the losing gang evade
+    // the forced closure by immediately opening an identical replacement.
+    let mut replacement = fixture.state.clone();
+    crate::enterprises::enterprise_execution::validate_retire_enterprise(&replacement, own)
+        .unwrap()
+        .commit(&mut replacement)
+        .unwrap();
+    let until = suppression_ends_at(&replacement, own).unwrap();
+    replacement = restore_save(&registry, build_save(&registry, &replacement).unwrap()).unwrap();
+    let before = bincode::serialize(&replacement).unwrap();
+    assert_eq!(
+        validate_establish_enterprise(&registry, &replacement, draft.clone()).err(),
+        Some(EnterpriseError::TerritorySuppressed {
+            enterprise: own,
+            until
+        })
+    );
+    assert_eq!(
+        held.commit(&mut replacement).err(),
+        Some(EnterpriseError::TerritorySuppressed {
+            enterprise: own,
+            until
+        })
+    );
+    assert_eq!(before, bincode::serialize(&replacement).unwrap());
+    // A separate venue remains available to the defeated organization.
+    let other_venue = insert_venue(
+        &registry,
+        &mut replacement,
+        "Separate Front",
+        fixture.neighborhood,
+        BusinessOwner::Organization(fixture.dominant),
+        hospitality_functions(),
+    );
+    let other = EnterpriseDraft {
+        location: EnterpriseLocation::Business(other_venue),
+        ..draft.clone()
+    };
+    assert!(validate_establish_enterprise(&registry, &replacement, other).is_ok());
+
+    replacement.advance_clock(SimDuration::from_minutes((7 * DAY_MINUTES - 1) as u32));
+    assert_eq!(
+        validate_establish_enterprise(&registry, &replacement, draft.clone()).err(),
+        Some(EnterpriseError::TerritorySuppressed {
+            enterprise: own,
+            until
+        })
+    );
+    replacement.advance_clock(SimDuration::from_minutes(1));
+    let successor = validate_establish_enterprise(&registry, &replacement, draft)
+        .unwrap()
+        .commit(&mut replacement)
+        .unwrap();
+    assert_ne!(successor, own);
+    assert_eq!(
+        replacement
+            .enterprises()
+            .get_enterprise(successor)
+            .unwrap()
+            .established_at(),
+        until
+    );
+    restore_save(&registry, build_save(&registry, &replacement).unwrap()).unwrap();
+
     // The loser still has a protected claim while its racket is forcibly closed.
     // Peace should be negotiable immediately after the fighting instead of
     // requiring the loser to resume first.

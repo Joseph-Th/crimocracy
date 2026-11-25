@@ -46,6 +46,14 @@ impl ValidatedEnterpriseEstablishment {
                 location: self.draft.location,
             });
         }
+        if let Some((enterprise, until)) = crate::world::territory_conflict::replacement_suppression(
+            state,
+            self.draft.organization,
+            self.draft.kind,
+            self.draft.location,
+        ) {
+            return Err(EnterpriseError::TerritorySuppressed { enterprise, until });
+        }
         if let Some((business_id, expected)) = self.host_business_version {
             // The host passed venue validation at validate time; any change of ownership or
             // function bumps the business version, so re-checking the pinned version is enough.
@@ -211,6 +219,14 @@ fn validate_establish_enterprise_with_optional_openings(
             kind: draft.kind,
             location: draft.location,
         });
+    }
+    if let Some((enterprise, until)) = crate::world::territory_conflict::replacement_suppression(
+        state,
+        draft.organization,
+        draft.kind,
+        draft.location,
+    ) {
+        return Err(EnterpriseError::TerritorySuppressed { enterprise, until });
     }
     validate_enterprise_business_dependencies(
         definition,

@@ -153,6 +153,34 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
             {
                 return Err(invalid());
             }
+            let defeated = if loser == assault {
+                assault_record
+            } else {
+                target_record
+            };
+            let suppression_end = event
+                .occurred_at()
+                .as_minutes()
+                .checked_add(
+                    crate::world::territory_conflict::CLASH_SUPPRESSION_DAYS
+                        * crate::core::time::DAY_MINUTES,
+                )
+                .ok_or_else(invalid)?;
+            // A successor has a new ID even when the defeated racket was retired
+            // and replaced in the same minute. Prior operations remain history.
+            if state
+                .enterprises()
+                .enterprises_at(defeated.location())
+                .any(|record| {
+                    record.id() > loser
+                        && record.organization() == defeated.organization()
+                        && record.kind() == defeated.kind()
+                        && record.established_at() >= event.occurred_at()
+                        && record.established_at().as_minutes() < suppression_end
+                })
+            {
+                return Err(invalid());
+            }
             previous_clashes.insert((district, attacker), end);
         }
         if let HistoryEventKind::TerritoryStandstill {

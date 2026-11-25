@@ -17,7 +17,7 @@ use crate::core::time::{DAY_MINUTES, SimTime, is_day_boundary};
 use crate::enterprises::enterprise_execution::{
     EnterpriseError, ValidatedEnterpriseStatusChange, validate_suspend_enterprise,
 };
-use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
+use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseStatus};
 use crate::history::history_system::{
     HistoryError, ValidatedHistoryEvent, validate_territory_clash_event,
 };
@@ -146,6 +146,29 @@ pub fn suppression_ends_at(state: &AppState, racket: EnterpriseId) -> Option<Sim
         .as_minutes()
         .checked_add(CLASH_SUPPRESSION_DAYS * DAY_MINUTES)?;
     (state.now().as_minutes() < end).then_some(SimTime::from_minutes(end))
+}
+
+/// A defeated gang cannot erase enforced downtime by retiring its racket and
+/// opening another record for the same operation. Other kinds, locations and
+/// organizations are not part of that suppression.
+pub(crate) fn replacement_suppression(
+    state: &AppState,
+    organization: OrganizationId,
+    kind: EnterpriseKind,
+    location: EnterpriseLocation,
+) -> Option<(EnterpriseId, SimTime)> {
+    state
+        .enterprises()
+        .enterprises_at(location)
+        .filter(|record| {
+            record.organization() == organization
+                && record.kind() == kind
+                && record.status() == EnterpriseStatus::Retired
+        })
+        .filter_map(|record| {
+            suppression_ends_at(state, record.id()).map(|until| (record.id(), until))
+        })
+        .max_by_key(|(id, until)| (*until, Reverse(*id)))
 }
 
 fn next_clash_allowed_at(

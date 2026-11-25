@@ -591,6 +591,34 @@ fn autonomous_lifecycle_keeps_temporarily_closed_hosted_racket_suspended() {
         "temporary host downtime must not be mistaken for a stale configuration"
     );
     validate_invariants(&fixture.state);
+
+    // The same temporary closure must not hide the loss of delegated discretion.
+    let mut obsolete = fixture.state.clone();
+    crate::world::world_system::validate_set_character_autonomy(
+        &obsolete,
+        organization,
+        fixture.authority.manager,
+        AutonomyLevel::Guided,
+    )
+    .unwrap()
+    .commit(&mut obsolete)
+    .unwrap();
+    let mut restored = restore_save(&registry, build_save(&registry, &obsolete).unwrap()).unwrap();
+    for state in [&mut obsolete, &mut restored] {
+        let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, state).unwrap();
+        assert_eq!(outcome.retired, vec![enterprise]);
+        assert!(outcome.resumed.is_empty());
+        assert!(!enterprise_location_is_occupied(
+            state,
+            EnterpriseKind::LoanSharking,
+            EnterpriseLocation::Business(venue)
+        ));
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&obsolete).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
 }
 
 #[test]
@@ -747,7 +775,21 @@ fn autonomous_lifecycle_retires_revoked_racket_even_while_police_fear_blocks_ope
 #[test]
 fn autonomous_lifecycle_retires_rival_racket_after_its_suspended_host_is_sold() {
     let registry = build_registry();
-    let mut fixture = make_test_enterprise_fixture();
+    let mut fixture = make_test_enterprise_fixture_with_inputs(
+        OrganizationKind::Criminal,
+        AutonomyLevel::Delegated,
+        NeighborhoodProfile {
+            economy: NeighborhoodEconomyProfile {
+                wealth: rating(60),
+                commercial_activity: rating(70),
+                illicit_demand: rating(50),
+            },
+            institutions: NeighborhoodInstitutionProfile {
+                police_presence: rating(40),
+            },
+        },
+        Some(rating(15)),
+    );
     fund_enterprise_fixture_cash(&mut fixture, 100_000);
     let organization = fixture.organization;
     let venue = insert_support_business(
@@ -782,19 +824,38 @@ fn autonomous_lifecycle_retires_rival_racket_after_its_suspended_host_is_sold() 
         .expect("hosted rival racket should suspend")
         .commit(&mut fixture.state)
         .expect("hosted rival suspension should commit");
+    // The captain now has no spare command capacity. Losing the venue must
+    // still retire the obsolete suspended racket instead of reserving its slot.
+    fixture.settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    let active = establish_protection(&registry, &mut fixture);
+    assert!(matches!(
+        validate_resume_enterprise(&registry, &fixture.state, enterprise),
+        Err(EnterpriseError::ManagerWorkloadExceeded { .. })
+    ));
     validate_transfer_business_ownership(&fixture.state, venue, BusinessOwner::Independent)
         .expect("a suspended racket no longer locks its former venue")
         .commit(&mut fixture.state)
         .expect("former venue sale should commit");
     fixture
         .state
-        .advance_clock(SimDuration::from_minutes(1_440));
-
-    let outcome = apply_due_autonomous_enterprise_lifecycle(&registry, &mut fixture.state)
-        .expect("structurally obsolete rival racket should resolve");
-
-    assert!(outcome.resumed.is_empty());
-    assert_eq!(outcome.retired, vec![enterprise]);
+        .advance_clock(SimDuration::from_minutes(1_439));
+    let mut replay =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    let outcome = run_tick(&registry, &mut fixture.state);
+    assert_eq!(outcome, run_tick(&registry, &mut replay));
+    assert!(outcome.resumed_enterprises.is_empty());
+    assert_eq!(outcome.retired_enterprises, vec![enterprise]);
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
     assert_eq!(
         fixture
             .state
@@ -812,7 +873,17 @@ fn autonomous_lifecycle_retires_rival_racket_after_its_suspended_host_is_sold() 
         ),
         "retirement must release the abandoned suspended slot"
     );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .get_enterprise(active)
+            .unwrap()
+            .status(),
+        EnterpriseStatus::Active
+    );
     validate_invariants(&fixture.state);
+    restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
 }
 
 #[test]

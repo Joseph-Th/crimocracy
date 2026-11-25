@@ -217,7 +217,9 @@ rackets. `preview-contest enterprise-N` inspects the legal opening and your
 available manpower without revealing the opponent's current strength.
 `contest enterprise-N` then challenges that rival with your actual local
 associates. The defender receives a two-associate positional advantage. The
-loser has one racket suspended for seven days and cannot reopen it early;
+loser has one racket suspended for seven days and cannot reopen it early, even
+by retiring it and establishing a replacement of the same kind at the same
+location;
 the attacker must also wait seven days before another district challenge.
 Stronger rivals autonomously contest overlapping territory and can shut down
 player holdings, triggering an actionable crisis report. The resulting lost
