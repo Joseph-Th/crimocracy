@@ -12,8 +12,10 @@ use crate::core::time::SimTime;
 use crate::intelligence::{
     InformationRecord, InformationSignal, KnowledgeHolder, LegalPersonStatusSignal,
 };
-use crate::operations::OperationKind;
 use crate::operations::operation_intelligence::resolve_information_score;
+use crate::operations::{
+    OperationAbortCause, OperationKind, OperationObjectiveBlocker, OperationObjectiveOutcome,
+};
 use crate::registry::Registry;
 use std::collections::BTreeSet;
 
@@ -115,7 +117,7 @@ pub(crate) fn known_detention_arrest(
         .world
         .get_character(character)
         .is_some_and(|member| member.organization() == Some(organization));
-    state
+    let arrest = state
         .intelligence
         .information_for_holder_subject(KnowledgeHolder::Organization(organization), target)
         .filter(|information| {
@@ -135,17 +137,6 @@ pub(crate) fn known_detention_arrest(
             else {
                 return None;
             };
-            // A crew knows the custody status of its own roster (the counsel view and
-            // release alerts already expose it). Historical intelligence is not a new
-            // extraction opportunity, even if the arrest report is still fresh.
-            if own_member
-                && state
-                    .legal
-                    .get_arrest(*arrest)
-                    .is_some_and(|episode| episode.released_at().is_some())
-            {
-                return None;
-            }
             Some((
                 information.observed_at(),
                 information.recorded_at(),
@@ -154,7 +145,44 @@ pub(crate) fn known_detention_arrest(
             ))
         })
         .max()
-        .map(|(_, _, _, arrest)| arrest)
+        .map(|(_, _, _, arrest)| arrest)?;
+    // Never fall back to an older episode when the latest known one has ended.
+    // Own-member custody is visible; a foreign release becomes known through
+    // the organization's own extraction after-action, not the hidden arrest table.
+    let released = state.legal.get_arrest(arrest)?.released_at().is_some();
+    if released && (own_member || confirmed_custody_end(state, organization, arrest).is_some()) {
+        return None;
+    }
+    Some(arrest)
+}
+
+/// Derive knowledge of an ended episode from the crew's persisted operation outcomes.
+/// A tactical failure alone does not establish release.
+fn confirmed_custody_end(
+    state: &AppState,
+    organization: OrganizationId,
+    arrest: ArrestId,
+) -> Option<SimTime> {
+    state
+        .operations()
+        .operations_for_organization(organization)
+        .filter(|operation| operation.extraction_arrest() == Some(arrest))
+        .filter_map(|operation| {
+            if let Some(abort) = operation.abort_record() {
+                return (abort.cause()
+                    == OperationAbortCause::ObjectiveUnavailable(
+                        OperationObjectiveBlocker::ExtractionCustodyEnded,
+                    ))
+                .then_some(abort.aborted_at());
+            }
+            let resolution = operation.resolution()?;
+            (resolution.objective_blocker()
+                == Some(OperationObjectiveBlocker::ExtractionCustodyEnded)
+                || (resolution.extraction_arrest() == Some(arrest)
+                    && resolution.objective_outcome() != OperationObjectiveOutcome::Failed))
+                .then_some(resolution.resolved_at())
+        })
+        .min()
 }
 
 pub(crate) fn known_witness_cases(
@@ -238,27 +266,24 @@ pub(crate) fn organization_knew_detention_at(
     at: SimTime,
 ) -> bool {
     let target = EntityRef::Character(character);
-    let Some(arrest_record) = state.legal.get_arrest(arrest) else {
-        return false;
-    };
-    if arrest_record.character() != character
-        || arrest_record.arrested_at() > at
-        || arrest_record
-            .released_at()
-            .is_some_and(|released_at| released_at < at)
+    // Same-minute authorization and after-action ordering is not persisted.
+    // Only a strictly earlier confirmation disproves historical authorization.
+    if state
+        .legal
+        .get_arrest(arrest)
+        .is_some_and(|episode| episode.released_at().is_some_and(|end| end < at))
+        && confirmed_custody_end(state, organization, arrest).is_some_and(|end| end < at)
     {
         return false;
     }
+    // Historical authorization proves learned custody, not a hidden current
+    // legal fact or the target's present-day membership. An outsider may have
+    // been released since the truthful observation that justified the order.
     state
         .intelligence
         .information_for_holder_subject(KnowledgeHolder::Organization(organization), target)
         .any(|information| {
             information.recorded_at() <= at
-                && information.observed_at() <= at
-                && arrest_record.arrested_at() <= information.observed_at()
-                && arrest_record
-                    .released_at()
-                    .is_none_or(|released_at| information.observed_at() <= released_at)
                 && matches!(
                     information.signal(),
                     Some(InformationSignal::LegalPersonStatus(
@@ -267,9 +292,11 @@ pub(crate) fn organization_knew_detention_at(
                         }
                     )) if *learned_arrest == arrest
                 )
-                && source_information_is_usable_for_operation_basis(
+                && source_information_proves_operation_basis(
                     registry,
+                    state,
                     OperationKind::Extraction,
+                    target,
                     information,
                     at,
                 )

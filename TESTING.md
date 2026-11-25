@@ -247,7 +247,12 @@ contacts, recruitment prospects, ownership, or organization-held information.
 No typed ID creates knowledge of a hidden record. Witness pressure and
 extraction still require actual episode-bound learned legal-person status;
 ordinary person sightings or authority-level case-activity sightings are
-not equivalent to witness registration or custody evidence.
+not equivalent to witness registration or custody evidence. Extraction tests in
+`operations::operation_execution::tests::extraction` cover unknown early
+foreign release, matching save/restored due-start aborts, rejection of
+repeated attempts after the crew learns custody ended, successful foreign
+rescue, and a fresh report of a distinct renewed arrest. Historical
+validation rejects an objective-unavailable abort before its due start.
 `legal::investigation_system::tests::unrelated_incident_with_existing_shelf_witness_opens_separate_case`
 proves that two separate operation incidents implicating the same suspect and
 eyewitness do not reuse an incompatible suspended case; the existing same-origin

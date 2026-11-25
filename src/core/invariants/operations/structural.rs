@@ -55,6 +55,10 @@ fn validate_operation_definition(
         || operation
             .started_at()
             .is_some_and(|started_at| started_at < earliest_start)
+        || operation.abort_record().is_some_and(|abort| {
+            matches!(abort.cause(), OperationAbortCause::ObjectiveUnavailable(_))
+                && abort.aborted_at() < earliest_start
+        })
     {
         return Err(StateValidationError::InvalidOperationDefinition {
             operation: operation.id(),
@@ -188,9 +192,15 @@ fn validate_operation_objective(
                 .ok_or_else(|| invalid_operation_definition(operation))?;
             if arrest.character() != *target
                 || arrest.arrested_at() > operation.authorized_at()
-                || arrest
-                    .released_at()
-                    .is_some_and(|released_at| released_at < operation.authorized_at())
+                // A fresh observation can outlive unknown foreign custody. Actual
+                // entry, unlike authorization, must still be inside that episode.
+                || operation.started_at().is_some_and(|started_at| {
+                    arrest.released_at().is_some_and(|released_at| released_at < started_at)
+                })
+                || operation.abort_record().is_some_and(|abort| {
+                    abort.cause() == OperationAbortCause::ObjectiveUnavailable(OperationObjectiveBlocker::ExtractionCustodyEnded)
+                        && arrest.released_at().is_none_or(|released_at| released_at > abort.aborted_at())
+                })
             {
                 return Err(invalid_operation_definition(operation));
             }
