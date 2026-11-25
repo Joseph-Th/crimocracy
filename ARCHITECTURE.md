@@ -177,8 +177,10 @@ The generic treasury allocation command only
 moves same-kind liquid funds: street money cannot become accounted money except
 through the canonical laundering path. Explicit accounted-to-street capitalization
 is validated and posted by `finance_system::validate_capitalize_street_cash` as
-an auditable, one-way, two-posting ledger transaction; it never clears a
-negative destination balance or grants access to another organization's cash.
+an auditable, one-way ledger transaction. Explicit orders select a single source;
+autonomous racket recovery pools spendable clean accounts through the same validator
+and preserves a two-day clean payroll reserve. A negative destination balance
+must be cleared in full; neither path grants access to another organization's cash.
 The adapter only selects its player's accounts, and reports spendable balances
 separately from net balances. Read-only leadership summaries aggregate actual
 owner-scoped operating cycles over a bounded trailing 30-day window and compare

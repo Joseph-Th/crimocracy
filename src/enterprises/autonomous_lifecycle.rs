@@ -22,9 +22,10 @@ use crate::enterprises::enterprise_execution::{
     validate_retire_enterprise,
 };
 use crate::finance::finance_system::{
-    StreetCapitalizationDraft, ValidatedLedgerTransaction, validate_capitalize_street_cash,
+    StreetCapitalizationError, ValidatedLedgerTransaction,
+    validate_capitalize_street_cash_from_reserves,
 };
-use crate::finance::{AccountKind, FinancialOwner, Money};
+use crate::finance::{AccountKind, Money};
 use crate::registry::Registry;
 use crate::world::{AutonomyLevel, CapabilityKind};
 use std::collections::BTreeSet;
@@ -318,32 +319,17 @@ fn plan_suspended_racket_capitalization(
             .characters_in_organization(organization)
             .count() as i128
         * 2;
-    let source = state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(organization))
-        .filter(|account| account.kind() == AccountKind::AccountedFunds)
-        .filter(|account| {
-            i128::from(account.available_payment_balance().cents())
-                >= i128::from(needed.cents()) + payroll_reserve
-        })
-        .max_by_key(|account| {
-            (
-                account.available_payment_balance(),
-                std::cmp::Reverse(account.id()),
-            )
-        });
-    let Some(source) = source else {
-        return Ok(None);
-    };
-    Ok(Some(validate_capitalize_street_cash(
+    match validate_capitalize_street_cash_from_reserves(
         state,
-        StreetCapitalizationDraft {
-            organization,
-            accounted_account: source.id(),
-            street_account: cash_account,
-            amount: needed,
-        },
-    )?))
+        organization,
+        cash_account,
+        needed,
+        payroll_reserve,
+    ) {
+        Ok(capitalization) => Ok(Some(capitalization)),
+        Err(StreetCapitalizationError::InsufficientFunds { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 impl AutonomousEnterpriseLifecyclePlan {
@@ -404,10 +390,12 @@ mod tests {
     use crate::core::simulation::run_test_tick;
     use crate::enterprises::enterprise_execution::validate_suspend_enterprise;
     use crate::finance::finance_system::{insert_account, validate_record_transaction};
-    use crate::finance::{FinancialAccountDraft, LedgerPosting, LedgerTransactionDraft};
+    use crate::finance::{
+        FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+    };
 
     #[test]
-    fn indebted_rival_reinvests_real_clean_dividends_to_reopen_racket() {
+    fn indebted_rival_pools_clean_dividends_to_reopen_racket() {
         let registry = crate::build_registry();
         let mut city = generate_city(&registry, CityScale::Small.config(82_734_113)).unwrap();
         let organization = city.rivals[0];
@@ -439,6 +427,19 @@ mod tests {
             },
         )
         .unwrap();
+        let mut clean_accounts = vec![accounted];
+        for _ in 0..3 {
+            clean_accounts.push(
+                insert_account(
+                    &mut city.state,
+                    FinancialAccountDraft {
+                        owner: FinancialOwner::Organization(organization),
+                        kind: AccountKind::AccountedFunds,
+                    },
+                )
+                .unwrap(),
+            );
+        }
         let settlement = city
             .state
             .finance()
@@ -446,20 +447,23 @@ mod tests {
             .find(|account| account.kind() == AccountKind::Settlement)
             .unwrap()
             .id();
-        for (memo, from, to, amount) in [
-            (
-                "Existing earned legitimate reserve",
-                settlement,
-                accounted,
-                200_000,
-            ),
-            (
+        for (memo, from, to, amount) in clean_accounts
+            .iter()
+            .map(|&account| {
+                (
+                    "Existing earned legitimate reserve",
+                    settlement,
+                    account,
+                    50_000,
+                )
+            })
+            .chain(std::iter::once((
                 "Old enterprise operating loss",
                 cash,
                 settlement,
                 opening_balance + 50_000,
-            ),
-        ] {
+            )))
+        {
             validate_record_transaction(
                 &city.state,
                 LedgerTransactionDraft {
@@ -540,6 +544,14 @@ mod tests {
                     .postings()
                     .iter()
                     .any(|posting| posting.account == cash)
+                && transaction
+                    .postings()
+                    .iter()
+                    .filter(|posting| {
+                        clean_accounts.contains(&posting.account) && posting.amount < Money::ZERO
+                    })
+                    .count()
+                    >= 2
         }));
         assert_eq!(
             bincode::serialize(&city.state).unwrap(),

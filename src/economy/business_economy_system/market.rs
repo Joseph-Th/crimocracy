@@ -312,6 +312,40 @@ pub(super) fn forecast_market_snapshot(
     market_snapshot(state, record, |_| Some(false))
 }
 
+/// A portfolio owner knows which of its own businesses actually operate.
+/// Treat foreign directory peers as healthy without consulting their books.
+fn owner_forecast_market_snapshot(
+    state: &AppState,
+    record: &BusinessRecord,
+    owner: BusinessOwner,
+) -> MarketSnapshot {
+    market_snapshot(state, record, |peer| {
+        if peer.owner() == owner {
+            operating_condition(state, peer.id())
+        } else {
+            Some(false)
+        }
+    })
+}
+
+/// Prospective income of a normally operating acquisition from the buyer's
+/// perspective. The public appraisal remains independent of anyone's books.
+pub(crate) fn forecast_acquisition_business_net(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+    buyer: OrganizationId,
+) -> Result<Money, BusinessEconomyError> {
+    let record = super::validate_business(state, business)?;
+    forecast_net_for_market(
+        registry,
+        state,
+        record,
+        owner_forecast_market_snapshot(state, record, BusinessOwner::Organization(buyer)),
+        false,
+    )
+}
+
 /// Aggregate the forecast additional daily revenue across the planner's own active
 /// businesses if a foreign target loses capacity. Use actual operating conditions for
 /// the planner's own portfolio and public directory assumptions for foreign peers.
@@ -337,13 +371,7 @@ pub(crate) fn forecast_competitor_disruption_gain(
         let Some(disrupted) = operating_condition(state, stake) else {
             continue;
         };
-        let healthy = market_snapshot(state, record, |peer| {
-            if peer.owner() == record.owner() {
-                operating_condition(state, peer.id())
-            } else {
-                Some(false)
-            }
-        });
+        let healthy = owner_forecast_market_snapshot(state, record, record.owner());
         let mut damaged = healthy;
         match kind {
             Competition::Direct => damaged.healthy_competitors -= 1,

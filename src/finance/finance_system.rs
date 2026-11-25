@@ -733,6 +733,7 @@ fn resolve_transaction_budget(
 }
 
 mod capitalization;
+pub(crate) use capitalization::validate_capitalize_street_cash_from_reserves;
 pub use capitalization::{
     StreetCapitalizationDraft, StreetCapitalizationError, validate_capitalize_street_cash,
 };

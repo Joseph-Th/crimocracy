@@ -60,6 +60,100 @@ fn established_shop(
 }
 
 #[test]
+fn rival_investment_accounts_for_its_own_closed_competitor_without_changing_public_appraisal() {
+    let mut fixture = make_independent_fixture();
+    let rival = fixture.organization;
+    insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Rival executive".into(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let neighborhood = ward(&mut fixture, "Marginal local market", 10, 10);
+    let closed = established_shop(
+        &mut fixture,
+        BusinessKind::Retail,
+        BusinessOwner::Organization(rival),
+        neighborhood,
+    );
+    let candidate = established_shop(
+        &mut fixture,
+        BusinessKind::Retail,
+        BusinessOwner::Independent,
+        neighborhood,
+    );
+    let public = appraise_business(&fixture.registry, &fixture.state, candidate).unwrap();
+    assert!(public.expected_cycle_net < Money::ZERO);
+    validate_suspend_business_economy(&fixture.state, closed)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        appraise_business(&fixture.registry, &fixture.state, candidate).unwrap(),
+        public
+    );
+    let expected_net = business_economy_system::forecast_live_business_net(
+        &fixture.registry,
+        &fixture.state,
+        candidate,
+    )
+    .unwrap();
+    assert!(expected_net > Money::ZERO);
+    let price = acquisition_offer(&fixture.registry, &fixture.state, rival, candidate)
+        .unwrap()
+        .0;
+    let reserve = 7 * fixture.registry.upkeep().per_member_daily().cents();
+    fund_accounted_from_street(&mut fixture, price.cents() + reserve);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(7 * DAY_MINUTES as u32));
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        assert_eq!(
+            apply_due_autonomous_acquisitions(&fixture.registry, state),
+            vec![candidate]
+        );
+        assert_eq!(
+            state.world().get_business(candidate).unwrap().owner(),
+            BusinessOwner::Organization(rival)
+        );
+        state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+        let plan =
+            business_economy_system::decide_business_cycle(&fixture.registry, state, candidate, 0)
+                .unwrap();
+        business_economy_system::validate_business_cycle_plan(state, plan)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        assert_eq!(
+            state
+                .economy()
+                .cycles_for(candidate)
+                .next_back()
+                .unwrap()
+                .net_cash(),
+            expected_net
+        );
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn rival_avoids_reopening_positive_margin_shop_that_destroys_its_other_earnings() {
     let mut fixture = make_independent_fixture();
     let rival = fixture.organization;

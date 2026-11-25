@@ -10,7 +10,7 @@ use crate::core::state::AppState;
 use crate::economy::BusinessOperatingStatus;
 use crate::economy::business_economy_system::{
     PortfolioAdministration, acquisition_owner_daily_displacement, daily_owner_net,
-    forecast_live_business_net,
+    forecast_acquisition_business_net, forecast_live_business_net,
 };
 use crate::finance::Money;
 use crate::registry::Registry;
@@ -103,7 +103,7 @@ impl PortfolioForecast {
         };
         let overhead = projection.overhead;
         let incoming = daily_owner_net(
-            appraisal.expected_cycle_net,
+            forecast_acquisition_business_net(registry, state, candidate, self.owner)?,
             appraisal.cycle_minutes,
             overhead,
         );

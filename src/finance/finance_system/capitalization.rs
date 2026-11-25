@@ -24,7 +24,7 @@ pub enum StreetCapitalizationError {
     InvalidSource,
     #[error("destination must be a street-cash account owned by the organization")]
     InvalidDestination,
-    #[error("source has {available} spendable cents, less than the requested {requested}")]
+    #[error("source funding has {available} spendable cents, less than the requested {requested}")]
     InsufficientFunds { available: i64, requested: i64 },
     #[error("destination cannot accept a full street-cash receipt or clear its existing deficit")]
     DestinationUnavailable,
@@ -33,8 +33,8 @@ pub enum StreetCapitalizationError {
 }
 
 /// Lose the clean-money designation to fund on-the-street work. The organization
-/// must explicitly select both of its accounts; an old street deficit is not
-/// silently settled, and generic same-kind transfers remain restrictive.
+/// must explicitly select both of its accounts; any old street deficit must
+/// be cleared in full, and generic same-kind transfers remain restrictive.
 /// The returned canonical ledger token rechecks accounts, versions and time at commit.
 pub fn validate_capitalize_street_cash(
     state: &AppState,
@@ -48,21 +48,76 @@ pub fn validate_capitalize_street_cash(
         .finance()
         .get_account(draft.accounted_account)
         .ok_or(FinanceError::MissingAccount(draft.accounted_account))?;
-    let destination = state
-        .finance()
-        .get_account(draft.street_account)
-        .ok_or(FinanceError::MissingAccount(draft.street_account))?;
     if source.owner() != owner || source.kind() != AccountKind::AccountedFunds {
         return Err(StreetCapitalizationError::InvalidSource);
     }
+    validate_capitalization(
+        state,
+        draft.organization,
+        draft.street_account,
+        draft.amount,
+        vec![(source.available_payment_balance(), source.id())],
+        0,
+    )
+}
+
+/// Autonomous treasury funding uses every spendable clean account belonging to
+/// the organization, leaving its required clean reserve across the same pool.
+/// Prefer larger sources to minimize postings; account IDs break exact ties.
+pub(crate) fn validate_capitalize_street_cash_from_reserves(
+    state: &AppState,
+    organization: OrganizationId,
+    street_account: FinancialAccountId,
+    amount: Money,
+    payroll_reserve: i128,
+) -> Result<ValidatedLedgerTransaction, StreetCapitalizationError> {
+    if amount <= Money::ZERO {
+        return Err(StreetCapitalizationError::InvalidAmount);
+    }
+    let mut sources: Vec<_> = state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(organization))
+        .filter(|account| account.kind() == AccountKind::AccountedFunds)
+        .map(|account| (account.available_payment_balance(), account.id()))
+        .filter(|(available, _)| *available > Money::ZERO)
+        .collect();
+    sources.sort_unstable_by_key(|&(available, id)| (std::cmp::Reverse(available), id));
+    validate_capitalization(
+        state,
+        organization,
+        street_account,
+        amount,
+        sources,
+        payroll_reserve,
+    )
+}
+
+fn validate_capitalization(
+    state: &AppState,
+    organization: OrganizationId,
+    street_account: FinancialAccountId,
+    amount: Money,
+    sources: Vec<(Money, FinancialAccountId)>,
+    reserve: i128,
+) -> Result<ValidatedLedgerTransaction, StreetCapitalizationError> {
+    let owner = FinancialOwner::Organization(organization);
+    let destination = state
+        .finance()
+        .get_account(street_account)
+        .ok_or(FinanceError::MissingAccount(street_account))?;
     if destination.owner() != owner || destination.kind() != AccountKind::StreetCash {
         return Err(StreetCapitalizationError::InvalidDestination);
     }
-    let available = source.available_payment_balance();
-    if available < draft.amount {
+    let available = (sources
+        .iter()
+        .map(|(balance, _)| i128::from(balance.cents()))
+        .sum::<i128>()
+        - reserve.max(0))
+    .max(0);
+    if available < i128::from(amount.cents()) {
         return Err(StreetCapitalizationError::InsufficientFunds {
-            available: available.cents(),
-            requested: draft.amount.cents(),
+            available: i64::try_from(available).expect("insufficient funds fit money range"),
+            requested: amount.cents(),
         });
     }
     // Explicit capitalization may repay debt, but only by clearing the entire
@@ -71,30 +126,38 @@ pub fn validate_capitalize_street_cash(
         && destination.version() < u32::MAX
         && destination
             .balance()
-            .checked_add(draft.amount)
+            .checked_add(amount)
             .is_some_and(|balance| balance >= Money::ZERO);
-    if !destination.can_receive_liquid_payment(draft.amount) && !fully_clears_deficit {
+    if !destination.can_receive_liquid_payment(amount) && !fully_clears_deficit {
         return Err(StreetCapitalizationError::DestinationUnavailable);
     }
+    let mut remaining = amount.cents();
+    let mut postings = Vec::new();
+    for (available, account) in sources {
+        let debit = remaining.min(available.cents());
+        if debit > 0 {
+            postings.push(LedgerPosting {
+                account,
+                amount: Money::from_cents(-debit),
+            });
+            remaining -= debit;
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    debug_assert_eq!(remaining, 0);
+    postings.push(LedgerPosting {
+        account: street_account,
+        amount,
+    });
     Ok(validate_record_transaction(
         state,
         LedgerTransactionDraft {
             occurred_at: state.now(),
             memo: "Treasury capitalization: accounted funds withdrawn for street operations"
                 .to_owned(),
-            postings: vec![
-                LedgerPosting {
-                    account: draft.accounted_account,
-                    amount: draft
-                        .amount
-                        .checked_neg()
-                        .expect("positive money amount can be negated"),
-                },
-                LedgerPosting {
-                    account: draft.street_account,
-                    amount: draft.amount,
-                },
-            ],
+            postings,
             authorization: None,
         },
     )?)
@@ -212,6 +275,31 @@ mod tests {
                 available: 20_000,
                 requested: 25_000,
             })
+        );
+        assert_eq!(bincode::serialize(&state).unwrap(), before);
+        assert_eq!(
+            validate_capitalize_street_cash_from_reserves(
+                &state,
+                organization,
+                street,
+                Money::from_cents(7_000),
+                13_001
+            )
+            .err(),
+            Some(StreetCapitalizationError::InsufficientFunds {
+                available: 6_999,
+                requested: 7_000
+            }),
+        );
+        assert!(
+            validate_capitalize_street_cash_from_reserves(
+                &state,
+                organization,
+                street,
+                Money::from_cents(7_000),
+                13_000
+            )
+            .is_ok()
         );
         assert_eq!(bincode::serialize(&state).unwrap(), before);
         let token = validate_capitalize_street_cash(&state, draft).unwrap();
