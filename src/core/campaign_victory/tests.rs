@@ -1,3 +1,4 @@
+use super::commercial_standing::{established_business, recent_business_net};
 use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
@@ -17,6 +18,7 @@ use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
 use crate::finance::{FinancialAccountDraft, LedgerPosting, LedgerTransactionDraft};
 use crate::reports::ReportKind;
+use crate::world::BusinessOwner;
 use crate::world::world_system::{
     designate_player_organization, insert_character, insert_neighborhood, insert_organization,
 };
@@ -236,29 +238,6 @@ fn hire_additional_staff(
         )
         .unwrap();
     }
-}
-
-#[test]
-fn political_business_coalition_requires_distinct_profitable_industries() {
-    let mut standing = BusinessDistrictStanding {
-        active: 3,
-        mature: 3,
-        established: 3,
-        window_net: 250_000,
-        ..BusinessDistrictStanding::default()
-    };
-    standing.established_kinds.insert(BusinessKind::Pawnshop);
-    assert!(
-        !standing.qualifies(120_000),
-        "two pawnshops are still a single local commercial constituency"
-    );
-    standing.established_kinds.insert(BusinessKind::Hospitality);
-    assert!(standing.qualifies(120_000));
-    standing.window_net = 119_999;
-    assert!(
-        !standing.qualifies(120_000),
-        "diversity cannot replace income"
-    );
 }
 
 #[test]

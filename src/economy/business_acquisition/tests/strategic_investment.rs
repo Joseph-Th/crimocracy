@@ -120,6 +120,159 @@ fn ambiguous_rival_executive_cannot_commission_acquisition() {
 }
 
 #[test]
+fn staffed_seller_requires_a_sole_available_executive_to_accept_offer() {
+    use crate::legal::arrest_system::{validate_arrest, validate_release_arrest};
+    use crate::legal::investigation_system::{validate_add_evidence, validate_open_investigation};
+    use crate::legal::{
+        Admissibility, ArrestDraft, EvidenceDraft, EvidenceKind, EvidenceReliability,
+        EvidenceStrength, InvestigationDraft,
+    };
+    use crate::world::world_system::validate_set_character_supervisor;
+
+    let mut fixture = make_independent_fixture();
+    designate_player_organization(&mut fixture.state, fixture.organization).unwrap();
+    let seller = organization(&mut fixture, "Staffed seller", OrganizationKind::Criminal);
+    executive(&mut fixture, seller);
+    let leader = fixture
+        .state
+        .world()
+        .characters_in_organization(seller)
+        .next()
+        .unwrap()
+        .id();
+    let target = another_property(&mut fixture, BusinessOwner::Organization(seller), true);
+    let offer = Money::from_cents(hospitality_price(&fixture).cents() * 100);
+    fund_accounted_from_street(&mut fixture, offer.cents());
+    let draft = BusinessAcquisitionDraft {
+        organization: fixture.organization,
+        business: target,
+        funding_accounts: BTreeSet::from([fixture.accounted]),
+    };
+    let held =
+        validate_offer_business(&fixture.registry, &fixture.state, draft.clone(), offer).unwrap();
+    executive(&mut fixture, seller);
+    let competing_leader = fixture
+        .state
+        .world()
+        .characters_in_organization(seller)
+        .find(|person| person.id() != leader)
+        .unwrap()
+        .id();
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        held.commit(&fixture.registry, &mut fixture.state)
+            .unwrap_err(),
+        BusinessAcquisitionError::OfferDeclined
+    );
+    assert_eq!(
+        validate_offer_business(&fixture.registry, &fixture.state, draft.clone(), offer).err(),
+        Some(BusinessAcquisitionError::OfferDeclined)
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+
+    // Consolidating real command restores consent. A subsequent arrest of that
+    // executive must invalidate both a held offer and newly submitted offers.
+    validate_set_character_supervisor(&fixture.state, competing_leader, Some(leader))
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let held =
+        validate_offer_business(&fixture.registry, &fixture.state, draft.clone(), offer).unwrap();
+    let police = organization(&mut fixture, "Police", OrganizationKind::LawEnforcement);
+    let investigation = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: police,
+            title: "Seller executive custody".into(),
+            subjects: BTreeSet::from([EntityRef::Character(leader)]),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let mut evidence = BTreeSet::new();
+    for (kind, strength) in [
+        (EvidenceKind::FinancialRecord, EvidenceStrength::Strong),
+        (EvidenceKind::Document, EvidenceStrength::Corroborating),
+    ] {
+        evidence.insert(
+            validate_add_evidence(
+                &fixture.state,
+                EvidenceDraft {
+                    investigation,
+                    custodian: police,
+                    subject: EntityRef::Character(leader),
+                    origin: None,
+                    kind,
+                    strength,
+                    reliability: EvidenceReliability::HighlyReliable,
+                    admissibility: Admissibility::Admissible,
+                    discovered_at: fixture.state.now(),
+                },
+            )
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap(),
+        );
+    }
+    let arrest = validate_arrest(
+        &fixture.registry,
+        &fixture.state,
+        ArrestDraft {
+            character: leader,
+            investigation,
+            evidence,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        held.commit(&fixture.registry, &mut fixture.state)
+            .unwrap_err(),
+        BusinessAcquisitionError::OfferDeclined
+    );
+    assert_eq!(
+        validate_offer_business(&fixture.registry, &fixture.state, draft.clone(), offer).err(),
+        Some(BusinessAcquisitionError::OfferDeclined)
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        validate_release_arrest(state, arrest)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        let receipt = validate_offer_business(&fixture.registry, state, draft.clone(), offer)
+            .unwrap()
+            .commit(&fixture.registry, state)
+            .unwrap();
+        assert_eq!(receipt.business, target);
+        assert_eq!(receipt.price, offer);
+        assert_eq!(
+            state.world().get_business(target).unwrap().owner(),
+            BusinessOwner::Organization(fixture.organization)
+        );
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
 fn equally_funded_rivals_alternate_first_access_to_scarce_listings_across_weeks() {
     let mut fixture = make_independent_fixture();
     let first = fixture.organization;
@@ -484,13 +637,20 @@ fn mature_seller_can_accept_full_years_payroll_without_a_replacement() {
     designate_player_organization(&mut fixture.state, player).unwrap();
     let seller = organization(&mut fixture, "Mature seller", OrganizationKind::Criminal);
     executive(&mut fixture, seller);
+    let leader = fixture
+        .state
+        .world()
+        .characters_in_organization(seller)
+        .next()
+        .unwrap()
+        .id();
     for index in 0..4 {
         insert_character(
             &mut fixture.state,
             CharacterDraft {
                 name: format!("Mature seller employee {index}"),
                 organization: Some(seller),
-                supervisor: None,
+                supervisor: Some(leader),
                 autonomy: AutonomyLevel::Guided,
                 capabilities: BTreeMap::new(),
                 traits: BTreeSet::new(),

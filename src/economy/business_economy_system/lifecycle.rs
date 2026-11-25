@@ -170,6 +170,7 @@ pub(crate) fn validate_acquisition_restart(
     state: &AppState,
     business: BusinessId,
     cycle_duration: SimDuration,
+    settlement_receives_purchase_payment: bool,
 ) -> Result<ValidatedBusinessEconomyStatusChange, BusinessEconomyError> {
     let business_record = validate_business(state, business)?;
     let economy = state
@@ -185,6 +186,20 @@ pub(crate) fn validate_acquisition_restart(
     )?;
     validate_account_posting_headroom(state, economy.operating_account())?;
     validate_account_posting_headroom(state, economy.settlement_account())?;
+    // Independent listings credit the existing settlement account before restart.
+    // Reserve both the payment posting and the subsequent operating headroom.
+    // Negotiated consideration goes to the seller's separate accounted funds.
+    if settlement_receives_purchase_payment {
+        let settlement = state
+            .finance
+            .get_account(economy.settlement_account())
+            .expect("account validation proved the settlement account exists");
+        crate::core::version::ensure_version_can_advance_by(
+            settlement.version(),
+            2,
+            "financial account",
+        )?;
+    }
     ensure_version_can_advance(economy.version(), "business economy")?;
     ensure_version_can_advance(business_record.version(), "business")?;
     let operating = state

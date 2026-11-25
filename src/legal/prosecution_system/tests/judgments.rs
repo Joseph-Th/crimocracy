@@ -300,6 +300,90 @@ fn later_review_cannot_impose_second_fine_from_already_adjudicated_evidence() {
     use crate::legal::investigation_system::{
         InvestigationTransition, validate_transition_investigation,
     };
+    // A new custody episode can use one genuinely new source alongside the
+    // existing corroboration, but the court cannot reuse adjudicated proof.
+    let mut rearrested = fixture.state.clone();
+    rearrested.advance_clock(SimDuration::ONE_MINUTE);
+    let mut combined_evidence = evidence.clone();
+    combined_evidence.insert(add_evidence(
+        &mut rearrested,
+        fixture.police,
+        fixture.investigation,
+        fixture.defendant,
+        EvidenceKind::Surveillance,
+    ));
+    let rearrest = validate_arrest(
+        &fixture.registry,
+        &rearrested,
+        ArrestDraft {
+            character: fixture.defendant,
+            investigation: fixture.investigation,
+            evidence: combined_evidence.clone(),
+        },
+    )
+    .unwrap()
+    .commit(&mut rearrested)
+    .unwrap();
+    assert_ne!(rearrest, fixture.arrest);
+    validate_release_arrest(&rearrested, rearrest)
+        .unwrap()
+        .commit(&mut rearrested)
+        .unwrap();
+    let review = validate_open_prosecution_case(
+        &rearrested,
+        ProsecutionCaseDraft {
+            arrest: rearrest,
+            prosecutor_office: fixture.office,
+            prosecutor: fixture.lead,
+            evidence: combined_evidence,
+        },
+    )
+    .unwrap()
+    .commit(&mut rearrested)
+    .unwrap();
+    validate_transition_investigation(
+        &rearrested,
+        fixture.investigation,
+        InvestigationTransition::Suspend,
+    )
+    .unwrap()
+    .commit(&mut rearrested)
+    .unwrap();
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &rearrested).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut rearrested, &mut restored] {
+        // The indexed prior judgment must be found across arrest IDs.
+        let tick = daily_boundary(&fixture.registry, state);
+        assert!(tick.adjudicated_prosecution_cases.is_empty());
+        assert_eq!(tick.declined_prosecution_cases, vec![review]);
+        assert_eq!(
+            state.legal().get_prosecution_case(review).unwrap().status(),
+            ProsecutionCaseStatus::Declined
+        );
+        assert_eq!(
+            state
+                .legal()
+                .get_prosecution_case(first)
+                .unwrap()
+                .judgment()
+                .unwrap()
+                .fine(),
+            old_fine
+        );
+    }
+    assert_eq!(
+        bincode::serialize(&rearrested).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &rearrested).unwrap(),
+    )
+    .unwrap();
+
     if fixture
         .state
         .legal()

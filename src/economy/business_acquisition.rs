@@ -245,6 +245,7 @@ impl ValidatedBusinessAcquisition {
                 state,
                 self.business,
                 self.economy_cycle_duration,
+                self.negotiated_seller.is_none(),
             )?)
         } else {
             None
@@ -654,6 +655,23 @@ fn eligible_offer_seller(
                     .enterprises_at(crate::enterprises::EnterpriseLocation::Business(business)),
             )
             .any(|enterprise| enterprise.status() != crate::enterprises::EnterpriseStatus::Retired)
+    {
+        return Err(BusinessAcquisitionError::OfferDeclined);
+    }
+    // A staffed rival cannot dispose of its capital without the same available
+    // executive required to commission a purchase. Preserve private consent
+    // and the liquidation path for holdings with no remaining personnel.
+    if let FinancialOwner::Organization(seller_id) = seller
+        && state
+            .world()
+            .get_organization(seller_id)
+            .is_some_and(|organization| organization.kind() == OrganizationKind::Criminal)
+        && state
+            .world()
+            .characters_in_organization(seller_id)
+            .next()
+            .is_some()
+        && crate::world::world_system::sole_available_executive(state, seller_id).is_none()
     {
         return Err(BusinessAcquisitionError::OfferDeclined);
     }

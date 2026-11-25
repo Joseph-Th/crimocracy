@@ -155,7 +155,7 @@ independent businesses. When the listings are exhausted, `offer <business-id> <c
 submits a binding negotiated purchase offer to another organization's owner. An
 owner may refuse; sufficient consideration must compensate its asset value and
 foregone operating income, and it will not sell infrastructure used by active or
-suspended rackets. A staffed rival protects its productive payroll base if there is no affordable
+suspended rackets. A staffed criminal rival must have one undetained executive to accept an offer; divided command and executive detention prevent consent, even for held offers. Holdings without remaining personnel can still be liquidated. A staffed rival protects its productive payroll base if there is no affordable
 replacement and the offered price plus liquid reserves cannot cover a full year
 of any post-sale payroll shortfall plus a week's payroll. Recently purchased
 profitable storefronts ordinarily stay with the buyer for ninety days, but a

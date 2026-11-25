@@ -83,13 +83,10 @@ pub(super) fn judgment_due(state: &AppState, case: &ProsecutionCaseRecord) -> bo
 fn prior_judgment(state: &AppState, case: &ProsecutionCaseRecord, at: SimTime) -> Option<SimTime> {
     state
         .legal()
-        .prosecution_cases()
-        .filter(|prior| {
-            prior.id() != case.id()
-                && prior.defendant() == case.defendant()
-                && prior.source_investigation() == case.source_investigation()
-                && prior.judgment().is_some()
-        })
+        .arrests_for_investigation(case.source_investigation())
+        .filter(|arrest| arrest.character() == case.defendant())
+        .flat_map(|arrest| state.legal().prosecution_cases_for_arrest(arrest.id()))
+        .filter(|prior| prior.id() != case.id() && prior.judgment().is_some())
         .filter_map(|prior| {
             prior
                 .resolved_at()

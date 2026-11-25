@@ -1143,6 +1143,110 @@ fn spendable_balance_excludes_deficits_and_settlement_counterparties() {
 }
 
 #[test]
+fn listed_purchase_leaves_settlement_capacity_for_restarted_economy() {
+    use crate::city_generation::{CityGenerationConfig, generate_city};
+    use crate::economy::business_acquisition::{
+        BusinessAcquisitionDraft, BusinessAcquisitionError, acquisition_offer,
+        validate_acquire_business,
+    };
+    use crate::economy::business_economy_system::BusinessEconomyError;
+
+    let registry = build_registry();
+    let city = generate_city(
+        &registry,
+        CityGenerationConfig {
+            seed: 41,
+            districts: 4,
+            businesses_per_district: 8,
+            rivals: 1,
+        },
+    )
+    .unwrap();
+    let mut state = city.state;
+    let business = city.secondary_target;
+    let settlement = state
+        .economy()
+        .get_business_economy(business)
+        .unwrap()
+        .settlement_account();
+    let price = acquisition_offer(&registry, &state, city.player, business)
+        .unwrap()
+        .0;
+    let owner = FinancialOwner::Organization(city.player);
+    let funding = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .unwrap();
+    let clearing = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Purchase funding".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: clearing,
+                    amount: Money::from_cents(-price.cents()),
+                },
+                LedgerPosting {
+                    account: funding,
+                    amount: price,
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let draft = BusinessAcquisitionDraft {
+        organization: city.player,
+        business,
+        funding_accounts: BTreeSet::from([funding]),
+    };
+    // Synthetic finance-owner boundary fixture: billions of real ledger postings
+    // are not needed to exercise the counter's final slots. This is not a save fixture.
+    state.finance.accounts.get_mut(&settlement).unwrap().version = u32::MAX - 1;
+    let before = bincode::serialize(&state).unwrap();
+    let error = validate_acquire_business(&registry, &state, draft.clone())
+        .unwrap()
+        .commit(&registry, &mut state)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        BusinessAcquisitionError::Economy(BusinessEconomyError::VersionCapacity(_))
+    ));
+    assert_eq!(bincode::serialize(&state).unwrap(), before);
+
+    state.finance.accounts.get_mut(&settlement).unwrap().version = u32::MAX - 2;
+    let receipt = validate_acquire_business(&registry, &state, draft)
+        .unwrap()
+        .commit(&registry, &mut state)
+        .unwrap();
+    assert_eq!(receipt.business, business);
+    assert_eq!(receipt.price, price);
+    assert_eq!(
+        state.finance().get_account(settlement).unwrap().version(),
+        u32::MAX - 1
+    );
+    assert_eq!(
+        state.world().get_business(business).unwrap().owner(),
+        BusinessOwner::Organization(city.player)
+    );
+}
+
+#[test]
 fn exhausted_account_version_rejects_ledger_transfer_before_any_balance_moves() {
     let registry = build_registry();
     let mut state = AppState::new(0xF1A0_CAFE);
