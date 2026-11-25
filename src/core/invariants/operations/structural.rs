@@ -455,6 +455,9 @@ fn validate_completed_operation(
     if started_at > due_at
         || resolution.resolved_at() < due_at
         || resolution.resolved_at() > state.now()
+        || operation
+            .completion_deadline()
+            .is_some_and(|deadline| resolution.resolved_at() > deadline)
         || operation.awaiting_decision_since().is_some()
         || operation.abort_record().is_some()
     {

@@ -2002,6 +2002,47 @@ fn live_operation_keeps_its_deadline_minute_while_authorized_work_misses_it() {
         .expect_err("live work on its deadline minute must not miss");
     assert_eq!(error, OperationError::DeadlineNotMissed { operation });
 
+    // The same boundary is valid for actual resolution and persistence.
+    let mut completed = state.clone();
+    let plan = decide_operation_resolution(
+        &registry,
+        &completed,
+        operation,
+        OperationResolutionRandomness::new(0, 0),
+    )
+    .unwrap();
+    validate_operation_resolution_plan(&registry, &completed, plan)
+        .unwrap()
+        .commit(&mut completed)
+        .unwrap();
+    let original = completed
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .clone();
+    assert_eq!(original.resolution().unwrap().resolved_at(), deadline);
+    let mut replacement = original.clone();
+    replacement.command.constraints = vec![crate::operations::OperationConstraint::CompleteBy(
+        SimTime::from_minutes(deadline.as_minutes() - 1),
+    )];
+    let original_bytes = bincode::serialize(&original).unwrap();
+    let replacement_bytes = bincode::serialize(&replacement).unwrap();
+    assert_eq!(original_bytes.len(), replacement_bytes.len());
+    let mut bytes = bincode::serialize(&build_save(&registry, &completed).unwrap()).unwrap();
+    let matches: Vec<_> = bytes
+        .windows(original_bytes.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+        .collect();
+    assert_eq!(matches.len(), 1);
+    let offset = matches[0];
+    bytes[offset..offset + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
+    let corrupted: SaveEnvelope = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(
+        restore_save(&registry, corrupted).unwrap_err(),
+        LoadError::InvalidState(StateValidationError::InvalidOperationRuntime { operation })
+    );
+
     state.advance_clock(SimDuration::ONE_MINUTE);
     assert!(has_missed_operation_deadline(&registry, &state, operation));
     validate_deadline_missed_operation(&registry, &state, operation)

@@ -644,6 +644,9 @@ restore_save(registry, envelope) ─► format check → schema check → conten
   Authorized operations reserve projected windows, but live work owns its crew until actual
   completion or abort, even after its scheduled resolution time. Structural validation rejects
   multiple live commitments for one participant independently of projected-window overlap.
+  Completion deadlines are binding even when artifact capacity blocks overdue cleanup: the
+  resolution cohort excludes expired operations, and completed records cannot postdate their
+  authored deadline.
 - Missing future-affecting values are not silently defaulted to make old data load.
 - Compatibility policy is in [`STATUS.md`](STATUS.md): current-version only, no implicit migration.
 - Core systems do not perform implicit filesystem IO (`src/core/persistence.rs` returns data; adapters do IO).

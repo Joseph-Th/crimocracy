@@ -1047,7 +1047,7 @@ fn overdue_operation_cleanup_exhaustion_is_terminal_noop_before_mutation() {
     .expect("overdue cleanup crew should validate");
 
     let mut operations = Vec::new();
-    for index in 0..2 {
+    for index in 0..3 {
         let leader = insert_character(
             &mut state,
             CharacterDraft {
@@ -1075,7 +1075,9 @@ fn overdue_operation_cleanup_exhaustion_is_terminal_noop_before_mutation() {
                 approach: OperationApproach::Covert,
                 roles: BTreeMap::from([(RoleKind::Surveillance, leader)]),
                 intelligence: BTreeSet::new(),
-                constraints: vec![OperationConstraint::CompleteBy(SimTime::from_minutes(60))],
+                constraints: vec![OperationConstraint::CompleteBy(SimTime::from_minutes(
+                    if index == 2 { 61 } else { 60 },
+                ))],
                 contingencies: Vec::new(),
                 scheduled_for: SimTime::ZERO,
             },
@@ -1096,11 +1098,61 @@ fn overdue_operation_cleanup_exhaustion_is_terminal_noop_before_mutation() {
         )
         .expect("overdue fixture operation should begin");
     }
-    state.advance_clock(SimDuration::from_minutes(60));
+    let on_time = operations
+        .pop()
+        .expect("third operation has the later deadline");
+    state.advance_clock(SimDuration::from_minutes(59));
+    let randomness = OperationResolutionRandomness::new(0, 0);
+    for &operation in &operations {
+        assert!(decide_operation_resolution(&registry, &state, operation, randomness).is_ok());
+    }
+    state.advance_clock(SimDuration::ONE_MINUTE);
     assert_eq!(
         find_due_operations_with_missed_deadlines(&state),
         operations,
         "both independent operations must be overdue in canonical deadline order"
+    );
+    for &operation in &operations {
+        assert_eq!(
+            decide_operation_resolution(&registry, &state, operation, randomness).unwrap_err(),
+            crate::operations::operation_execution::OperationResolutionError::DeadlineMissed {
+                operation,
+                deadline: SimTime::from_minutes(60),
+                now: SimTime::from_minutes(61),
+            }
+        );
+    }
+
+    // One report fits, but the two expired operations cannot both abort.
+    // Their blocked cleanup must not compete for the last report with valid work.
+    let mut report_limited = state.clone();
+    report_limited
+        .ids
+        .set_next_raw_for_test(crate::core::id::IdKind::Report, u32::MAX - 1);
+    let mut restored = crate::core::persistence::restore_save(
+        &registry,
+        crate::core::persistence::build_save(&registry, &report_limited).unwrap(),
+    )
+    .unwrap();
+    for branch in [&mut report_limited, &mut restored] {
+        let phase = run_operations_phase(&registry, branch);
+        assert!(phase.aborted.is_empty());
+        assert_eq!(phase.resolved, vec![on_time]);
+        for &operation in &operations {
+            assert_eq!(
+                branch
+                    .operations()
+                    .get_operation(operation)
+                    .unwrap()
+                    .status(),
+                OperationStatus::InProgress
+            );
+        }
+        validate_state(branch).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&report_limited).unwrap(),
+        bincode::serialize(&restored).unwrap()
     );
 
     // Each deadline abort emits one primary information record. Leave room for exactly one:

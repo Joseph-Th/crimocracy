@@ -74,6 +74,12 @@ pub(crate) enum OperationResolutionError {
         operation: OperationId,
         due_at: SimTime,
     },
+    #[error("operation {operation} missed its completion deadline {deadline:?} at {now:?}")]
+    DeadlineMissed {
+        operation: OperationId,
+        deadline: SimTime,
+        now: SimTime,
+    },
     #[error("operation resolution variance {variance} exceeds authored limit {limit}")]
     VarianceOutOfRange { variance: i8, limit: u8 },
     #[error("operation exposure variance {variance} exceeds authored limit {limit}")]
@@ -335,6 +341,15 @@ pub(crate) fn decide_operation_resolution(
         .expect("in-progress operation must have a resolution due time");
     if state.now() < due_at {
         return Err(OperationResolutionError::ResolutionNotDue { operation, due_at });
+    }
+    if let Some(deadline) = record.completion_deadline()
+        && state.now() > deadline
+    {
+        return Err(OperationResolutionError::DeadlineMissed {
+            operation,
+            deadline,
+            now: state.now(),
+        });
     }
 
     let definition = registry.get_operation(record.kind());

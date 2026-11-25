@@ -361,6 +361,14 @@ pub(super) fn run_operation_resolution_phase(
             .operations()
             .get_operation(operation)
             .expect("due operation must still exist");
+        // Cleanup can be blocked by finite artifact capacity. A missed deadline is still
+        // binding: leave such work queued for cleanup, not eligible for late completion.
+        if record
+            .completion_deadline()
+            .is_some_and(|deadline| state.now() > deadline)
+        {
+            continue;
+        }
         let budget = mandatory_operation_resolution_id_budget(record);
         // If even this operation's guaranteed after-action footprint cannot fit, its
         // resolution is independently impossible at the finite ID rail. It must not
@@ -477,6 +485,7 @@ fn operation_resolution_is_terminally_blocked(error: &OperationResolutionError) 
         OperationResolutionError::MissingOperation(_)
         | OperationResolutionError::OperationNotInProgress(_)
         | OperationResolutionError::ResolutionNotDue { .. }
+        | OperationResolutionError::DeadlineMissed { .. }
         | OperationResolutionError::VarianceOutOfRange { .. }
         | OperationResolutionError::ExposureVarianceOutOfRange { .. }
         | OperationResolutionError::PropertyProceedsOverflow { .. }
