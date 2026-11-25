@@ -797,7 +797,10 @@ fn latest_protection_history_preserves_each_gangs_terms_across_renewal_and_resto
         .context()
     {
         DecisionContext::ProtectionDemand(terms) => terms,
-        _ => panic!("expected a new protection demand"),
+        DecisionContext::OperationPoliceArrival { .. }
+        | DecisionContext::RecruitmentApproval(_) => {
+            panic!("expected a new protection demand")
+        }
     };
     assert_eq!(second_terms.attacker(), second_gang);
     assert_eq!(second_terms.district(), district);

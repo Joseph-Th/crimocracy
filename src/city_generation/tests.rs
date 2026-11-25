@@ -28,7 +28,10 @@ fn generated_workplaces_cover_supported_custom_business_densities() {
                     }
                     match person.life().vocation() {
                         IndependentVocation::BusinessEmployee(workplace) => Some(workplace),
-                        _ => None,
+                        IndependentVocation::Resident
+                        | IndependentVocation::FreelanceCriminal
+                        | IndependentVocation::Journalist
+                        | IndependentVocation::IndependentLawyer => None,
                     }
                 })
                 .collect();

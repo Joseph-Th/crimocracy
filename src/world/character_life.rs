@@ -7,7 +7,7 @@ use super::{
     CharacterLife, CivicActivity, CivicProfession, IndependentVocation, OrganizationKind,
     WorldState,
 };
-use crate::core::id::{BusinessId, CharacterId, NeighborhoodId};
+use crate::core::id::{BusinessId, CharacterId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, is_day_boundary};
 use crate::core::version::ensure_version_can_advance;
@@ -197,6 +197,36 @@ struct DayWork {
     detained: bool,
 }
 
+fn is_rest_day(character: CharacterId, day: u64) -> bool {
+    (day + u64::from(character.raw()) % 7).is_multiple_of(7)
+}
+
+/// Working days in the calendar from the first day boundary through this
+/// activity, before accounting for detention or periods without a job.
+fn maximum_workdays(character: CharacterId, day: u64) -> u64 {
+    day - (day + u64::from(character.raw()) % 7) / 7
+}
+
+/// Fixed institutional duties share their immutable organization-kind mapping
+/// with historical activity validation. Police work depends on live assignments.
+fn institutional_work(
+    organization: OrganizationId,
+    kind: OrganizationKind,
+) -> Option<CivicActivity> {
+    match kind {
+        OrganizationKind::Political => Some(CivicActivity::Politics(organization)),
+        OrganizationKind::LegalServices | OrganizationKind::LegalAuthority => {
+            Some(CivicActivity::LegalService(organization))
+        }
+        OrganizationKind::Prosecutor => Some(CivicActivity::Prosecution(organization)),
+        OrganizationKind::Labor => Some(CivicActivity::LaborAdvocacy(organization)),
+        OrganizationKind::Commercial | OrganizationKind::Civic => {
+            Some(CivicActivity::CommercialAdvocacy(organization))
+        }
+        OrganizationKind::LawEnforcement | OrganizationKind::Criminal => None,
+    }
+}
+
 fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
     let detained = state
         .legal()
@@ -209,7 +239,7 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
     // One rest day per person per week, staggered by persistent identity.
     // A universal day-seven holiday would leave every police beat and public
     // institution without any named on-duty staff at the same time.
-    if detained || (day + u64::from(character.raw())).is_multiple_of(7) {
+    if detained || is_rest_day(character, day) {
         return DayWork {
             action: None,
             business_profit: 0,
@@ -224,9 +254,6 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
     let owned = properties
         .filter_map(|business| {
             let economy = state.economy().get_business_economy(business.id())?;
-            if economy.status() != BusinessOperatingStatus::Active {
-                return None;
-            }
             // Only fresh settlements in the current ownership and operating
             // period can affect the proprietor. A missed settlement does not
             // replay yesterday's result, and reopening starts a new period
@@ -242,11 +269,17 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
                             .loss_streak_anchor()
                             .is_none_or(|anchor| cycle.occurred_at() > anchor)
                 });
+            // Settlement may have suspended this business before the daily
+            // character phase. Its completed workday still happened; only
+            // later days without a fresh settlement are days out of work.
+            if economy.status() != BusinessOperatingStatus::Active && cycle.is_none() {
+                return None;
+            }
             let profit = cycle.map_or(0, |cycle| cycle.net_cash().cents());
             Some((business.id(), profit))
         })
-        // The owner visits the most troubled active business, not necessarily
-        // the earliest property in its personal portfolio.
+        // The owner visits the most troubled business that worked this day
+        // or remains active, not necessarily the earliest property.
         .min_by_key(|(id, profit)| (*profit, *id));
     if let Some((business, profit)) = owned {
         return DayWork {
@@ -314,16 +347,14 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
                         .map(CivicActivity::PolicePatrol)
                 }
             }
-            OrganizationKind::Political => Some(CivicActivity::Politics(organization)),
-            OrganizationKind::LegalServices | OrganizationKind::LegalAuthority => {
-                Some(CivicActivity::LegalService(organization))
-            }
-            OrganizationKind::Prosecutor => Some(CivicActivity::Prosecution(organization)),
-            OrganizationKind::Labor => Some(CivicActivity::LaborAdvocacy(organization)),
-            OrganizationKind::Commercial | OrganizationKind::Civic => {
-                Some(CivicActivity::CommercialAdvocacy(organization))
-            }
-            OrganizationKind::Criminal => None, // Already acts through crews and enterprises.
+            kind @ (OrganizationKind::Criminal
+            | OrganizationKind::LegalAuthority
+            | OrganizationKind::LegalServices
+            | OrganizationKind::Prosecutor
+            | OrganizationKind::Political
+            | OrganizationKind::Labor
+            | OrganizationKind::Civic
+            | OrganizationKind::Commercial) => institutional_work(organization, kind),
         });
     let action = action.or_else(|| {
         if person.organization().is_some() {
@@ -445,39 +476,47 @@ pub(crate) fn valid_character_lives(state: &AppState) -> bool {
         let life = person.life();
         life.professional_standing() <= 100
             && life.fatigue() <= 100
-            && u64::from(life.career_days()) <= state.now().as_minutes() / DAY_MINUTES
-            && life.last_activity().is_none_or(|(at, action)| {
-                at <= state.now()
-                    && at.as_minutes() > 0
-                    && at.as_minutes().is_multiple_of(DAY_MINUTES)
-                    && match action {
-                        CivicActivity::BusinessManagement(id) => {
-                            state.world().get_business(id).is_some()
+            && life
+                .last_activity()
+                .map_or(life.career_days() == 0, |(at, action)| {
+                    let day = at.as_minutes() / DAY_MINUTES;
+                    at <= state.now()
+                        && at.as_minutes() > 0
+                        && at.as_minutes().is_multiple_of(DAY_MINUTES)
+                        && !is_rest_day(person.id(), day)
+                        && life.career_days() > 0
+                        && u64::from(life.career_days()) <= maximum_workdays(person.id(), day)
+                        && match action {
+                            CivicActivity::BusinessManagement(id) => {
+                                state.world().get_business(id).is_some()
+                            }
+                            CivicActivity::PolicePatrol(id) => {
+                                state.world().get_neighborhood(id).is_some()
+                            }
+                            CivicActivity::DetectiveWork(id) => {
+                                state.legal().get_investigation(id).is_some()
+                            }
+                            CivicActivity::Politics(id)
+                            | CivicActivity::LegalService(id)
+                            | CivicActivity::Prosecution(id)
+                            | CivicActivity::LaborAdvocacy(id)
+                            | CivicActivity::CommercialAdvocacy(id) => state
+                                .world()
+                                .get_organization(id)
+                                .is_some_and(|organization| {
+                                    institutional_work(id, organization.kind()) == Some(action)
+                                }),
+                            CivicActivity::Community => true,
+                            CivicActivity::BusinessShift(id) => {
+                                state.world().get_business(id).is_some()
+                            }
+                            CivicActivity::FreelanceWork(id)
+                            | CivicActivity::Journalism(id)
+                            | CivicActivity::IndependentLegalPractice(id) => {
+                                state.world().get_neighborhood(id).is_some()
+                            }
                         }
-                        CivicActivity::PolicePatrol(id) => {
-                            state.world().get_neighborhood(id).is_some()
-                        }
-                        CivicActivity::DetectiveWork(id) => {
-                            state.legal().get_investigation(id).is_some()
-                        }
-                        CivicActivity::Politics(id)
-                        | CivicActivity::LegalService(id)
-                        | CivicActivity::Prosecution(id)
-                        | CivicActivity::LaborAdvocacy(id)
-                        | CivicActivity::CommercialAdvocacy(id) => {
-                            state.world().get_organization(id).is_some()
-                        }
-                        CivicActivity::Community => true,
-                        CivicActivity::BusinessShift(id) => {
-                            state.world().get_business(id).is_some()
-                        }
-                        CivicActivity::FreelanceWork(id)
-                        | CivicActivity::Journalism(id)
-                        | CivicActivity::IndependentLegalPractice(id) => {
-                            state.world().get_neighborhood(id).is_some()
-                        }
-                    }
-            })
+                })
             && life
                 .home()
                 .is_none_or(|home| state.world().get_neighborhood(home).is_some())
@@ -495,326 +534,6 @@ pub(crate) fn valid_character_lives(state: &AppState) -> bool {
 }
 
 #[cfg(test)]
-mod business_work_tests {
-    use super::*;
-    use crate::build_registry;
-    use crate::city_generation::{CityScale, generate_city};
-    use crate::core::invariants::validate_invariants;
-    use crate::core::persistence::{build_save, restore_save};
-    use crate::core::time::SimDuration;
-    use crate::economy::business_economy_system::{
-        decide_business_cycle, validate_business_cycle_plan, validate_suspend_business_economy,
-    };
-    use crate::finance::Money;
-    use crate::world::BusinessOwner;
-    use crate::world::world_system::validate_transfer_business_ownership;
-
-    #[test]
-    fn suspended_proprietor_does_not_resume_an_old_vocation() {
-        let registry = build_registry();
-        let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
-        let business = city
-            .state
-            .world()
-            .businesses()
-            .find(|shop| {
-                matches!(shop.owner(), BusinessOwner::Character(_))
-                    && city
-                        .state
-                        .economy()
-                        .get_business_economy(shop.id())
-                        .is_some_and(|economy| economy.status() == BusinessOperatingStatus::Active)
-            })
-            .unwrap()
-            .id();
-        let worker = city
-            .state
-            .world()
-            .characters()
-            .find(|person| {
-                let IndependentVocation::BusinessEmployee(workplace) = person.life().vocation()
-                else {
-                    return false;
-                };
-                workplace != business
-                    && city.state.world().civic_profession(person.id())
-                        == Some(CivicProfession::BusinessEmployee)
-                    && city
-                        .state
-                        .economy()
-                        .get_business_economy(workplace)
-                        .is_some_and(|economy| economy.status() == BusinessOperatingStatus::Active)
-            })
-            .unwrap()
-            .id();
-        validate_transfer_business_ownership(
-            &city.state,
-            business,
-            BusinessOwner::Character(worker),
-        )
-        .unwrap()
-        .commit(&mut city.state)
-        .unwrap();
-        validate_suspend_business_economy(&city.state, business)
-            .unwrap()
-            .commit(&mut city.state)
-            .unwrap();
-        assert_eq!(
-            city.state.world().civic_profession(worker),
-            Some(CivicProfession::BusinessOwner)
-        );
-        let day = (1..=7)
-            .find(|day| !(*day + u64::from(worker.raw())).is_multiple_of(7))
-            .unwrap();
-        let life = city.state.world().get_character(worker).unwrap().life();
-        city.state
-            .advance_clock(SimDuration::from_minutes((day * DAY_MINUTES) as u32));
-        crate::opportunities::opportunity_system::apply_opportunity_expiry(
-            &registry,
-            &mut city.state,
-        )
-        .unwrap();
-        apply_due_character_lives(&mut city.state);
-        let after = city.state.world().get_character(worker).unwrap().life();
-        assert_eq!(after.career_days(), life.career_days());
-        assert_eq!(after.professional_standing(), life.professional_standing());
-        assert_eq!(
-            after.last_activity(),
-            life.last_activity(),
-            "a closed proprietor must not work at a previous employer"
-        );
-        validate_invariants(&city.state);
-        let restored =
-            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
-        assert_eq!(
-            restored.world().get_character(worker).unwrap().life(),
-            after
-        );
-    }
-
-    #[test]
-    fn reopened_proprietor_does_not_reuse_pre_suspension_earnings() {
-        let registry = build_registry();
-        let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
-        let (owner, business) = city
-            .state
-            .world()
-            .businesses()
-            .find_map(|shop| {
-                let BusinessOwner::Character(owner) = shop.owner() else {
-                    return None;
-                };
-                if city
-                    .state
-                    .world()
-                    .businesses_owned_by_character(owner)
-                    .count()
-                    != 1
-                {
-                    return None;
-                }
-                city.state
-                    .economy()
-                    .get_business_economy(shop.id())
-                    .filter(|economy| economy.status() == BusinessOperatingStatus::Active)
-                    .map(|_| (owner, shop.id()))
-            })
-            .unwrap();
-        let due = city
-            .state
-            .economy()
-            .get_business_economy(business)
-            .unwrap()
-            .next_cycle_at()
-            .unwrap();
-        city.state.advance_clock(SimDuration::from_minutes(
-            u32::try_from(due.as_minutes()).unwrap(),
-        ));
-        crate::opportunities::opportunity_system::apply_opportunity_expiry(
-            &registry,
-            &mut city.state,
-        )
-        .unwrap();
-        let plan = decide_business_cycle(&registry, &city.state, business, 0).unwrap();
-        let cycle = validate_business_cycle_plan(&city.state, plan)
-            .unwrap()
-            .commit(&mut city.state)
-            .unwrap();
-        assert_ne!(
-            city.state.economy().get_cycle(cycle).unwrap().net_cash(),
-            Money::ZERO
-        );
-        validate_suspend_business_economy(&city.state, business)
-            .unwrap()
-            .commit(&mut city.state)
-            .unwrap();
-        crate::economy::business_economy_system::validate_resume_business_economy(
-            &registry,
-            &city.state,
-            business,
-        )
-        .unwrap()
-        .commit(&mut city.state)
-        .unwrap();
-
-        let day = city.state.now().as_minutes() / DAY_MINUTES;
-        let working_day = (day..day + 7)
-            .find(|&day| !(day + u64::from(owner.raw())).is_multiple_of(7))
-            .unwrap();
-        let work = choose_work(&city.state, owner, working_day);
-        assert_eq!(
-            work.action,
-            Some(CivicActivity::BusinessManagement(business))
-        );
-        assert_eq!(work.business_profit, 0);
-        let mut restored =
-            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
-        assert_eq!(
-            choose_work(&restored, owner, working_day).business_profit,
-            0
-        );
-
-        for state in [&mut city.state, &mut restored] {
-            let due = state
-                .economy()
-                .get_business_economy(business)
-                .unwrap()
-                .next_cycle_at()
-                .unwrap();
-            state.advance_clock(SimDuration::from_minutes(
-                u32::try_from(due.as_minutes() - state.now().as_minutes()).unwrap(),
-            ));
-            crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, state)
-                .unwrap();
-            let plan = decide_business_cycle(&registry, state, business, 0).unwrap();
-            let cycle = validate_business_cycle_plan(state, plan)
-                .unwrap()
-                .commit(state)
-                .unwrap();
-            let net = state.economy().get_cycle(cycle).unwrap().net_cash();
-            assert_ne!(net, Money::ZERO);
-            let work = choose_work(state, owner, working_day);
-            assert_eq!(work.business_profit, if net > Money::ZERO { 1 } else { -1 });
-            validate_invariants(state);
-
-            // An operating shop can miss its next settlement (for example,
-            // when a ledger account is temporarily unable to post). The owner
-            // still works, but the old result cannot earn another day's standing
-            // or impose another day's loss penalty.
-            state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
-            let work = choose_work(state, owner, working_day);
-            assert_eq!(
-                work.action,
-                Some(CivicActivity::BusinessManagement(business))
-            );
-            assert_eq!(work.business_profit, 0);
-        }
-    }
-
-    #[test]
-    fn new_proprietor_does_not_inherit_previous_owners_earnings_record() {
-        let registry = build_registry();
-        let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
-        let (previous_owner, business) = city
-            .state
-            .world()
-            .businesses()
-            .find_map(|shop| {
-                let BusinessOwner::Character(owner) = shop.owner() else {
-                    return None;
-                };
-                if city
-                    .state
-                    .world()
-                    .businesses_owned_by_character(owner)
-                    .count()
-                    != 1
-                {
-                    return None;
-                }
-                city.state
-                    .economy()
-                    .get_business_economy(shop.id())
-                    .filter(|economy| economy.status() == BusinessOperatingStatus::Active)
-                    .map(|_| (owner, shop.id()))
-            })
-            .expect("generated city has an active private proprietor");
-        let successor = city
-            .state
-            .world()
-            .characters()
-            .find(|person| {
-                person.id() != previous_owner
-                    && person.organization().is_none()
-                    && city
-                        .state
-                        .world()
-                        .businesses_owned_by_character(person.id())
-                        .next()
-                        .is_none()
-            })
-            .expect("generated city has an independent non-owner")
-            .id();
-
-        // Settle a real prior owner's business cycle; its signed net is the
-        // historical signal that would otherwise be incorrectly inherited.
-        for _ in 0..45 {
-            city.state
-                .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
-            crate::opportunities::opportunity_system::apply_opportunity_expiry(
-                &registry,
-                &mut city.state,
-            )
-            .unwrap();
-            if let Ok(plan) = decide_business_cycle(&registry, &city.state, business, 0) {
-                validate_business_cycle_plan(&city.state, plan)
-                    .unwrap()
-                    .commit(&mut city.state)
-                    .unwrap();
-            }
-            if city
-                .state
-                .economy()
-                .cycles_for(business)
-                .next_back()
-                .is_some_and(|cycle| cycle.net_cash() != Money::ZERO)
-            {
-                break;
-            }
-        }
-        let historical_cycle = city
-            .state
-            .economy()
-            .cycles_for(business)
-            .next_back()
-            .expect("private business should settle during the review horizon");
-        assert_ne!(historical_cycle.net_cash(), Money::ZERO);
-
-        validate_transfer_business_ownership(
-            &city.state,
-            business,
-            BusinessOwner::Character(successor),
-        )
-        .unwrap()
-        .commit(&mut city.state)
-        .unwrap();
-
-        let day = city.state.now().as_minutes() / DAY_MINUTES;
-        let working_day = (day..day + 7)
-            .find(|&day| !(day + u64::from(successor.raw())).is_multiple_of(7))
-            .unwrap();
-        let work = choose_work(&city.state, successor, working_day);
-        assert_eq!(
-            work.action,
-            Some(CivicActivity::BusinessManagement(business))
-        );
-        assert_eq!(work.business_profit, 0);
-
-        validate_invariants(&city.state);
-        let restored =
-            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
-        let restored_work = choose_work(&restored, successor, working_day);
-        assert_eq!(restored_work.action, work.action);
-        assert_eq!(restored_work.business_profit, work.business_profit);
-    }
-}
+mod business_work_tests;
+#[cfg(test)]
+mod validation_tests;
