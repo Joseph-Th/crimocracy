@@ -227,6 +227,30 @@ fn institutional_work(
     }
 }
 
+/// A storefront either remains open or completed a settlement during the
+/// preceding workday. The final settled day counts for both proprietors and
+/// employees even if the settlement closed the shop before this phase.
+/// Only a fresh result in the current title and operating period can affect
+/// standing; an active shop that missed a settlement has neutral earnings.
+fn business_work_profit(state: &AppState, business: &super::BusinessRecord) -> Option<i64> {
+    let economy = state.economy().get_business_economy(business.id())?;
+    let cycle = state
+        .economy()
+        .cycles_for(business.id())
+        .next_back()
+        .filter(|cycle| {
+            cycle.business_version() == business.version()
+                && state.now().as_minutes() - cycle.occurred_at().as_minutes() < DAY_MINUTES
+                && economy
+                    .loss_streak_anchor()
+                    .is_none_or(|anchor| cycle.occurred_at() > anchor)
+        });
+    if economy.status() != BusinessOperatingStatus::Active && cycle.is_none() {
+        return None;
+    }
+    Some(cycle.map_or(0, |cycle| cycle.net_cash().cents()))
+}
+
 fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
     let detained = state
         .legal()
@@ -253,30 +277,7 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
     let proprietor = properties.peek().is_some();
     let owned = properties
         .filter_map(|business| {
-            let economy = state.economy().get_business_economy(business.id())?;
-            // Only fresh settlements in the current ownership and operating
-            // period can affect the proprietor. A missed settlement does not
-            // replay yesterday's result, and reopening starts a new period
-            // even when the title has not changed.
-            let cycle = state
-                .economy()
-                .cycles_for(business.id())
-                .next_back()
-                .filter(|cycle| {
-                    cycle.business_version() == business.version()
-                        && state.now().as_minutes() - cycle.occurred_at().as_minutes() < DAY_MINUTES
-                        && economy
-                            .loss_streak_anchor()
-                            .is_none_or(|anchor| cycle.occurred_at() > anchor)
-                });
-            // Settlement may have suspended this business before the daily
-            // character phase. Its completed workday still happened; only
-            // later days without a fresh settlement are days out of work.
-            if economy.status() != BusinessOperatingStatus::Active && cycle.is_none() {
-                return None;
-            }
-            let profit = cycle.map_or(0, |cycle| cycle.net_cash().cents());
-            Some((business.id(), profit))
+            business_work_profit(state, business).map(|profit| (business.id(), profit))
         })
         // The owner visits the most troubled business that worked this day
         // or remains active, not necessarily the earliest property.
@@ -365,9 +366,9 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
             IndependentVocation::Resident => Some(CivicActivity::Community),
             IndependentVocation::FreelanceCriminal => Some(CivicActivity::FreelanceWork(home)),
             IndependentVocation::BusinessEmployee(workplace) => state
-                .economy()
-                .get_business_economy(workplace)
-                .filter(|economy| economy.status() == BusinessOperatingStatus::Active)
+                .world()
+                .get_business(workplace)
+                .and_then(|business| business_work_profit(state, business))
                 .map(|_| CivicActivity::BusinessShift(workplace)),
             IndependentVocation::Journalist => Some(CivicActivity::Journalism(home)),
             IndependentVocation::IndependentLawyer => {

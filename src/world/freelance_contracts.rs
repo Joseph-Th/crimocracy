@@ -19,10 +19,15 @@ use crate::world::world_system::{
     ValidatedCharacterReassignment, WorldError, validate_reassign_character,
 };
 use crate::world::{
-    CapabilityKind, CivicProfession, IndependentVocation, OrganizationKind, WorldState,
+    CapabilityKind, CharacterRecord, CivicProfession, IndependentVocation, OrganizationKind,
+    WorldState,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use thiserror::Error;
+
+const MIN_TERM_DAYS: u8 = 1;
+const MAX_TERM_DAYS: u8 = 14;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FreelanceContractRecord {
@@ -245,22 +250,9 @@ pub fn freelance_contact_available(
         && validate_reassign_character(state, freelancer, Some(sponsor), Some(manager)).is_ok()
 }
 
-pub fn validate_hire_freelancer(
-    state: &AppState,
-    sponsor: OrganizationId,
-    freelancer: CharacterId,
-    manager: CharacterId,
-    days: u8,
-) -> Result<ValidatedFreelanceContract, FreelanceError> {
-    if !(1..=14).contains(&days) {
-        return Err(FreelanceError::InvalidDuration);
-    }
-    ensure_eligible(state, sponsor, freelancer, manager)?;
-    let membership = validate_reassign_character(state, freelancer, Some(sponsor), Some(manager))?;
-    let person = state
-        .world()
-        .get_character(freelancer)
-        .expect("qualified freelance character");
+/// Capabilities are immutable in the current character model, so the same fee
+/// rule can re-derive signed historical terms without a second stored quote.
+fn signing_fee(person: &CharacterRecord, days: u8) -> i64 {
     let max_skill = [
         CapabilityKind::Burglary,
         CapabilityKind::Violence,
@@ -273,7 +265,26 @@ pub fn validate_hire_freelancer(
     .map(|score| i64::from(score.value()))
     .max()
     .unwrap_or(0);
-    let fee_cents = 10_000_i64 + i64::from(days) * (3_000 + max_skill * 50);
+    10_000_i64 + i64::from(days) * (3_000 + max_skill * 50)
+}
+
+pub fn validate_hire_freelancer(
+    state: &AppState,
+    sponsor: OrganizationId,
+    freelancer: CharacterId,
+    manager: CharacterId,
+    days: u8,
+) -> Result<ValidatedFreelanceContract, FreelanceError> {
+    if !(MIN_TERM_DAYS..=MAX_TERM_DAYS).contains(&days) {
+        return Err(FreelanceError::InvalidDuration);
+    }
+    ensure_eligible(state, sponsor, freelancer, manager)?;
+    let membership = validate_reassign_character(state, freelancer, Some(sponsor), Some(manager))?;
+    let person = state
+        .world()
+        .get_character(freelancer)
+        .expect("qualified freelance character");
+    let fee_cents = signing_fee(person, days);
     // A crew's street cash belongs to the organization, not to whichever
     // individual racket happened to retain the largest pocket. Assemble the
     // full fee from spendable accounts, largest first to keep the ledger small.
@@ -401,7 +412,10 @@ fn valid_contract_payment(
     let Some(transaction) = state.finance().get_transaction(contract.transaction) else {
         return false;
     };
-    if transaction.occurred_at() != contract.signed_at || transaction.postings().len() < 2 {
+    if transaction.occurred_at() != contract.signed_at
+        || transaction.postings().len() < 2
+        || transaction.budget_usage().is_some()
+    {
         return false;
     }
     let mut received = false;
@@ -433,7 +447,26 @@ fn valid_contract_payment(
     received && debited == i128::from(contract.fee_cents)
 }
 
+fn valid_signed_terms(person: &CharacterRecord, contract: &FreelanceContractRecord) -> bool {
+    let Some(minutes) = contract
+        .expires_at
+        .as_minutes()
+        .checked_sub(contract.signed_at.as_minutes())
+    else {
+        return false;
+    };
+    if !minutes.is_multiple_of(DAY_MINUTES) {
+        return false;
+    }
+    let Ok(days) = u8::try_from(minutes / DAY_MINUTES) else {
+        return false;
+    };
+    (MIN_TERM_DAYS..=MAX_TERM_DAYS).contains(&days)
+        && contract.fee_cents == signing_fee(person, days)
+}
+
 pub(crate) fn valid_freelance_contracts(state: &AppState) -> bool {
+    let mut seen_payments = BTreeSet::new();
     state
         .world()
         .freelance_contracts
@@ -450,14 +483,15 @@ pub(crate) fn valid_freelance_contracts(state: &AppState) -> bool {
                         // signed employment history. Ended contracts remain valid after a
                         // later lawful career change; active contracts retain the vocation.
                         && person.is_some_and(|person| {
-                            record.ended_at.is_some()
-                                || person.life().vocation() == IndependentVocation::FreelanceCriminal
+                            valid_signed_terms(person, record)
+                                && (record.ended_at.is_some()
+                                    || person.life().vocation() == IndependentVocation::FreelanceCriminal)
                         })
                         && sponsor.is_some_and(|record| record.kind() == OrganizationKind::Criminal)
                         && leader.is_some()
-                        && record.signed_at < record.expires_at
+                        && record.manager != freelancer
                         && record.signed_at <= state.now()
-                        && record.fee_cents > 0
+                        && seen_payments.insert(record.transaction)
                         && record
                             .ended_at
                             .is_none_or(|end| end >= record.signed_at && end <= state.now())
@@ -489,4 +523,100 @@ pub(crate) fn valid_freelance_contracts(state: &AppState) -> bool {
                         && valid_contract_payment(state, freelancer, record)
                 })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_registry;
+    use crate::city_generation::{CityScale, generate_city};
+    use crate::core::invariants::StateValidationError;
+    use crate::core::persistence::{LoadError, SaveEnvelope, build_save, restore_save};
+
+    #[test]
+    fn restore_rejects_impossible_freelance_terms_and_reused_payment() {
+        let registry = build_registry();
+        let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+        let freelancer = city
+            .state
+            .world()
+            .characters()
+            .find(|person| {
+                freelance_contact_available(&city.state, city.player, person.id(), city.boss)
+            })
+            .unwrap()
+            .id();
+        validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 1)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        let original = city
+            .state
+            .world()
+            .active_freelance_contract(freelancer)
+            .unwrap()
+            .clone();
+        let saved = build_save(&registry, &city.state).unwrap();
+        restore_save(&registry, saved.clone()).unwrap();
+        let bytes = bincode::serialize(&saved).unwrap();
+        let history = bincode::serialize(&vec![original.clone()]).unwrap();
+        let positions: Vec<_> = bytes
+            .windows(history.len())
+            .enumerate()
+            .filter_map(|(index, window)| (window == history).then_some(index))
+            .collect();
+        assert_eq!(
+            positions.len(),
+            1,
+            "serialized contract history must occur once"
+        );
+        let start = positions[0];
+        let term = |minutes| FreelanceContractRecord {
+            expires_at: SimTime::from_minutes(original.signed_at.as_minutes() + minutes),
+            ..original.clone()
+        };
+        let corruptions = [
+            ("fractional-day term", vec![term(DAY_MINUTES + 1)]),
+            ("overlong term", vec![term(15 * DAY_MINUTES)]),
+            (
+                "two days for a one-day signing fee",
+                vec![term(2 * DAY_MINUTES)],
+            ),
+            (
+                "self-managed signing",
+                vec![FreelanceContractRecord {
+                    manager: freelancer,
+                    ..original.clone()
+                }],
+            ),
+            (
+                "one payment for two signed contracts",
+                vec![
+                    FreelanceContractRecord {
+                        ended_at: Some(original.signed_at),
+                        ..original.clone()
+                    },
+                    original.clone(),
+                ],
+            ),
+        ];
+        let mut accepted = Vec::new();
+        for (scenario, contracts) in corruptions {
+            let mut forged = bytes.clone();
+            forged.splice(
+                start..start + history.len(),
+                bincode::serialize(&contracts).unwrap(),
+            );
+            let envelope: SaveEnvelope = bincode::deserialize(&forged).unwrap();
+            match restore_save(&registry, envelope) {
+                Err(LoadError::InvalidState(StateValidationError::InvalidFreelanceContract)) => {}
+                Ok(_) => accepted.push(scenario),
+                Err(error) => panic!("{scenario}: unexpected error {error:?}"),
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "impossible contract histories accepted: {accepted:?}"
+        );
+    }
 }

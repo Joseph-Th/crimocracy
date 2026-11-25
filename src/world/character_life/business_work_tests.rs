@@ -12,7 +12,7 @@ use crate::world::BusinessOwner;
 use crate::world::world_system::validate_transfer_business_ownership;
 
 #[test]
-fn losing_proprietor_records_the_day_the_business_closes() {
+fn proprietor_and_employee_record_the_day_the_business_closes() {
     use crate::economy::BusinessEconomyDraft;
     use crate::economy::business_economy_system::validate_establish_business_economy;
     use crate::finance::finance_system::insert_account;
@@ -70,6 +70,28 @@ fn losing_proprietor_records_the_day_the_business_closes() {
         },
     )
     .unwrap();
+    let employee = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Warehouse Employee".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_set_civic_occupation(
+        &state,
+        employee,
+        neighborhood,
+        IndependentVocation::BusinessEmployee(business),
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
     let operating_account = insert_account(
         &mut state,
         FinancialAccountDraft {
@@ -106,6 +128,7 @@ fn losing_proprietor_records_the_day_the_business_closes() {
     for _ in 0..threshold {
         state.advance_clock(crate::core::time::DAY_DURATION);
         let before = state.world().get_character(owner).unwrap().life();
+        let employee_before = state.world().get_character(employee).unwrap().life();
         let plan = decide_business_cycle(&registry, &state, business, -500).unwrap();
         let cycle = validate_business_cycle_plan(&state, plan)
             .unwrap()
@@ -127,6 +150,23 @@ fn losing_proprietor_records_the_day_the_business_closes() {
             after.last_activity(),
             Some((state.now(), CivicActivity::BusinessManagement(business)))
         );
+        assert!(
+            !(state.now().as_minutes() / DAY_MINUTES + u64::from(employee.raw())).is_multiple_of(7)
+        );
+        let employee_after = state.world().get_character(employee).unwrap().life();
+        assert_eq!(
+            employee_after.career_days(),
+            employee_before.career_days() + 1
+        );
+        assert_eq!(
+            employee_after.professional_standing(),
+            employee_before.professional_standing() + 1
+        );
+        assert_eq!(employee_after.fatigue(), employee_before.fatigue() + 2);
+        assert_eq!(
+            employee_after.last_activity(),
+            Some((state.now(), CivicActivity::BusinessShift(business)))
+        );
     }
     assert_eq!(
         state
@@ -137,6 +177,7 @@ fn losing_proprietor_records_the_day_the_business_closes() {
         BusinessOperatingStatus::Suspended
     );
     let closed_life = state.world().get_character(owner).unwrap().life();
+    let employee_closed = state.world().get_character(employee).unwrap().life();
     let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
     for state in [&mut state, &mut restored] {
         state.advance_clock(crate::core::time::DAY_DURATION);
@@ -149,6 +190,17 @@ fn losing_proprietor_records_the_day_the_business_closes() {
         );
         assert_eq!(after.last_activity(), closed_life.last_activity());
         assert_eq!(after.fatigue(), 0);
+        let employee_after = state.world().get_character(employee).unwrap().life();
+        assert_eq!(employee_after.career_days(), employee_closed.career_days());
+        assert_eq!(
+            employee_after.professional_standing(),
+            employee_closed.professional_standing()
+        );
+        assert_eq!(
+            employee_after.last_activity(),
+            employee_closed.last_activity()
+        );
+        assert_eq!(employee_after.fatigue(), 0);
         validate_invariants(state);
     }
     assert_eq!(
