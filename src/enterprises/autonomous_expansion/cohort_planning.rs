@@ -25,8 +25,9 @@ use crate::enterprises::enterprise_execution::{
 use crate::enterprises::{EnterpriseKind, EnterpriseLocation, EnterpriseStatus};
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
+use crate::world::territory_conflict::{DEFENSIVE_ADVANTAGE, local_defensive_force};
 use crate::world::territory_influence::{resolve_neighborhood_influence, unique_economic_leader};
-use crate::world::{AutonomyLevel, BusinessRecord};
+use crate::world::{AutonomyLevel, BusinessRecord, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 struct PhaseExpansionCandidate {
@@ -67,8 +68,10 @@ impl AutonomousExpansionCohort {
     }
 }
 
-struct ProjectedTerritoryInfluence {
+pub(super) struct ProjectedTerritoryInfluence {
     counts: BTreeMap<NeighborhoodId, BTreeMap<OrganizationId, u32>>,
+    strongest_racket_force: BTreeMap<OrganizationId, u32>,
+    exposed_commerce_defense: BTreeMap<NeighborhoodId, u32>,
 }
 
 pub(super) fn plan_due_autonomous_expansions(
@@ -126,6 +129,7 @@ pub(super) fn plan_due_autonomous_expansions(
             state,
             observed_district_pressure: &observed_district_pressure,
             district_leaders: &district_leaders,
+            territory: &territory,
         };
         let Some(selected) = select_phase_expansion_candidate(
             &iteration,
@@ -178,7 +182,12 @@ pub(super) fn plan_due_autonomous_expansions(
             });
 
         occupied_locations.insert((selected.plan.kind, selected.plan.location));
-        territory.record_establishment(state, organization, selected.plan.location);
+        territory.record_establishment(
+            state,
+            organization,
+            selected.plan.kind,
+            selected.plan.location,
+        );
         actions.push(PlannedAutonomousExpansionAction {
             organization,
             mandate,
@@ -375,8 +384,8 @@ fn resolve_eligible_expansion_mandates(
 }
 
 impl ProjectedTerritoryInfluence {
-    fn from_state(state: &AppState) -> Self {
-        let counts = state
+    pub(super) fn from_state(state: &AppState) -> Self {
+        let counts: BTreeMap<_, BTreeMap<_, _>> = state
             .world()
             .neighborhoods()
             .map(|neighborhood| {
@@ -390,7 +399,66 @@ impl ProjectedTerritoryInfluence {
                 (neighborhood_id, counts)
             })
             .collect();
-        Self { counts }
+        let mut strongest_racket_force = BTreeMap::<_, u32>::new();
+        for racket in state.enterprises().active_enterprises() {
+            let strongest = strongest_racket_force
+                .entry(racket.organization())
+                .or_default();
+            *strongest = (*strongest).max(u32::from(racket.associates()));
+        }
+
+        // The player never participates in the expansion cohort, so the exposed
+        // commercial wards and their distributed defense remain fixed throughout it.
+        // Snapshot only the player's owned, operating storefronts once, not the
+        // entire city directory once per ward, mandate, and selection iteration.
+        let mut exposed_commerce_defense = BTreeMap::new();
+        if let Some(player) = state.player_organization()
+            && state
+                .world()
+                .get_organization(player)
+                .is_some_and(|org| org.kind() == OrganizationKind::Criminal)
+        {
+            for shop in state.world().businesses_owned_by_organization(player) {
+                let ward = shop.neighborhood();
+                if counts[&ward].contains_key(&player)
+                    || !state
+                        .economy()
+                        .get_business_economy(shop.id())
+                        .is_some_and(|books| {
+                            books.status() == crate::economy::BusinessOperatingStatus::Active
+                        })
+                {
+                    continue;
+                }
+                exposed_commerce_defense
+                    .entry(ward)
+                    .or_insert_with(|| local_defensive_force(state, player, ward));
+            }
+        }
+        Self {
+            counts,
+            strongest_racket_force,
+            exposed_commerce_defense,
+        }
+    }
+
+    pub(super) fn vacated_commercial_districts(
+        &self,
+        attacker: OrganizationId,
+    ) -> BTreeSet<NeighborhoodId> {
+        let force = self
+            .strongest_racket_force
+            .get(&attacker)
+            .copied()
+            .unwrap_or(u32::from(EnterpriseKind::Protection.baseline_associates()));
+        self.exposed_commerce_defense
+            .iter()
+            .filter_map(|(&ward, &defense)| {
+                (!self.counts[&ward].contains_key(&attacker)
+                    && force > defense.saturating_add(DEFENSIVE_ADVANTAGE))
+                .then_some(ward)
+            })
+            .collect()
     }
 
     fn leaders(&self) -> BTreeMap<NeighborhoodId, Option<OrganizationId>> {
@@ -413,6 +481,7 @@ impl ProjectedTerritoryInfluence {
         &mut self,
         state: &AppState,
         organization: OrganizationId,
+        kind: EnterpriseKind,
         location: EnterpriseLocation,
     ) {
         let neighborhood = resolve_location_neighborhood(state, location)
@@ -426,6 +495,8 @@ impl ProjectedTerritoryInfluence {
         *count = count
             .checked_add(1)
             .expect("active enterprise count cannot exceed the persistent enterprise id space");
+        let strongest = self.strongest_racket_force.entry(organization).or_default();
+        *strongest = (*strongest).max(u32::from(kind.baseline_associates()));
     }
 }
 

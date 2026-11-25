@@ -30,7 +30,7 @@ use candidate_planning::{
 };
 use cohort_planning::{
     AutonomousExpansionCohort, PlannedAutonomousExpansionAction, PlannedSettlementAccount,
-    plan_due_autonomous_expansions,
+    ProjectedTerritoryInfluence, plan_due_autonomous_expansions,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,6 +68,7 @@ struct ExpansionIterationContext<'a> {
     state: &'a AppState,
     observed_district_pressure: &'a ObservedDistrictPressure,
     district_leaders: &'a BTreeMap<NeighborhoodId, Option<OrganizationId>>,
+    territory: &'a ProjectedTerritoryInfluence,
 }
 
 #[derive(Clone, Copy)]
@@ -210,13 +211,8 @@ fn enumerate_autonomous_expansion_candidates(
     let has_enterprise_function_scope = mandate.scopes().contains(&enterprise_function_scope);
     let vacated_commercial_districts = if has_enterprise_function_scope {
         iteration
-            .district_leaders
-            .keys()
-            .copied()
-            .filter(|district| {
-                unguarded_criminal_commerce(iteration.state, organization, *district)
-            })
-            .collect::<BTreeSet<_>>()
+            .territory
+            .vacated_commercial_districts(organization)
     } else {
         BTreeSet::new()
     };
@@ -352,58 +348,6 @@ fn collect_enterprise_function_candidates(
     Ok(())
 }
 
-fn unguarded_criminal_commerce(
-    state: &AppState,
-    attacker: OrganizationId,
-    district: NeighborhoodId,
-) -> bool {
-    // The most important opening is a legitimate-only commercial ward, even
-    // if its owner has never run a racket here. Requiring a *previously*
-    // suspended racket rewarded the player for skipping street security from
-    // the beginning. A gang that already established a local racket has
-    // already contested the opening and should look elsewhere for expansion.
-    if crate::world::territory_conflict::active_district_force(state, attacker, district) > 0 {
-        return false;
-    }
-    let projected_force = state
-        .enterprises()
-        .active_for_organization(attacker)
-        .map(|racket| u32::from(racket.associates()))
-        .max()
-        .unwrap_or(u32::from(EnterpriseKind::Protection.baseline_associates()));
-    state
-        .world()
-        .public_business_directory()
-        .filter(|(_, _, _, neighborhood)| *neighborhood == district)
-        .any(|(business_id, _, _, _)| {
-            let Some(business) = state.world().get_business(business_id) else {
-                return false;
-            };
-            let crate::world::BusinessOwner::Organization(owner) = business.owner() else {
-                return false;
-            };
-            owner != attacker
-                && state.player_organization() == Some(owner)
-                && state
-                    .world()
-                    .get_organization(owner)
-                    .is_some_and(|org| org.kind() == crate::world::OrganizationKind::Criminal)
-                && state
-                    .economy()
-                    .get_business_economy(business_id)
-                    .is_some_and(|books| {
-                        books.status() == crate::economy::BusinessOperatingStatus::Active
-                    })
-                && crate::world::territory_conflict::active_district_force(state, owner, district)
-                    == 0
-                && projected_force
-                    > crate::world::territory_conflict::local_defensive_force(
-                        state, owner, district,
-                    )
-                    .saturating_add(crate::world::territory_conflict::DEFENSIVE_ADVANTAGE)
-        })
-}
-
 /// One organization's currently usable business network for an immutable expansion selection
 /// pass. Hosting and support both require live organization-owned businesses, so one snapshot can
 /// serve every mandate without repeatedly traversing the same owner index.
@@ -505,6 +449,221 @@ mod tests {
     };
 
     #[test]
+    fn rival_cohort_contests_each_exposed_ward_before_reinforcing_one() {
+        use crate::delegation::MandateDraft;
+        use crate::delegation::delegation_system::validate_assign_mandate;
+        use crate::world::world_system::{
+            designate_player_organization, insert_character, insert_neighborhood,
+        };
+        use crate::world::{
+            AutonomyLevel, CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile,
+            NeighborhoodInstitutionProfile, NeighborhoodProfile,
+        };
+
+        let registry = build_registry();
+        let mut state = AppState::new(1931);
+        let player = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Merchant family".into(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .unwrap();
+        designate_player_organization(&mut state, player).unwrap();
+        let rival = insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: "Expansion family".into(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .unwrap();
+        let rating = |value| Rating::try_new(value).unwrap();
+        for index in 0..2 {
+            let manager = insert_character(
+                &mut state,
+                CharacterDraft {
+                    name: format!("Manager {index}"),
+                    organization: Some(rival),
+                    supervisor: None,
+                    autonomy: AutonomyLevel::Delegated,
+                    capabilities: BTreeMap::from([(CapabilityKind::Management, rating(100))]),
+                    traits: BTreeSet::new(),
+                    drives: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+            validate_assign_mandate(
+                &state,
+                MandateDraft {
+                    organization: rival,
+                    manager,
+                    scopes: BTreeSet::from([ResponsibilityScope::Function(
+                        ResponsibilityFunction::Enterprise,
+                    )]),
+                    standing_orders: BTreeMap::new(),
+                    budget: None,
+                },
+            )
+            .unwrap()
+            .commit(&mut state)
+            .unwrap();
+        }
+        let mut wards = Vec::new();
+        for prosperity in [100, 40] {
+            let ward = insert_neighborhood(
+                &mut state,
+                NeighborhoodDraft {
+                    name: format!("Ward {prosperity}"),
+                    profile: NeighborhoodProfile {
+                        economy: NeighborhoodEconomyProfile {
+                            wealth: rating(prosperity),
+                            commercial_activity: rating(prosperity),
+                            illicit_demand: rating(prosperity),
+                        },
+                        institutions: NeighborhoodInstitutionProfile {
+                            police_presence: rating(0),
+                        },
+                    },
+                },
+            )
+            .unwrap();
+            wards.push(ward);
+            let business = insert_business(
+                &registry,
+                &mut state,
+                BusinessDraft {
+                    name: format!("Merchant {prosperity}"),
+                    kind: BusinessKind::Retail,
+                    functions: BTreeSet::from([BusinessFunction::CustomerAccess]),
+                    neighborhood: ward,
+                    owner: BusinessOwner::Organization(player),
+                },
+            )
+            .unwrap();
+            let operating_account = insert_account(
+                &mut state,
+                FinancialAccountDraft {
+                    owner: FinancialOwner::Business(business),
+                    kind: AccountKind::LegitimateOperating,
+                },
+            )
+            .unwrap();
+            let settlement_account = insert_account(
+                &mut state,
+                FinancialAccountDraft {
+                    owner: FinancialOwner::Business(business),
+                    kind: AccountKind::Settlement,
+                },
+            )
+            .unwrap();
+            validate_establish_business_economy(
+                &registry,
+                &state,
+                BusinessEconomyDraft {
+                    business,
+                    operating_account,
+                    settlement_account,
+                },
+            )
+            .unwrap()
+            .commit(&mut state)
+            .unwrap();
+        }
+        insert_business(
+            &registry,
+            &mut state,
+            BusinessDraft {
+                name: "Rival cash venue".into(),
+                kind: BusinessKind::Pawnshop,
+                functions: BTreeSet::from([BusinessFunction::CashIntensive]),
+                neighborhood: wards[0],
+                owner: BusinessOwner::Organization(rival),
+            },
+        )
+        .unwrap();
+        let cash = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(rival),
+                kind: AccountKind::StreetCash,
+            },
+        )
+        .unwrap();
+        let settlement = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(rival),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .unwrap();
+        validate_record_transaction(
+            &state,
+            LedgerTransactionDraft {
+                occurred_at: state.now(),
+                memo: "Expansion treasury".into(),
+                postings: vec![
+                    LedgerPosting {
+                        account: settlement,
+                        amount: Money::from_cents(-1_000_000),
+                    },
+                    LedgerPosting {
+                        account: cash,
+                        amount: Money::from_cents(1_000_000),
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+
+        let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+        let cohort = plan_due_autonomous_expansions(&registry, &state, &BTreeSet::new()).unwrap();
+        let replay =
+            plan_due_autonomous_expansions(&registry, &restored, &BTreeSet::new()).unwrap();
+        let locations = |cohort: &AutonomousExpansionCohort| {
+            cohort
+                .actions
+                .iter()
+                .map(|action| {
+                    (
+                        crate::world::territory_conflict::district_of_racket(
+                            &state,
+                            action.plan.location,
+                        )
+                        .unwrap(),
+                        action.plan.authority_rank,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(locations(&cohort), locations(&replay));
+        assert_eq!(
+            locations(&cohort),
+            wards
+                .iter()
+                .map(|ward| (*ward, UNGUARDED_CRIMINAL_COMMERCE_AUTHORITY_RANK))
+                .collect::<Vec<_>>(),
+            "a second mandate should contest a different unguarded ward rather than claim a second first foothold"
+        );
+        assert_eq!(
+            cohort.commit(&registry, &mut state),
+            replay.commit(&registry, &mut restored)
+        );
+        assert_eq!(
+            bincode::serialize(&state).unwrap(),
+            bincode::serialize(&restored).unwrap()
+        );
+        validate_invariants(&state);
+    }
+
+    #[test]
     fn legitimate_only_new_districts_invite_actual_rival_territorial_expansion() {
         let registry = build_registry();
         let mut city = generate_city(&registry, CityScale::Small.config(82_734_113)).unwrap();
@@ -599,9 +758,11 @@ mod tests {
             "the player has never operated a criminal racket in the newly owned ward"
         );
         assert!(
-            city.rivals
-                .iter()
-                .any(|rival| { unguarded_criminal_commerce(&city.state, *rival, untouched) }),
+            city.rivals.iter().any(|rival| {
+                ProjectedTerritoryInfluence::from_state(&city.state)
+                    .vacated_commercial_districts(*rival)
+                    .contains(&untouched)
+            }),
             "new commercial property without a historical failed racket must invite takeover"
         );
         let planned =
@@ -678,20 +839,20 @@ mod tests {
         let registry = build_registry();
         let mut city = generate_city(&registry, CityScale::Small.config(82_734_113)).unwrap();
         let attacker = city.rivals[0];
-        assert!(!unguarded_criminal_commerce(
-            &city.state,
-            attacker,
-            city.home
-        ));
+        assert!(
+            !ProjectedTerritoryInfluence::from_state(&city.state)
+                .vacated_commercial_districts(attacker)
+                .contains(&city.home)
+        );
         validate_suspend_enterprise(&city.state, city.starter_racket)
             .unwrap()
             .commit(&mut city.state)
             .unwrap();
-        assert!(unguarded_criminal_commerce(
-            &city.state,
-            attacker,
-            city.home
-        ));
+        assert!(
+            ProjectedTerritoryInfluence::from_state(&city.state)
+                .vacated_commercial_districts(attacker)
+                .contains(&city.home)
+        );
         let mut replayed =
             restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
         let first =
