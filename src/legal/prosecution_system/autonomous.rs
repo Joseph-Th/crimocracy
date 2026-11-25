@@ -5,7 +5,9 @@
 //! canonical transactions as explicit institutional actions. A daily finite intake budget
 //! prevents every historical arrest being processed in one minute.
 
-use super::adjudication::{ValidatedJudgment, judgment_due, screened_case, validate_judgment};
+use super::adjudication::{
+    ValidatedJudgment, judgment_due, screened_case, supplement_changes_verdict, validate_judgment,
+};
 use super::{
     ProsecutionCaseDraft, ProsecutionError, ProsecutionReferralDraft,
     ValidatedProsecutionCaseOpening, ValidatedProsecutionCaseResolution,
@@ -207,15 +209,18 @@ impl ReviewCandidate<'_> {
         registry: &Registry,
         state: &AppState,
     ) -> Result<Option<Action>, ProsecutionError> {
-        if self.hearing_due {
+        let evidence = defendant_evidence(state, self.arrest)?;
+        let additions: BTreeSet<_> = evidence.difference(self.case.evidence()).copied().collect();
+        if self.hearing_due
+            && (additions.is_empty()
+                || !supplement_changes_verdict(registry, state, self.case, &evidence))
+        {
             return Ok(Some(Action::Judgment(validate_judgment(
                 registry,
                 state,
                 self.case.id(),
             )?)));
         }
-        let evidence = defendant_evidence(state, self.arrest)?;
-        let additions: BTreeSet<_> = evidence.difference(self.case.evidence()).copied().collect();
         if !additions.is_empty() {
             return Ok(Some(Action::Supplement(
                 validate_supplement_prosecution_case(

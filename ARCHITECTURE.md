@@ -401,7 +401,7 @@ determinism and client contracts.
 11  apply_autonomous_evidence_arrests      active LawEnforcement cases: independent-evidence threshold → custody + responsibility preemption + managed enterprise suspension
                                             reconstruct authority/defendant release and cited-racket history for qualifying candidates; 60-day routine cooldown, no recycled vice incident after unrelated custody
 12  apply_autonomous_prosecution_staffing  refill prosecution seats released by custody
-    ──► apply_due_prosecution_referrals    daily one action per available prosecutor; due hearings first (oldest opening first), then existing review work by oldest last referral, then new intake; own-member notice
+    ──► apply_due_prosecution_referrals    daily one action per available prosecutor; due reviews first (oldest opening first), supplement verdict-changing evidence before judgment, then existing review work by oldest last referral, then new intake; own-member notice
 13  apply_automatic_legal_support          conclude only after custody and every open prosecution review end;
                                                 retain for custody or open post-release prosecution,
                                                 with pending detainee decisions funded first

@@ -1,6 +1,118 @@
 use super::*;
 
 #[test]
+fn autonomous_expansion_reconsiders_smaller_racket_after_subordinate_consumes_command_capacity() {
+    let registry = build_registry();
+    let profile = NeighborhoodProfile {
+        economy: NeighborhoodEconomyProfile {
+            wealth: rating(10),
+            commercial_activity: rating(100),
+            illicit_demand: rating(10),
+        },
+        institutions: NeighborhoodInstitutionProfile {
+            police_presence: rating(0),
+        },
+    };
+    let mut fixture = make_test_enterprise_fixture_with_inputs(
+        OrganizationKind::Criminal,
+        AutonomyLevel::Delegated,
+        profile,
+        Some(rating(15)),
+    );
+    let executive = fixture.authority.manager;
+    let EnterpriseLocation::Neighborhood(home) = fixture.location else {
+        unreachable!();
+    };
+    let other = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Commercial branch".into(),
+            profile,
+        },
+    )
+    .unwrap();
+    let captain = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Experienced branch captain".into(),
+            organization: Some(fixture.organization),
+            supervisor: Some(executive),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(90))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: fixture.organization,
+            manager: captain,
+            scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(other)]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let front = insert_business(
+        &registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Cash counter".into(),
+            kind: BusinessKind::Pawnshop,
+            functions: BTreeSet::from([BusinessFunction::CashIntensive]),
+            neighborhood: home,
+            owner: BusinessOwner::Organization(fixture.organization),
+        },
+    )
+    .unwrap();
+    fund_enterprise_fixture_cash(&mut fixture, 200_000);
+    fixture.state.advance_clock(SimDuration::from_minutes(1439));
+    let mut replay =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+
+    let tick = run_tick(&registry, &mut fixture.state);
+    assert_eq!(tick, run_tick(&registry, &mut replay));
+    let established: Vec<_> = fixture
+        .state
+        .enterprises()
+        .active_for_organization(fixture.organization)
+        .map(|enterprise| {
+            (
+                enterprise.manager(),
+                enterprise.kind(),
+                enterprise.location(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        established,
+        vec![
+            (
+                captain,
+                EnterpriseKind::Protection,
+                EnterpriseLocation::Neighborhood(other)
+            ),
+            (
+                executive,
+                EnterpriseKind::LoanSharking,
+                EnterpriseLocation::Business(front)
+            ),
+        ]
+    );
+    let workload = manager_workload(&fixture.state, executive).unwrap();
+    assert_eq!((workload.required, workload.available), (5, 5));
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
+    restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+}
+
+#[test]
 fn working_capital_reserves_the_actual_active_workforce_wages() {
     use crate::enterprises::autonomous_planning::resolve_committed_working_capital;
 

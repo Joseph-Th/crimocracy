@@ -15,6 +15,66 @@ use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 
 #[test]
+fn due_hearing_refers_decisive_evidence_before_rendering_verdict() {
+    let mut fixture = fixture();
+    let case = open_case(&mut fixture);
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        14 * DAY_DURATION.as_minutes() - 1,
+    ));
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+
+    // The filed document and association screen successfully, but cannot
+    // convict. The police already hold an independent strong financial exhibit.
+    let tick = run_test_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(tick, run_test_tick(&fixture.registry, &mut restored));
+    assert!(tick.adjudicated_prosecution_cases.is_empty());
+    assert_eq!(tick.prosecution_supplements.len(), 1);
+    let reviewing = fixture.state.legal().get_prosecution_case(case).unwrap();
+    assert_eq!(reviewing.status(), ProsecutionCaseStatus::Reviewing);
+    assert!(
+        reviewing
+            .evidence()
+            .contains(&fixture.supplemental_evidence)
+    );
+
+    // Once the file can convict, further exhibits must not indefinitely delay
+    // the scheduled hearing. A prosecutor still takes only one action per day.
+    for state in [&mut fixture.state, &mut restored] {
+        add_evidence(
+            state,
+            fixture.police,
+            fixture.investigation,
+            fixture.defendant,
+            EvidenceKind::Surveillance,
+        );
+    }
+    let tick = daily_boundary(&fixture.registry, &mut fixture.state);
+    assert_eq!(tick, daily_boundary(&fixture.registry, &mut restored));
+    assert_eq!(tick.adjudicated_prosecution_cases, vec![case]);
+    assert!(tick.prosecution_supplements.is_empty());
+    let verdict = fixture.state.legal().get_prosecution_case(case).unwrap();
+    assert_eq!(verdict.status(), ProsecutionCaseStatus::Convicted);
+    assert_eq!(verdict.judgment().unwrap().proof_score(), 8);
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
 fn due_hearing_takes_priority_over_supplementing_a_newer_review() {
     let mut fixture = fixture();
     // The first arrest is older, but its review opens later. A prosecutor with

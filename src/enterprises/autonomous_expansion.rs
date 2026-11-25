@@ -26,7 +26,7 @@ use crate::registry::{EnterpriseDefinition, Registry};
 use crate::world::{CapabilityKind, Rating};
 use candidate_planning::{
     collect_business_scope_candidates, collect_district_candidates,
-    collect_neighborhood_scope_candidates, compare_expansion_plans,
+    collect_neighborhood_scope_candidates,
 };
 use cohort_planning::{
     AutonomousExpansionCohort, PlannedAutonomousExpansionAction, PlannedSettlementAccount,
@@ -189,14 +189,14 @@ impl PlannedAutonomousExpansionAction {
 /// authority scope. This mirrors canonical establishment instead of incorrectly requiring one
 /// storefront to embody an entire supply chain or letting a district manager bind remote assets.
 /// Candidate economics come from the same gross/cost composition as production cycle settlement.
-fn decide_autonomous_expansion(
+fn enumerate_autonomous_expansion_candidates(
     iteration: &ExpansionIterationContext<'_>,
     organization: OrganizationId,
     mandate: &crate::delegation::MandateRecord,
     available_working_capital: Money,
     occupied_locations: &BTreeSet<(EnterpriseKind, EnterpriseLocation)>,
     owned_venues: &BTreeMap<BusinessId, &crate::world::BusinessRecord>,
-) -> Result<Option<AutonomousExpansionPlan>, AutonomousEnterpriseError> {
+) -> Result<Vec<AutonomousExpansionPlan>, AutonomousEnterpriseError> {
     let district_scopes =
         resolve_ranked_district_scopes(organization, mandate, iteration.district_leaders);
     let business_scopes: Vec<ResponsibilityScope> = mandate
@@ -273,7 +273,7 @@ fn decide_autonomous_expansion(
         }
     }
 
-    Ok(candidates.into_iter().min_by(compare_expansion_plans))
+    Ok(candidates)
 }
 
 fn resolve_ranked_district_scopes(

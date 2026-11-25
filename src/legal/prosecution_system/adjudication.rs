@@ -7,7 +7,9 @@ use super::{
 };
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{ArrestId, IdKind, LegalRepresentationId, OrganizationId, ProsecutionCaseId};
+use crate::core::id::{
+    ArrestId, EvidenceId, IdKind, LegalRepresentationId, OrganizationId, ProsecutionCaseId,
+};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime};
 use crate::finance::Money;
@@ -108,13 +110,14 @@ fn assessment(
     registry: &Registry,
     state: &AppState,
     case: &ProsecutionCaseRecord,
+    evidence: &BTreeSet<EvidenceId>,
     at: SimTime,
     defense: Option<LegalRepresentationId>,
 ) -> (ProsecutionCaseResolution, JudicialJudgment) {
     let (independent_sources, strong_sources, proof_score) =
         crate::legal::arrest_system::judicial_proof(
             state,
-            case.evidence(),
+            evidence,
             prior_judgment(state, case, at),
         );
     // A case cannot win on one witness, association, or many weak findings. Skilled
@@ -148,6 +151,31 @@ fn assessment(
     )
 }
 
+/// A due hearing may wait for a referral that changes its actual verdict.
+/// Non-decisive additions must not let a busy police file postpone court forever.
+pub(super) fn supplement_changes_verdict(
+    registry: &Registry,
+    state: &AppState,
+    case: &ProsecutionCaseRecord,
+    complete_evidence: &BTreeSet<EvidenceId>,
+) -> bool {
+    let defense = state
+        .legal()
+        .active_representation_for_arrest(case.arrest())
+        .map(|rep| rep.id());
+    let filed = assessment(registry, state, case, case.evidence(), state.now(), defense).0;
+    filed == ProsecutionCaseResolution::Acquitted
+        && assessment(
+            registry,
+            state,
+            case,
+            complete_evidence,
+            state.now(),
+            defense,
+        )
+        .0 == ProsecutionCaseResolution::Convicted
+}
+
 pub(super) struct ValidatedJudgment {
     case: ProsecutionCaseId,
     resolution: ValidatedProsecutionCaseResolution,
@@ -178,7 +206,8 @@ impl ValidatedJudgment {
             .map(|rep| rep.id());
         if !judgment_due(state, case)
             || !screened_case(registry, state, case, state.now())
-            || assessment(registry, state, case, state.now(), defense).1 != self.judgment
+            || assessment(registry, state, case, case.evidence(), state.now(), defense).1
+                != self.judgment
         {
             return Err(ProsecutionError::StaleJudgment(self.case));
         }
@@ -214,7 +243,8 @@ pub(super) fn validate_judgment(
         .legal()
         .active_representation_for_arrest(case.arrest())
         .map(|rep| rep.id());
-    let (outcome, judgment) = assessment(registry, state, case, state.now(), defense);
+    let (outcome, judgment) =
+        assessment(registry, state, case, case.evidence(), state.now(), defense);
     let resolution = validate_prosecution_case_resolution(state, id, outcome)?;
     let convicted = outcome == ProsecutionCaseResolution::Convicted;
     let notice = person
@@ -352,7 +382,8 @@ pub(crate) fn validate_judgment_history(
             return false;
         }
     }
-    let (expected, mut proof) = assessment(registry, state, case, at, judgment.defense);
+    let (expected, mut proof) =
+        assessment(registry, state, case, case.evidence(), at, judgment.defense);
     proof.payments.clone_from(&judgment.payments);
     expected.status() == case.status() && &proof == judgment
 }

@@ -7,7 +7,7 @@
 
 use super::candidate_planning::{compare_expansion_plans, compare_phase_expansion_candidates};
 use super::{
-    AutonomousExpansionPlan, ExpansionIterationContext, decide_autonomous_expansion,
+    AutonomousExpansionPlan, ExpansionIterationContext, enumerate_autonomous_expansion_candidates,
     resolve_autonomous_cash_account, resolve_available_owned_businesses,
     resolve_max_autonomous_working_capital, settlement_account_is_available,
 };
@@ -225,38 +225,54 @@ fn select_phase_expansion_candidate(
         let owned_venues = available_venues
             .get(organization)
             .expect("eligible expansion organization must have a venue snapshot");
+        let mut prospective_jobs: Vec<_> = planned_jobs
+            .iter()
+            .copied()
+            .filter(|job| job.organization == *organization)
+            .collect();
         // Resolve internal governance before comparing organizations. A mixed comparator
         // would otherwise let mandate iteration order change the contested-slot winner.
         let mut preferred: Option<PhaseExpansionCandidate> = None;
         for (mandate_index, mandate) in organization_mandates.iter().enumerate() {
-            let Some(plan) = decide_autonomous_expansion(
+            let candidates = enumerate_autonomous_expansion_candidates(
                 iteration,
                 *organization,
                 mandate,
                 available_working_capital,
                 occupied_locations,
                 owned_venues,
-            )?
-            else {
-                continue;
-            };
-            // The current-state validator sees one captain at a time; the
-            // cohort may contain multiple captains reporting to one superior.
-            // Project *all* prior selections before accepting a candidate
-            // rather than discovering a shared executive overload halfway
-            // through the nominally preflighted commit batch.
-            let mut prospective_jobs = planned_jobs.clone();
-            prospective_jobs.push(ProjectedCommandJob {
-                organization: *organization,
-                captain: mandate.manager(),
-                kind: plan.kind,
-                location: plan.location,
-                associates: plan.kind.baseline_associates(),
-                supporting_businesses: plan.supporting_businesses.len(),
-            });
-            if !projected_command_jobs_fit(iteration.state, &prospective_jobs) {
-                continue;
+            )?;
+            // Rank only feasible plans. A larger preferred racket may no
+            // longer fit after a subordinate adds a command line, while a
+            // smaller profitable alternative still fits. Avoid rechecking
+            // unrelated organizations or plans that cannot beat the best
+            // feasible candidate already found for this mandate.
+            let mut best_plan = None;
+            for plan in candidates {
+                if best_plan
+                    .as_ref()
+                    .is_some_and(|best| !compare_expansion_plans(&plan, best).is_lt())
+                {
+                    continue;
+                }
+                if !prospective_jobs.is_empty() {
+                    prospective_jobs.push(ProjectedCommandJob {
+                        organization: *organization,
+                        captain: mandate.manager(),
+                        kind: plan.kind,
+                        location: plan.location,
+                        associates: plan.kind.baseline_associates(),
+                        supporting_businesses: plan.supporting_businesses.len(),
+                    });
+                    let fits = projected_command_jobs_fit(iteration.state, &prospective_jobs);
+                    prospective_jobs.pop();
+                    if !fits {
+                        continue;
+                    }
+                }
+                best_plan = Some(plan);
             }
+            let Some(plan) = best_plan else { continue };
             let neighborhood = resolve_location_neighborhood(iteration.state, plan.location)
                 .expect("autonomous candidate location must resolve to a live neighborhood");
             let district_leader = iteration
