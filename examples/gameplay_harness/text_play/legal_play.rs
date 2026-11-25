@@ -1,10 +1,12 @@
-//! Player-controlled legal defense. An arrest is selectable only when it affects
-//! a current member and is either current custody or known to the organization
-//! through typed personal detention information. Counsel comes from an actual
-//! player-established legal contact, and all payments and closures are committed
-//! by the production legal-representation owner.
+//! Player-controlled legal defense. New retainers require a current member;
+//! existing sponsored engagements remain manageable after a member leaves.
+//! Counsel comes from an actual player-established legal contact, and all
+//! payments and closures are committed by the production legal owner.
 
 use super::*;
+use crimocracy::legal::legal_representation_system::{
+    sponsored_active_representations, sponsored_representation_matter_open,
+};
 
 impl Session<'_> {
     pub(super) fn known_member_arrests(&self) -> BTreeSet<ArrestId> {
@@ -17,7 +19,12 @@ impl Session<'_> {
         let mut out = String::new();
         match words[0] {
             "counsel" => {
-                let known = self.known_member_arrests();
+                let members = self.known_member_arrests();
+                let mut known = members.clone();
+                known.extend(
+                    sponsored_active_representations(&self.state, self.player)
+                        .map(|representation| representation.arrest()),
+                );
                 let selected = match words.get(1).copied() {
                     None | Some("all") => None,
                     Some(raw) => {
@@ -27,14 +34,14 @@ impl Session<'_> {
                                 .iter()
                                 .copied()
                                 .find(|arrest| arrest.raw() == id)
-                                .ok_or("arrest is not known for a current organization member")?,
+                                .ok_or("arrest is not a current member matter or an active sponsored engagement")?,
                         )
                     }
                 };
                 let show_all = words.get(1) == Some(&"all");
                 let mut quiet = 0_usize;
                 if known.is_empty() {
-                    out.push_str("No arrests of current members are known to leadership.\n");
+                    out.push_str("No arrests of current members or active sponsored engagements are known to leadership.\n");
                 }
                 for id in known {
                     if selected.is_some_and(|requested| requested != id) {
@@ -45,22 +52,35 @@ impl Session<'_> {
                         .legal()
                         .get_arrest(id)
                         .ok_or("known arrest record disappeared")?;
-                    let open_review =
+                    let current_member = members.contains(&id);
+                    let representation = self.state.legal().active_representation_for_arrest(id);
+                    let sponsored = representation.filter(|record| record.sponsor() == self.player);
+                    let detained = record.status() == crimocracy::legal::ArrestStatus::Detained;
+                    let open_review = if current_member {
                         crimocracy::legal::prosecution_system::member_prosecution_under_review(
                             &self.state,
                             self.player,
                             id,
-                        );
+                        )
+                    } else {
+                        sponsored.is_some_and(|rep| {
+                            !detained
+                                && sponsored_representation_matter_open(
+                                    &self.state,
+                                    self.player,
+                                    rep.id(),
+                                )
+                                .unwrap_or(false)
+                        })
+                    };
                     let judgments = crimocracy::legal::prosecution_system::member_judgments(
                         &self.state,
                         self.player,
                         id,
                     );
-                    let representation = self.state.legal().active_representation_for_arrest(id);
-                    let detained = record.status() == crimocracy::legal::ArrestStatus::Detained;
                     let actionable = detained
                         || open_review
-                        || representation.is_some()
+                        || sponsored.is_some()
                         || judgments
                             .iter()
                             .any(|judgment| judgment.outstanding.cents() > 0);
@@ -75,10 +95,15 @@ impl Session<'_> {
                         .ok_or("known defendant disappeared")?;
                     writeln!(
                         out,
-                        "arrest-{} | {} (char-{}) | {:?} | observed from {}",
+                        "arrest-{} | {} (char-{}){} | {:?} | observed from {}",
                         id.raw(),
                         defendant.name(),
                         defendant.id().raw(),
+                        if current_member {
+                            ""
+                        } else {
+                            " | former member; sponsored engagement"
+                        },
                         record.status(),
                         time_label(record.arrested_at().as_minutes())
                     )
@@ -97,7 +122,7 @@ impl Session<'_> {
                         )
                         .unwrap();
                     }
-                    if let Some(representation) = representation {
+                    if let Some(representation) = sponsored {
                         let counsel = self
                             .state
                             .world()
@@ -114,6 +139,8 @@ impl Session<'_> {
                         if !detained && !open_review {
                             writeln!(out, "  Legal matter no longer needs active defense. This retainer remains assigned until leadership uses 'end-counsel representation-{} concluded'.", representation.id().raw()).unwrap();
                         }
+                    } else if representation.is_some() {
+                        out.push_str("  Existing counsel retained outside your organization; this engagement is not yours to end.\n");
                     } else if detained || open_review {
                         out.push_str(
                             "  No retained counsel. Use 'retain arrest-N contact-N cents'.\n",
@@ -121,7 +148,7 @@ impl Session<'_> {
                     }
                 }
                 if quiet > 0 {
-                    writeln!(out, "{quiet} other known arrest matter(s) have no active custody, open review, retainer, or unpaid fine. Use 'counsel all' or 'counsel arrest-N' for history.").unwrap();
+                    writeln!(out, "{quiet} other known arrest matter(s) have no active custody, open review, sponsored retainer, or unpaid fine. Use 'counsel all' or 'counsel arrest-N' for history.").unwrap();
                 } else if out.is_empty() {
                     out.push_str("No known current member matters require legal attention.\n");
                 }
@@ -155,6 +182,17 @@ impl Session<'_> {
                     .into_iter()
                     .find(|id| id.raw() == raw)
                     .ok_or("arrest is not known for a current organization member")?;
+                if self
+                    .state
+                    .legal()
+                    .active_representation_for_arrest(arrest)
+                    .is_some_and(|record| record.sponsor() != self.player)
+                {
+                    return Err(
+                        "this member already has counsel retained outside your organization"
+                            .to_owned(),
+                    );
+                }
                 let contact_raw = parse_number(words[2], "contact")?;
                 let contact = self
                     .state
@@ -211,14 +249,11 @@ impl Session<'_> {
             }
             "end-counsel" => {
                 let raw = parse_number(words[1], "representation")?;
-                let representation = self
-                    .known_member_arrests()
-                    .into_iter()
-                    .filter_map(|arrest| {
-                        self.state.legal().active_representation_for_arrest(arrest)
-                    })
-                    .find(|record| record.id().raw() == raw && record.sponsor() == self.player)
-                    .ok_or("representation is not active for one of your known member cases")?
+                let representation = sponsored_active_representations(&self.state, self.player)
+                    .find(|record| record.id().raw() == raw)
+                    .ok_or(
+                        "representation is not an active engagement sponsored by your organization",
+                    )?
                     .id();
                 let reason = match words[2] {
                     "concluded" => LegalRepresentationEndReason::MatterConcluded,

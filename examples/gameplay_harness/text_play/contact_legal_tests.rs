@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod sponsorship;
+
 fn snapshot(registry: &Registry, session: &Session<'_>) -> Vec<u8> {
     bincode::serialize(&build_save(registry, &session.state).unwrap()).unwrap()
 }

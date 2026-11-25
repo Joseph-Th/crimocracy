@@ -328,11 +328,10 @@ use the learned episode if the production legal and operation checks permit.
 An institution-level surveillance report about case activity is not itself
 evidence that a specific person is a witness.
 
-Routine police vice observations cannot autonomously detain the same person under the same police authority more than once in fourteen days after release, even across separate inquiries; police may still arrest sooner for a newly completed criminal operation, and the ordinary direct arrest evidence gate remains intact. Pending prosecutions and current enforcement costs continue during this interval. `counsel` displays known custody matters involving current members and their
-actual representation. `retain <arrest-id> <legal-contact-id> <fee-cents>`
-hires counsel through a live legal contact and the production ledger.
-`end-counsel <representation-id> <concluded|replace|withdraw>` closes
-representation only when its legal constraints allow it. Alternatively,
+Routine autonomous custody has a sixty-day cooldown following release by the same police authority. Continuing observations of an already-cited racket cannot restart custody merely because that cooldown expires or an unrelated arrest intervenes. Distinct new racket evidence remains actionable after the cooldown; a newly completed criminal operation can justify earlier custody. The direct arrest evidence gate, pending prosecutions, and ongoing enforcement costs remain intact.
+
+`counsel` displays current-member legal matters and your own active retainers, including those for former members. Another sponsor's retainer is indicated without revealing its management ID, lawyer, or fee. `retain <arrest-id> <legal-contact-id> <fee-cents>` hires counsel for a current member through a live legal contact and the production ledger.
+`end-counsel <representation-id> <concluded|replace|withdraw>` closes your sponsored representation, including after a member's departure, only when its legal constraints allow it. Alternatively,
 `policy legal automatic` enables automatic retention when a legal contact
 and funding exist. `advance` interrupts on arrests and releases of members
 so manual counsel decisions are not skipped. It also pauses on newly suspended

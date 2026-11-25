@@ -423,6 +423,76 @@ fn vice_inquiry_observes_distinct_operating_cycles_then_detains_and_refers_manag
         "save/load must retain the repeat-vice arrest rule"
     );
 
+    // A later, unrelated police matter must not erase the earlier vice history.
+    // Otherwise alternating case files makes the same old racket arrestable again
+    // as soon as the general cooldown expires.
+    let unrelated = validate_open_investigation(
+        &repeated_vice,
+        InvestigationDraft {
+            owner: police,
+            title: "Unrelated property inquiry".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(manager)]),
+        },
+    )
+    .unwrap()
+    .commit(&mut repeated_vice)
+    .unwrap();
+    let mut evidence = BTreeSet::new();
+    for kind in [EvidenceKind::Document, EvidenceKind::FinancialRecord] {
+        evidence.insert(
+            validate_add_evidence(
+                &repeated_vice,
+                EvidenceDraft {
+                    investigation: unrelated,
+                    custodian: police,
+                    subject: EntityRef::Character(manager),
+                    origin: None,
+                    kind,
+                    strength: EvidenceStrength::Strong,
+                    reliability: EvidenceReliability::HighlyReliable,
+                    admissibility: Admissibility::Admissible,
+                    discovered_at: repeated_vice.now(),
+                },
+            )
+            .unwrap()
+            .commit(&mut repeated_vice)
+            .unwrap(),
+        );
+    }
+    let intervening = crate::legal::arrest_system::apply_autonomous_evidence_arrests(
+        &registry,
+        &mut repeated_vice,
+    )
+    .unwrap();
+    assert_eq!(intervening.len(), 1);
+    assert_eq!(
+        repeated_vice
+            .legal()
+            .get_arrest(intervening[0])
+            .unwrap()
+            .investigation(),
+        unrelated,
+        "the original vice history must not immunize the manager from a distinct matter"
+    );
+    repeated_vice.advance_clock(SimDuration::ONE_MINUTE);
+    crate::legal::arrest_system::validate_release_arrest(&repeated_vice, intervening[0])
+        .unwrap()
+        .commit(&mut repeated_vice)
+        .unwrap();
+    repeated_vice.advance_clock(SimDuration::from_minutes(61 * 1_440));
+    let mut replay =
+        restore_save(&registry, build_save(&registry, &repeated_vice).unwrap()).unwrap();
+    let before = bincode::serialize(&repeated_vice).unwrap();
+    for state in [&mut repeated_vice, &mut replay] {
+        assert!(
+            crate::legal::arrest_system::apply_autonomous_evidence_arrests(&registry, state)
+                .unwrap()
+                .is_empty(),
+            "intervening unrelated custody must not re-enable repeat arrests for old vice"
+        );
+        assert_eq!(bincode::serialize(state).unwrap(), before);
+    }
+
     // Daily prosecutorial intake is downstream of actual custody, never manufactured here.
     fixture
         .state

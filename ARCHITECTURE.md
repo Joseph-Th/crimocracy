@@ -398,6 +398,7 @@ determinism and client contracts.
  9  apply_investigation_work_scheduling    one active-case scan; evidence review first, otherwise witness interview
 10  run_investigation_work_phase           resolve due work (RNG: investigation stream)
 11  apply_autonomous_evidence_arrests      active LawEnforcement cases: independent-evidence threshold → custody + responsibility preemption + managed enterprise suspension
+                                            reconstruct authority/defendant release and cited-racket history for qualifying candidates; 60-day routine cooldown, no recycled vice incident after unrelated custody
 12  apply_autonomous_prosecution_staffing  refill prosecution seats released by custody
     ──► apply_due_prosecution_referrals    daily one action per available prosecutor; due hearings first (oldest opening first), then existing review work by oldest last referral, then new intake; own-member notice
 13  apply_automatic_legal_support          conclude only after custody and every open prosecution review end;

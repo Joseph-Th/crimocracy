@@ -35,6 +35,41 @@ use crate::world::{CapabilityKind, OrganizationKind};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
+/// The sponsor owns its active engagements even after the represented person
+/// leaves. Use the sponsor's contacts and their active representation indexes,
+/// not the current membership roster or lifetime representation history.
+pub fn sponsored_active_representations(
+    state: &AppState,
+    sponsor: OrganizationId,
+) -> impl Iterator<Item = &LegalRepresentationRecord> + '_ {
+    state
+        .contacts()
+        .contacts_for_sponsor(sponsor)
+        .filter(|contact| contact.status() == ContactStatus::Active)
+        .flat_map(|contact| {
+            state
+                .legal()
+                .active_representations_for_contact(contact.id())
+        })
+}
+
+/// A sponsor can know whether its own lawyer still has an open matter, without
+/// receiving unrelated prosecution files or a former member's new legal history.
+pub fn sponsored_representation_matter_open(
+    state: &AppState,
+    sponsor: OrganizationId,
+    representation: LegalRepresentationId,
+) -> Option<bool> {
+    let record = state.legal().get_legal_representation(representation)?;
+    if record.sponsor() != sponsor || record.status() != LegalRepresentationStatus::Active {
+        return None;
+    }
+    Some(
+        representation_matter_open(state, record)
+            .expect("active representation must retain its arrest"),
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum LegalRepresentationError {
     #[error("arrest {0} does not exist")]
@@ -960,20 +995,26 @@ fn ensure_representation_matter_concluded(
     if reason != LegalRepresentationEndReason::MatterConcluded {
         return Ok(());
     }
-    let arrest = state.legal.get_arrest(representation.arrest()).ok_or(
-        LegalRepresentationError::MissingArrest(representation.arrest()),
-    )?;
-    if arrest.status() == ArrestStatus::Detained
-        || state
-            .legal
-            .has_open_prosecution_case_for_arrest(representation.arrest())
-    {
+    if representation_matter_open(state, representation)? {
         return Err(LegalRepresentationError::MatterStillActive {
             representation: representation.id(),
             arrest: representation.arrest(),
         });
     }
     Ok(())
+}
+
+fn representation_matter_open(
+    state: &AppState,
+    representation: &LegalRepresentationRecord,
+) -> Result<bool, LegalRepresentationError> {
+    let arrest = state.legal.get_arrest(representation.arrest()).ok_or(
+        LegalRepresentationError::MissingArrest(representation.arrest()),
+    )?;
+    Ok(arrest.status() == ArrestStatus::Detained
+        || state
+            .legal
+            .has_open_prosecution_case_for_arrest(representation.arrest()))
 }
 
 pub(crate) fn retained_representation_summary(

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::core::entity::EntityRef;
 use crate::core::id::{
-    ArrestId, CharacterId, EvidenceId, InvestigationId, OperationId, OrganizationId,
+    ArrestId, CharacterId, EnterpriseId, EvidenceId, InvestigationId, OperationId, OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime};
@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug)]
 struct AutonomousArrestCandidate {
     investigation: InvestigationId,
+    authority: OrganizationId,
     character: CharacterId,
     evidence: BTreeSet<EvidenceId>,
     independent_sources: usize,
@@ -27,70 +28,95 @@ struct AutonomousArrestCandidate {
 
 /// Routine vice casework may continue after release, but the same already-cited
 /// racket must not create another arrest merely by being observed each day.
-/// New racket evidence and completed criminal operations remain actionable. Other routine arrests retain a minimum cooldown.
+/// New racket evidence remains actionable after the routine cooldown, and completed
+/// post-release criminal operations can bypass that cooldown.
 /// This policy is reconstructed from persisted arrests and never alters direct arrest validity.
 const ROUTINE_REARREST_INTERVAL_DAYS: u64 = 60;
 
-/// Ordinary surveillance of the enterprise already cited in a prior arrest
-/// can deepen its case, but does not create a new criminal incident. Even
-/// derivative casework does not convert the same racket into another crime.
-/// Evidence of a different racket or an actual new operation is separate.
-fn repeats_previous_racket_case(
-    state: &AppState,
-    prior: &ArrestRecord,
-    case_id: InvestigationId,
-    released_at: SimTime,
-    evidence: &BTreeSet<EvidenceId>,
-) -> bool {
-    let Some(EntityRef::Enterprise(case_racket)) = state
-        .legal()
-        .get_investigation(case_id)
-        .and_then(|case| case.origin())
-    else {
-        return false;
+fn case_racket(state: &AppState, case: InvestigationId) -> Option<EnterpriseId> {
+    let EntityRef::Enterprise(id) = state.legal().get_investigation(case)?.origin()? else {
+        return None;
     };
-    let prior_case_racket = state
-        .legal()
-        .get_investigation(prior.investigation())
-        .and_then(|case| case.origin())
-        .and_then(|origin| {
-            if let EntityRef::Enterprise(id) = origin {
-                Some(id)
-            } else {
-                None
-            }
-        });
-    let previously_cited =
-        prior_case_racket == Some(case_racket) || prior.investigation() == case_id;
-    if !previously_cited {
-        return false;
-    }
-    // A case may cite a stronger derivative instead of the original observed
-    // trade. Resolve the independent root when testing for evidence of a
-    // genuinely different racket rather than treating that derivative as new.
-    !evidence.iter().any(|id| {
-        state.legal().get_evidence(*id).is_some_and(|record| {
-            if record.discovered_at() <= released_at {
-                return false;
-            }
-            let source = if record.derived_from().len() == 1 {
-                record
-                    .derived_from()
+    Some(id)
+}
+
+/// Date a cited observation to the underlying operating event, not a later
+/// forensic analysis of it.
+fn observed_racket(state: &AppState, id: EvidenceId) -> Option<(EnterpriseId, SimTime)> {
+    let record = state.legal().get_evidence(id)?;
+    let root = match record.derived_from().len() {
+        0 => record,
+        1 => state
+            .legal()
+            .get_evidence(*record.derived_from().first()?)?,
+        _ => return None,
+    };
+    let racket = crate::legal::investigation_system::enterprise_observation_origin(
+        root.kind(),
+        root.subject(),
+        root.origin(),
+    )?;
+    Some((racket, root.discovered_at()))
+}
+
+#[derive(Default)]
+struct ReleaseHistory {
+    /// The general cooldown follows the most recent release by this authority.
+    latest: Option<SimTime>,
+    /// Vice history survives an unrelated arrest and recognizes cited incident roots.
+    rackets: BTreeMap<EnterpriseId, SimTime>,
+}
+
+impl ReleaseHistory {
+    fn record(&mut self, state: &AppState, arrest: &ArrestRecord) {
+        let Some(released_at) = arrest.released_at() else {
+            return;
+        };
+        self.latest = self.latest.max(Some(released_at));
+        // A consolidated inquiry can cite multiple rackets. Preserve every
+        // cited racket as well as the originating vice file across unrelated
+        // later arrests.
+        for racket in case_racket(state, arrest.investigation())
+            .into_iter()
+            .chain(
+                arrest
+                    .evidence()
                     .iter()
-                    .next()
-                    .and_then(|id| state.legal().get_evidence(*id))
-                    .unwrap_or(record)
-            } else {
-                record
-            };
-            crate::legal::investigation_system::enterprise_observation_origin(
-                source.kind(),
-                source.subject(),
-                source.origin(),
+                    .filter_map(|&id| observed_racket(state, id).map(|(racket, _)| racket)),
             )
-            .is_some_and(|racket| Some(racket) != prior_case_racket && racket != case_racket)
+        {
+            let last = self.rackets.entry(racket).or_insert(released_at);
+            *last = (*last).max(released_at);
+        }
+    }
+
+    fn blocks(&self, state: &AppState, candidate: &AutonomousArrestCandidate) -> bool {
+        let Some(released_at) = self.latest else {
+            return false;
+        };
+        if has_distinct_post_release_operation(state, released_at, &candidate.evidence) {
+            return false;
+        }
+        if state
+            .now()
+            .as_minutes()
+            .saturating_sub(released_at.as_minutes())
+            < ROUTINE_REARREST_INTERVAL_DAYS * DAY_MINUTES
+        {
+            return true;
+        }
+        let Some(racket) = case_racket(state, candidate.investigation) else {
+            return false;
+        };
+        let Some(&racket_release) = self.rackets.get(&racket) else {
+            return false;
+        };
+        !candidate.evidence.iter().any(|&id| {
+            observed_racket(state, id).is_some_and(|(observed, at)| {
+                !self.rackets.contains_key(&observed) && at > racket_release
+            })
         })
-    })
+    }
 }
 
 fn has_distinct_post_release_operation(
@@ -113,21 +139,25 @@ fn has_distinct_post_release_operation(
     })
 }
 
-fn most_recent_release_by_subject_and_authority(
+fn release_history_by_subject_and_authority(
     state: &AppState,
-) -> BTreeMap<(CharacterId, OrganizationId), &ArrestRecord> {
-    let mut latest = BTreeMap::new();
+    candidates: &[AutonomousArrestCandidate],
+) -> BTreeMap<(CharacterId, OrganizationId), ReleaseHistory> {
+    let mut history: BTreeMap<_, ReleaseHistory> = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                (candidate.character, candidate.authority),
+                ReleaseHistory::default(),
+            )
+        })
+        .collect();
     for arrest in state.legal().arrests() {
-        if arrest.released_at().is_some() {
-            let entry = latest
-                .entry((arrest.character(), arrest.authority()))
-                .or_insert(arrest);
-            if (arrest.released_at(), arrest.id()) > (entry.released_at(), entry.id()) {
-                *entry = arrest;
-            }
+        if let Some(prior) = history.get_mut(&(arrest.character(), arrest.authority())) {
+            prior.record(state, arrest);
         }
     }
-    latest
+    history
 }
 
 /// A single case-level evidence pass supplies all character subjects. A multi-subject case
@@ -256,6 +286,7 @@ fn resolve_autonomous_arrest_candidates(
             }
             Some(AutonomousArrestCandidate {
                 investigation: investigation_id,
+                authority: owner,
                 character,
                 evidence,
                 independent_sources: assessment.independent_qualifying(),
@@ -303,32 +334,11 @@ pub fn apply_autonomous_evidence_arrests(
     // Most minutes have no custody-grade candidates. Re-read lifetime release history only
     // when there is actual qualifying evidence, not on every canonical simulation minute.
     if !candidates.is_empty() {
-        let most_recent_release = most_recent_release_by_subject_and_authority(state);
+        let history = release_history_by_subject_and_authority(state, &candidates);
         candidates.retain(|candidate| {
-            let authority = state
-                .legal()
-                .get_investigation(candidate.investigation)
-                .expect("candidate must retain an active investigation")
-                .owner();
-            !most_recent_release
-                .get(&(candidate.character, authority))
-                .is_some_and(|prior| {
-                    let released_at = prior
-                        .released_at()
-                        .expect("the last released arrest has a release instant");
-                    !has_distinct_post_release_operation(state, released_at, &candidate.evidence)
-                        && (repeats_previous_racket_case(
-                            state,
-                            prior,
-                            candidate.investigation,
-                            released_at,
-                            &candidate.evidence,
-                        ) || state
-                            .now()
-                            .as_minutes()
-                            .saturating_sub(released_at.as_minutes())
-                            < ROUTINE_REARREST_INTERVAL_DAYS * DAY_MINUTES)
-                })
+            !history
+                .get(&(candidate.character, candidate.authority))
+                .is_some_and(|prior| prior.blocks(state, candidate))
         });
     }
     // One character can be arrestable in several police files at once, but only one active
