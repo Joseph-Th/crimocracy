@@ -19,8 +19,6 @@ use crate::delegation::delegation_system::validate_assign_mandate;
 use crate::delegation::{
     MandateAuthority, MandateDraft, ResponsibilityFunction, ResponsibilityScope,
 };
-use crate::economy::BusinessEconomyDraft;
-use crate::economy::business_economy_system::validate_establish_business_economy;
 use crate::enterprises::enterprise_execution::validate_establish_enterprise;
 use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
@@ -43,18 +41,21 @@ use crate::registry::Registry;
 use crate::social::relationship_system::validate_set_relationship;
 use crate::social::{RelationshipDimensions, RelationshipLevel};
 use crate::world::world_system::{
-    designate_player_organization, insert_business, insert_character, insert_neighborhood,
-    insert_organization,
+    designate_player_organization, insert_character, insert_neighborhood, insert_organization,
 };
 use crate::world::{
-    ALL_BUSINESS_KINDS, ApprovalPolicy, AutonomyLevel, BusinessDraft, BusinessFunction as F,
-    BusinessKind as K, BusinessOwner, CapabilityKind as C, CharacterDraft, DriveKind,
+    ApprovalPolicy, AutonomyLevel, CapabilityKind as C, CharacterDraft, DriveKind,
     IndependentVocation, NeighborhoodDraft, NeighborhoodEconomyProfile,
     NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, OrganizationKind,
     PolicyKind, PolicySetting, Rating, TraitKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+
+mod businesses;
+use businesses::{GeneratedProperties, PropertyCity, generate_properties};
+mod population;
+use population::{PopulationCity, populate_city};
 
 pub type GenerationResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -228,31 +229,6 @@ const GIVEN_NAMES: &[&str] = &[
     "Elena", "Felix", "Frank", "Grace", "Hector", "Inez", "Iris", "Joseph", "June", "Leo", "Lena",
     "Marco", "Mara", "Nora", "Owen", "Pearl", "Rosa", "Sam", "Sofia", "Theo", "Vera", "Victor",
 ];
-const SHOP_PREFIXES: &[&str] = &[
-    "Adler",
-    "Bell",
-    "Bridge",
-    "Calder",
-    "Dover",
-    "Ellis",
-    "Fulton",
-    "Grafton",
-    "Hollis",
-    "Keystone",
-    "Linden",
-    "Marlow",
-    "Northline",
-    "Parker",
-    "Redline",
-    "Sable",
-    "Tanner",
-    "Union",
-    "Vesper",
-    "Whitmore",
-    "Arcadia",
-    "Crown",
-];
-
 fn person_name(rng: &mut CityRng) -> String {
     let mut collisions = 0;
     loop {
@@ -312,321 +288,6 @@ fn add_character(
     )?)
 }
 
-struct PopulationRole<'a> {
-    vocation: IndependentVocation,
-    organization: Option<OrganizationId>,
-    supervisor: Option<CharacterId>,
-    skills: &'a [(C, u8)],
-    personality: TraitKind,
-    contact: Option<CharacterId>,
-}
-
-impl<'a> PopulationRole<'a> {
-    fn new(
-        vocation: IndependentVocation,
-        organization: Option<OrganizationId>,
-        supervisor: Option<CharacterId>,
-        skills: &'a [(C, u8)],
-        personality: TraitKind,
-        contact: Option<CharacterId>,
-    ) -> Self {
-        Self {
-            vocation,
-            organization,
-            supervisor,
-            skills,
-            personality,
-            contact,
-        }
-    }
-}
-
-struct PopulationPerson<'a> {
-    home: NeighborhoodId,
-    vocation: IndependentVocation,
-    organization: Option<OrganizationId>,
-    supervisor: Option<CharacterId>,
-    capabilities: &'a [(C, u8)],
-    trait_kind: TraitKind,
-}
-
-fn add_population_person(
-    state: &mut AppState,
-    rng: &mut CityRng,
-    profile: PopulationPerson<'_>,
-) -> GenerationResult<CharacterId> {
-    let PopulationPerson {
-        home,
-        vocation,
-        organization,
-        supervisor,
-        capabilities,
-        trait_kind,
-    } = profile;
-    let name = person_name(rng);
-    let person = insert_character(
-        state,
-        CharacterDraft {
-            name,
-            organization,
-            supervisor,
-            autonomy: if organization.is_some() {
-                AutonomyLevel::Guided
-            } else {
-                AutonomyLevel::Broad
-            },
-            capabilities: capabilities
-                .iter()
-                .map(|&(kind, value)| (kind, rating(value)))
-                .collect(),
-            traits: BTreeSet::from([trait_kind]),
-            drives: BTreeMap::from([
-                (DriveKind::Money, rng.rating(25, 96)),
-                (DriveKind::Safety, rng.rating(22, 95)),
-                (DriveKind::Status, rng.rating(20, 94)),
-                (DriveKind::Independence, rng.rating(20, 98)),
-            ]),
-        },
-    )?;
-    crate::world::character_life::validate_set_civic_occupation(state, person, home, vocation)?
-        .commit(state)?;
-    Ok(person)
-}
-
-struct PopulationCity<'a> {
-    districts: &'a [NeighborhoodId],
-    police: &'a [OrganizationId],
-    detectives: &'a [CharacterId],
-    council: OrganizationId,
-    councilor: CharacterId,
-    legal_services: OrganizationId,
-    lawyer: CharacterId,
-    prosecutor: OrganizationId,
-    labor: OrganizationId,
-    union_delegate: CharacterId,
-    commerce: OrganizationId,
-    merchant: CharacterId,
-    boss: CharacterId,
-    lieutenant: CharacterId,
-    scout: CharacterId,
-    rivals: &'a [OrganizationId],
-    rival_leaders: &'a [CharacterId],
-    reserved_names: &'a BTreeSet<String>,
-}
-
-fn populate_city(
-    state: &mut AppState,
-    seed: u64,
-    context: PopulationCity<'_>,
-) -> GenerationResult<()> {
-    let PopulationCity {
-        districts,
-        police,
-        detectives,
-        council,
-        councilor,
-        legal_services,
-        lawyer,
-        prosecutor,
-        labor,
-        union_delegate,
-        commerce,
-        merchant,
-        boss,
-        lieutenant,
-        scout,
-        rivals,
-        rival_leaders,
-        reserved_names,
-    } = context;
-    let mut rng = CityRng::new(seed ^ 0x9CE5_27AD_1347_8F10);
-    rng.used_names = reserved_names.clone();
-    for (&rival, &leader) in rivals.iter().zip(rival_leaders) {
-        for index in 0..2 {
-            let member = add_population_person(
-                state,
-                &mut rng,
-                PopulationPerson {
-                    home: districts[(index + 1) % districts.len()],
-                    vocation: IndependentVocation::Resident,
-                    organization: Some(rival),
-                    supervisor: Some(leader),
-                    capabilities: if index == 0 {
-                        &[(C::Violence, 65), (C::Intimidation, 66)]
-                    } else {
-                        &[(C::Burglary, 67), (C::Stealth, 72), (C::Driving, 61)]
-                    },
-                    trait_kind: TraitKind::LoyalToFamily,
-                },
-            )?;
-            validate_set_relationship(state, member, leader, relationship(69, 74, 57))?
-                .commit(state)?;
-        }
-    }
-    for (ward_index, &ward) in districts.iter().enumerate() {
-        let precinct = ward_index % police.len();
-        let shops: Vec<_> = state
-            .world()
-            .businesses_in_neighborhood(ward)
-            .map(|business| (business.id(), business.owner()))
-            .collect();
-        for slot in 0..42 {
-            let workplace = shops[(slot * 5 + ward_index) % shops.len()];
-            let PopulationRole {
-                vocation,
-                organization,
-                supervisor,
-                skills,
-                personality,
-                contact,
-            } = match slot {
-                0..=11 => PopulationRole::new(
-                    IndependentVocation::BusinessEmployee(workplace.0),
-                    None,
-                    None,
-                    &[(C::Management, 47), (C::SocialAccess, 56)],
-                    if slot % 3 == 0 {
-                        TraitKind::Ambitious
-                    } else {
-                        TraitKind::Cautious
-                    },
-                    Some(match workplace.1 {
-                        BusinessOwner::Character(person) => person,
-                        BusinessOwner::Independent | BusinessOwner::Organization(_) => merchant,
-                    }),
-                ),
-                12..=20 => {
-                    let n = slot - 12;
-                    let skills: &[(C, u8)] = match n % 5 {
-                        0 => &[(C::Burglary, 74), (C::Stealth, 81)],
-                        1 => &[(C::Violence, 75), (C::Intimidation, 68)],
-                        2 => &[(C::Driving, 84), (C::Surveillance, 63)],
-                        3 => &[(C::Surveillance, 77), (C::Stealth, 74)],
-                        _ => &[(C::Negotiation, 69), (C::Intimidation, 70)],
-                    };
-                    let contact = match n {
-                        0 => boss,
-                        1 => lieutenant,
-                        2 => scout,
-                        3 | 4 => rival_leaders[(ward_index + n) % rival_leaders.len()],
-                        _ => merchant,
-                    };
-                    PopulationRole::new(
-                        IndependentVocation::FreelanceCriminal,
-                        None,
-                        None,
-                        skills,
-                        if n % 2 == 0 {
-                            TraitKind::Greedy
-                        } else {
-                            TraitKind::Secretive
-                        },
-                        Some(contact),
-                    )
-                }
-                21..=28 => PopulationRole::new(
-                    IndependentVocation::Resident,
-                    None,
-                    None,
-                    &[(C::SocialAccess, 49)],
-                    TraitKind::LoyalToFamily,
-                    Some(if slot % 2 == 0 {
-                        union_delegate
-                    } else {
-                        merchant
-                    }),
-                ),
-                29..=32 => PopulationRole::new(
-                    IndependentVocation::Resident,
-                    Some(police[precinct]),
-                    Some(detectives[precinct]),
-                    &[
-                        (C::Investigation, 68),
-                        (C::Surveillance, 67),
-                        (C::Violence, 48),
-                    ],
-                    TraitKind::Cautious,
-                    Some(detectives[precinct]),
-                ),
-                33..=34 => PopulationRole::new(
-                    IndependentVocation::Resident,
-                    Some(council),
-                    Some(councilor),
-                    &[(C::Negotiation, 74), (C::SocialAccess, 76)],
-                    TraitKind::Ambitious,
-                    Some(councilor),
-                ),
-                35..=36 => PopulationRole::new(
-                    IndependentVocation::Resident,
-                    Some(legal_services),
-                    Some(lawyer),
-                    &[(C::LegalKnowledge, 78), (C::Negotiation, 66)],
-                    TraitKind::Proud,
-                    Some(lawyer),
-                ),
-                37 => PopulationRole::new(
-                    IndependentVocation::Resident,
-                    Some(prosecutor),
-                    None,
-                    &[(C::LegalKnowledge, 79), (C::Investigation, 68)],
-                    TraitKind::Cautious,
-                    None,
-                ),
-                38 => PopulationRole::new(
-                    IndependentVocation::Resident,
-                    Some(labor),
-                    Some(union_delegate),
-                    &[(C::Negotiation, 74), (C::SocialAccess, 72)],
-                    TraitKind::LoyalToFamily,
-                    Some(union_delegate),
-                ),
-                39 => PopulationRole::new(
-                    IndependentVocation::Resident,
-                    Some(commerce),
-                    Some(merchant),
-                    &[(C::Management, 66), (C::Negotiation, 72)],
-                    TraitKind::Charismatic,
-                    Some(merchant),
-                ),
-                40 => PopulationRole::new(
-                    IndependentVocation::Journalist,
-                    None,
-                    None,
-                    &[(C::Surveillance, 79), (C::SocialAccess, 68)],
-                    TraitKind::Secretive,
-                    Some(merchant),
-                ),
-                41 => PopulationRole::new(
-                    IndependentVocation::IndependentLawyer,
-                    None,
-                    None,
-                    &[(C::LegalKnowledge, 82), (C::Negotiation, 72)],
-                    TraitKind::Proud,
-                    Some(lawyer),
-                ),
-                _ => unreachable!("finite local population role table"),
-            };
-            let person = add_population_person(
-                state,
-                &mut rng,
-                PopulationPerson {
-                    home: ward,
-                    vocation,
-                    organization,
-                    supervisor,
-                    capabilities: skills,
-                    trait_kind: personality,
-                },
-            )?;
-            if let Some(contact) = contact {
-                validate_set_relationship(state, person, contact, relationship(55, 64, 32))?
-                    .commit(state)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 fn add_account(
     state: &mut AppState,
     owner: FinancialOwner,
@@ -666,119 +327,6 @@ fn treasury(
     )?
     .commit(state)?;
     Ok((cash, settlement))
-}
-
-fn add_business(
-    registry: &Registry,
-    state: &mut AppState,
-    name: String,
-    kind: K,
-    functions: &[F],
-    district: NeighborhoodId,
-    owner: BusinessOwner,
-) -> GenerationResult<BusinessId> {
-    let business = insert_business(
-        registry,
-        state,
-        BusinessDraft {
-            name,
-            kind,
-            functions: functions.iter().copied().collect(),
-            neighborhood: district,
-            owner,
-        },
-    )?;
-    // Every real venue gets an independent operating ledger and a settlement
-    // clock. An independent shop is not just scenery until it is acquired.
-    let operating = add_account(
-        state,
-        FinancialOwner::Business(business),
-        AccountKind::LegitimateOperating,
-    )?;
-    let settlement = add_account(
-        state,
-        FinancialOwner::Business(business),
-        AccountKind::Settlement,
-    )?;
-    validate_establish_business_economy(
-        registry,
-        state,
-        BusinessEconomyDraft {
-            business,
-            operating_account: operating,
-            settlement_account: settlement,
-        },
-    )?
-    .commit(state)?;
-    Ok(business)
-}
-
-fn business_template(kind: K) -> (&'static str, &'static [F]) {
-    use F::*;
-    match kind {
-        K::Retail => ("Stores", &[CustomerAccess, ProfessionalRecords]),
-        K::Hospitality => (
-            "Social Club",
-            &[CashIntensive, MeetingSpace, CustomerAccess],
-        ),
-        K::Automotive => (
-            "Auto Works",
-            &[VehicleWorkshop, CustomerAccess, ResaleMarket],
-        ),
-        K::Transportation => ("Freight", &[VehicleFleet, DistributionInfrastructure]),
-        K::Warehouse => ("Storage", &[Warehousing, DistributionInfrastructure]),
-        K::ProfessionalServices => ("Accounting", &[ProfessionalRecords, CustomerAccess]),
-        K::Brewery => ("Brewery", &[AlcoholProduction, Warehousing]),
-        K::Nightclub => (
-            "Nightclub",
-            &[CashIntensive, Nightlife, MeetingSpace, CustomerAccess],
-        ),
-        K::Construction => ("Builders", &[VehicleFleet, Warehousing, UnionAccess]),
-        K::Wholesale => (
-            "Wholesale",
-            &[Warehousing, DistributionInfrastructure, CustomerAccess],
-        ),
-        K::Pawnshop => (
-            "Exchange",
-            &[CashIntensive, ResaleMarket, CustomerAccess, Warehousing],
-        ),
-        K::CoinMachineDistribution => (
-            "Coin Machines",
-            &[
-                DistributionInfrastructure,
-                CashIntensive,
-                VehicleFleet,
-                CustomerAccess,
-            ],
-        ),
-        K::Lodging => (
-            "Hotel",
-            &[Lodging, CustomerAccess, MeetingSpace, CashIntensive],
-        ),
-        K::AthleticClub => ("Gymnasium", &[SportingVenue, MeetingSpace, CustomerAccess]),
-        K::Laundry => ("Laundry", &[CashIntensive, CustomerAccess]),
-        K::Printing => ("Printing", &[PrintingPress, ProfessionalRecords]),
-        K::FinancialServices => ("Savings", &[FinancialServices, ProfessionalRecords]),
-        K::GarmentFactory => (
-            "Textiles",
-            &[Warehousing, DistributionInfrastructure, UnionAccess],
-        ),
-        K::Stevedoring => (
-            "Dock Services",
-            &[
-                DockAccess,
-                Warehousing,
-                UnionAccess,
-                DistributionInfrastructure,
-            ],
-        ),
-        K::NewsService => ("Racing Wire", &[RacingWire, ProfessionalRecords]),
-        K::Pharmacy => ("Pharmacy", &[CustomerAccess, ProfessionalRecords]),
-        K::FuneralParlor => ("Funeral Home", &[MeetingSpace, CustomerAccess]),
-        K::SoupKitchen => ("Kitchen", &[CustomerAccess, CashIntensive]),
-        K::TaxiGarage => ("Taxi Garage", &[VehicleFleet, VehicleWorkshop]),
-        K::MovieTheater => ("Picture House", &[CustomerAccess, CashIntensive]),
-    }
 }
 
 /// Construct a new, playable city from a seed and bounded structural budget.
@@ -1236,151 +784,24 @@ pub fn generate_city(
         }
     }
 
-    // Place authored *roles*, not authored properties: every city has playable
-    // opening infrastructure, but its names, district conditions and surrounding
-    // industries are generated. Remaining businesses mix all 25 registry kinds.
-    let mut primary_target = None;
-    let mut secondary_target = None;
-    let mut starter_front = None;
-    let mut rival_fronts = Vec::new();
-    // Personal biographies must not alter the seeded property mix or the
-    // documented public listing opportunities by consuming geography RNG.
-    let mut proprietor_rng = CityRng::new(config.seed ^ 0xB89D_0A31_2026_F17E);
-    proprietor_rng.used_names = rng.used_names.clone();
-    for (district_index, district) in districts.iter().copied().enumerate() {
-        let district_name = state
-            .world()
-            .get_neighborhood(district)
-            .expect("newly inserted district must exist")
-            .name()
-            .to_owned();
-        for slot in 0..usize::from(config.businesses_per_district) {
-            let (name, kind, mut owner) = if district_index == 0 {
-                match slot {
-                    0 => (
-                        format!("{} Jewelers", SHOP_PREFIXES[rng.range(SHOP_PREFIXES.len())]),
-                        K::Retail,
-                        BusinessOwner::Character(civilians[0]),
-                    ),
-                    1 => (
-                        format!(
-                            "{} Receiving House",
-                            SHOP_PREFIXES[rng.range(SHOP_PREFIXES.len())]
-                        ),
-                        K::Retail,
-                        BusinessOwner::Independent,
-                    ),
-                    2 => (
-                        format!(
-                            "{} Social Club",
-                            SHOP_PREFIXES[rng.range(SHOP_PREFIXES.len())]
-                        ),
-                        K::Hospitality,
-                        BusinessOwner::Organization(player),
-                    ),
-                    3 => (
-                        format!(
-                            "{} Pawn Exchange",
-                            SHOP_PREFIXES[rng.range(SHOP_PREFIXES.len())]
-                        ),
-                        K::Pawnshop,
-                        BusinessOwner::Organization(player),
-                    ),
-                    _ => random_business(
-                        &mut rng,
-                        district_index,
-                        slot,
-                        &district_name,
-                        &rivals,
-                        &civilians,
-                    ),
-                }
-            } else if district_index <= rivals.len() && slot == 0 {
-                (
-                    format!(
-                        "{} Social Club",
-                        SHOP_PREFIXES[rng.range(SHOP_PREFIXES.len())]
-                    ),
-                    K::Hospitality,
-                    BusinessOwner::Organization(rivals[district_index - 1]),
-                )
-            } else {
-                random_business(
-                    &mut rng,
-                    district_index,
-                    slot,
-                    &district_name,
-                    &rivals,
-                    &civilians,
-                )
-            };
-            // A private operating shop belongs to a particular person. Only
-            // separately advertised public listings retain Independent title
-            // until purchase; they are not anonymous simulated proprietors.
-            // Introduce these people at their actual shop's creation, through
-            // the canonical world owner and with their own accountable finances.
-            if owner == BusinessOwner::Independent
-                && !(district_index == 0 && slot == 1)
-                && kind != K::SoupKitchen
-                && (slot + district_index * 3) % 2 == 0
-            {
-                let proprietor = add_character(
-                    &mut state,
-                    person_name(&mut proprietor_rng),
-                    None,
-                    None,
-                    AutonomyLevel::Guided,
-                    &[
-                        (C::Management, 37 + proprietor_rng.range(54) as u8),
-                        (C::Negotiation, 36 + proprietor_rng.range(53) as u8),
-                        (C::SocialAccess, 32 + proprietor_rng.range(58) as u8),
-                    ],
-                    &[if proprietor_rng.range(2) == 0 {
-                        TraitKind::Cautious
-                    } else {
-                        TraitKind::Ambitious
-                    }],
-                )?;
-                validate_set_relationship(
-                    &state,
-                    proprietor,
-                    merchant,
-                    relationship(47 + proprietor_rng.range(25) as u8, 55, 27),
-                )?
-                .commit(&mut state)?;
-                owner = BusinessOwner::Character(proprietor);
-            }
-            let (_, functions) = business_template(kind);
-            let id = add_business(
-                registry,
-                &mut state,
-                format!("{name} ({district_name}, {})", slot + 1),
-                kind,
-                functions,
-                district,
-                owner,
-            )?;
-            if district_index == 0 {
-                match slot {
-                    0 => primary_target = Some(id),
-                    1 => secondary_target = Some(id),
-                    2 => starter_front = Some(id),
-                    _ => {}
-                }
-            } else if district_index <= rivals.len() && slot == 0 {
-                rival_fronts.push(id);
-            }
-        }
-    }
-    // Reserve the names of all newly created owners before drawing the
-    // additional civic employees, preventing duplicate identities without
-    // altering the city's preceding economic geography.
-    rng.used_names.extend(proprietor_rng.used_names);
-    let primary_target =
-        primary_target.expect("validated business density includes a primary target");
-    let secondary_target =
-        secondary_target.expect("validated business density includes a second target");
-    let starter_front = starter_front.expect("validated density includes an initial cash front");
+    let GeneratedProperties {
+        primary_target,
+        secondary_target,
+        starter_front,
+        rival_fronts,
+    } = generate_properties(
+        registry,
+        &mut state,
+        &mut rng,
+        PropertyCity {
+            config,
+            districts: &districts,
+            player,
+            rivals: &rivals,
+            civilians: &civilians,
+            merchant,
+        },
+    )?;
 
     // Institutional headcount follows the city, not a fixed single council
     // representative and one abstract precinct roster. Each ward has a named
@@ -1404,6 +825,13 @@ pub fn generate_city(
         )?;
         validate_set_relationship(&state, ward_delegate, councilor, relationship(67, 71, 33))?
             .commit(&mut state)?;
+        crate::world::character_life::validate_set_civic_occupation(
+            &state,
+            ward_delegate,
+            district,
+            IndependentVocation::Resident,
+        )?
+        .commit(&mut state)?;
         let precinct_index = index % police.len();
         let officer = add_character(
             &mut state,
@@ -1425,7 +853,13 @@ pub fn generate_city(
             relationship(70, 74, 44),
         )?
         .commit(&mut state)?;
-        let _ = district;
+        crate::world::character_life::validate_set_civic_occupation(
+            &state,
+            officer,
+            district,
+            IndependentVocation::Resident,
+        )?
+        .commit(&mut state)?;
     }
 
     let (cash, settlement) = treasury(&mut state, player, 150_000)?;
@@ -1640,59 +1074,6 @@ pub fn generate_city(
         rivals,
         seed: config.seed,
     })
-}
-
-fn random_business(
-    rng: &mut CityRng,
-    district_index: usize,
-    slot: usize,
-    ward_name: &str,
-    rivals: &[OrganizationId],
-    civilians: &[CharacterId],
-) -> (String, K, BusinessOwner) {
-    // Six industrial identities generate recognizable local clusters without
-    // excluding any of the 25 modeled industry kinds elsewhere in the city.
-    let thematic = match district_index % 6 {
-        0 => [
-            K::Retail,
-            K::FinancialServices,
-            K::Pharmacy,
-            K::MovieTheater,
-        ],
-        1 => [
-            K::Construction,
-            K::Automotive,
-            K::GarmentFactory,
-            K::Printing,
-        ],
-        2 => [K::Stevedoring, K::Warehouse, K::Transportation, K::Brewery],
-        3 => [K::Lodging, K::SoupKitchen, K::Laundry, K::Retail],
-        4 => [
-            K::Nightclub,
-            K::Hospitality,
-            K::MovieTheater,
-            K::AthleticClub,
-        ],
-        _ => [K::TaxiGarage, K::Pawnshop, K::Wholesale, K::NewsService],
-    };
-    let kind = if rng.range(100) < 62 {
-        thematic[(slot + rng.range(4)) % 4]
-    } else {
-        ALL_BUSINESS_KINDS[rng.range(ALL_BUSINESS_KINDS.len())]
-    };
-    let owner = match rng.range(100) {
-        0..=17 => BusinessOwner::Organization(rivals[(district_index + slot) % rivals.len()]),
-        18..=30 => BusinessOwner::Character(civilians[district_index]),
-        _ => BusinessOwner::Independent,
-    };
-    let (suffix, _) = business_template(kind);
-    let name = format!(
-        "{} {} of {}",
-        SHOP_PREFIXES[rng.range(SHOP_PREFIXES.len())],
-        suffix,
-        ward_name
-    );
-    (name, kind, owner)
 }
 
 #[cfg(test)]

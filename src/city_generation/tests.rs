@@ -1,9 +1,93 @@
 use super::*;
 use crate::core::persistence::{build_save, restore_save};
 use crate::core::simulation::run_tick;
+use crate::world::{ALL_BUSINESS_KINDS, BusinessFunction as F, BusinessKind as K};
 
 fn bytes(registry: &Registry, state: &AppState) -> Vec<u8> {
     bincode::serialize(&build_save(registry, state).unwrap()).unwrap()
+}
+
+#[test]
+fn generated_workplaces_cover_supported_custom_business_densities() {
+    let registry = crate::build_registry();
+    for density in 8..=40 {
+        let config = CityGenerationConfig {
+            seed: 12,
+            districts: 4,
+            businesses_per_district: density,
+            rivals: 2,
+        };
+        let city = generate_city(&registry, config).unwrap();
+        let world = city.state.world();
+        for ward in world.neighborhoods() {
+            let employees: Vec<_> = world
+                .characters()
+                .filter_map(|person| {
+                    if person.life().home() != Some(ward.id()) {
+                        return None;
+                    }
+                    match person.life().vocation() {
+                        IndependentVocation::BusinessEmployee(workplace) => Some(workplace),
+                        _ => None,
+                    }
+                })
+                .collect();
+            assert_eq!(employees.len(), 12);
+            assert_eq!(
+                employees.iter().copied().collect::<BTreeSet<_>>().len(),
+                usize::from(density.min(12)),
+                "{density} shops in ward {}",
+                ward.id()
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_ward_officials_have_actual_local_assignments() {
+    let registry = crate::build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(12)).unwrap();
+    let world = city.state.world();
+    for ward in world.neighborhoods() {
+        let local = |profession| {
+            world
+                .characters()
+                .filter(|person| {
+                    person.life().home() == Some(ward.id())
+                        && world.civic_profession(person.id()) == Some(profession)
+                })
+                .count()
+        };
+        assert_eq!(local(crate::world::CivicProfession::PoliceOfficer), 5);
+        assert_eq!(local(crate::world::CivicProfession::Politician), 3);
+    }
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut restored] {
+        for _ in 0..crate::core::time::DAY_MINUTES {
+            run_tick(&registry, state).unwrap();
+        }
+        for ward in state.world().neighborhoods() {
+            let local_patrols = state
+                .world()
+                .characters()
+                .filter(|person| {
+                    person.life().home() == Some(ward.id())
+                        && person.life().last_activity()
+                            == Some((
+                                state.now(),
+                                crate::world::CivicActivity::PolicePatrol(ward.id()),
+                            ))
+                })
+                .count();
+            assert!(
+                local_patrols > 0,
+                "{} has no actual local patrol work",
+                ward.id()
+            );
+        }
+    }
+    assert_eq!(bytes(&registry, &city.state), bytes(&registry, &restored));
 }
 
 #[test]

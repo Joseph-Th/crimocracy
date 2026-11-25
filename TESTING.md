@@ -415,7 +415,7 @@ participate in the canonical tick. Construction does not consume the four
 independent persisted simulation RNG streams. Generated starting identities
 are temporary return values, not a second save schema; the original campaign
 envelope saves only authoritative state. Validated custom city budgets are
-bounded to 4-24 districts and 8-40 businesses per district.
+bounded to 4-24 districts and 8-40 businesses per district. The generator's `businesses` and `population` children own commercial layout and local population construction respectively. `generated_workplaces_cover_supported_custom_business_densities` checks all 33 allowed business densities; `generated_ward_officials_have_actual_local_assignments` checks ward staffing and actual daily patrols across 1,440 canonical minutes on both original and restored states. Enterprise host and support-network regression tests are grouped in `src/enterprises/enterprise_execution/tests/business_networks.rs`.
 
 `src/city_generation/tests.rs` checks exact same-seed serialized state
 and visual layout, changed-seed diversity, invariant-safe creation for
