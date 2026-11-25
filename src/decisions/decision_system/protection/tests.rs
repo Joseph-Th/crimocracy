@@ -8,7 +8,6 @@ use crate::core::time::SimDuration;
 use crate::economy::BusinessEconomyDraft;
 use crate::economy::business_economy_system::validate_establish_business_economy;
 use crate::finance::finance_system::insert_account;
-use crate::world::territory_conflict::local_defensive_force;
 use crate::world::world_system::{insert_business, insert_character};
 use crate::world::{
     AutonomyLevel, BusinessDraft, BusinessFunction, BusinessKind, CapabilityKind, CharacterDraft,
@@ -174,14 +173,23 @@ fn named_muscle_is_distributed_not_multiplied_across_legitimate_wards() {
     let home_associates = active_district_force(&city.state, city.player, city.home);
     let exposed_associates = active_district_force(&city.state, city.player, exposed);
     assert_eq!(exposed_associates, 0);
-    let total_local = local_defensive_force(&city.state, city.player, city.home)
-        + local_defensive_force(&city.state, city.player, exposed);
+    let defenses = local_defensive_forces(&city.state, city.player);
+    assert_eq!(defenses.len(), 2);
+    let home = defenses[&city.home];
+    let exposed = defenses[&exposed];
+    assert_eq!(home.associates, home_associates);
+    assert_eq!(home.active_rackets, 1);
+    assert_eq!(home.operating_shops, 2);
+    assert_eq!(exposed.associates, 0);
+    assert_eq!(exposed.active_rackets, 0);
+    assert_eq!(exposed.operating_shops, 3);
     assert_eq!(
-        total_local,
+        home.total() + exposed.total(),
         named + home_associates + exposed_associates,
         "one violent member cannot defend multiple districts at full strength"
     );
-    assert!(local_defensive_force(&city.state, city.player, exposed) < named);
+    assert_eq!(home.named_enforcers + exposed.named_enforcers, named);
+    assert!(exposed.total() < named);
 }
 
 #[test]
@@ -212,8 +220,8 @@ fn executing_operation_temporarily_removes_enforcer_from_local_defense() {
     )
     .unwrap();
     let force = |state: &AppState| {
-        local_defensive_force(state, city.player, city.home)
-            + local_defensive_force(state, city.player, exposed)
+        let defenses = local_defensive_forces(state, city.player);
+        defenses[&city.home].total() + defenses[&exposed].total()
     };
     let before = force(&city.state);
     let op = validate_authorize_operation(
@@ -894,7 +902,9 @@ fn refusing_protection_opens_rival_retaliation_and_armed_defense_deters_demand()
         )
         .unwrap();
     }
-    assert!(local_defensive_force(&protected.state, protected.player, district) >= attackers);
+    assert!(
+        local_defensive_forces(&protected.state, protected.player)[&district].total() >= attackers
+    );
     protected.state.advance_clock(SimDuration::from_minutes(
         u32::try_from(DAY_MINUTES - 1).unwrap(),
     ));

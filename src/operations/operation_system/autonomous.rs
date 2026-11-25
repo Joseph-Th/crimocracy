@@ -30,7 +30,8 @@ use crate::registry::Registry;
 use crate::reputation::{AudienceKind, reputation_system::resolve_score};
 use crate::world::organization_pressure::public_prominence_tier;
 use crate::world::territory_conflict::{
-    DEFENSIVE_ADVANTAGE, available_named_enforcers, district_of_racket, local_defensive_forces,
+    DEFENSIVE_ADVANTAGE, DistrictDefense, available_named_enforcers, district_of_racket,
+    local_defensive_forces,
 };
 use crate::world::{AutonomyLevel, BusinessKind, BusinessOwner, OrganizationKind};
 use std::cmp::Reverse;
@@ -149,7 +150,7 @@ fn predatory_stake(
     target: BusinessId,
     force_by_district: &BTreeMap<NeighborhoodId, u32>,
     strongest_force: u32,
-    defenses: &mut BTreeMap<OrganizationId, BTreeMap<NeighborhoodId, u32>>,
+    defenses: &mut BTreeMap<OrganizationId, BTreeMap<NeighborhoodId, DistrictDefense>>,
 ) -> i128 {
     let Some(shop) = state.world().get_business(target) else {
         return 0;
@@ -176,7 +177,8 @@ fn predatory_stake(
         .or_insert_with(|| local_defensive_forces(state, defender))
         .get(&district)
         .copied()
-        .unwrap_or(0);
+        .unwrap_or_default()
+        .total();
     if projected_force <= visible_defense.saturating_add(DEFENSIVE_ADVANTAGE) {
         return 0;
     }

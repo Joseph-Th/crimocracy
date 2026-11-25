@@ -183,7 +183,7 @@ pub(crate) fn apply_due_protection_demands(
                 continue;
             }
         }
-        let defense = defenses.get(&district).copied().unwrap_or(0);
+        let defense = defenses.get(&district).copied().unwrap_or_default().total();
         let amount = Money::from_cents(offer_cents(registry, state, &holdings));
         let Some(business) = holdings.first().copied() else {
             continue;

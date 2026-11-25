@@ -433,7 +433,7 @@ impl ProjectedTerritoryInfluence {
                 }
                 exposed_commerce_defense
                     .entry(ward)
-                    .or_insert_with(|| defenses.get(&ward).copied().unwrap_or(0));
+                    .or_insert_with(|| defenses.get(&ward).copied().unwrap_or_default().total());
             }
         }
         Self {

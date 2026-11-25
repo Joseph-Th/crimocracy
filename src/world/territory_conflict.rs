@@ -95,6 +95,21 @@ pub(crate) fn available_named_enforcers(state: &AppState, organization: Organiza
         .count()
 }
 
+/// A live district footprint and its allocated defensive force, not a stored balance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DistrictDefense {
+    pub active_rackets: usize,
+    pub operating_shops: usize,
+    pub associates: u32,
+    pub named_enforcers: u32,
+}
+
+impl DistrictDefense {
+    pub fn total(self) -> u32 {
+        self.associates.saturating_add(self.named_enforcers)
+    }
+}
+
 /// Street muscle is geographically finite. Associates defend only the ward
 /// where their racket operates. Capable named members can cover other wards,
 /// but must divide their attention across the organization's active commercial
@@ -106,16 +121,19 @@ pub(crate) fn available_named_enforcers(state: &AppState, organization: Organiza
 /// The allocation is deterministic and recomputed from live world state:
 /// sorted district IDs receive the remainder when named muscle cannot be
 /// divided evenly. It is not an extra mutable staffing or territory currency.
-pub(crate) fn local_defensive_forces(
+pub fn local_defensive_forces(
     state: &AppState,
     organization: OrganizationId,
-) -> BTreeMap<NeighborhoodId, u32> {
+) -> BTreeMap<NeighborhoodId, DistrictDefense> {
     let named = available_named_enforcers(state, organization);
-    let mut districts = BTreeMap::<NeighborhoodId, u32>::new();
+    let mut districts = BTreeMap::<NeighborhoodId, DistrictDefense>::new();
     for racket in state.enterprises().active_for_organization(organization) {
         if let Some(ward) = district_of_racket(state, racket.location()) {
             let force = districts.entry(ward).or_default();
-            *force = force.saturating_add(u32::from(racket.associates()));
+            force.active_rackets += 1;
+            force.associates = force
+                .associates
+                .saturating_add(u32::from(racket.associates()));
         }
     }
     for shop in state.world().businesses_owned_by_organization(organization) {
@@ -126,7 +144,10 @@ pub(crate) fn local_defensive_forces(
                 economy.status() == crate::economy::BusinessOperatingStatus::Active
             })
         {
-            districts.entry(shop.neighborhood()).or_default();
+            districts
+                .entry(shop.neighborhood())
+                .or_default()
+                .operating_shops += 1;
         }
     }
     if !districts.is_empty() {
@@ -134,22 +155,10 @@ pub(crate) fn local_defensive_forces(
         let remainder = named % districts.len();
         for (rank, force) in districts.values_mut().enumerate() {
             let assigned = per_district + usize::from(rank < remainder);
-            *force = force.saturating_add(u32::try_from(assigned).unwrap_or(u32::MAX));
+            force.named_enforcers = u32::try_from(assigned).unwrap_or(u32::MAX);
         }
     }
     districts
-}
-
-/// Single-ward read of the same finite-force projection used by rival planners.
-pub fn local_defensive_force(
-    state: &AppState,
-    organization: OrganizationId,
-    district: NeighborhoodId,
-) -> u32 {
-    local_defensive_forces(state, organization)
-        .get(&district)
-        .copied()
-        .unwrap_or(0)
 }
 
 pub fn suppression_ends_at(state: &AppState, racket: EnterpriseId) -> Option<SimTime> {

@@ -216,45 +216,16 @@ impl Session<'_> {
                 }
             }
             "turf" => {
-                use crimocracy::world::territory_influence::{
-                    active_standstill, resolve_neighborhood_influence,
-                };
+                use crimocracy::world::territory_conflict::local_defensive_forces;
+                use crimocracy::world::territory_influence::active_standstill;
+                let defenses = local_defensive_forces(state, self.player);
                 for district in state.world().neighborhoods() {
-                    let summary = resolve_neighborhood_influence(state, district.id())
-                        .map_err(|error| error.to_string())?;
-                    let own = summary
-                        .standings
-                        .iter()
-                        .find(|entry| entry.organization == self.player)
-                        .map_or(0, |entry| entry.active_enterprises);
-                    let associates = crimocracy::world::territory_conflict::active_district_force(
-                        state,
-                        self.player,
-                        district.id(),
-                    );
-                    let defense = crimocracy::world::territory_conflict::local_defensive_force(
-                        state,
-                        self.player,
-                        district.id(),
-                    );
-                    let operating_shops = state
-                        .world()
-                        .businesses_owned_by_organization(self.player)
-                        .filter(|shop| shop.neighborhood() == district.id())
-                        .filter(|shop| {
-                            state
-                                .economy()
-                                .get_business_economy(shop.id())
-                                .is_some_and(|economy| {
-                                    economy.status()
-                                        == crimocracy::economy::BusinessOperatingStatus::Active
-                                })
-                        })
-                        .count();
+                    let footprint = defenses.get(&district.id()).copied().unwrap_or_default();
+                    let defense = footprint.total();
                     writeln!(out, "district-{} {} | own active rackets: {} | active associates: {} | operating shops: {} | local defense: {} (including {} distributed named enforcers) | rival influence requires reconnaissance",
-                        district.id().raw(), district.name(), own, associates,
-                        operating_shops, defense, defense.saturating_sub(associates)).unwrap();
-                    if operating_shops > 0 && defense == 0 {
+                        district.id().raw(), district.name(), footprint.active_rackets, footprint.associates,
+                        footprint.operating_shops, defense, footprint.named_enforcers).unwrap();
+                    if footprint.operating_shops > 0 && defense == 0 {
                         writeln!(out, "  Unprotected commercial holdings: vulnerable to rival rackets and protection demands.").unwrap();
                     }
                     if let Some(standstill) = active_standstill(state, self.player, district.id()) {

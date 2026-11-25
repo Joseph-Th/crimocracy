@@ -524,20 +524,13 @@ pub fn progress_and_political_districts(
         .collect::<BTreeSet<_>>();
     // Territorial control, proven labor, named defenders and independent command
     // must hold in the SAME districts, not in unrelated sets of locations.
+    let defenses = crate::world::territory_conflict::local_defensive_forces(state, organization);
     let defended_districts = workforce_ready
         .iter()
-        .filter(|&&district| {
-            let force = crate::world::territory_conflict::local_defensive_force(
-                state,
-                organization,
-                district,
-            );
-            let associates = crate::world::territory_conflict::active_district_force(
-                state,
-                organization,
-                district,
-            );
-            force.saturating_sub(associates) >= UNDERBOSS_ENFORCERS_PER_DISTRICT
+        .filter(|district| {
+            defenses
+                .get(district)
+                .is_some_and(|defense| defense.named_enforcers >= UNDERBOSS_ENFORCERS_PER_DISTRICT)
         })
         .copied()
         .collect::<BTreeSet<_>>();
