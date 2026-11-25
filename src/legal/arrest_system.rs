@@ -7,7 +7,7 @@ mod enterprise_suspensions;
 
 use enterprise_suspensions::CustodyEnterpriseSuspensions;
 
-pub use autonomous::apply_autonomous_evidence_arrests;
+pub(crate) use autonomous::apply_autonomous_evidence_arrests;
 pub use custody::{ValidatedRelease, validate_release_arrest};
 pub(crate) use custody::{apply_due_custody_releases, custody_release_at};
 

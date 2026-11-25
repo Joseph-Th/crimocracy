@@ -346,7 +346,7 @@ fn resolve_autonomous_arrest_candidates(
 /// preempts conflicting operation bookings and scheduled detective work through their explicit
 /// abort or cancellation lifecycles, so internal commitments cannot make an arrestable subject
 /// immune.
-pub fn apply_autonomous_evidence_arrests(
+pub(crate) fn apply_autonomous_evidence_arrests(
     registry: &Registry,
     state: &mut AppState,
 ) -> Result<Vec<ArrestId>, ArrestError> {

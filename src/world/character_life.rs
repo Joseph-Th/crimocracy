@@ -227,15 +227,17 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
             if economy.status() != BusinessOperatingStatus::Active {
                 return None;
             }
-            // Only settlements in the current ownership and operating period
-            // can affect the proprietor. Reopening starts a new period even
-            // when the title has not changed.
+            // Only fresh settlements in the current ownership and operating
+            // period can affect the proprietor. A missed settlement does not
+            // replay yesterday's result, and reopening starts a new period
+            // even when the title has not changed.
             let cycle = state
                 .economy()
                 .cycles_for(business.id())
                 .next_back()
                 .filter(|cycle| {
                     cycle.business_version() == business.version()
+                        && state.now().as_minutes() - cycle.occurred_at().as_minutes() < DAY_MINUTES
                         && economy
                             .loss_streak_anchor()
                             .is_none_or(|anchor| cycle.occurred_at() > anchor)
@@ -419,9 +421,9 @@ fn finish_day(
 /// Daily civilian choices happen after business settlement and legal assignments.
 /// They use only persisted identity, capability, property and case records and do
 /// not consume RNG or mutate authority/character assignment versions.
-pub fn apply_due_character_lives(state: &mut AppState) -> usize {
+pub(crate) fn apply_due_character_lives(state: &mut AppState) {
     if !is_day_boundary(state.now()) {
-        return 0;
+        return;
     }
     let day = state.now().as_minutes() / DAY_MINUTES;
     let changes: Vec<_> = state
@@ -433,11 +435,9 @@ pub fn apply_due_character_lives(state: &mut AppState) -> usize {
             (person.life() != life).then_some((person.id(), life))
         })
         .collect();
-    let changed = changes.len();
     for (id, life) in changes {
         state.world.update_character_life(id, life);
     }
-    changed
 }
 
 pub(crate) fn valid_character_lives(state: &AppState) -> bool {
@@ -696,6 +696,18 @@ mod business_work_tests {
             let work = choose_work(state, owner, working_day);
             assert_eq!(work.business_profit, if net > Money::ZERO { 1 } else { -1 });
             validate_invariants(state);
+
+            // An operating shop can miss its next settlement (for example,
+            // when a ledger account is temporarily unable to post). The owner
+            // still works, but the old result cannot earn another day's standing
+            // or impose another day's loss penalty.
+            state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+            let work = choose_work(state, owner, working_day);
+            assert_eq!(
+                work.action,
+                Some(CivicActivity::BusinessManagement(business))
+            );
+            assert_eq!(work.business_profit, 0);
         }
     }
 

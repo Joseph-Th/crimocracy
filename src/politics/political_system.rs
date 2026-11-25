@@ -28,7 +28,8 @@ mod election;
 mod expenditure;
 #[cfg(test)]
 pub(super) use daily::affordable_rival_campaign_points;
-pub use daily::{apply_due_political_campaigns, daily_campaign_erosion};
+pub(crate) use daily::apply_due_political_campaigns;
+pub use daily::daily_campaign_erosion;
 pub use expenditure::ValidatedPoliticalOrder;
 use expenditure::{CampaignAction, valid_campaign_expenditure, validate_spend};
 

@@ -263,7 +263,7 @@ fn autonomous_rival_campaigns(registry: &Registry, state: &mut AppState) {
 /// After same-day payroll and commerce, campaigns pay workers, suffer ordinary
 /// attention decay, and face rival political spending. The last step records
 /// continuously defended majority tenure; one losing day resets the clock.
-pub fn apply_due_political_campaigns(registry: &Registry, state: &mut AppState) {
+pub(crate) fn apply_due_political_campaigns(registry: &Registry, state: &mut AppState) {
     if !is_day_boundary(state.now()) {
         return;
     }

@@ -373,7 +373,7 @@ pub fn validate_hire_freelancer(
 
 /// Contract workers leave at their exact expiration minute. If a case, police custody
 /// or a scheduled operation still binds them, expiry remains indexed for retry.
-pub fn apply_due_freelance_expirations(state: &mut AppState) -> Vec<CharacterId> {
+pub(crate) fn apply_due_freelance_expirations(state: &mut AppState) -> Vec<CharacterId> {
     let due = state.world().due_freelance_contracts(state.now());
     let mut ended = Vec::new();
     for freelancer in due {
