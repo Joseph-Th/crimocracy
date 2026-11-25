@@ -88,15 +88,19 @@ fn real_text_campaign_orders_expose_funded_civic_work_and_official_election_sche
     let campaign = session.execute("campaign").unwrap().0;
     assert!(campaign.contains("grassroots 0/1000"), "{campaign}");
     assert!(
-        campaign.contains("Next election: day 181 00:00"),
+        campaign.contains(
+            "Next election: day 181 00:00 | earliest ballot for a new filing: day 181 00:00"
+        ),
         "{campaign}"
     );
+    let election = session.execute("election").unwrap().0;
     assert!(
-        session
-            .execute("election")
-            .unwrap()
-            .0
-            .contains("No mayoral ballot yet. Next election: day 181 00:00.")
+        election.contains("No mayoral ballot yet. Next election: day 181 00:00."),
+        "{election}"
+    );
+    assert!(
+        election.contains("Earliest ballot for a new filing: day 181 00:00."),
+        "{election}"
     );
     assert!(
         session

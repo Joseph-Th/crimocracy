@@ -702,20 +702,70 @@ pub fn progress_and_political_districts(
     Ok((standing, political_rows))
 }
 
-/// Campaign readiness is tested at the municipal ballot, not rewarded as an
-/// immediate victory. The election owner uses this same threshold snapshot.
-pub(crate) fn mayoral_ballot_ready(standing: &VictoryProgress) -> bool {
-    standing.legitimate_transition_ready
-        && standing.established_political_contacts > 0
-        && standing.total_districts > 0
-        && standing.established_business_districts >= standing.required_political_districts
-        && standing.key_personnel >= standing.required_political_personnel
-        && standing.staffed_political_districts >= standing.required_political_districts
-        && standing.mayoral_majority_districts >= standing.required_political_districts
-        && standing.campaign_spent_cents >= MAYORAL_CAMPAIGN_SPEND_REQUIRED
-        && standing.accounted_net.cents() >= MAYORAL_LIQUID_RESERVE_REQUIRED
-        && standing.mayoral_leader_eligible
-        && standing.legitimate_self_sufficient
+/// The same qualification projection determines election eligibility and explains
+/// a rejected citywide coalition. An empty result means all citywide gates pass;
+/// the election still requires the filed nominee and actual winning ward ballots.
+pub(crate) fn mayoral_ballot_shortfalls(standing: &VictoryProgress) -> Vec<String> {
+    let mut shortfalls = Vec::new();
+    if !standing.legitimate_transition_ready {
+        shortfalls.push("legitimate transition incomplete".to_owned());
+    }
+    if standing.established_political_contacts == 0 {
+        shortfalls.push("no established political sponsor".to_owned());
+    }
+    if standing.total_districts == 0 {
+        shortfalls.push("no municipal districts".to_owned());
+    }
+    for (label, actual, required) in [
+        (
+            "productive mature commercial districts",
+            standing.established_business_districts,
+            standing.required_political_districts,
+        ),
+        (
+            "named political personnel",
+            standing.key_personnel,
+            standing.required_political_personnel,
+        ),
+        (
+            "independently staffed districts",
+            standing.staffed_political_districts,
+            standing.required_political_districts,
+        ),
+        (
+            "sustained electoral districts",
+            standing.mayoral_majority_districts,
+            standing.required_political_districts,
+        ),
+    ] {
+        if actual < required {
+            shortfalls.push(format!("{label}: {actual}/{required}"));
+        }
+    }
+    if standing.campaign_spent_cents < standing.required_campaign_spent_cents {
+        shortfalls.push(format!(
+            "lifetime campaign spending: {}/{} cents",
+            standing.campaign_spent_cents, standing.required_campaign_spent_cents
+        ));
+    }
+    if standing.accounted_net.cents() < standing.required_mayoral_reserve_cents {
+        shortfalls.push(format!(
+            "remaining clean reserve: {}/{} cents",
+            standing.accounted_net.cents(),
+            standing.required_mayoral_reserve_cents
+        ));
+    }
+    if !standing.mayoral_leader_eligible {
+        shortfalls.push("no sole available executive".to_owned());
+    }
+    if !standing.legitimate_self_sufficient {
+        shortfalls.push(format!(
+            "mature legitimate income does not cover named payroll: {} versus {} cents/day",
+            standing.legitimate_daily_net.cents(),
+            standing.daily_payroll.cents()
+        ));
+    }
+    shortfalls
 }
 
 fn ensure_eligible(

@@ -1514,6 +1514,89 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
                     .unwrap();
             }
         }
+        if day + 1 == election_day {
+            // Run the same fully organized ballot with a depleted clean treasury.
+            // The final day's specialists still get paid and local support remains
+            // intact, but the citywide reserve requirement is independently unmet.
+            let mut depleted = city.state.clone();
+            let reserve = progress(&registry, &depleted)
+                .unwrap()
+                .accounted_net
+                .cents();
+            let mut remaining = reserve - (MAYORAL_LIQUID_RESERVE_REQUIRED - 1);
+            assert!(remaining > 0);
+            let mut postings = Vec::new();
+            for account in depleted
+                .finance()
+                .accounts_for(FinancialOwner::Organization(city.player))
+            {
+                if account.kind() == AccountKind::AccountedFunds {
+                    let debit = remaining.min(account.available_payment_balance().cents());
+                    if debit > 0 {
+                        postings.push(LedgerPosting {
+                            account: account.id(),
+                            amount: Money::from_cents(-debit),
+                        });
+                        remaining -= debit;
+                    }
+                }
+            }
+            assert_eq!(remaining, 0);
+            let spent = -postings
+                .iter()
+                .map(|posting| posting.amount.cents())
+                .sum::<i64>();
+            let destination = insert_account(
+                &mut depleted,
+                FinancialAccountDraft {
+                    owner: FinancialOwner::Organization(city.player),
+                    kind: AccountKind::Settlement,
+                },
+            )
+            .unwrap();
+            postings.push(LedgerPosting {
+                account: destination,
+                amount: Money::from_cents(spent),
+            });
+            validate_record_transaction(
+                &depleted,
+                LedgerTransactionDraft {
+                    occurred_at: depleted.now(),
+                    memo: "Final pre-election capital expenditure".into(),
+                    postings,
+                    authorization: None,
+                },
+            )
+            .unwrap()
+            .commit(&mut depleted)
+            .unwrap();
+            apply_due_political_campaigns(&registry, &mut depleted);
+            let result = depleted
+                .politics()
+                .organization(city.player)
+                .unwrap()
+                .latest_election()
+                .unwrap();
+            assert!(result.wards_won >= result.wards_needed);
+            assert!(!result.eligible);
+            assert!(!result.elected);
+            let report = depleted
+                .reports()
+                .reports_for_after(city.player, None)
+                .find(|report| report.title().starts_with("Municipal election"))
+                .unwrap();
+            let summary = &report.entries()[0].summary;
+            assert!(
+                summary.contains("remaining clean reserve"),
+                "The report must explain the failed citywide qualification despite enough winning wards: {summary}"
+            );
+            let restored =
+                restore_save(&registry, build_save(&registry, &depleted).unwrap()).unwrap();
+            assert_eq!(
+                bincode::serialize(&restored).unwrap(),
+                bincode::serialize(&depleted).unwrap()
+            );
+        }
         apply_due_political_campaigns(&registry, &mut city.state);
         if day % 7 == 0 {
             for (&district, &manager) in districts.iter().zip(managers.iter()) {

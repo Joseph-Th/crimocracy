@@ -175,6 +175,22 @@ pub fn next_municipal_election_day(now: SimTime) -> Option<u64> {
     SimTime::from_elapsed_days(day).map(|_| day)
 }
 
+/// Earliest scheduled ballot for which a new filing still satisfies the
+/// minimum lead time. Unlike the next calendar election, this can skip a ballot
+/// after its filing cutoff and can be unavailable even before the final ballot.
+pub fn next_mayoral_nomination_day(now: SimTime) -> Option<u64> {
+    let next = next_municipal_election_day(now)?;
+    let deadline = now
+        .as_minutes()
+        .checked_add(MAYORAL_FILING_LEAD_DAYS * DAY_MINUTES)?;
+    let election_day = if SimTime::from_elapsed_days(next)?.as_minutes() >= deadline {
+        next
+    } else {
+        next.checked_add(MUNICIPAL_ELECTION_INTERVAL_DAYS)?
+    };
+    SimTime::from_elapsed_days(election_day).map(|_| election_day)
+}
+
 fn established_contact(state: &AppState, owner: OrganizationId, kind: ContactKind) -> bool {
     let required_days = if kind == ContactKind::Political {
         POLITICAL_CONTACT_DAYS
@@ -306,31 +322,13 @@ pub fn validate_nominate_mayor(
     if !eligible_candidate(state, owner, candidate) {
         return Err(PoliticalError::IneligibleCandidate);
     }
-    let proposed =
-        next_municipal_election_day(state.now()).ok_or(PoliticalError::ElectionUnavailable)?;
-    let deadline = state
-        .now()
-        .as_minutes()
-        .checked_add(MAYORAL_FILING_LEAD_DAYS * DAY_MINUTES)
-        .ok_or(PoliticalError::ElectionUnavailable)?;
-    let proposed_at = proposed
-        .checked_mul(DAY_MINUTES)
-        .ok_or(PoliticalError::ElectionUnavailable)?;
-    let election_day = if proposed_at >= deadline {
-        proposed
-    } else {
-        proposed
-            .checked_add(MUNICIPAL_ELECTION_INTERVAL_DAYS)
-            .ok_or(PoliticalError::ElectionUnavailable)?
-    };
-    election_day
-        .checked_mul(DAY_MINUTES)
-        .ok_or(PoliticalError::ElectionUnavailable)?;
+    let election_day =
+        next_mayoral_nomination_day(state.now()).ok_or(PoliticalError::ElectionUnavailable)?;
     if state
         .politics()
         .organization(owner)
         .and_then(OrganizationCampaign::candidacy)
-        .is_some_and(|candidacy| candidacy.election_day >= proposed)
+        .is_some()
     {
         return Err(PoliticalError::AlreadyNominated);
     }
@@ -598,21 +596,14 @@ pub fn valid_political_state(state: &AppState) -> bool {
                 return false;
             }
         }
-        if let Some(candidacy) = campaign.candidacy {
-            let Some(vote_at) = candidacy.election_day.checked_mul(DAY_MINUTES) else {
-                return false;
-            };
-            if candidacy.filed_at > state.now()
-                || vote_at <= state.now().as_minutes()
-                || !candidacy
-                    .election_day
-                    .is_multiple_of(MUNICIPAL_ELECTION_INTERVAL_DAYS)
-                || vote_at.saturating_sub(candidacy.filed_at.as_minutes())
-                    < MAYORAL_FILING_LEAD_DAYS * DAY_MINUTES
-                || state.world().get_character(candidacy.candidate).is_none()
-            {
-                return false;
-            }
+        if let Some(candidacy) = campaign.candidacy
+            && (candidacy.filed_at > state.now()
+                || next_mayoral_nomination_day(candidacy.filed_at) != Some(candidacy.election_day)
+                || SimTime::from_elapsed_days(candidacy.election_day)
+                    .is_none_or(|vote_at| vote_at <= state.now())
+                || state.world().get_character(candidacy.candidate).is_none())
+        {
+            return false;
         }
         let mut previous_day = 0;
         for election in &campaign.elections {

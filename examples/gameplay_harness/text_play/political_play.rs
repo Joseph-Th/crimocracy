@@ -5,9 +5,9 @@ use crimocracy::core::campaign_victory::{
 };
 use crimocracy::politics::political_system::{
     campaign_salary_commitment, daily_campaign_erosion, dismiss_specialist, eligible_manager,
-    initiative_available, next_municipal_election_day, specialist_output,
-    validate_civic_initiative, validate_hire_specialist, validate_invest_influence,
-    validate_nominate_mayor,
+    initiative_available, next_mayoral_nomination_day, next_municipal_election_day,
+    specialist_output, validate_civic_initiative, validate_hire_specialist,
+    validate_invest_influence, validate_nominate_mayor,
 };
 use crimocracy::politics::{CivicInitiative, SpecialistKind};
 
@@ -61,9 +61,11 @@ impl Session<'_> {
             salaries.contracted.cents(), salaries.payable.cents()).unwrap();
         writeln!(
             out,
-            "Next election: {} | nomination {} | latest election {}, won {}",
+            "Next election: {} | earliest ballot for a new filing: {} | nomination {} | latest election {}, won {}",
             next_municipal_election_day(self.state.now())
                 .and_then(SimTime::from_elapsed_days)
+                .map_or_else(|| "unavailable".to_owned(), |time| time.to_string()),
+            next_mayoral_nomination_day(self.state.now()).and_then(SimTime::from_elapsed_days)
                 .map_or_else(|| "unavailable".to_owned(), |time| time.to_string()),
             election_date_label(progress.mayoral_nominated_for_day),
             election_date_label(progress.latest_election_day),
@@ -141,9 +143,9 @@ impl Session<'_> {
                         .to_owned(),
                 );
             };
-            return Ok(format!(
-                "No mayoral ballot yet. Next election: {time}. File your leader at least 30 days in advance using 'nominate-mayor char-N'."
-            ));
+            let mut out = format!("No mayoral ballot yet. Next election: {time}.");
+            self.write_nomination_calendar(&mut out);
+            return Ok(out);
         };
         let mut out = format!(
             "Municipal election {} | nominee char-{} | qualified {} | wards won {}/{} | elected {}\n",
@@ -168,11 +170,44 @@ impl Session<'_> {
                 ballot.candidate_votes,
                 ballot.incumbent_votes,
                 ballot.rival_votes,
-                if ballot.ward_won { "won" } else { "lost" }
+                if ballot.ward_won {
+                    "won qualifying ward"
+                } else if ballot.candidate_votes > ballot.incumbent_votes
+                    && ballot.candidate_votes > ballot.rival_votes
+                {
+                    "vote plurality, local qualification not met"
+                } else {
+                    "lost vote"
+                }
             )
             .unwrap();
         }
+        self.write_nomination_calendar(&mut out);
         Ok(out)
+    }
+
+    fn write_nomination_calendar(&self, out: &mut String) {
+        let pending = self
+            .state
+            .politics()
+            .organization(self.player)
+            .and_then(|campaign| campaign.candidacy());
+        if let Some(candidacy) = pending {
+            write!(
+                out,
+                "\nFiled nominee: char-{} for {}. A new filing requires this ballot to conclude.",
+                candidacy.candidate.raw(),
+                election_date_label(Some(candidacy.election_day))
+            )
+            .unwrap();
+            return;
+        }
+        out.push('\n');
+        if let Some(day) = next_mayoral_nomination_day(self.state.now()) {
+            write!(out, "Earliest ballot for a new filing: {}. File your leader at least 30 days in advance using 'nominate-mayor char-N'.", election_date_label(Some(day))).unwrap();
+        } else {
+            out.push_str("No new filing fits within the remaining simulation clock.");
+        }
     }
 
     pub(super) fn execute_campaign_order(&mut self, words: &[&str]) -> Result<String, String> {

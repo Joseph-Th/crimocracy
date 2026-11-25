@@ -3,7 +3,7 @@
 
 use super::{
     PoliticalError, campaign_office_available, eligible_candidate, eligible_manager,
-    initiative_ready, next_municipal_election_day, reconcile_district_majorities, valid_scope,
+    initiative_ready, next_mayoral_nomination_day, reconcile_district_majorities, valid_scope,
 };
 use crate::core::id::{CharacterId, FinancialAccountId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
@@ -177,8 +177,7 @@ impl ValidatedPoliticalOrder {
                         .organization(self.owner)
                         .and_then(OrganizationCampaign::candidacy)
                         .is_some()
-                    || next_municipal_election_day(state.now())
-                        .is_none_or(|day| day > candidacy.election_day) =>
+                    || next_mayoral_nomination_day(state.now()) != Some(candidacy.election_day) =>
             {
                 return Err(PoliticalError::Stale);
             }

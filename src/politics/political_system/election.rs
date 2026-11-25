@@ -62,15 +62,24 @@ pub(super) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
     else {
         return;
     };
-    let eligible = eligible_candidate(state, owner, candidacy.candidate)
-        && crate::core::campaign_victory::mayoral_ballot_ready(&progress);
+    let mut shortfalls = crate::core::campaign_victory::mayoral_ballot_shortfalls(&progress);
+    if !eligible_candidate(state, owner, candidacy.candidate)
+        && progress.mayoral_leader_eligible
+        && progress.established_political_contacts > 0
+    {
+        shortfalls.push("filed nominee no longer holds eligible executive authority".to_owned());
+    }
+    let eligible = shortfalls.is_empty();
     let incumbent = state
         .world()
         .organizations()
         .filter(|organization| organization.kind() == OrganizationKind::Political)
         .flat_map(|organization| state.world().characters_in_organization(organization.id()))
         .filter(|person| {
-            person.supervisor().is_none()
+            // The filed nominee is a separate historical ballot participant even
+            // if they subsequently leave the crew and join a council.
+            person.id() != candidacy.candidate
+                && person.supervisor().is_none()
                 && state
                     .legal()
                     .active_arrest_for_character(person.id())
@@ -192,8 +201,13 @@ pub(super) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
             progress.total_districts
         )
     } else {
+        let reason = if eligible {
+            "Too few qualifying wards won the ballot.".to_owned()
+        } else {
+            format!("Citywide qualification failed: {}.", shortfalls.join("; "))
+        };
         format!(
-            "Municipal election {ballot_at}: the nominated leader won {wards_won} of {} wards; {} needed. The mayoral campaign was defeated; another election can be contested.",
+            "Municipal election {ballot_at}: the nominated leader won {wards_won} qualifying wards out of {} city wards; {} needed. {reason} The mayoral campaign was defeated; another election can be contested.",
             progress.total_districts, progress.required_political_districts
         )
     };

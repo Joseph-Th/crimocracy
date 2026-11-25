@@ -470,6 +470,38 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
             bincode::serialize(&restored).unwrap()
         );
     }
+    // The exact filing cutoff is inclusive, and missing it by one minute
+    // files for the following ballot, not the nearest calendar election.
+    for (late_minutes, expected_day) in [(0, 360), (1, 540)] {
+        let mut filing = city.state.clone();
+        filing.advance_clock(SimDuration::from_minutes(
+            (150 * DAY_MINUTES) as u32 + late_minutes,
+        ));
+        assert_eq!(
+            political_system::next_municipal_election_day(filing.now()),
+            Some(360)
+        );
+        assert_eq!(
+            political_system::next_mayoral_nomination_day(filing.now()),
+            Some(expected_day)
+        );
+        validate_nominate_mayor(&filing, city.boss)
+            .unwrap()
+            .commit(&mut filing)
+            .unwrap();
+        assert_eq!(
+            filing
+                .politics()
+                .organization(city.player)
+                .unwrap()
+                .candidacy()
+                .unwrap()
+                .election_day,
+            expected_day
+        );
+        let restored = restore_save(&registry, build_save(&registry, &filing).unwrap()).unwrap();
+        assert_eq!(restored.politics(), filing.politics());
+    }
     validate_nominate_mayor(&city.state, city.boss)
         .unwrap()
         .commit(&mut city.state)
@@ -488,6 +520,41 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
             .election_day,
         360
     );
+    // A filed nomination cannot silently skip a reachable ballot. Forge
+    // only the serialized date on a genuine paid filing and require the
+    // release-safe loader to reject the otherwise plausible future ballot.
+    let candidacy = city
+        .state
+        .politics()
+        .organization(city.player)
+        .unwrap()
+        .candidacy()
+        .unwrap();
+    let envelope = build_save(&registry, &city.state).unwrap();
+    let original = bincode::serialize(&candidacy).unwrap();
+    let mut bytes = bincode::serialize(&envelope).unwrap();
+    let positions: Vec<_> = bytes
+        .windows(original.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == original).then_some(index))
+        .collect();
+    assert_eq!(positions.len(), 1);
+    let delayed = MayoralCandidacy {
+        election_day: candidacy.election_day + MUNICIPAL_ELECTION_INTERVAL_DAYS,
+        ..candidacy
+    };
+    bytes.splice(
+        positions[0]..positions[0] + original.len(),
+        bincode::serialize(&delayed).unwrap(),
+    );
+    let forged = bincode::deserialize(&bytes).unwrap();
+    assert!(matches!(
+        restore_save(&registry, forged),
+        Err(crate::core::persistence::LoadError::InvalidState(
+            crate::core::invariants::StateValidationError::InvalidPoliticalCampaign
+        ))
+    ));
+    restore_save(&registry, envelope).unwrap();
     for _ in 180..359 {
         day(&registry, &mut city.state);
     }
@@ -544,6 +611,108 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
 }
 
 #[test]
+fn former_nominee_joining_the_council_cannot_face_themself_on_the_ballot() {
+    use crate::world::world_system::{
+        insert_character, validate_reassign_character, validate_set_character_supervisor,
+    };
+    use crate::world::{CapabilityKind, CharacterDraft, Rating};
+    use std::collections::BTreeMap;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(104)).unwrap();
+    let council = city
+        .state
+        .world()
+        .organizations()
+        .find(|organization| organization.kind() == OrganizationKind::Political)
+        .unwrap()
+        .id();
+    let official = city
+        .state
+        .world()
+        .characters_in_organization(council)
+        .next()
+        .unwrap()
+        .id();
+    validate_establish_contact(
+        &city.state,
+        InstitutionalContactDraft {
+            sponsor: city.player,
+            handler: city.boss,
+            contact: official,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    fund(&mut city.state, city.player, 5_000_000);
+    for _ in 0..crate::core::campaign_victory::POLITICAL_CONTACT_DAYS {
+        day(&registry, &mut city.state);
+    }
+    let nominee = insert_character(
+        &mut city.state,
+        CharacterDraft {
+            name: "New executive".into(),
+            organization: Some(city.player),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([
+                (CapabilityKind::Negotiation, Rating::try_new(100).unwrap()),
+                (CapabilityKind::SocialAccess, Rating::try_new(100).unwrap()),
+            ]),
+            traits: Default::default(),
+            drives: Default::default(),
+        },
+    )
+    .unwrap();
+    validate_set_character_supervisor(&city.state, city.boss, Some(nominee))
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    validate_nominate_mayor(&city.state, nominee)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    validate_set_character_supervisor(&city.state, city.boss, None)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    validate_reassign_character(&city.state, nominee, Some(council), None)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut restored] {
+        state.advance_clock(SimDuration::from_minutes(
+            (MUNICIPAL_ELECTION_INTERVAL_DAYS * DAY_MINUTES) as u32,
+        ));
+        apply_due_political_campaigns(&registry, state);
+        let election = state
+            .politics()
+            .organization(city.player)
+            .unwrap()
+            .latest_election()
+            .unwrap();
+        assert_eq!(election.candidate, nominee);
+        assert_ne!(
+            election.incumbent,
+            Some(nominee),
+            "a candidate and incumbent must be distinct people"
+        );
+        assert!(!election.eligible);
+        assert!(!election.elected);
+        validate_invariants(state);
+        restore_save(&registry, build_save(&registry, state).unwrap()).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn mayoral_nomination_rejects_an_election_beyond_the_simulation_clock() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(104)).unwrap();
@@ -572,7 +741,32 @@ fn mayoral_nomination_rejects_an_election_beyond_the_simulation_clock() {
     .unwrap()
     .commit(&mut city.state)
     .unwrap();
-    city.state.set_now_for_test(crate::core::time::SimTime::MAX);
+    use crate::core::time::SimTime;
+    let final_ballot = (u64::MAX / DAY_MINUTES / MUNICIPAL_ELECTION_INTERVAL_DAYS)
+        * MUNICIPAL_ELECTION_INTERVAL_DAYS;
+    let final_cutoff = final_ballot * DAY_MINUTES - MAYORAL_FILING_LEAD_DAYS * DAY_MINUTES;
+    assert_eq!(
+        political_system::next_mayoral_nomination_day(SimTime::from_minutes(final_cutoff)),
+        Some(final_ballot)
+    );
+    city.state
+        .set_now_for_test(SimTime::from_minutes(final_cutoff + 1));
+    let before = bincode::serialize(&city.state).unwrap();
+    assert_eq!(
+        political_system::next_municipal_election_day(city.state.now()),
+        Some(final_ballot)
+    );
+    assert_eq!(
+        political_system::next_mayoral_nomination_day(city.state.now()),
+        None
+    );
+    assert_eq!(
+        validate_nominate_mayor(&city.state, city.boss).err(),
+        Some(PoliticalError::ElectionUnavailable)
+    );
+    assert_eq!(bincode::serialize(&city.state).unwrap(), before);
+
+    city.state.set_now_for_test(SimTime::MAX);
     let before = bincode::serialize(&city.state).unwrap();
     assert_eq!(
         political_system::next_municipal_election_day(city.state.now()),
