@@ -546,6 +546,112 @@ fn add_two_same_source_informant_statements(fixture: &mut Fixture) -> BTreeSet<E
 }
 
 #[test]
+fn autonomous_rearrest_preserves_fresh_statement_from_previously_uncited_source() {
+    let mut fixture = fixture();
+    let older_statements = add_two_same_source_informant_statements(&mut fixture);
+    let source = fixture.state.legal().informants().next().unwrap();
+    let (informant, character) = (source.id(), source.character());
+    let first = arrest_fixture(&mut fixture);
+    let mut evidence = fixture
+        .state
+        .legal()
+        .get_arrest(first)
+        .unwrap()
+        .evidence()
+        .clone();
+    assert!(older_statements.is_disjoint(&evidence));
+
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    validate_release_arrest(&fixture.state, first)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let information = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(character),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::OperationalOutcome,
+            source_entity: None,
+            subject: EntityRef::Character(fixture.suspect),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "The source reports new activity after release.".to_owned(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let disclosure = validate_record_informant_disclosure(
+        &fixture.state,
+        InformantDisclosureDraft {
+            informant,
+            investigation: fixture.investigation,
+            source_information: information,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let fresh = fixture
+        .state
+        .legal()
+        .informant_disclosures()
+        .find(|record| record.id() == disclosure)
+        .unwrap()
+        .evidence();
+    evidence.insert(fresh);
+    assert!(
+        validate_arrest(
+            &fixture.registry,
+            &fixture.state,
+            ArrestDraft {
+                character: fixture.suspect,
+                investigation: fixture.investigation,
+                evidence,
+            },
+        )
+        .is_ok(),
+        "the new independent source satisfies canonical repeat-custody requirements"
+    );
+    assert!(
+        apply_autonomous_evidence_arrests(&fixture.registry, &mut fixture.state)
+            .unwrap()
+            .is_empty(),
+        "fresh routine evidence does not bypass the recovery interval"
+    );
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        60 * u32::try_from(crate::core::time::DAY_MINUTES).unwrap() - 1,
+    ));
+    let save = build_save(&fixture.registry, &fixture.state).unwrap();
+    let mut restored = restore_save(&fixture.registry, save).unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let arrests = apply_autonomous_evidence_arrests(&fixture.registry, state).unwrap();
+        assert_eq!(
+            arrests.len(),
+            1,
+            "fresh qualifying citation must not be discarded"
+        );
+        let arrest = state.legal().get_arrest(arrests[0]).unwrap();
+        assert!(arrest.evidence().contains(&fresh));
+        assert!(
+            arrest
+                .evidence()
+                .contains(older_statements.first().unwrap())
+        );
+        assert_eq!(arrest.evidence().len(), 4);
+        validate_state_against_registry(&fixture.registry, state).unwrap();
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn repeated_statements_from_one_named_source_count_as_one_corroborator() {
     let mut fixture = fixture();
     let mut statement_evidence = add_two_same_source_informant_statements(&mut fixture);

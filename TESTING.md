@@ -397,6 +397,10 @@ payroll interruption at the exact boundary, read-only coverage, and persistent
 attention preferences. The police-response integration test resolves two complete
 identifying operations and verifies one active file, independent evidence, actual
 custody, and deterministic continuation from a save between incidents.
+The autonomous repeat-custody regression preserves fresh qualifying testimony
+from a previously uncited source even when older testimony ranks higher, retains
+stronger evidence, respects the sixty-day cooldown, and produces byte-identical
+continuation after restore.
 Script input is one command per line, with blank lines
 and lines beginning `#` ignored. Interactive command rejection prints a
 reason without ending the session; a rejected scripted command fails with its

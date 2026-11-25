@@ -2,8 +2,8 @@
 
 use super::{
     ArrestError, CustodyCorroborationSource, CustodyEvidenceAssessment,
-    evidence_qualifies_for_custody, repeat_custody_without_new_evidence, validate_arrest,
-    validate_custody_evidence_references,
+    evidence_qualifies_for_custody, find_fresh_independent_custody_evidence,
+    repeat_custody_without_new_evidence, validate_arrest, validate_custody_evidence_references,
 };
 use crate::core::entity::EntityRef;
 use crate::core::id::{
@@ -11,7 +11,7 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime};
-use crate::legal::{ArrestDraft, ArrestRecord, InvestigationStatus};
+use crate::legal::{ArrestDraft, ArrestRecord, EvidenceRecord, InvestigationStatus};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +24,41 @@ struct AutonomousArrestCandidate {
     evidence: BTreeSet<EvidenceId>,
     independent_sources: usize,
     strong_sources: usize,
+}
+
+/// The strongest and newest qualifying records serve different purposes: the former
+/// supports corroboration and prosecution, while the latter can establish a fresh basis
+/// for renewed custody. Retain both in the case's single evidence pass.
+struct SourceCitations<'a> {
+    strongest: &'a EvidenceRecord,
+    newest: &'a EvidenceRecord,
+}
+
+impl<'a> SourceCitations<'a> {
+    fn observe(&mut self, cited: &'a EvidenceRecord, evidence: &'a EvidenceRecord) {
+        if Self::quality_rank(cited) > Self::quality_rank(self.strongest) {
+            self.strongest = cited;
+        }
+        if (evidence.discovered_at(), Self::quality_rank(evidence))
+            > (self.newest.discovered_at(), Self::quality_rank(self.newest))
+        {
+            self.newest = evidence;
+        }
+    }
+
+    fn quality_rank(
+        evidence: &EvidenceRecord,
+    ) -> (
+        crate::legal::EvidenceStrength,
+        crate::legal::EvidenceReliability,
+        std::cmp::Reverse<EvidenceId>,
+    ) {
+        (
+            evidence.strength(),
+            evidence.reliability(),
+            std::cmp::Reverse(evidence.id()),
+        )
+    }
 }
 
 /// Routine vice casework may continue after release, but the same already-cited
@@ -180,7 +215,7 @@ fn resolve_autonomous_arrest_candidates(
         CharacterId,
         (
             CustodyEvidenceAssessment,
-            BTreeMap<CustodyCorroborationSource, EvidenceId>,
+            BTreeMap<CustodyCorroborationSource, SourceCitations<'_>>,
         ),
     > = investigation
         .subjects()
@@ -221,11 +256,10 @@ fn resolve_autonomous_arrest_candidates(
             continue;
         };
         assessment.observe(state, evidence);
-        // Cite one qualifying record per independent source. A forensic review can improve
-        // reliability without creating a second independent fact. Prefer the improved analysis
-        // when its quality is higher, but use the primary on a true quality tie: downstream
-        // prosecution must receive the best available evidence, not a stale weaker citation.
-        let citation = match evidence.derived_from().iter().next().copied() {
+        // Choose the strongest qualifying record per independent source. A forensic review
+        // can improve reliability without creating a second independent fact. Prefer the
+        // improved analysis when its quality is higher, but use the primary on a quality tie.
+        let cited = match evidence.derived_from().iter().next().copied() {
             Some(source_id) => {
                 let source_evidence = state
                     .legal
@@ -235,42 +269,22 @@ fn resolve_autonomous_arrest_candidates(
                     && (source_evidence.strength(), source_evidence.reliability())
                         >= (evidence.strength(), evidence.reliability())
                 {
-                    source_evidence.id()
+                    source_evidence
                 } else {
-                    evidence.id()
+                    evidence
                 }
             }
-            None => evidence.id(),
+            None => evidence,
         };
-        // Rank the actual cited record, not the derivative inspected during this iteration.
-        // Otherwise a superior derivative's rank can be assigned to its weaker primary and
-        // mistakenly survive the selection. Stable ID breaks only equal-quality ties.
-        let cited = state
-            .legal
-            .get_evidence(citation)
-            .expect("selected autonomous citation must be persisted");
-        let rank = (
-            cited.strength(),
-            cited.reliability(),
-            std::cmp::Reverse(citation),
-        );
+        // Rank the selected record itself, while keeping the actual observation minute
+        // separately for renewed custody. Stable ID breaks only equal-quality ties.
         citations
             .entry(source)
-            .and_modify(|current| {
-                let current_record = state
-                    .legal
-                    .get_evidence(*current)
-                    .expect("autonomous citation must reference persisted evidence");
-                let current_rank = (
-                    current_record.strength(),
-                    current_record.reliability(),
-                    std::cmp::Reverse(current_record.id()),
-                );
-                if rank > current_rank {
-                    *current = citation;
-                }
-            })
-            .or_insert(citation);
+            .and_modify(|current| current.observe(cited, evidence))
+            .or_insert(SourceCitations {
+                strongest: cited,
+                newest: evidence,
+            });
     }
     Ok(by_character
         .into_iter()
@@ -278,11 +292,30 @@ fn resolve_autonomous_arrest_candidates(
             if !assessment.meets(registry.legal().minimum_arrest_qualifying_evidence()) {
                 return None;
             }
-            let evidence: BTreeSet<_> = citations.into_values().collect();
-            if repeat_custody_without_new_evidence(state, investigation_id, character, &evidence)
-                .is_some()
+            let mut evidence: BTreeSet<_> = citations
+                .values()
+                .map(|citation| citation.strongest.id())
+                .collect();
+            if let Some((prior_id, released_at)) =
+                repeat_custody_without_new_evidence(state, investigation_id, character, &evidence)
             {
-                return None;
+                if state.now() <= released_at {
+                    return None;
+                }
+                let prior = state
+                    .legal()
+                    .get_arrest(prior_id)
+                    .expect("repeat-custody guard returned a persisted arrest");
+                // A higher-quality older record can obscure a fresh statement from the
+                // same previously uncited source. Include the fresh record as an additional
+                // citation only when required; it never counts as a second independent source.
+                let fresh = find_fresh_independent_custody_evidence(
+                    state,
+                    prior,
+                    citations.values().map(|citation| citation.newest.id()),
+                    released_at,
+                )?;
+                evidence.insert(fresh);
             }
             Some(AutonomousArrestCandidate {
                 investigation: investigation_id,

@@ -513,8 +513,8 @@ fn validate_arrest_dependencies(
             // silently dropping what the drafter explicitly relied on. Merely weak,
             // questionable, or multi-source-derived exhibits are simply not custody-grade, so
             // skip them and let the aggregate independent-source bar judge the remaining
-            // qualifying citations. This matches the autonomous converter, which cites one
-            // qualifying record per independent source; a draft citing {Strong-A, Strong-B,
+            // qualifying citations. The autonomous converter also cites only qualifying
+            // evidence; a draft citing {Strong-A, Strong-B,
             // Weak-C} must arrest exactly like {Strong-A, Strong-B} instead of failing on C.
             if evidence.admissibility() == crate::legal::Admissibility::Inadmissible {
                 return Err(ArrestError::InadmissibleEvidence {
@@ -612,6 +612,16 @@ pub(crate) fn has_fresh_independent_custody_evidence(
     evidence: &BTreeSet<EvidenceId>,
     released_at: SimTime,
 ) -> bool {
+    find_fresh_independent_custody_evidence(state, prior, evidence.iter().copied(), released_at)
+        .is_some()
+}
+
+fn find_fresh_independent_custody_evidence(
+    state: &AppState,
+    prior: &ArrestRecord,
+    evidence: impl IntoIterator<Item = EvidenceId>,
+    released_at: SimTime,
+) -> Option<EvidenceId> {
     // Renewed custody needs a fresh qualifying *independent* source. A source that the first
     // arrest explicitly cited remains previously known even if the original exhibit was weak
     // or questionable and only its new forensic derivative now satisfies custody quality.
@@ -621,7 +631,7 @@ pub(crate) fn has_fresh_independent_custody_evidence(
         .filter_map(|id| state.legal.get_evidence(*id))
         .filter_map(|record| CustodyEvidenceAssessment::evidence_source(state, record))
         .collect();
-    evidence.iter().any(|evidence| {
+    evidence.into_iter().find(|evidence| {
         !prior.evidence().contains(evidence)
             && state.legal.get_evidence(*evidence).is_some_and(|record| {
                 record.discovered_at() >= released_at
