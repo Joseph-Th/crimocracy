@@ -251,6 +251,11 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // than a mixture of pre- and post-boundary state.
     let payrolls = crate::world::payroll_execution::apply_daily_payroll(registry, state)
         .expect("valid state should settle every due criminal-organization payroll");
+    // Close the workday after actual cases, storefront settlements and payroll, but
+    // before midnight membership changes. A departing crew member must not receive
+    // independent civilian work credit for the same day they were still employed.
+    // Personal condition updates do not invalidate held organizational authority.
+    crate::world::character_life::apply_due_character_lives(state);
     // Departures see actual wages and current resentment before recruitment and expansion
     // evaluate the roster and delegated authorities.
     let payroll_departures =
@@ -262,10 +267,6 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         freelance_contract_expirations =
             crate::world::freelance_contracts::apply_due_freelance_expirations(state);
     }
-    // Named civilians and institutional officers independently work, rest and
-    // gain experience after today's actual cases and storefront settlements.
-    // Updates do not invalidate held organizational authorization tokens.
-    crate::world::character_life::apply_due_character_lives(state);
     // Municipal campaigning spends only funds left after actual payroll.
     // Specialists work, influence decays, and rival organizations challenge
     // local majorities before the day closes; no political progress is free.

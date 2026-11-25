@@ -789,6 +789,93 @@ fn freelance_terms_cannot_be_extended_by_permanent_roles_or_future_bookings() {
 }
 
 #[test]
+fn midnight_freelance_expiry_does_not_credit_independent_work_during_paid_term() {
+    use crate::core::simulation::run_tick;
+    use crate::finance::FinancialOwner;
+    use crate::world::CivicActivity;
+    use crate::world::freelance_contracts::freelance_contact_available;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let freelancer = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            freelance_contact_available(&city.state, city.player, person.id(), city.boss)
+                && (1..=2).all(|day| !(day + u64::from(person.id().raw())).is_multiple_of(7))
+        })
+        .unwrap()
+        .id();
+    let home = city
+        .state
+        .world()
+        .get_character(freelancer)
+        .unwrap()
+        .life()
+        .home()
+        .unwrap();
+    validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 1)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let original = city.state.world().get_character(freelancer).unwrap().life();
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+
+    for state in [&mut city.state, &mut restored] {
+        state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32 - 1));
+        let tick = run_tick(&registry, state).unwrap();
+        assert_eq!(tick.freelance_contract_expirations, vec![freelancer]);
+        let payroll = tick
+            .payrolls
+            .iter()
+            .find(|payroll| payroll.organization() == city.player)
+            .unwrap();
+        let wage = state
+            .finance()
+            .get_transaction(payroll.transaction().unwrap())
+            .unwrap()
+            .postings()
+            .iter()
+            .filter(|posting| {
+                state
+                    .finance()
+                    .get_account(posting.account)
+                    .unwrap()
+                    .owner()
+                    == FinancialOwner::Character(freelancer)
+            })
+            .map(|posting| posting.amount.cents())
+            .sum::<i64>();
+        assert_eq!(wage, registry.upkeep().per_member_daily().cents());
+        let person = state.world().get_character(freelancer).unwrap();
+        assert_eq!(person.organization(), None);
+        assert_eq!(
+            person.life(),
+            original,
+            "the completed paid term is not independent freelance work"
+        );
+
+        state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32 - 1));
+        let tick = run_tick(&registry, state).unwrap();
+        assert!(tick.freelance_contract_expirations.is_empty());
+        let life = state.world().get_character(freelancer).unwrap().life();
+        assert_eq!(life.career_days(), original.career_days() + 1);
+        assert_eq!(
+            life.last_activity(),
+            Some((state.now(), CivicActivity::FreelanceWork(home)))
+        );
+        assert_eq!(life.fatigue(), 4);
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn freelance_expiration_uses_its_signed_minute_without_charging_an_extra_day() {
     use crate::core::simulation::run_tick;
 
