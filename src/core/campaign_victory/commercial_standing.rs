@@ -3,100 +3,76 @@
 use super::{
     POLITICAL_BUSINESS_ESTABLISHMENT_DAYS, POLITICAL_BUSINESS_KINDS_PER_DISTRICT,
     POLITICAL_BUSINESSES_PER_DISTRICT, PoliticalBusinessProgress, PoliticalDistrictProgress,
-    VICTORY_INCOME_WINDOW_DAYS, VICTORY_PROFITABLE_CYCLES, VictoryError, established_for,
-    political_staffing, recent_income_start, settled_recently,
+    VICTORY_INCOME_WINDOW_DAYS, VICTORY_PROFITABLE_CYCLES, VictoryError, political_staffing,
+    recent_income_start, settled_recently,
 };
 use crate::core::id::{BusinessId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime};
-use crate::economy::BusinessOperatingStatus;
 use crate::economy::business_economy_system::portfolio_overhead_basis_points;
+use crate::economy::{BusinessCycleRecord, BusinessOperatingStatus};
 use crate::finance::Money;
 use crate::politics::political_system::{held_electoral_majority, rival_pressure};
 use crate::registry::Registry;
-use crate::world::{BusinessKind, BusinessOwner};
+use crate::world::{BusinessKind, BusinessOwner, BusinessRecord};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Net operating profit, not laundering volume or appraisal, earned by the
-/// present owner during the recent income window. Losses must offset profits.
-pub(super) fn recent_business_net(
-    state: &AppState,
-    business: BusinessId,
-    owner: OrganizationId,
-) -> i128 {
-    let Some(record) = state.world().get_business(business) else {
-        return 0;
-    };
-    state
-        .economy()
-        .cycles_for(business)
-        .rev()
-        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
-        .filter(|cycle| {
-            cycle.occurred_at() <= state.now()
-                && cycle.business_version() == record.version()
-                && cycle.owner() == BusinessOwner::Organization(owner)
-        })
-        .map(|cycle| i128::from(cycle.net_cash().cents()))
-        .sum()
+/// One title period's realized operating evidence, excluding transfers and appraisals.
+#[derive(Default)]
+struct TitleWindow {
+    net: i128,
+    profitable_cycles: usize,
+    latest: Option<SimTime>,
 }
 
-fn mature_business_title(state: &AppState, business: BusinessId, owner: OrganizationId) -> bool {
-    let Some(record) = state.world().get_business(business) else {
-        return false;
-    };
+impl TitleWindow {
+    fn include(&mut self, cycle: &BusinessCycleRecord) {
+        self.net += i128::from(cycle.net_cash().cents());
+        self.profitable_cycles += usize::from(cycle.net_cash() > Money::ZERO);
+        self.latest = self.latest.max(Some(cycle.occurred_at()));
+    }
+
+    fn established(&self, now: SimTime, owned_minutes: u64) -> bool {
+        owned_minutes >= POLITICAL_BUSINESS_ESTABLISHMENT_DAYS * DAY_MINUTES
+            && self.profitable_cycles >= VICTORY_PROFITABLE_CYCLES
+            && self.latest.is_some_and(|at| settled_recently(now, at))
+    }
+}
+
+fn title_age_minutes(state: &AppState, business: &BusinessRecord, owner: OrganizationId) -> u64 {
     state
         .world()
-        .get_business_ownership_change_for_version(business, record.version())
-        .is_some_and(|change| {
-            change.new_owner() == BusinessOwner::Organization(owner)
-                && established_for(
-                    state.now(),
-                    change.changed_at(),
-                    POLITICAL_BUSINESS_ESTABLISHMENT_DAYS,
-                )
+        .get_business_ownership_change_for_version(business.id(), business.version())
+        .filter(|change| change.new_owner() == BusinessOwner::Organization(owner))
+        .map_or(0, |change| {
+            state
+                .now()
+                .as_minutes()
+                .saturating_sub(change.changed_at().as_minutes())
         })
 }
 
-/// A recent settlement and a substantial record of profitable cycles under
-/// current title prevent an instant acquisition from inheriting the seller's
-/// political standing.
-pub(super) fn established_business(
+fn current_title_window(
     state: &AppState,
-    business: BusinessId,
+    business: &BusinessRecord,
     owner: OrganizationId,
-) -> bool {
-    if !mature_business_title(state, business, owner)
-        || !state.economy().latest_cycle(business).is_some_and(|cycle| {
-            cycle.owner() == BusinessOwner::Organization(owner)
-                && settled_recently(state.now(), cycle.occurred_at())
-        })
-    {
-        return false;
-    }
-    profitable_business_cycles(state, business, owner) >= VICTORY_PROFITABLE_CYCLES
-}
-
-fn profitable_business_cycles(
-    state: &AppState,
-    business: BusinessId,
-    owner: OrganizationId,
-) -> usize {
-    let Some(record) = state.world().get_business(business) else {
-        return 0;
-    };
-    state
+) -> TitleWindow {
+    let mut window = TitleWindow::default();
+    let cutoff = recent_income_start(state.now());
+    for cycle in state
         .economy()
-        .cycles_for(business)
+        .cycles_for(business.id())
         .rev()
-        .take_while(|cycle| cycle.occurred_at().as_minutes() > recent_income_start(state.now()))
+        .take_while(|cycle| cycle.occurred_at().as_minutes() > cutoff)
         .filter(|cycle| {
             cycle.occurred_at() <= state.now()
-                && cycle.business_version() == record.version()
+                && cycle.business_version() == business.version()
                 && cycle.owner() == BusinessOwner::Organization(owner)
-                && cycle.net_cash() > Money::ZERO
         })
-        .count()
+    {
+        window.include(cycle);
+    }
+    window
 }
 
 #[derive(Clone, Debug, Default)]
@@ -228,16 +204,8 @@ pub fn political_business_progress(
         .filter_map(|business| {
             let economy = state.economy().get_business_economy(business.id())?;
             let active = economy.status() == BusinessOperatingStatus::Active;
-            let owned_minutes = state
-                .world()
-                .get_business_ownership_change_for_version(business.id(), business.version())
-                .filter(|change| change.new_owner() == BusinessOwner::Organization(owner))
-                .map_or(0, |change| {
-                    state
-                        .now()
-                        .as_minutes()
-                        .saturating_sub(change.changed_at().as_minutes())
-                });
+            let owned_minutes = title_age_minutes(state, business, owner);
+            let window = current_title_window(state, business, owner);
             let owned_days = owned_minutes / DAY_MINUTES;
             let days_until_mature = (POLITICAL_BUSINESS_ESTABLISHMENT_DAYS * DAY_MINUTES)
                 .saturating_sub(owned_minutes)
@@ -257,16 +225,14 @@ pub fn political_business_progress(
                 active,
                 owned_days,
                 days_until_mature,
-                profitable_cycles: profitable_business_cycles(state, business.id(), owner),
+                profitable_cycles: window.profitable_cycles,
                 last_owned_settlement,
                 recent_net: Money::from_cents(
-                    net_after_portfolio_overhead(
-                        recent_business_net(state, business.id(), owner),
-                        overhead,
-                    )
-                    .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
+                    net_after_portfolio_overhead(window.net, overhead)
+                        .clamp(i128::from(i64::MIN), i128::from(i64::MAX))
+                        as i64,
                 ),
-                established: active && established_business(state, business.id(), owner),
+                established: active && window.established(state.now(), owned_minutes),
             })
         })
         .collect())
@@ -291,7 +257,7 @@ pub(super) fn business_district_standings(
     // positive standing, but a recent net loss cannot be erased by closing or
     // transferring the asset.
     let cutoff = recent_income_start(state.now());
-    let mut remaining_net = BTreeMap::<(BusinessId, u32), i128>::new();
+    let mut remaining_income = BTreeMap::<(BusinessId, u32), TitleWindow>::new();
     for cycle in state
         .economy()
         .cycles_for_owner_from_through(
@@ -301,9 +267,10 @@ pub(super) fn business_district_standings(
         )
         .filter(|cycle| cycle.occurred_at().as_minutes() > cutoff)
     {
-        *remaining_net
+        remaining_income
             .entry((cycle.business(), cycle.business_version()))
-            .or_default() += i128::from(cycle.net_cash().cents());
+            .or_default()
+            .include(cycle);
     }
     for business in state.world().businesses_owned_by_organization(owner) {
         let Some(economy) = state.economy().get_business_economy(business.id()) else {
@@ -318,28 +285,27 @@ pub(super) fn business_district_standings(
             continue;
         }
         entry.active += 1;
-        if mature_business_title(state, business.id(), owner) {
+        let owned_minutes = title_age_minutes(state, business, owner);
+        if owned_minutes >= POLITICAL_BUSINESS_ESTABLISHMENT_DAYS * DAY_MINUTES {
             entry.mature += 1;
-            entry.window_net += net_after_portfolio_overhead(
-                remaining_net
-                    .remove(&(business.id(), business.version()))
-                    .unwrap_or(0),
-                overhead,
-            );
-            if established_business(state, business.id(), owner) {
+            let window = remaining_income
+                .remove(&(business.id(), business.version()))
+                .unwrap_or_default();
+            entry.window_net += net_after_portfolio_overhead(window.net, overhead);
+            if window.established(state.now(), owned_minutes) {
                 entry.established += 1;
                 entry.established_kinds.insert(business.kind());
             }
         }
     }
-    for ((business, _), net) in remaining_net {
-        if net < 0
+    for ((business, _), window) in remaining_income {
+        if window.net < 0
             && let Some(record) = state.world().get_business(business)
         {
             standings
                 .entry(record.neighborhood())
                 .or_default()
-                .window_net += net;
+                .window_net += window.net;
         }
     }
     standings

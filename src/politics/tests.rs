@@ -736,6 +736,154 @@ fn purchased_machine_influence_alone_cannot_win_a_ward_and_rivals_can_contest_it
 }
 
 #[test]
+fn paid_orders_reconcile_majority_tenure_without_waiting_for_daily_maintenance() {
+    use crate::core::campaign_victory::political_district_progress;
+    use crate::delegation::MandateDraft;
+    use crate::delegation::delegation_system::validate_assign_mandate;
+    use crate::world::world_system::insert_neighborhood;
+    use crate::world::{
+        CapabilityKind, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        NeighborhoodInstitutionProfile, NeighborhoodProfile, Rating,
+    };
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(6_217)).unwrap();
+    let rating = |value| Rating::try_new(value).unwrap();
+    // No rival storefronts here: the only opposition is the deliberate paid order below.
+    let district = insert_neighborhood(
+        &mut city.state,
+        NeighborhoodDraft {
+            name: "New civic ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(50),
+                    commercial_activity: rating(50),
+                    illicit_demand: rating(50),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(50),
+                },
+            },
+        },
+    )
+    .unwrap();
+    let manager = insert_character(
+        &mut city.state,
+        CharacterDraft {
+            name: "Local organizer".to_owned(),
+            organization: Some(city.player),
+            supervisor: Some(city.boss),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([
+                (CapabilityKind::SocialAccess, rating(100)),
+                (CapabilityKind::Negotiation, rating(100)),
+            ]),
+            traits: Default::default(),
+            drives: Default::default(),
+        },
+    )
+    .unwrap();
+    validate_assign_mandate(
+        &city.state,
+        MandateDraft {
+            organization: city.player,
+            manager,
+            scopes: [
+                ResponsibilityScope::Neighborhood(district),
+                ResponsibilityScope::Function(ResponsibilityFunction::Political),
+            ]
+            .into_iter()
+            .collect(),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    let rival = city.rivals[0];
+    fund(&mut city.state, city.player, 15_000_000);
+    fund(&mut city.state, rival, 5_000_000);
+    for kind in [SpecialistKind::Organizer, SpecialistKind::Publicist] {
+        validate_hire_specialist(&city.state, district, manager, kind)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    let office = |state: &crate::AppState| {
+        state
+            .politics()
+            .organization(city.player)
+            .unwrap()
+            .district(district)
+            .unwrap()
+            .clone()
+    };
+    for _ in 0..30 {
+        let local = office(&city.state);
+        if local.grassroots() >= GRASSROOTS_REQUIRED
+            && local.institutions() >= INSTITUTIONAL_REQUIRED
+        {
+            break;
+        }
+        advance_day(&registry, &mut city.state);
+    }
+    let local = office(&city.state);
+    assert!(
+        local.grassroots() >= GRASSROOTS_REQUIRED && local.institutions() >= INSTITUTIONAL_REQUIRED
+    );
+    assert!(local.influence() < MAYORAL_INFLUENCE_REQUIRED);
+    assert!(local.leading_since().is_none());
+
+    // An ordinary paid investment, not a daily tick, crosses the majority threshold.
+    city.state.advance_clock(SimDuration::ONE_MINUTE);
+    let won_at = city.state.now();
+    validate_invest_influence(
+        &city.state,
+        district,
+        i64::from(MAYORAL_INFLUENCE_REQUIRED - local.influence()) * INFLUENCE_COST_PER_POINT,
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    assert!(controls_district(&city.state, city.player, district));
+    assert_eq!(office(&city.state).leading_since(), Some(won_at));
+
+    city.state.advance_clock(SimDuration::ONE_MINUTE);
+    political_system::validate_invest_for(
+        &city.state,
+        rival,
+        district,
+        550 * INFLUENCE_COST_PER_POINT,
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    assert!(!controls_district(&city.state, city.player, district));
+    assert!(office(&city.state).leading_since().is_none());
+    let row = political_district_progress(&registry, &city.state)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.district == district)
+        .unwrap();
+    assert_eq!(row.majority_held_days, 0);
+
+    // A later payment restores the lead before the next daily pass, but cannot inherit
+    // the earlier streak. The new start is preserved exactly in the save.
+    city.state.advance_clock(SimDuration::ONE_MINUTE);
+    let regained_at = city.state.now();
+    validate_invest_influence(&city.state, district, 200 * INFLUENCE_COST_PER_POINT)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert!(controls_district(&city.state, city.player, district));
+    assert_eq!(office(&city.state).leading_since(), Some(regained_at));
+    let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert_eq!(office(&restored).leading_since(), Some(regained_at));
+    assert_eq!(restored.politics(), city.state.politics());
+}
+
+#[test]
 fn rival_campaign_reserve_counts_operating_cash_owned_by_the_organization() {
     let registry = build_registry();
     let mut state = crate::AppState::new(31);

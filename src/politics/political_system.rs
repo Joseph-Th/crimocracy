@@ -507,6 +507,35 @@ pub fn controls_district(
         && u32::from(own) > u32::from(rival_pressure(state, owner, district)) * 3 / 2
 }
 
+/// Reconcile the uninterrupted majority clock for every campaign in the affected ward.
+/// A paid initiative or investment can change both the investor's standing and a rival's.
+/// Daily maintenance calls this only after decay, salaries and rival spending have settled,
+/// so temporary intermediate scores inside that one minute are not observed as lost days.
+fn reconcile_district_majorities(state: &mut AppState, district: NeighborhoodId) {
+    let owners: Vec<_> = state
+        .politics()
+        .organizations
+        .iter()
+        .filter(|(_, campaign)| campaign.district(district).is_some())
+        .map(|(&owner, _)| owner)
+        .collect();
+    let now = state.now();
+    for owner in owners {
+        let leading = controls_district(state, owner, district);
+        let office = state
+            .politics
+            .organizations
+            .get_mut(&owner)
+            .and_then(|campaign| campaign.districts.get_mut(&district))
+            .expect("district campaign exists");
+        if leading {
+            office.leading_since.get_or_insert(now);
+        } else {
+            office.leading_since = None;
+        }
+    }
+}
+
 pub fn held_electoral_majority(
     state: &AppState,
     owner: OrganizationId,
@@ -556,6 +585,7 @@ pub fn valid_political_state(state: &AppState) -> bool {
                 || office
                     .leading_since
                     .is_some_and(|start| start > state.now())
+                || office.leading_since.is_some() != controls_district(state, owner, district)
                 || office.specialists.values().any(|manager| {
                     state.world().get_character(*manager).is_none()
                         || manager_offices

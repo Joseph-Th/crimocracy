@@ -2,8 +2,8 @@
 
 use super::election::apply_due_mayoral_elections;
 use super::{
-    CampaignAction, controls_district, eligible_manager, specialist_output, validate_invest_for,
-    validate_spend,
+    CampaignAction, eligible_manager, reconcile_district_majorities, specialist_output,
+    validate_invest_for, validate_spend,
 };
 use crate::core::id::{NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
@@ -255,7 +255,7 @@ fn autonomous_rival_campaigns(registry: &Registry, state: &mut AppState) {
             district,
             i64::from(points) * INFLUENCE_COST_PER_POINT,
         ) {
-            let _ = order.commit(state);
+            let _ = order.commit_daily(state);
         }
     }
 }
@@ -270,33 +270,14 @@ pub fn apply_due_political_campaigns(registry: &Registry, state: &mut AppState) 
     apply_daily_decay(state);
     pay_campaign_staff(state);
     autonomous_rival_campaigns(registry, state);
-    let owners = state
+    let districts = state
         .politics()
         .organizations
-        .iter()
-        .flat_map(|(&owner, campaign)| {
-            campaign
-                .districts
-                .keys()
-                .copied()
-                .map(move |district| (owner, district))
-        })
-        .collect::<Vec<_>>();
-    for (owner, district) in owners {
-        let leading = controls_district(state, owner, district);
-        let now = state.now();
-        if let Some(office) = state
-            .politics
-            .organizations
-            .get_mut(&owner)
-            .and_then(|campaign| campaign.districts.get_mut(&district))
-        {
-            if leading {
-                office.leading_since.get_or_insert(now);
-            } else {
-                office.leading_since = None;
-            }
-        }
+        .values()
+        .flat_map(|campaign| campaign.districts.keys().copied())
+        .collect::<BTreeSet<_>>();
+    for district in districts {
+        reconcile_district_majorities(state, district);
     }
     apply_due_mayoral_elections(registry, state);
 }

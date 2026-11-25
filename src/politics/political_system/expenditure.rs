@@ -3,7 +3,7 @@
 
 use super::{
     PoliticalError, campaign_office_available, eligible_candidate, eligible_manager,
-    initiative_ready, next_municipal_election_day, valid_scope,
+    initiative_ready, next_municipal_election_day, reconcile_district_majorities, valid_scope,
 };
 use crate::core::id::{CharacterId, FinancialAccountId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
@@ -130,6 +130,16 @@ pub(super) fn validate_spend(
 
 impl ValidatedPoliticalOrder {
     pub fn commit(self, state: &mut AppState) -> Result<(), PoliticalError> {
+        self.commit_order(state, true)
+    }
+
+    /// Daily rival spending is one part of the maintenance cohort; the daily owner reconciles
+    /// every ward after all decay, staff output and investments have been applied.
+    pub(super) fn commit_daily(self, state: &mut AppState) -> Result<(), PoliticalError> {
+        self.commit_order(state, false)
+    }
+
+    fn commit_order(self, state: &mut AppState, reconcile: bool) -> Result<(), PoliticalError> {
         ensure_time_current(state.now(), self.at).map_err(|_| PoliticalError::Stale)?;
         if !valid_scope(state, self.owner, self.district) {
             return Err(PoliticalError::Stale);
@@ -224,6 +234,14 @@ impl ValidatedPoliticalOrder {
             }
             CampaignAction::Nominate(candidacy) => campaign.candidacy = Some(candidacy),
             CampaignAction::Salary => {}
+        }
+        if reconcile
+            && matches!(
+                self.action,
+                CampaignAction::Invest(_) | CampaignAction::Initiative(..)
+            )
+        {
+            reconcile_district_majorities(state, self.district);
         }
         Ok(())
     }

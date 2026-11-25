@@ -1,4 +1,3 @@
-use super::commercial_standing::{established_business, recent_business_net};
 use super::*;
 use crate::build_registry;
 use crate::core::entity::EntityRef;
@@ -2857,10 +2856,23 @@ fn long_owned_low_margin_storefront_does_not_create_political_leverage() {
         .commit(&mut city.state)
         .unwrap();
     }
-    assert!(established_business(&city.state, storefront, city.player));
-    let earned = recent_business_net(&city.state, storefront, city.player);
-    assert!(earned > 0);
-    assert!(earned < i128::from(one_wage) * i128::from(VICTORY_INCOME_WINDOW_DAYS));
+    let district = city
+        .state
+        .world()
+        .get_business(storefront)
+        .unwrap()
+        .neighborhood();
+    let title = political_business_progress(&city.state, district)
+        .unwrap()
+        .into_iter()
+        .find(|title| title.business == storefront)
+        .expect("acquired storefront appears in its district's title evidence");
+    assert!(title.established);
+    assert!(title.recent_net > Money::ZERO);
+    assert!(
+        i128::from(title.recent_net.cents())
+            < i128::from(one_wage) * i128::from(VICTORY_INCOME_WINDOW_DAYS)
+    );
     let standing = progress(&registry, &city.state).unwrap();
     assert_eq!(standing.owned_operating_business_districts, 2);
     assert_eq!(standing.established_business_districts, 0);
