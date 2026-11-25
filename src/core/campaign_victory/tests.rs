@@ -77,6 +77,71 @@ fn retirement_fixture() -> (Registry, AppState, OrganizationId, CharacterId, Cha
     (registry, state, owner, boss, member)
 }
 
+#[test]
+fn underboss_reserve_includes_organization_operating_liquidity_and_deficits() {
+    let (registry, mut state, owner, _, _) = retirement_fixture();
+    let baseline = progress(&registry, &state)
+        .unwrap()
+        .underboss_liquid_reserve;
+    let operating = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let debt = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(owner),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Operating liquidity and separate debt".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: operating,
+                    amount: Money::from_cents(100_000),
+                },
+                LedgerPosting {
+                    account: debt,
+                    amount: Money::from_cents(-25_000),
+                },
+                LedgerPosting {
+                    account: settlement,
+                    amount: Money::from_cents(-75_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    assert_eq!(
+        progress(&registry, &state)
+            .unwrap()
+            .underboss_liquid_reserve,
+        baseline.checked_add(Money::from_cents(75_000)).unwrap(),
+        "organization-owned operating accounts fund wages; their deficits also reduce reserves"
+    );
+    validate_invariants(&state);
+}
+
 /// A qualifying boss actually runs a local racket for 90 profitable days before
 /// collecting the clean nest egg. These are canonical enterprise settlements,
 /// not constructed revenue records or a victory-validator bypass.
@@ -999,6 +1064,25 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
             district.established_active
         );
         assert!(titles.iter().all(|title| title.days_until_mature == 0));
+        for title in &titles {
+            let business = city.state.world().get_business(title.business).unwrap();
+            let expected = city
+                .state
+                .economy()
+                .cycles_for(title.business)
+                .filter(|cycle| {
+                    cycle.occurred_at().as_minutes() > recent_income_start(city.state.now())
+                        && cycle.occurred_at() <= city.state.now()
+                        && cycle.business_version() == business.version()
+                        && cycle.owner() == BusinessOwner::Organization(city.player)
+                        && cycle.net_cash() > Money::ZERO
+                })
+                .count();
+            assert_eq!(
+                title.profitable_cycles, expected,
+                "title progress must report the complete window, not cap it at the qualification threshold"
+            );
+        }
         assert!(
             titles
                 .iter()

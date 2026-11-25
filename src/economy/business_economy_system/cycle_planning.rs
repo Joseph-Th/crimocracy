@@ -567,23 +567,13 @@ pub(crate) fn resolve_business_current_gross(
         .is_disrupted(state.now());
     let market = resolve_market_snapshot(state, business)?;
     let normal = resolve_business_gross_potential(registry, state, business)?;
-    let gross = resolve_disrupted_gross(
+    resolve_market_adjusted_gross(
         business,
         normal,
-        market.gross_basis_points(
-            disrupted,
-            registry.business_disruption().gross_basis_points(),
-        ),
-    )?;
-    if disrupted {
-        resolve_disrupted_gross(
-            business,
-            gross,
-            registry.business_disruption().gross_basis_points(),
-        )
-    } else {
-        Ok(gross)
-    }
+        registry.business_disruption().gross_basis_points(),
+        disrupted,
+        market,
+    )
 }
 
 /// Re-derive business gross with an explicit historical disruption fact. A completed take
@@ -635,6 +625,26 @@ pub(super) fn resolve_gross_before_variance(
         .ok_or(BusinessEconomyError::ArithmeticOverflow(business))
 }
 
+/// Shared earning-power calculation for live projections and settled cycles.
+fn resolve_market_adjusted_gross(
+    business: BusinessId,
+    normal_gross: Money,
+    disruption_gross_basis_points: u32,
+    disrupted: bool,
+    market: MarketSnapshot,
+) -> Result<Money, BusinessEconomyError> {
+    let market_gross = resolve_disrupted_gross(
+        business,
+        normal_gross,
+        market.gross_basis_points(disrupted, disruption_gross_basis_points),
+    )?;
+    if disrupted {
+        resolve_disrupted_gross(business, market_gross, disruption_gross_basis_points)
+    } else {
+        Ok(market_gross)
+    }
+}
+
 /// One owner for the authored business-cycle arithmetic used by both live settlement and
 /// persistence re-derivation. `disrupted` is supplied explicitly so historical validation uses
 /// the cycle's frozen sabotage fact rather than the economy's mutable current disruption horizon.
@@ -655,16 +665,13 @@ pub(super) fn resolve_cycle_financials(
         });
     }
     let normal_gross = resolve_gross_before_variance(business, economics, profile)?;
-    let normal_gross = resolve_disrupted_gross(
+    let gross_before_variance = resolve_market_adjusted_gross(
         business,
         normal_gross,
-        market.gross_basis_points(disrupted, disruption_gross_basis_points),
+        disruption_gross_basis_points,
+        disrupted,
+        market,
     )?;
-    let gross_before_variance = if disrupted {
-        resolve_disrupted_gross(business, normal_gross, disruption_gross_basis_points)?
-    } else {
-        normal_gross
-    };
     let gross_revenue =
         resolve_basis_point_variance(business, gross_before_variance, variance_basis_points)?;
     let police_cost = weighted_rating(

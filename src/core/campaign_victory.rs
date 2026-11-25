@@ -681,12 +681,7 @@ pub fn progress_and_political_districts(
     let underboss_liquid_reserve = state
         .finance()
         .accounts_for(FinancialOwner::Organization(organization))
-        .filter(|account| {
-            matches!(
-                account.kind(),
-                AccountKind::StreetCash | AccountKind::ConcealedCash | AccountKind::AccountedFunds
-            )
-        })
+        .filter(|account| account.kind().is_liquid())
         .map(|account| {
             let balance = i128::from(account.balance().cents());
             if balance < 0 {

@@ -96,7 +96,6 @@ fn profitable_business_cycles(
                 && cycle.owner() == BusinessOwner::Organization(owner)
                 && cycle.net_cash() > Money::ZERO
         })
-        .take(VICTORY_PROFITABLE_CYCLES)
         .count()
 }
 
