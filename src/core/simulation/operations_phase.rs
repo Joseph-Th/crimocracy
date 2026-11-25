@@ -170,6 +170,7 @@ fn operation_phase_batch_is_terminally_blocked(error: &OperationPhaseBatchError)
             | DecisionError::RecruitmentApprovalRequiresPersonnelScope { .. }
             | DecisionError::RecruitmentApprovalOrganizationMismatch { .. }
             | DecisionError::RecruitmentApprovalPolicyMismatch { .. }
+            | DecisionError::AutonomousRecruitmentApprovalUnavailable(_)
             | DecisionError::StaleRecruitmentApprovalAuthority
             | DecisionError::MissingDecision(_)
             | DecisionError::DecisionNotPending(_)

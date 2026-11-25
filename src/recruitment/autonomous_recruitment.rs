@@ -386,6 +386,14 @@ fn prepare_recruitment_authorities(
         let PolicySetting::IndependentRecruitment(policy) = resolved_policy.setting else {
             unreachable!("independent-recruitment policy lookup returned another policy kind");
         };
+        // Independent authority survives temporary executive incapacity, but an
+        // approval-required NPC pitch cannot invent an executive's consent.
+        if policy == ApprovalPolicy::RequireApproval
+            && state.player_organization() != Some(organization)
+            && crate::world::world_system::sole_available_executive(state, organization).is_none()
+        {
+            continue;
+        }
         if policy.recruitment_limit().is_some_and(|limit| {
             state
                 .world()

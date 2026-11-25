@@ -125,6 +125,8 @@ pub enum DecisionError {
     },
     #[error("recruitment approval request requires RequireApproval policy, found {policy:?}")]
     RecruitmentApprovalPolicyMismatch { policy: ApprovalPolicy },
+    #[error("organization {0} has no sole available executive for autonomous recruitment approval")]
+    AutonomousRecruitmentApprovalUnavailable(OrganizationId),
     #[error(
         "recruitment approval authority or effective policy changed after the request was created"
     )]

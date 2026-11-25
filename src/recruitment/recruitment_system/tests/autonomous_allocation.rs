@@ -2,6 +2,125 @@
 
 use super::*;
 
+#[test]
+fn rival_recruitment_approval_requires_sole_available_executive() {
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));
+    let other_root = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Rival executive".to_owned(),
+            organization: Some(fixture.target),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    fixture
+        .state
+        .advance_clock(fixture.registry.recruitment().autonomous_attempt_cadence());
+    let before = bincode::serialize(&fixture.state).unwrap();
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let outcome = apply_due_autonomous_recruitment(&fixture.registry, state).unwrap();
+        assert!(outcome.attempts.is_empty());
+        assert!(outcome.approval_requests.is_empty());
+        assert_eq!(bincode::serialize(state).unwrap(), before);
+        crate::world::world_system::validate_set_character_supervisor(
+            state,
+            fixture.recruiter,
+            Some(other_root),
+        )
+        .unwrap()
+        .commit(state)
+        .unwrap();
+        state.advance_clock(fixture.registry.recruitment().autonomous_attempt_cadence());
+        let outcome = apply_due_autonomous_recruitment(&fixture.registry, state).unwrap();
+        assert_eq!(outcome.attempts.len(), 1);
+        assert_eq!(outcome.approval_requests.len(), 1);
+        assert_eq!(
+            state
+                .decisions()
+                .get_decision(outcome.approval_requests[0].decision)
+                .unwrap()
+                .status(),
+            DecisionStatus::Resolved
+        );
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
+fn detained_executive_blocks_only_approval_required_rival_recruitment() {
+    for policy in [ApprovalPolicy::RequireApproval, ApprovalPolicy::Delegated] {
+        let mut fixture = fixture();
+        let executive = insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: "Rival executive".to_owned(),
+                organization: Some(fixture.target),
+                supervisor: None,
+                autonomy: AutonomyLevel::Broad,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        crate::world::world_system::validate_set_character_supervisor(
+            &fixture.state,
+            fixture.recruiter,
+            Some(executive),
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        assign_personnel_mandate(&mut fixture, Some(policy));
+        let arrest = detain_recruitment_character(&mut fixture, executive, "Executive custody");
+        fixture
+            .state
+            .advance_clock(fixture.registry.recruitment().autonomous_attempt_cadence());
+        let before = bincode::serialize(&fixture.state).unwrap();
+        let outcome =
+            apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+        assert!(outcome.approval_requests.is_empty());
+        if policy == ApprovalPolicy::RequireApproval {
+            assert!(outcome.attempts.is_empty());
+            assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+            crate::legal::arrest_system::validate_release_arrest(&fixture.state, arrest)
+                .unwrap()
+                .commit(&mut fixture.state)
+                .unwrap();
+            fixture
+                .state
+                .advance_clock(fixture.registry.recruitment().autonomous_attempt_cadence());
+            let outcome =
+                apply_due_autonomous_recruitment(&fixture.registry, &mut fixture.state).unwrap();
+            assert_eq!(outcome.attempts.len(), 1);
+            assert_eq!(outcome.approval_requests.len(), 1);
+        } else {
+            assert_eq!(outcome.attempts.len(), 1);
+        }
+        validate_invariants(&fixture.state);
+        restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, &fixture.state).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
 fn add_personnel_crew(
     fixture: &mut Fixture,
     policy: ApprovalPolicy,

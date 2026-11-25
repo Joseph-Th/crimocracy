@@ -205,6 +205,11 @@ impl ValidatedRecruitmentApprovalRequest {
     ) -> Result<ValidatedAutonomousRecruitmentApproval, DecisionError> {
         let context = self.context();
         debug_assert_ne!(state.player_organization(), Some(self.recipient));
+        if crate::world::world_system::sole_available_executive(state, self.recipient).is_none() {
+            return Err(DecisionError::AutonomousRecruitmentApprovalUnavailable(
+                self.recipient,
+            ));
+        }
         if !self.options.contains(&response) {
             return Err(DecisionError::InvalidResponse {
                 decision: predicted_decision,
