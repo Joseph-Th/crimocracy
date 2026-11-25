@@ -222,23 +222,26 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
         .peekable();
     let proprietor = properties.peek().is_some();
     let owned = properties
-        .filter(|business| {
-            state
-                .economy()
-                .get_business_economy(business.id())
-                .is_some_and(|record| record.status() == BusinessOperatingStatus::Active)
-        })
-        .map(|business| {
-            // A sale starts a new ownership period. The predecessor's last
-            // settlement must not change the new proprietor's standing or
-            // workload before their own first operating cycle has closed.
+        .filter_map(|business| {
+            let economy = state.economy().get_business_economy(business.id())?;
+            if economy.status() != BusinessOperatingStatus::Active {
+                return None;
+            }
+            // Only settlements in the current ownership and operating period
+            // can affect the proprietor. Reopening starts a new period even
+            // when the title has not changed.
             let cycle = state
                 .economy()
                 .cycles_for(business.id())
                 .next_back()
-                .filter(|cycle| cycle.business_version() == business.version());
+                .filter(|cycle| {
+                    cycle.business_version() == business.version()
+                        && economy
+                            .loss_streak_anchor()
+                            .is_none_or(|anchor| cycle.occurred_at() > anchor)
+                });
             let profit = cycle.map_or(0, |cycle| cycle.net_cash().cents());
-            (business.id(), profit)
+            Some((business.id(), profit))
         })
         // The owner visits the most troubled active business, not necessarily
         // the earliest property in its personal portfolio.
@@ -424,21 +427,15 @@ pub fn apply_due_character_lives(state: &mut AppState) -> usize {
     let changes: Vec<_> = state
         .world()
         .characters()
-        .map(|person| {
+        .filter_map(|person| {
             let work = choose_work(state, person.id(), day);
-            (person.id(), finish_day(person.life(), state.now(), work))
+            let life = finish_day(person.life(), state.now(), work);
+            (person.life() != life).then_some((person.id(), life))
         })
         .collect();
-    let mut changed = 0;
+    let changed = changes.len();
     for (id, life) in changes {
-        if state
-            .world()
-            .get_character(id)
-            .is_some_and(|person| person.life() != life)
-        {
-            state.world.update_character_life(id, life);
-            changed += 1;
-        }
+        state.world.update_character_life(id, life);
     }
     changed
 }
@@ -596,6 +593,113 @@ mod business_work_tests {
     }
 
     #[test]
+    fn reopened_proprietor_does_not_reuse_pre_suspension_earnings() {
+        let registry = build_registry();
+        let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+        let (owner, business) = city
+            .state
+            .world()
+            .businesses()
+            .find_map(|shop| {
+                let BusinessOwner::Character(owner) = shop.owner() else {
+                    return None;
+                };
+                if city
+                    .state
+                    .world()
+                    .businesses_owned_by_character(owner)
+                    .count()
+                    != 1
+                {
+                    return None;
+                }
+                city.state
+                    .economy()
+                    .get_business_economy(shop.id())
+                    .filter(|economy| economy.status() == BusinessOperatingStatus::Active)
+                    .map(|_| (owner, shop.id()))
+            })
+            .unwrap();
+        let due = city
+            .state
+            .economy()
+            .get_business_economy(business)
+            .unwrap()
+            .next_cycle_at()
+            .unwrap();
+        city.state.advance_clock(SimDuration::from_minutes(
+            u32::try_from(due.as_minutes()).unwrap(),
+        ));
+        crate::opportunities::opportunity_system::apply_opportunity_expiry(
+            &registry,
+            &mut city.state,
+        )
+        .unwrap();
+        let plan = decide_business_cycle(&registry, &city.state, business, 0).unwrap();
+        let cycle = validate_business_cycle_plan(&city.state, plan)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        assert_ne!(
+            city.state.economy().get_cycle(cycle).unwrap().net_cash(),
+            Money::ZERO
+        );
+        validate_suspend_business_economy(&city.state, business)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+        crate::economy::business_economy_system::validate_resume_business_economy(
+            &registry,
+            &city.state,
+            business,
+        )
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+
+        let day = city.state.now().as_minutes() / DAY_MINUTES;
+        let working_day = (day..day + 7)
+            .find(|&day| !(day + u64::from(owner.raw())).is_multiple_of(7))
+            .unwrap();
+        let work = choose_work(&city.state, owner, working_day);
+        assert_eq!(
+            work.action,
+            Some(CivicActivity::BusinessManagement(business))
+        );
+        assert_eq!(work.business_profit, 0);
+        let mut restored =
+            restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+        assert_eq!(
+            choose_work(&restored, owner, working_day).business_profit,
+            0
+        );
+
+        for state in [&mut city.state, &mut restored] {
+            let due = state
+                .economy()
+                .get_business_economy(business)
+                .unwrap()
+                .next_cycle_at()
+                .unwrap();
+            state.advance_clock(SimDuration::from_minutes(
+                u32::try_from(due.as_minutes() - state.now().as_minutes()).unwrap(),
+            ));
+            crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, state)
+                .unwrap();
+            let plan = decide_business_cycle(&registry, state, business, 0).unwrap();
+            let cycle = validate_business_cycle_plan(state, plan)
+                .unwrap()
+                .commit(state)
+                .unwrap();
+            let net = state.economy().get_cycle(cycle).unwrap().net_cash();
+            assert_ne!(net, Money::ZERO);
+            let work = choose_work(state, owner, working_day);
+            assert_eq!(work.business_profit, if net > Money::ZERO { 1 } else { -1 });
+            validate_invariants(state);
+        }
+    }
+
+    #[test]
     fn new_proprietor_does_not_inherit_previous_owners_earnings_record() {
         let registry = build_registry();
         let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
@@ -607,6 +711,15 @@ mod business_work_tests {
                 let BusinessOwner::Character(owner) = shop.owner() else {
                     return None;
                 };
+                if city
+                    .state
+                    .world()
+                    .businesses_owned_by_character(owner)
+                    .count()
+                    != 1
+                {
+                    return None;
+                }
                 city.state
                     .economy()
                     .get_business_economy(shop.id())
