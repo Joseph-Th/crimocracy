@@ -16,6 +16,7 @@ use crate::core::id::{
 };
 use crate::core::time::SimTime;
 use crate::core::version::advance_version_preflighted;
+use crate::finance::Money;
 use crate::legal::investigation_system::evidence_is_actionable_case_lead;
 use crate::legal::records::{
     ArrestRecord, ArrestStatus, CaseWitnessRecord, EvidenceRecord, InformantDisclosureRecord,
@@ -405,7 +406,15 @@ impl LegalState {
     }
 
     fn rebuild_prosecution_indexes(&mut self) {
+        self.indexes
+            .prosecutions
+            .awaiting_initial_review
+            .extend(self.arrests.keys().copied());
         for case in self.prosecution_cases.values() {
+            self.indexes
+                .prosecutions
+                .awaiting_initial_review
+                .remove(&case.arrest());
             self.indexes
                 .prosecutions
                 .by_arrest

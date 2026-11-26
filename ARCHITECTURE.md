@@ -413,7 +413,7 @@ determinism and client contracts.
 11  apply_autonomous_evidence_arrests      active LawEnforcement cases: independent-evidence threshold → custody + responsibility preemption + managed enterprise suspension
                                             reconstruct authority/defendant release and cited-racket history for qualifying candidates; 60-day routine cooldown, no recycled vice incident after unrelated custody
 12  apply_autonomous_prosecution_staffing  refill prosecution seats released by custody
-    ──► apply_due_prosecution_referrals    daily one action per available prosecutor; due reviews first (oldest opening first), supplement verdict-changing evidence before judgment, then existing review work by oldest last referral, then new intake; own-member notice
+    ──► apply_due_prosecution_referrals    daily one action per available prosecutor; due reviews first (oldest opening first), supplement verdict-changing evidence before judgment, then existing review work by oldest last referral, then new intake from the derived set of arrests with no prosecution history (including released defendants); own-member notice
 13  apply_automatic_legal_support          conclude only after custody and every open prosecution review end;
                                                 retain for custody or open post-release prosecution,
                                                 with pending detainee decisions funded first
@@ -434,7 +434,7 @@ determinism and client contracts.
           wage-driven departures suspend live rackets before revoking mandates and releasing membership; suspended player rackets remain recoverable by succession; history gates return; assetless final abandonment can end a player campaign
     ──► apply_due_political_campaigns     after payroll; decay, funded work, rival spending, tenure
     ──► apply_due_fine_collections
-          court fines collect only from convicted defendants' accessible personal funds, including wages
+          court fines collect only from convicted defendants' accessible personal funds, including wages; a derived unpaid-balance index drops settled judgments and is rebuilt from the authoritative judgments and payment ledger
     ──► apply_reputation_phase           decay and current operation/racket consequences
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence
     ──► apply_due_overstretched_manager_suspensions

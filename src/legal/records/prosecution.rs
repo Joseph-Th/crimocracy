@@ -237,6 +237,10 @@ pub(in crate::legal) struct ProsecutionIndexes {
     /// All cases keyed by their originating arrest, including resolved history.
     /// Representation validation must prove past matters without scanning unrelated cases.
     pub(in crate::legal) by_arrest: BTreeMap<ArrestId, BTreeSet<ProsecutionCaseId>>,
+    /// Custody episodes with no prosecution history, including released defendants.
+    pub(in crate::legal) awaiting_initial_review: BTreeSet<ArrestId>,
+    /// Positive outstanding personal fines; reconstructed from judgments and ledger history.
+    pub(in crate::legal) unpaid_fines: BTreeMap<ProsecutionCaseId, Money>,
     /// Reviewing cases currently assigned to each prosecutor. Terminal case history is not
     /// retained here because actor attribution is stored on referral/resolution records.
     pub(in crate::legal) reviewing_cases_by_prosecutor:

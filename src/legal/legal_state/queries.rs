@@ -290,6 +290,33 @@ impl LegalState {
             .next()
             .is_some()
     }
+    /// Only arrests that have never entered prosecution review.
+    pub(crate) fn arrests_awaiting_initial_review(&self) -> impl Iterator<Item = &ArrestRecord> {
+        self.indexes
+            .prosecutions
+            .awaiting_initial_review
+            .iter()
+            .map(|id| self.arrests.get(id).expect("pending review owns an arrest"))
+    }
+
+    /// Positive outstanding fines, in stable case-ID order.
+    pub(crate) fn unpaid_fines(&self) -> impl Iterator<Item = (ProsecutionCaseId, Money)> + '_ {
+        self.indexes
+            .prosecutions
+            .unpaid_fines
+            .iter()
+            .map(|(id, amount)| (*id, *amount))
+    }
+
+    pub(crate) fn outstanding_fine(&self, case: ProsecutionCaseId) -> Money {
+        self.indexes
+            .prosecutions
+            .unpaid_fines
+            .get(&case)
+            .copied()
+            .unwrap_or(Money::ZERO)
+    }
+
     /// Arrests with at least one reviewing prosecution, without duplicate candidates when
     /// several prosecutor offices hold separate cases against the same defendant.
     pub(crate) fn arrests_with_open_prosecutions(&self) -> impl Iterator<Item = ArrestId> + '_ {

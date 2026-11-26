@@ -14,7 +14,7 @@ use crate::finance::{
     Money,
 };
 use crate::legal::{ProsecutionCaseRecord, ProsecutionCaseStatus};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn memo(id: ProsecutionCaseId) -> String {
     format!("Court fine payment for {id}")
@@ -75,16 +75,37 @@ pub(super) fn outstanding(state: &AppState, case: &ProsecutionCaseRecord) -> Opt
 /// Ledger history must reconcile to the individual court order. No payment can
 /// discharge two debts and no organizational, business, or concealed balance
 /// can be attributed to a defendant's fine.
-pub(crate) fn validate_fine_history(state: &AppState) -> bool {
+fn derive_unpaid_fines(state: &AppState) -> Option<BTreeMap<ProsecutionCaseId, Money>> {
     let mut seen = BTreeSet::new();
-    state.legal().prosecution_cases().all(|case| {
-        case.judgment().is_none_or(|judgment| {
-            outstanding(state, case).is_some()
-                && judgment.payments().iter().all(|id| seen.insert(*id))
-                && (case.status() == ProsecutionCaseStatus::Convicted
-                    || judgment.payments().is_empty())
-        })
-    })
+    let mut debts = BTreeMap::new();
+    for case in state.legal().prosecution_cases() {
+        let Some(judgment) = case.judgment() else {
+            continue;
+        };
+        let remaining = outstanding(state, case)?;
+        if !judgment.payments().iter().all(|id| seen.insert(*id)) {
+            return None;
+        }
+        if case.status() == ProsecutionCaseStatus::Convicted {
+            if remaining > Money::ZERO {
+                debts.insert(case.id(), remaining);
+            }
+        } else if !judgment.payments().is_empty() {
+            return None;
+        }
+    }
+    Some(debts)
+}
+
+pub(crate) fn validate_fine_history(state: &AppState) -> bool {
+    derive_unpaid_fines(state).is_some_and(|expected| state.legal().unpaid_fines().eq(expected))
+}
+
+/// Restore after finance and legal indexes have been rebuilt. Malformed history
+/// remains a structural validation error at the subsequent save/load boundary.
+pub(crate) fn rebuild_fine_debts(state: &mut AppState) {
+    let debts = derive_unpaid_fines(state).unwrap_or_default();
+    state.legal.rebuild_unpaid_fines(debts);
 }
 
 pub(crate) fn apply_due_fine_collections(
@@ -93,16 +114,11 @@ pub(crate) fn apply_due_fine_collections(
     if !is_day_boundary(state.now()) {
         return Ok(Vec::new());
     }
-    let cases: Vec<_> = state
-        .legal()
-        .prosecution_cases()
-        .filter(|case| case.status() == ProsecutionCaseStatus::Convicted)
-        .map(|case| case.id())
-        .collect();
+    let cases: Vec<_> = state.legal().unpaid_fines().collect();
     let mut payments = Vec::new();
     // Each collection sees the balance left by previous orders. No overlapping
     // debit plan or stale account token can overdraw the same personal funds.
-    for id in cases {
+    for (id, mut needed) in cases {
         let case = state
             .legal()
             .get_prosecution_case(id)
@@ -110,10 +126,7 @@ pub(crate) fn apply_due_fine_collections(
         if case.version() == u32::MAX {
             continue;
         }
-        let mut needed = outstanding(state, case).expect("valid court debt reconciles");
-        if needed <= Money::ZERO {
-            continue;
-        }
+        debug_assert!(needed > Money::ZERO);
         let mut postings = Vec::new();
         let mut collected = Money::ZERO;
         for account in state
@@ -185,7 +198,7 @@ pub(crate) fn apply_due_fine_collections(
         let Ok(payment) = plan.commit(state) else {
             continue;
         };
-        state.legal.record_fine_payment(id, payment);
+        state.legal.record_fine_payment(id, payment, collected);
         payments.push(payment);
     }
     Ok(payments)

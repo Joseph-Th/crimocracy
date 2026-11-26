@@ -826,6 +826,15 @@ fn autonomous_prosecution_uses_one_daily_intake_slot_per_prosecutor() {
     )
     .unwrap();
     let second_arrest = detain_character(&mut fixture, second, "Second");
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .arrests_awaiting_initial_review()
+            .map(|a| a.id())
+            .collect::<Vec<_>>(),
+        vec![fixture.arrest, second_arrest]
+    );
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(DAY_DURATION.as_minutes() - 1));
@@ -839,6 +848,33 @@ fn autonomous_prosecution_uses_one_daily_intake_slot_per_prosecutor() {
             .next()
             .is_none()
     );
+    validate_release_arrest(&fixture.state, second_arrest)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .arrests_awaiting_initial_review()
+            .map(|a| a.id())
+            .collect::<Vec<_>>(),
+        vec![second_arrest]
+    );
+    fixture.state = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .arrests_awaiting_initial_review()
+            .map(|a| a.id())
+            .collect::<Vec<_>>(),
+        vec![second_arrest]
+    );
     fixture
         .state
         .advance_clock(SimDuration::from_minutes(DAY_DURATION.as_minutes() - 1));
@@ -851,6 +887,14 @@ fn autonomous_prosecution_uses_one_daily_intake_slot_per_prosecutor() {
             .prosecution_cases_for_arrest(second_arrest)
             .next()
             .is_some()
+    );
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .arrests_awaiting_initial_review()
+            .count(),
+        0
     );
     build_save(&fixture.registry, &fixture.state).unwrap();
 }

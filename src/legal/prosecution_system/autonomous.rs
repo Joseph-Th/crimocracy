@@ -406,17 +406,7 @@ pub(crate) fn apply_due_prosecution_referrals(
 
     // Prioritize actual custody, then older referrals; released defendants remain eligible.
     // Prior completed review is not reopened merely because the same arrest still exists.
-    let mut pending: Vec<_> = state
-        .legal()
-        .arrests()
-        .filter(|arrest| {
-            state
-                .legal()
-                .prosecution_cases_for_arrest(arrest.id())
-                .next()
-                .is_none()
-        })
-        .collect();
+    let mut pending: Vec<_> = state.legal().arrests_awaiting_initial_review().collect();
     pending.sort_unstable_by_key(|arrest| {
         (
             arrest.status() != ArrestStatus::Detained,

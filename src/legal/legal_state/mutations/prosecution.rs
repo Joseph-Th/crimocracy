@@ -17,6 +17,10 @@ impl LegalState {
         debug_assert_eq!(case.evidence(), referral.evidence());
         self.indexes
             .prosecutions
+            .awaiting_initial_review
+            .remove(&case.arrest());
+        self.indexes
+            .prosecutions
             .by_arrest
             .entry(case.arrest())
             .or_default()
@@ -160,6 +164,14 @@ impl LegalState {
             ProsecutionCaseStatus::Convicted | ProsecutionCaseStatus::Acquitted
         ));
         debug_assert!(case.resolution_artifacts.judgment.is_none());
+        if judgment.fine() > Money::ZERO && case.status() == ProsecutionCaseStatus::Convicted {
+            let previous = self
+                .indexes
+                .prosecutions
+                .unpaid_fines
+                .insert(id, judgment.fine());
+            debug_assert!(previous.is_none());
+        }
         case.resolution_artifacts.judgment = Some(judgment);
     }
 
@@ -167,7 +179,17 @@ impl LegalState {
         &mut self,
         id: ProsecutionCaseId,
         payment: crate::core::id::LedgerTransactionId,
+        collected: Money,
     ) {
+        let remaining = self.indexes.prosecutions.unpaid_fines[&id]
+            .checked_sub(collected)
+            .expect("validated payment is bounded by debt");
+        assert!(collected > Money::ZERO && remaining >= Money::ZERO);
+        if remaining == Money::ZERO {
+            self.indexes.prosecutions.unpaid_fines.remove(&id);
+        } else {
+            self.indexes.prosecutions.unpaid_fines.insert(id, remaining);
+        }
         let case = self
             .prosecution_cases
             .get_mut(&id)
@@ -182,6 +204,14 @@ impl LegalState {
             .insert(payment);
         debug_assert!(inserted);
         case.version = advance_version_preflighted(case.version);
+    }
+
+    /// Restore-only projection; the ledger and judgments remain authoritative.
+    pub(in crate::legal) fn rebuild_unpaid_fines(
+        &mut self,
+        debts: BTreeMap<ProsecutionCaseId, Money>,
+    ) {
+        self.indexes.prosecutions.unpaid_fines = debts;
     }
 
     pub(in crate::legal) fn set_prosecution_case_prosecutor(

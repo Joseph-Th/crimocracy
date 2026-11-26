@@ -7,6 +7,21 @@ use crate::legal::records::{
 
 impl LegalState {
     pub(super) fn has_consistent_prosecution_indexes(&self) -> bool {
+        let expected_pending = self
+            .arrests
+            .keys()
+            .filter(|id| !self.indexes.prosecutions.by_arrest.contains_key(id))
+            .copied();
+        if !self
+            .indexes
+            .prosecutions
+            .awaiting_initial_review
+            .iter()
+            .copied()
+            .eq(expected_pending)
+        {
+            return false;
+        }
         for case in self.prosecution_cases.values() {
             let id = case.id();
             if !self

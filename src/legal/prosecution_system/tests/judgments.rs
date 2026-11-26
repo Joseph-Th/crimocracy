@@ -594,7 +594,37 @@ fn court_hearing_distinguishes_conviction_from_acquittal_and_collects_only_perso
     let sponsor = sponsor(&fixture);
     // The production intake refers two strong admissible conduct exhibits plus
     // known association. The latter cannot count toward court proof.
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .arrests_awaiting_initial_review()
+            .map(|a| a.id())
+            .collect::<Vec<_>>(),
+        vec![fixture.arrest]
+    );
+    let pending_restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pending_restored
+            .legal()
+            .arrests_awaiting_initial_review()
+            .map(|a| a.id())
+            .collect::<Vec<_>>(),
+        vec![fixture.arrest]
+    );
     let opened = daily_boundary(&fixture.registry, &mut fixture.state).opened_prosecution_cases[0];
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .arrests_awaiting_initial_review()
+            .count(),
+        0
+    );
     validate_release_arrest(&fixture.state, fixture.arrest)
         .unwrap()
         .commit(&mut fixture.state)
@@ -709,9 +739,22 @@ fn court_hearing_distinguishes_conviction_from_acquittal_and_collects_only_perso
     let judgment = defended.state.legal().get_prosecution_case(opened).unwrap();
     assert_eq!(judgment.status(), ProsecutionCaseStatus::Acquitted);
     assert_eq!(judgment.judgment().unwrap().defense(), Some(defense));
+    assert_eq!(defended.state.legal().unpaid_fines().count(), 0);
+    assert_eq!(
+        defended
+            .state
+            .legal()
+            .arrests_awaiting_initial_review()
+            .count(),
+        0
+    );
     let outstanding = member_judgments(&state, sponsor, defended.arrest)[0]
         .outstanding
         .cents();
+    assert_eq!(
+        state.legal().unpaid_fines().collect::<Vec<_>>(),
+        vec![(opened, Money::from_cents(outstanding))]
+    );
     let later = daily_boundary(&defended.registry, &mut state);
     assert_eq!(later.court_fine_payments.len(), 1);
     assert_eq!(
@@ -720,14 +763,70 @@ fn court_hearing_distinguishes_conviction_from_acquittal_and_collects_only_perso
             .cents(),
         outstanding - defended.registry.upkeep().per_member_daily().cents()
     );
-    restore_save(
+    let mut restored = restore_save(
         &defended.registry,
         build_save(&defended.registry, &state).unwrap(),
     )
     .unwrap();
-    restore_save(
+    assert_eq!(
+        state.legal().unpaid_fines().collect::<Vec<_>>(),
+        restored.legal().unpaid_fines().collect::<Vec<_>>()
+    );
+    let remaining = state.legal().outstanding_fine(opened).cents();
+    assert!(remaining > 0);
+    for branch in [&mut state, &mut restored] {
+        fund(branch, source, personal, remaining);
+        let paid = daily_boundary(&defended.registry, branch);
+        assert_eq!(paid.court_fine_payments.len(), 1);
+        assert_eq!(branch.legal().unpaid_fines().count(), 0);
+        assert_eq!(
+            member_judgments(branch, sponsor, defended.arrest)[0].outstanding,
+            Money::ZERO
+        );
+        let history = branch
+            .legal()
+            .get_prosecution_case(opened)
+            .unwrap()
+            .judgment()
+            .unwrap()
+            .payments()
+            .clone();
+        assert!(history.len() >= 3);
+        let next = daily_boundary(&defended.registry, branch);
+        assert!(next.court_fine_payments.is_empty());
+        assert_eq!(
+            branch
+                .legal()
+                .get_prosecution_case(opened)
+                .unwrap()
+                .judgment()
+                .unwrap()
+                .payments(),
+            &history
+        );
+        assert_eq!(branch.legal().arrests_awaiting_initial_review().count(), 0);
+        *branch = restore_save(
+            &defended.registry,
+            build_save(&defended.registry, branch).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(branch.legal().unpaid_fines().count(), 0);
+    }
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    let acquitted_restored = restore_save(
         &defended.registry,
         build_save(&defended.registry, &defended.state).unwrap(),
     )
     .unwrap();
+    assert_eq!(acquitted_restored.legal().unpaid_fines().count(), 0);
+    assert_eq!(
+        acquitted_restored
+            .legal()
+            .arrests_awaiting_initial_review()
+            .count(),
+        0
+    );
 }

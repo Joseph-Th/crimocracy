@@ -323,7 +323,7 @@ pub fn member_judgments(
                 status: case.status(),
                 resolved_at: case.resolved_at()?,
                 fine: judgment.fine(),
-                outstanding: super::fine_collection::outstanding(state, case)?,
+                outstanding: state.legal().outstanding_fine(case.id()),
             })
         })
         .collect()

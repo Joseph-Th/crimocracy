@@ -38,6 +38,8 @@ impl LegalState {
             .entry(record.arrested_at())
             .or_default()
             .insert(id);
+        let pending = self.indexes.prosecutions.awaiting_initial_review.insert(id);
+        debug_assert!(pending);
         let previous = self.arrests.insert(id, record);
         debug_assert!(
             previous.is_none(),

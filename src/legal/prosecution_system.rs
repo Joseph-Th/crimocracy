@@ -5,7 +5,9 @@ mod artifacts;
 mod fine_collection;
 pub use adjudication::member_judgments;
 pub(crate) use adjudication::validate_judgment_history;
-pub(crate) use fine_collection::{apply_due_fine_collections, validate_fine_history};
+pub(crate) use fine_collection::{
+    apply_due_fine_collections, rebuild_fine_debts, validate_fine_history,
+};
 mod autonomous;
 mod staffing;
 

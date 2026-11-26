@@ -268,6 +268,7 @@ impl AppState {
         if !self.legal.rebuild_derived_indexes() {
             return false;
         }
+        crate::legal::prosecution_system::rebuild_fine_debts(self);
         self.reports.rebuild_derived_indexes();
         self.history.rebuild_derived_indexes();
         true
