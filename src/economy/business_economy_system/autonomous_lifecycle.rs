@@ -133,16 +133,17 @@ pub(crate) fn apply_due_autonomous_business_lifecycle(
             .cmp(&left.incremental_owner_daily_net)
             .then(left.business.cmp(&right.business))
     });
-    let mut reopening_sectors = std::collections::BTreeSet::new();
+    let mut reopening_sectors = std::collections::BTreeMap::<_, Vec<_>>::new();
     let mut planned = Vec::new();
     for candidate in candidates {
-        if reopening_sectors.iter().any(|&(district, kind)| {
-            district == candidate.neighborhood
-                && super::market::market_trades_compete(kind, candidate.kind)
-        }) {
+        let local = reopening_sectors.entry(candidate.neighborhood).or_default();
+        if local
+            .iter()
+            .any(|&kind| super::market::market_trades_compete(kind, candidate.kind))
+        {
             continue;
         }
-        reopening_sectors.insert((candidate.neighborhood, candidate.kind));
+        local.push(candidate.kind);
         planned.push((candidate.business, candidate.resume));
     }
     // The economic choice is independent of ID order; committing and reporting in stable ID

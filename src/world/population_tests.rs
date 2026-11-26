@@ -515,6 +515,44 @@ fn paid_freelance_contract_is_personal_temporary_and_recruitable_after_expiry() 
         .unwrap()
         .id();
     let manager = city.boss;
+    let rival = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            person.supervisor().is_none()
+                && person.organization().is_some_and(|organization| {
+                    organization != city.player
+                        && city
+                            .state
+                            .world()
+                            .get_organization(organization)
+                            .unwrap()
+                            .kind()
+                            == crate::world::OrganizationKind::Criminal
+                })
+        })
+        .unwrap();
+    let rival_organization = rival.organization().unwrap();
+    let rival = rival.id();
+    let mut dimensions = crate::social::RelationshipDimensions::zero();
+    dimensions.trust = crate::social::RelationshipLevel::try_new(90).unwrap();
+    crate::social::relationship_system::validate_set_relationship(
+        &city.state,
+        freelancer,
+        rival,
+        dimensions,
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    let rival_pitch = RecruitmentDraft {
+        target_organization: rival_organization,
+        recruiter: rival,
+        candidate: freelancer,
+        approach: RecruitmentApproach::FinancialOpportunity,
+    };
+    assert!(validate_recruitment_attempt(&registry, &city.state, rival_pitch).is_ok());
     let now = city.state.now();
     let before = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
     assert!(matches!(
@@ -535,6 +573,24 @@ fn paid_freelance_contract_is_personal_temporary_and_recruitable_after_expiry() 
         validate_hire_freelancer(&city.state, city.player, freelancer, manager, 2).unwrap();
     let fee = signed.fee_cents();
     signed.commit(&mut city.state).unwrap();
+    let contracted = bincode::serialize(&city.state).unwrap();
+    assert!(matches!(
+        validate_recruitment_attempt(&registry, &city.state, rival_pitch),
+        Err(crate::recruitment::recruitment_system::RecruitmentError::World(
+            crate::world::world_system::WorldError::ActiveFreelanceTransfer(character)
+        )) if character == freelancer
+    ));
+    assert!(
+        !crate::recruitment::recruitment_system::find_recruitment_candidates(
+            &registry,
+            &city.state,
+            rival_organization,
+            rival,
+        )
+        .unwrap()
+        .contains(&freelancer)
+    );
+    assert_eq!(contracted, bincode::serialize(&city.state).unwrap());
     let contract = city
         .state
         .world()
@@ -634,6 +690,7 @@ fn paid_freelance_contract_is_personal_temporary_and_recruitable_after_expiry() 
         },
     )
     .expect("formerly contracted freelancer must be considered by the real recruitment owner");
+    assert!(validate_recruitment_attempt(&registry, &city.state, rival_pitch).is_ok());
     validate_invariants(&city.state);
     restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
 }

@@ -206,6 +206,25 @@ fn generated_city_has_hundreds_of_real_people_and_hires_a_freelancer_for_a_fixed
         .unwrap()
         .0;
     assert!(outcome.contains("Contracted"), "{outcome}");
+    let expiry = session
+        .state
+        .world()
+        .active_freelance_contract(worker)
+        .unwrap()
+        .expires_at();
+    let before = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let roster = session.execute("people").unwrap().0;
+    assert!(
+        roster.contains(&format!("Freelance contract expires {expiry}")),
+        "{roster}"
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(roster, session.execute("people").unwrap().0);
     assert_eq!(
         session
             .state

@@ -528,6 +528,12 @@ mod tests {
             district: "Test ward".to_owned(),
             district_variant: "TEST",
         };
+        let roster = session.execute("people").unwrap().0;
+        assert!(
+            roster.contains("Freelance contract expired day 2 00:00; release pending"),
+            "{roster}"
+        );
+        assert_eq!(roster, restored.execute("people").unwrap().0);
         let released = session.execute("advance 1m uninterrupted").unwrap().0;
         assert_eq!(
             released,

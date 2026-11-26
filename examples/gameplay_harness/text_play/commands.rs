@@ -210,6 +210,18 @@ impl Session<'_> {
                         supervisor
                     )
                     .unwrap();
+                    if let Some(contract) = state.world().active_freelance_contract(person.id()) {
+                        let expiry = contract.expires_at();
+                        if expiry <= state.now() {
+                            writeln!(
+                                out,
+                                "  Freelance contract expired {expiry}; release pending"
+                            )
+                            .unwrap();
+                        } else {
+                            writeln!(out, "  Freelance contract expires {expiry}").unwrap();
+                        }
+                    }
                     let capabilities = ALL_CAPABILITY_KINDS
                         .into_iter()
                         .filter_map(|kind| {

@@ -1250,6 +1250,12 @@ fn text_play_district_racket_settles_and_restores_with_original_business_racket(
     let cash = starting_cash(&session);
     let settlement = fresh_settlement(&mut session);
     let before = snapshot(&registry, &session);
+    let malformed = format!("start-racket pro!tection district-1 {cash} {settlement}");
+    assert_eq!(
+        session.execute(&malformed).unwrap_err(),
+        "unknown racket kind 'pro!tection'; use 'racket-kinds'"
+    );
+    assert_eq!(before, snapshot(&registry, &session));
     for command in [
         format!("start-racket gambling district-1 {cash} {settlement}"),
         format!("start-racket protection district-99 {cash} {settlement}"),

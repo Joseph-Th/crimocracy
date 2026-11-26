@@ -106,6 +106,8 @@ pub enum WorldError {
     FreelanceSupervisor(CharacterId),
     #[error("contracted freelancer {0} must retain a supervisor while employed")]
     FreelanceExecutive(CharacterId),
+    #[error("contracted freelancer {0} cannot join another organization until released")]
+    ActiveFreelanceTransfer(CharacterId),
     #[error("cannot assign supervisor {supervisor} to a character without an organization")]
     SupervisorWithoutOrganization { supervisor: CharacterId },
     #[error("character {character} cannot supervise itself")]
@@ -558,6 +560,11 @@ fn validate_reassignment_preconditions(
         return Err(WorldError::FreelanceExecutive(character));
     }
     if organization_changed {
+        // A paid term binds the worker to its sponsor until the canonical release path
+        // ends employment. Wage-driven departures may still release them to independence.
+        if organization.is_some() && state.world.active_freelance_contract(character).is_some() {
+            return Err(WorldError::ActiveFreelanceTransfer(character));
+        }
         if let Some(organization) = organization
             && let Some(decision) = state
                 .decisions()

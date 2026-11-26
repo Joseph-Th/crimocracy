@@ -153,7 +153,7 @@ impl Session<'_> {
                 } else if acquisition_offer(self.registry, state, self.player, business).is_some() {
                     writeln!(out, "  Purchase status: independently listed; use 'buy {raw}' (funds checked at purchase).").unwrap();
                 } else {
-                    writeln!(out, "  Purchase status: not available for direct purchase; 'offer {raw} <cents>' may work for an organization-held property, but seller identity and consent are not public.").unwrap();
+                    writeln!(out, "  Purchase status: not available for direct purchase; 'offer {raw} <cents>' may work for a privately held property, but seller consent is not public.").unwrap();
                 }
                 writeln!(
                     out,
@@ -201,7 +201,7 @@ impl Session<'_> {
                     writeln!(out, "business-{} {name} | {kind:?} | district-{} {ward} | {} cents | functions {functions:?}", id.raw(), district.raw(), price.cents()).unwrap();
                 }
                 if out.is_empty() {
-                    out.push_str("No properties currently available for direct purchase. Use directory to identify properties and offer <business-id> <cents> to negotiate with an existing organization owner.");
+                    out.push_str("No properties currently available for direct purchase. Use directory to identify properties and offer <business-id> <cents> to negotiate with a private owner.");
                 }
             }
             "business" => {

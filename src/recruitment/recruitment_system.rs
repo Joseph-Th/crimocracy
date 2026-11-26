@@ -401,6 +401,7 @@ fn candidate_reassignment_is_unavailable(error: WorldError) -> bool {
         | WorldError::PayrollDepartureCoolingOff { .. }
         | WorldError::PayrollDepartureUnfunded { .. }
         | WorldError::FreelanceSupervisor(_)
+        | WorldError::ActiveFreelanceTransfer(_)
         | WorldError::VersionCapacity(_) => true,
         WorldError::EmptyName
         | WorldError::MissingOrganization(_)

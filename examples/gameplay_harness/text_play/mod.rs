@@ -153,7 +153,7 @@ const HELP: &str = "Commands:
   contacts               Your established institutional channels and their pending disclosures
   connect <handler-id> <known-person-id>  Establish a contact using a real relationship
   contact <contact-id> [ask|ask-recent|ask-all|end]
-                         Hear one update, newest unseen fact per subject, up to 64, or end a channel
+                         Hear one update, up to 16 newest facts by topic and subject, up to 64 updates, or end a channel
   contact <contact-id> reassign <member-id>
                          Transfer an active channel to a qualified member; retain case/disclosure history
   counsel                Current custody, prosecution, representation and unpaid fines
@@ -195,7 +195,7 @@ const HELP: &str = "Commands:
   business-cycles <business-id> [count]
                          Settled revenue and costs under your ownership
   buy <business-id>      Acquire a listed business at its standard price using clean funds
-  offer <business-id> <cents>  Make a binding offer for an organization-owned business
+  offer <business-id> <cents>  Make a binding offer for a privately held business
   launder <business-id> <cents|max>  Convert an amount or remaining affordable front capacity
   launder-all <street-reserve-cents>
                          One-time conversion through owned fronts, preserving a street-cash reserve
@@ -495,13 +495,22 @@ fn parse_advance(raw: &str) -> Result<u64, String> {
 }
 
 fn parse_enterprise_kind(raw: &str) -> Result<EnterpriseKind, String> {
-    let normalized = raw
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .collect::<String>();
     ALL_ENTERPRISE_KINDS
         .into_iter()
-        .find(|kind| format!("{kind:?}").eq_ignore_ascii_case(&normalized))
+        .find(|kind| {
+            let name = format!("{kind:?}");
+            if name.eq_ignore_ascii_case(raw) {
+                return true;
+            }
+            let mut hyphenated = String::new();
+            for (index, character) in name.chars().enumerate() {
+                if index != 0 && character.is_ascii_uppercase() {
+                    hyphenated.push('-');
+                }
+                hyphenated.push(character.to_ascii_lowercase());
+            }
+            hyphenated.eq_ignore_ascii_case(raw)
+        })
         .ok_or_else(|| format!("unknown racket kind '{raw}'; use 'racket-kinds'"))
 }
 
