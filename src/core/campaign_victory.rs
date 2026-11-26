@@ -29,16 +29,20 @@ use thiserror::Error;
 mod certification_report;
 mod command_staffing;
 mod commercial_standing;
+mod district_matching;
 mod political_staffing;
 mod retirement;
 mod underboss;
 use certification_report::prepare_victory_report;
-use command_staffing::staffed_racket_districts;
+use command_staffing::{racket_district_assignment, staffed_racket_districts};
 use commercial_standing::{business_district_standings, political_district_rows};
 pub use commercial_standing::{political_business_progress, political_district_progress};
 pub(crate) use retirement::retirement_settlement_matches;
 use retirement::{ValidatedRetirementSettlement, prepare_retirement_payment, retirement_members};
-use underboss::{institutional_reach, operating_reserve, racket_standing, senior_command_count};
+use underboss::{
+    independent_captain, institutional_reach, operating_reserve, racket_standing,
+    senior_command_count,
+};
 
 /// These are ending choices, not automatic achievements. Variant order is persistent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +157,7 @@ pub struct VictoryProgress {
     /// The same independently captained districts also possess current civic leverage.
     pub influential_underboss_districts: usize,
     pub available_underboss_personnel: usize,
+    /// Senior commanders with two direct-report captains in a feasible fully backed coalition.
     pub senior_underboss_commands: usize,
     pub underboss_contact_kinds: usize,
     pub underboss_contact_handlers: usize,
@@ -471,10 +476,12 @@ pub(crate) fn ballot_progress(
             if standing.established && standing.net > 0 {
                 *count += 1;
                 if standing.proven_associates > 0 {
-                    captains_by_district
-                        .entry(district)
-                        .or_default()
-                        .insert(racket.manager());
+                    if independent_captain(state, organization, racket.manager()) {
+                        captains_by_district
+                            .entry(district)
+                            .or_default()
+                            .insert(racket.manager());
+                    }
                     *mature_workers_by_district.entry(district).or_default() +=
                         standing.proven_associates;
                     mature_kinds_by_district
@@ -565,8 +572,9 @@ pub(crate) fn ballot_progress(
         })
         .copied()
         .collect::<BTreeSet<_>>();
-    let influential_underboss_districts =
-        staffed_racket_districts(&influential_districts, &captains_by_district);
+    let influential_assignment =
+        racket_district_assignment(&influential_districts, &captains_by_district);
+    let influential_underboss_districts = influential_assignment.len();
     let available_underboss_personnel = state
         .world()
         .characters_in_organization(organization)
@@ -580,8 +588,10 @@ pub(crate) fn ballot_progress(
     let senior_underboss_commands = senior_command_count(
         state,
         organization,
-        &defended_districts,
+        &influential_districts,
         &captains_by_district,
+        &influential_assignment,
+        required_underboss_districts,
     );
     let (underboss_contact_kinds, underboss_contact_handlers) =
         institutional_reach(state, organization);

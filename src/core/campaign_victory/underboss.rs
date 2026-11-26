@@ -2,6 +2,8 @@
 //! The victory owner derives these from live relationships, the reporting tree and
 //! canonical enterprise cost projections; no parallel prestige counter is persisted.
 
+use super::command_staffing::supports_senior_command;
+use super::district_matching::Assignments;
 use super::{
     UNDERBOSS_CONTACT_DAYS, UNDERBOSS_OPERATING_RUNWAY_DAYS, UNDERBOSS_SENIOR_MANAGEMENT_RATING,
     VICTORY_ESTABLISHMENT_DAYS, VICTORY_PROFITABLE_CYCLES, VictoryError, established_for,
@@ -75,6 +77,23 @@ pub(super) fn racket_standing(state: &AppState, racket: &EnterpriseRecord) -> Ra
     }
 }
 
+/// Proven operating experience does not grant current independent discretion.
+pub(super) fn independent_captain(
+    state: &AppState,
+    owner: OrganizationId,
+    captain: CharacterId,
+) -> bool {
+    state.world().get_character(captain).is_some_and(|person| {
+        person.organization() == Some(owner)
+            && person.supervisor().is_some()
+            && matches!(
+                person.autonomy(),
+                AutonomyLevel::Delegated | AutonomyLevel::Broad
+            )
+            && state.legal().active_arrest_for_character(captain).is_none()
+    })
+}
+
 /// Longstanding, currently usable civic relationships, not purchased reputation.
 /// Police contacts are optional; an organization need not cultivate law enforcement.
 pub(super) fn institutional_reach(state: &AppState, owner: OrganizationId) -> (usize, usize) {
@@ -106,16 +125,20 @@ pub(super) fn institutional_reach(state: &AppState, owner: OrganizationId) -> (u
     )
 }
 
-/// A genuine middle layer must direct proven captains in more than one district.
-/// Neither an idle appointment nor the boss personally supervising every captain qualifies.
+/// Count senior commanders that can participate in a complete qualifying
+/// coalition, not merely those who supervise two candidates on paper.
 pub(super) fn senior_command_count(
     state: &AppState,
     owner: OrganizationId,
     eligible_districts: &BTreeSet<NeighborhoodId>,
     captains: &BTreeMap<NeighborhoodId, BTreeSet<CharacterId>>,
+    ordinary: &Assignments,
+    required_districts: usize,
 ) -> usize {
-    let mut reports =
-        BTreeMap::<CharacterId, (BTreeSet<CharacterId>, BTreeSet<NeighborhoodId>)>::new();
+    if ordinary.len() < required_districts.max(2) {
+        return 0;
+    }
+    let mut reports = BTreeMap::<CharacterId, BTreeSet<CharacterId>>::new();
     for district in eligible_districts {
         for captain in captains.get(district).into_iter().flatten() {
             if let Some(supervisor) = state
@@ -123,35 +146,34 @@ pub(super) fn senior_command_count(
                 .get_character(*captain)
                 .and_then(|person| person.supervisor())
             {
-                let (people, districts) = reports.entry(supervisor).or_default();
-                people.insert(*captain);
-                districts.insert(*district);
+                reports.entry(supervisor).or_default().insert(*captain);
             }
         }
     }
     reports
         .into_iter()
-        .filter(|(supervisor, (people, districts))| {
+        .filter(|(supervisor, people)| {
             people.len() >= 2
-                && districts.len() >= 2
+                && independent_captain(state, owner, *supervisor)
                 && state
                     .world()
                     .get_character(*supervisor)
                     .is_some_and(|person| {
-                        person.organization() == Some(owner)
-                            && person.supervisor().is_some()
-                            && matches!(
-                                person.autonomy(),
-                                AutonomyLevel::Delegated | AutonomyLevel::Broad
-                            )
-                            && person
-                                .capability(CapabilityKind::Management)
-                                .is_some_and(|rating| {
-                                    rating.value() >= UNDERBOSS_SENIOR_MANAGEMENT_RATING
-                                })
+                        person
+                            .capability(CapabilityKind::Management)
+                            .is_some_and(|rating| {
+                                rating.value() >= UNDERBOSS_SENIOR_MANAGEMENT_RATING
+                            })
                     })
                 && manager_workload(state, *supervisor)
                     .is_some_and(|load| load.command_lines >= 2 && load.required <= load.available)
+                && supports_senior_command(
+                    eligible_districts,
+                    captains,
+                    people,
+                    ordinary,
+                    required_districts,
+                )
         })
         .count()
 }

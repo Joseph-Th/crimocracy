@@ -2293,7 +2293,10 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     let staffed = progress(&registry, &city.state).unwrap();
     assert_eq!(staffed.defended_underboss_districts, 3);
     assert_eq!(staffed.staffed_underboss_districts, 3);
-    assert!(staffed.senior_underboss_commands > 0);
+    assert_eq!(
+        staffed.senior_underboss_commands, 0,
+        "senior qualification needs a fully backed coalition"
+    );
     hire_additional_staff(
         &mut city.state,
         city.player,
@@ -2596,7 +2599,277 @@ fn uncontested_territory_and_superior_enterprise_strength_claim_underboss() {
     }
     let cash = progress(&registry, &city.state).unwrap();
     assert_eq!(cash.influential_underboss_districts, 3);
+    assert!(cash.senior_underboss_commands > 0);
     assert!(cash.underboss_ready);
+
+    // A proven crew still operates under Guided autonomy, but its captain no
+    // longer commands independently. Do not let a same-minute change in
+    // discretion bypass the hierarchy requirement of the underboss ending.
+    let mut micromanaged = city.state.clone();
+    let captain = managers[0];
+    let held =
+        validate_claim_victory(&registry, &micromanaged, VictoryPath::CityUnderboss).unwrap();
+    validate_set_character_autonomy(&micromanaged, city.player, captain, AutonomyLevel::Guided)
+        .unwrap()
+        .commit(&mut micromanaged)
+        .unwrap();
+    let reduced = progress(&registry, &micromanaged).unwrap();
+    assert_eq!(reduced.racket_daily_net, cash.racket_daily_net);
+    assert_eq!(reduced.mature_associates, cash.mature_associates);
+    assert_eq!(reduced.defended_underboss_districts, 3);
+    assert_eq!(
+        reduced.staffed_underboss_districts, 2,
+        "a micromanaged captain is not independent"
+    );
+    assert!(!reduced.underboss_ready);
+    let before = bincode::serialize(&build_save(&registry, &micromanaged).unwrap()).unwrap();
+    assert_eq!(
+        held.commit(&registry, &mut micromanaged).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &micromanaged).unwrap()).unwrap()
+    );
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &micromanaged).unwrap()).unwrap();
+    assert_eq!(progress(&registry, &restored).unwrap(), reduced);
+    for branch in [&mut micromanaged, &mut restored] {
+        validate_set_character_autonomy(branch, city.player, captain, AutonomyLevel::Delegated)
+            .unwrap()
+            .commit(branch)
+            .unwrap();
+        assert!(progress(&registry, branch).unwrap().underboss_ready);
+        validate_state_against_registry(&registry, branch).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&micromanaged).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+
+    // A fourth defended, politically backed ward has enough proven workers,
+    // but only one captain. A senior commander whose two direct reports cover
+    // that ward and one complete ward cannot supervise two complete teams.
+    let mut fragmented = city.state.clone();
+    let incomplete_district = fragmented
+        .world()
+        .neighborhoods()
+        .map(|district| district.id())
+        .find(|district| ![home, empty_districts[0], empty_districts[1]].contains(district))
+        .unwrap();
+    let cash_account = fragmented
+        .enterprises()
+        .get_enterprise(city.starter_racket)
+        .unwrap()
+        .cash_account();
+    let original_reports = fragmented
+        .world()
+        .characters_in_organization(city.player)
+        .filter(|person| person.supervisor() == Some(senior))
+        .map(|person| person.id())
+        .collect::<Vec<_>>();
+    assert_eq!(original_reports.len(), 3);
+    let other_captains = fragmented
+        .enterprises()
+        .active_for_organization(city.player)
+        .map(|racket| racket.manager())
+        .filter(|&manager| manager != original_reports[0])
+        .collect::<BTreeSet<_>>();
+    for report in other_captains {
+        if fragmented
+            .world()
+            .get_character(report)
+            .unwrap()
+            .supervisor()
+            != Some(city.boss)
+        {
+            validate_set_character_supervisor(&fragmented, report, Some(city.boss))
+                .unwrap()
+                .commit(&mut fragmented)
+                .unwrap();
+        }
+    }
+    let isolated_captain = insert_character(
+        &mut fragmented,
+        CharacterDraft {
+            name: "Isolated fourth-ward captain".into(),
+            organization: Some(city.player),
+            supervisor: Some(senior),
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Management,
+                Rating::try_new(100).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let scope = ResponsibilityScope::Neighborhood(incomplete_district);
+    let mandate = validate_assign_mandate(
+        &fragmented,
+        MandateDraft {
+            organization: city.player,
+            manager: isolated_captain,
+            scopes: BTreeSet::from([
+                scope,
+                ResponsibilityScope::Function(ResponsibilityFunction::Political),
+            ]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fragmented)
+    .unwrap();
+    for (slot, kind) in [
+        EnterpriseKind::Gambling,
+        EnterpriseKind::Protection,
+        EnterpriseKind::Gambling,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let venue = insert_business(
+            &registry,
+            &mut fragmented,
+            BusinessDraft {
+                name: format!("Fourth ward front {slot}"),
+                kind: BusinessKind::Hospitality,
+                functions: BTreeSet::from([
+                    BusinessFunction::CashIntensive,
+                    BusinessFunction::MeetingSpace,
+                    BusinessFunction::CustomerAccess,
+                ]),
+                neighborhood: incomplete_district,
+                owner: BusinessOwner::Organization(city.player),
+            },
+        )
+        .unwrap();
+        let settlement = insert_account(
+            &mut fragmented,
+            FinancialAccountDraft {
+                owner: FinancialOwner::Organization(city.player),
+                kind: AccountKind::Settlement,
+            },
+        )
+        .unwrap();
+        let racket = validate_establish_enterprise(
+            &registry,
+            &fragmented,
+            EnterpriseDraft {
+                kind,
+                organization: city.player,
+                authority: MandateAuthority {
+                    mandate,
+                    manager: isolated_captain,
+                    scope,
+                },
+                location: EnterpriseLocation::Business(venue),
+                supporting_businesses: BTreeSet::new(),
+                cash_account,
+                settlement_account: settlement,
+            },
+        )
+        .unwrap()
+        .commit(&mut fragmented)
+        .unwrap();
+        validate_staff_enterprise(&fragmented, racket, 10)
+            .unwrap()
+            .commit(&mut fragmented)
+            .unwrap();
+    }
+    for index in 0..3 {
+        insert_character(
+            &mut fragmented,
+            CharacterDraft {
+                name: format!("Fourth ward defender {index}"),
+                organization: Some(city.player),
+                supervisor: Some(city.boss),
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([(
+                    CapabilityKind::Violence,
+                    Rating::try_new(75).unwrap(),
+                )]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    }
+    fund(&mut fragmented, city.player, 100_000_000);
+    for _ in 0..VICTORY_ESTABLISHMENT_DAYS {
+        fragmented.advance_clock(crate::core::time::DAY_DURATION);
+        let rackets = fragmented
+            .enterprises()
+            .active_for_organization(city.player)
+            .map(|racket| racket.id())
+            .collect::<Vec<_>>();
+        for racket in rackets {
+            let plan = decide_enterprise_cycle(
+                &registry,
+                &fragmented,
+                racket,
+                EnterpriseCycleRandomness::new(
+                    0,
+                    EnterpriseCycleRandomness::MAX_ENFORCEMENT_ATTENTION_ROLL,
+                ),
+            )
+            .unwrap();
+            validate_enterprise_cycle_plan(&fragmented, plan)
+                .unwrap()
+                .commit(&mut fragmented)
+                .unwrap();
+        }
+    }
+    validate_invest_influence(&fragmented, incomplete_district, influence_cost)
+        .unwrap()
+        .commit(&mut fragmented)
+        .unwrap();
+    validate_civic_initiative(
+        &fragmented,
+        incomplete_district,
+        isolated_captain,
+        CivicInitiative::LaborCoalition,
+    )
+    .unwrap()
+    .commit(&mut fragmented)
+    .unwrap();
+    let fragmented_standing = progress(&registry, &fragmented).unwrap();
+    assert_eq!(
+        fragmented_standing.defended_underboss_districts, 4,
+        "{fragmented_standing:?}"
+    );
+    assert_eq!(fragmented_standing.influential_underboss_districts, 3);
+    assert!(fragmented_standing.racket_self_sufficient);
+    assert!(
+        fragmented_standing.underboss_liquid_reserve
+            >= fragmented_standing.required_underboss_liquid_reserve
+    );
+    assert_eq!(
+        fragmented_standing.senior_underboss_commands, 0,
+        "the senior cannot rely on an unmatchable ward"
+    );
+    assert_eq!(
+        validate_claim_victory(&registry, &fragmented, VictoryPath::CityUnderboss).err(),
+        Some(VictoryError::UnderbossNotReady)
+    );
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fragmented).unwrap()).unwrap();
+    assert_eq!(progress(&registry, &restored).unwrap(), fragmented_standing);
+    for branch in [&mut fragmented, &mut restored] {
+        validate_set_character_supervisor(branch, original_reports[1], Some(senior))
+            .unwrap()
+            .commit(branch)
+            .unwrap();
+        assert!(progress(&registry, branch).unwrap().underboss_ready);
+        validate_state_against_registry(&registry, branch).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fragmented).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+
     let mut isolated = city.state.clone();
     validate_terminate_contact(&isolated, contacts[0])
         .unwrap()

@@ -16,7 +16,7 @@ pub(super) struct DistrictCandidates {
     pub finance: BTreeSet<CharacterId>,
 }
 
-type Assignments = BTreeMap<NeighborhoodId, (CharacterId, CharacterId)>;
+use super::district_matching::{self, Assignments, Choice, Priority};
 
 pub(super) struct PoliticalStaffing {
     pub candidates: BTreeMap<NeighborhoodId, DistrictCandidates>,
@@ -83,205 +83,24 @@ pub(super) fn allocate(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Priority {
-    BallotWinner,
-    Electoral,
-    Commercial,
-}
-
-struct Choice<'a> {
-    district: NeighborhoodId,
-    priority: Priority,
-    roles: [&'a BTreeSet<CharacterId>; 2],
-}
-
-// Lexicographic cumulative counts: winning eligible wards, all electoral-ready
-// wards, then all economically qualified wards. Ordinary planning has no winners.
-type Score = [usize; 3];
-
-fn add_match(score: &mut Score, priority: Priority) {
-    for count in &mut score[priority as usize..] {
-        *count += 1;
-    }
-}
-
 fn solve<'a>(
     candidates: impl IntoIterator<Item = (&'a NeighborhoodId, &'a DistrictCandidates)>,
     electoral: &BTreeSet<NeighborhoodId>,
     ballot_winners: &BTreeSet<NeighborhoodId>,
 ) -> Assignments {
-    let mut choices = candidates
-        .into_iter()
-        .filter(|(_, local)| {
-            !local.political.is_empty()
-                && !local.finance.is_empty()
-                && local.political.union(&local.finance).take(2).count() == 2
-        })
-        .map(|(&district, local)| Choice {
-            district,
-            priority: if electoral.contains(&district) {
-                if ballot_winners.contains(&district) {
-                    Priority::BallotWinner
-                } else {
-                    Priority::Electoral
-                }
+    district_matching::solve(candidates.into_iter().map(|(&district, local)| Choice {
+        district,
+        priority: if electoral.contains(&district) {
+            if ballot_winners.contains(&district) {
+                Priority::Primary
             } else {
-                Priority::Commercial
-            },
-            roles: [&local.political, &local.finance],
-        })
-        .collect::<Vec<_>>();
-    // At the ballot, actual winning wards have priority over otherwise ready
-    // losing wards. Within each tier consider scarce teams first, then stable IDs.
-    choices.sort_by_key(|choice| {
-        (
-            choice.priority,
-            choice.roles[0].len().saturating_mul(choice.roles[1].len()),
-            choice.district,
-        )
-    });
-    let mut best = Best::default();
-    search(
-        &choices,
-        0,
-        &mut BTreeSet::new(),
-        &mut Assignments::new(),
-        Score::default(),
-        &mut best,
-    );
-    best.assigned
-}
-
-#[derive(Default)]
-struct Best {
-    score: Score,
-    assigned: Assignments,
-}
-
-impl Best {
-    fn consider(&mut self, score: Score, assigned: &Assignments) {
-        if score > self.score {
-            self.score = score;
-            self.assigned = assigned.clone();
-        }
-    }
-}
-
-/// Relax complete-district constraints to ordinary bipartite post matching.
-/// Processing posts in priority order preserves the maximum matching size of
-/// every priority prefix as later augmenting paths rematch individuals. Half
-/// of each prefix's matched post count bounds its complete-district count.
-fn relaxed_matching(
-    choices: &[Choice<'_>],
-    start: usize,
-    used: &BTreeSet<CharacterId>,
-) -> (Score, Assignments) {
-    fn augment(
-        choices: &[Choice<'_>],
-        slot: (usize, usize),
-        used: &BTreeSet<CharacterId>,
-        assigned: &mut BTreeMap<CharacterId, (usize, usize)>,
-        seen: &mut BTreeSet<CharacterId>,
-    ) -> bool {
-        for &person in choices[slot.0].roles[slot.1] {
-            if used.contains(&person) || !seen.insert(person) {
-                continue;
+                Priority::Secondary
             }
-            if assigned
-                .get(&person)
-                .copied()
-                .is_none_or(|previous| augment(choices, previous, used, assigned, seen))
-            {
-                assigned.insert(person, slot);
-                return true;
-            }
-        }
-        false
-    }
-    let mut people = BTreeMap::new();
-    let mut posts = Score::default();
-    for (index, choice) in choices.iter().enumerate().skip(start) {
-        for role in 0..2 {
-            if augment(
-                choices,
-                (index, role),
-                used,
-                &mut people,
-                &mut BTreeSet::new(),
-            ) {
-                add_match(&mut posts, choice.priority);
-            }
-        }
-    }
-    let mut by_slot = BTreeMap::new();
-    for (person, slot) in people {
-        by_slot.insert(slot, person);
-    }
-    let pairs = choices
-        .iter()
-        .enumerate()
-        .skip(start)
-        .filter_map(|(index, choice)| {
-            Some((
-                choice.district,
-                (*by_slot.get(&(index, 0))?, *by_slot.get(&(index, 1))?),
-            ))
-        })
-        .collect();
-    (posts.map(|count| count / 2), pairs)
-}
-
-fn search(
-    choices: &[Choice<'_>],
-    index: usize,
-    used: &mut BTreeSet<CharacterId>,
-    current: &mut Assignments,
-    score: Score,
-    best: &mut Best,
-) {
-    let (bound, pairs) = relaxed_matching(choices, index, used);
-    let upper: Score = std::array::from_fn(|tier| score[tier] + bound[tier]);
-    if upper <= best.score {
-        return;
-    }
-    // Every complete pair in the relaxed match is already a valid assignment.
-    // This often reaches the upper bound without enumerating any combinations.
-    let mut feasible = current.clone();
-    let mut lower = score;
-    for choice in &choices[index..] {
-        if pairs.contains_key(&choice.district) {
-            add_match(&mut lower, choice.priority);
-        }
-    }
-    feasible.extend(pairs);
-    best.consider(lower, &feasible);
-    if upper <= best.score || index == choices.len() {
-        return;
-    }
-    let choice = &choices[index];
-    for &political in choice.roles[0] {
-        if !used.insert(political) {
-            continue;
-        }
-        for &finance in choice.roles[1] {
-            if !used.insert(finance) {
-                continue;
-            }
-            current.insert(choice.district, (political, finance));
-            let mut next_score = score;
-            add_match(&mut next_score, choice.priority);
-            search(choices, index + 1, used, current, next_score, best);
-            current.remove(&choice.district);
-            used.remove(&finance);
-            if upper <= best.score {
-                used.remove(&political);
-                return;
-            }
-        }
-        used.remove(&political);
-    }
-    search(choices, index + 1, used, current, score, best);
+        } else {
+            Priority::Ordinary
+        },
+        roles: [&local.political, &local.finance],
+    }))
 }
 
 #[cfg(test)]
