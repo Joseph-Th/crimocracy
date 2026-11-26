@@ -438,7 +438,7 @@ determinism and client contracts.
     ──► apply_reputation_phase           decay and current operation/racket consequences
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence
     ──► apply_due_overstretched_manager_suspensions
-          deeper branches before superiors; reconcile current command workload before expansion
+          indexed active portfolios only; deeper branches before superiors; reconcile current command workload before expansion
     ──► apply_due_autonomous_acquisitions
           weekly rival citywide listings or negotiated purchases after payroll and recruitment; competing buyers rotate first access by review week instead of permanent organization-ID privilege; new infrastructure available for expansion
     ──► apply_due_autonomous_enterprise_lifecycle

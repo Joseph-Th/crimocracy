@@ -180,6 +180,16 @@ impl EnterpriseState {
         self.records.get(&id)
     }
 
+    /// Resolve player-entered IDs without scanning unrelated or retired holdings.
+    pub fn enterprise_for_organization_by_raw(
+        &self,
+        organization: OrganizationId,
+        raw: u32,
+    ) -> Option<&EnterpriseRecord> {
+        self.get_enterprise(EnterpriseId::from_raw(raw))
+            .filter(|record| record.organization() == organization)
+    }
+
     pub fn get_cycle(&self, id: EnterpriseCycleId) -> Option<&EnterpriseCycleRecord> {
         self.cycles.get(&id)
     }

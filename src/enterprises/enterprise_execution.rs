@@ -35,8 +35,8 @@ use establishment::enterprise_location_is_occupied;
 pub(crate) use establishment::validate_establish_enterprise_with_openings;
 pub use establishment::{ValidatedEnterpriseEstablishment, validate_establish_enterprise};
 pub use lifecycle::{
-    ValidatedEnterpriseStatusChange, validate_resume_enterprise, validate_retire_enterprise,
-    validate_suspend_enterprise,
+    ValidatedEnterpriseResumptions, ValidatedEnterpriseStatusChange, validate_resume_enterprise,
+    validate_resume_enterprises, validate_retire_enterprise, validate_suspend_enterprise,
 };
 pub(crate) use staffing::ManagedJob;
 pub use staffing::{
@@ -222,6 +222,8 @@ pub enum EnterpriseError {
     EnterpriseStaffingCycleDue(EnterpriseId),
     #[error("enterprise {0} is not active")]
     EnterpriseNotActive(EnterpriseId),
+    #[error("select at least one suspended enterprise")]
+    EmptyResumptionSelection,
     #[error("enterprise {0} is not suspended")]
     EnterpriseNotSuspended(EnterpriseId),
     #[error("enterprise {0} is retired and cannot return to operation")]

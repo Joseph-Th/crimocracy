@@ -89,6 +89,13 @@ impl ValidatedEnterpriseStatusChange {
             self.commit_suspension_preflighted(state);
             return Ok(());
         }
+        let next_cycle_at = self.ensure_current(state)?;
+        self.commit_status_preflighted(state, next_cycle_at);
+        Ok(())
+    }
+
+    fn ensure_current(&self, state: &AppState) -> Result<Option<SimTime>, EnterpriseError> {
+        debug_assert_ne!(self.change, EnterpriseStatusChange::Suspend);
         // Version pins are the only staleness guard this token needs: unlike disruption
         // tokens, which freeze a validate-time horizon and must reject a held-across-tick
         // commit, every time-derived value here (next cycle, loss anchor, change instant)
@@ -170,20 +177,22 @@ impl ValidatedEnterpriseStatusChange {
             validate_enterprise_account_posting_headroom(state, record.cash_account())?;
             validate_enterprise_account_posting_headroom(state, record.settlement_account())?;
         }
-        let next_status = match self.change {
-            EnterpriseStatusChange::Suspend => EnterpriseStatus::Suspended,
-            EnterpriseStatusChange::Resume => EnterpriseStatus::Active,
-            EnterpriseStatusChange::Retire => EnterpriseStatus::Retired,
-        };
-        let next_cycle_at = self
-            .cycle_duration
+        self.cycle_duration
             .map(|duration| {
                 state
                     .now()
                     .checked_add(duration)
                     .ok_or(EnterpriseError::SimulationTimeOverflow)
             })
-            .transpose()?;
+            .transpose()
+    }
+
+    fn commit_status_preflighted(self, state: &mut AppState, next_cycle_at: Option<SimTime>) {
+        let next_status = match self.change {
+            EnterpriseStatusChange::Suspend => EnterpriseStatus::Suspended,
+            EnterpriseStatusChange::Resume => EnterpriseStatus::Active,
+            EnterpriseStatusChange::Retire => EnterpriseStatus::Retired,
+        };
         // Resuming restarts the chronic-loss grace window at the actual resume instant.
         let loss_streak_anchor =
             (self.change == EnterpriseStatusChange::Resume).then_some(state.now());
@@ -194,8 +203,72 @@ impl ValidatedEnterpriseStatusChange {
             loss_streak_anchor,
             state.now(),
         );
+    }
+}
+
+/// An explicitly selected resumption cohort. Each member's dependencies and
+/// the aggregate command workload must remain valid before the first write.
+/// No full-state clone or intermediate active portfolio is needed.
+pub struct ValidatedEnterpriseResumptions {
+    plans: Vec<ValidatedEnterpriseStatusChange>,
+}
+
+impl ValidatedEnterpriseResumptions {
+    pub fn commit(self, state: &mut AppState) -> Result<(), EnterpriseError> {
+        let due = self
+            .plans
+            .iter()
+            .map(|plan| plan.ensure_current(state))
+            .collect::<Result<Vec<_>, _>>()?;
+        ensure_resumption_cohort_capacity(state, &self.plans)?;
+        for (plan, next_cycle_at) in self.plans.into_iter().zip(due) {
+            plan.commit_status_preflighted(state, next_cycle_at);
+        }
         Ok(())
     }
+}
+
+fn ensure_resumption_cohort_capacity(
+    state: &AppState,
+    plans: &[ValidatedEnterpriseStatusChange],
+) -> Result<(), EnterpriseError> {
+    if plans.len() <= 1 {
+        return Ok(());
+    }
+    let jobs = plans
+        .iter()
+        .map(|plan| {
+            let record = state
+                .enterprises()
+                .get_enterprise(plan.enterprise)
+                .expect("preflighted resumption owns its enterprise");
+            ProjectedCommandJob {
+                organization: record.organization(),
+                captain: record.manager(),
+                kind: record.kind(),
+                location: record.location(),
+                associates: record.associates(),
+                supporting_businesses: record.supporting_businesses().len(),
+            }
+        })
+        .collect::<Vec<_>>();
+    super::staffing::ensure_projected_command_jobs_fit(state, &jobs)
+}
+
+pub fn validate_resume_enterprises(
+    registry: &Registry,
+    state: &AppState,
+    enterprises: &BTreeSet<EnterpriseId>,
+) -> Result<ValidatedEnterpriseResumptions, EnterpriseError> {
+    if enterprises.is_empty() {
+        return Err(EnterpriseError::EmptyResumptionSelection);
+    }
+    let plans = enterprises
+        .iter()
+        .map(|id| validate_resume_enterprise(registry, state, *id))
+        .collect::<Result<Vec<_>, _>>()?;
+    ensure_resumption_cohort_capacity(state, &plans)?;
+    Ok(ValidatedEnterpriseResumptions { plans })
 }
 
 pub fn validate_suspend_enterprise(

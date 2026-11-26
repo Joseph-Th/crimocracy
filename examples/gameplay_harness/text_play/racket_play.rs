@@ -218,6 +218,22 @@ impl Session<'_> {
         out
     }
 
+    fn selected_owned_rackets(&self, words: &[&str]) -> Result<BTreeSet<EnterpriseId>, String> {
+        let mut selected = BTreeSet::new();
+        for raw in words {
+            let raw_id = parse_number(raw, "enterprise")?;
+            let record = self
+                .state
+                .enterprises()
+                .enterprise_for_organization_by_raw(self.player, raw_id)
+                .ok_or_else(|| format!("enterprise-{raw_id} is not yours"))?;
+            if !selected.insert(record.id()) {
+                return Err(format!("enterprise-{raw_id} was selected more than once"));
+            }
+        }
+        Ok(selected)
+    }
+
     pub(super) fn execute_racket_commands(&mut self, words: &[&str]) -> Result<String, String> {
         let state = &self.state;
         let mut out = String::new();
@@ -304,8 +320,7 @@ impl Session<'_> {
                 let raw = parse_number(words[1], "enterprise")?;
                 let record = state
                     .enterprises()
-                    .enterprises_for_organization(self.player)
-                    .find(|enterprise| enterprise.id().raw() == raw)
+                    .enterprise_for_organization_by_raw(self.player, raw)
                     .ok_or("no owned enterprise with that ID")?;
                 let outlook =
                     crimocracy::enterprises::enterprise_reporting::resolve_enterprise_outlook(
@@ -479,32 +494,27 @@ impl Session<'_> {
                 // against a projected state. All failures discard that projection, so neither
                 // a manager-capacity block nor an invalid second racket leaves a partial handoff.
                 let manager = self.requested_member(words[1])?;
-                let mut selected = BTreeSet::new();
-                for raw in &words[2..] {
-                    let raw_id = parse_number(raw, "enterprise")?;
-                    let id = self
-                        .state
-                        .enterprises()
-                        .enterprises_for_organization(self.player)
-                        .find(|record| record.id().raw() == raw_id)
-                        .ok_or(format!("enterprise-{raw_id} is not yours"))?
-                        .id();
-                    if !selected.insert(id) {
-                        return Err(format!("enterprise-{raw_id} was selected more than once"));
-                    }
-                }
+                let selected = self.selected_owned_rackets(&words[2..])?;
                 let mut projected = self.state.clone();
                 for id in &selected {
                     let racket = projected
                         .enterprises()
                         .get_enterprise(*id)
                         .expect("selected enterprise must exist");
-                    let authority = self.enterprise_authority(
-                        racket.location(),
-                        racket.supporting_businesses(),
-                        Some(manager),
-                    )?;
-                    if racket.manager() != manager {
+                    // Keep an already-current mandate. A replacement scope or mandate
+                    // may require a handoff even when the named captain did not change.
+                    if racket.manager() != manager
+                        || crimocracy::delegation::delegation_system::resolve_mandate_authority(
+                            &projected,
+                            racket.authority(),
+                        )
+                        .is_err()
+                    {
+                        let authority = self.enterprise_authority(
+                            racket.location(),
+                            racket.supporting_businesses(),
+                            Some(manager),
+                        )?;
                         crimocracy::enterprises::enterprise_execution::validate_reassign_enterprise(
                             &projected,
                             *id,
@@ -514,11 +524,15 @@ impl Session<'_> {
                         .commit(&mut projected)
                         .map_err(|error| format!("enterprise-{}: {error}", id.raw()))?;
                     }
-                    validate_resume_enterprise(self.registry, &projected, *id)
-                        .map_err(|error| format!("enterprise-{}: {error}", id.raw()))?
-                        .commit(&mut projected)
-                        .map_err(|error| format!("enterprise-{}: {error}", id.raw()))?;
                 }
+                crimocracy::enterprises::enterprise_execution::validate_resume_enterprises(
+                    self.registry,
+                    &projected,
+                    &selected,
+                )
+                .map_err(|error| error.to_string())?
+                .commit(&mut projected)
+                .map_err(|error| error.to_string())?;
                 self.state = projected;
                 writeln!(
                     out,
@@ -533,34 +547,17 @@ impl Session<'_> {
                 ).unwrap();
             }
             "resume-rackets" => {
-                // The player explicitly selects every racket. Validate the full cohort
-                // before resuming any of them, so a blocked manager cannot cause a
-                // partial batch. Independent version-pinned status changes then commit
-                // in stable enterprise-ID order without changing shared finances.
-                let mut selected = BTreeSet::new();
-                for raw in &words[1..] {
-                    let id = parse_number(raw, "enterprise")?;
-                    let enterprise = state
-                        .enterprises()
-                        .enterprises_for_organization(self.player)
-                        .find(|enterprise| enterprise.id().raw() == id)
-                        .ok_or(format!("enterprise-{id} is not yours"))?
-                        .id();
-                    if !selected.insert(enterprise) {
-                        return Err(format!("enterprise-{id} was selected more than once"));
-                    }
-                }
-                let plans = selected
-                    .iter()
-                    .map(|id| {
-                        validate_resume_enterprise(self.registry, &self.state, *id)
-                            .map_err(|error| format!("enterprise-{}: {error}", id.raw()))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                for plan in plans {
-                    plan.commit(&mut self.state)
-                        .map_err(|error| error.to_string())?;
-                }
+                // The owner validates all individual dependencies and the combined
+                // command workload before mutating any enterprise.
+                let selected = self.selected_owned_rackets(&words[1..])?;
+                crimocracy::enterprises::enterprise_execution::validate_resume_enterprises(
+                    self.registry,
+                    &self.state,
+                    &selected,
+                )
+                .map_err(|error| error.to_string())?
+                .commit(&mut self.state)
+                .map_err(|error| error.to_string())?;
                 writeln!(
                     out,
                     "Resumed {} selected racket(s): {}. Every requested resumption passed validation before the first change.",
@@ -572,8 +569,7 @@ impl Session<'_> {
                 let raw = parse_number(words[1], "enterprise")?;
                 let record = state
                     .enterprises()
-                    .enterprises_for_organization(self.player)
-                    .find(|enterprise| enterprise.id().raw() == raw)
+                    .enterprise_for_organization_by_raw(self.player, raw)
                     .ok_or("no owned enterprise with that ID")?;
                 let manager = self.requested_member(words[2])?;
                 let authority = self.enterprise_authority(
@@ -618,8 +614,7 @@ impl Session<'_> {
                 let raw = parse_number(words[1], "enterprise")?;
                 let id = state
                     .enterprises()
-                    .enterprises_for_organization(self.player)
-                    .find(|enterprise| enterprise.id().raw() == raw)
+                    .enterprise_for_organization_by_raw(self.player, raw)
                     .ok_or("no owned enterprise with that ID")?
                     .id();
                 let validated = match words[2] {
@@ -650,8 +645,7 @@ impl Session<'_> {
                     .map_err(|_| "associate count must be a nonnegative integer".to_owned())?;
                 let enterprise = state
                     .enterprises()
-                    .enterprises_for_organization(self.player)
-                    .find(|enterprise| enterprise.id().raw() == raw)
+                    .enterprise_for_organization_by_raw(self.player, raw)
                     .ok_or("no owned enterprise with that ID")?
                     .id();
                 crimocracy::enterprises::enterprise_execution::validate_staff_enterprise(

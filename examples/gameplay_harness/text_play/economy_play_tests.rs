@@ -429,6 +429,227 @@ fn laundering_orders_pool_split_street_balances_without_extra_transactions() {
 }
 
 #[test]
+fn resume_rackets_rejects_joint_command_overload_without_partial_reopening() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let original = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .next()
+        .unwrap();
+    let first = original.id();
+    let manager = original.manager();
+    let district = session.state.world().neighborhoods().nth(1).unwrap().id();
+    let cash = starting_cash(&session);
+    let settlement = fresh_settlement(&mut session);
+    session
+        .execute(&format!("racket {} suspend", first.raw()))
+        .unwrap();
+    session
+        .execute(&format!(
+            "start-racket protection district-{} {cash} {settlement} manager=char-{}",
+            district.raw(),
+            manager.raw()
+        ))
+        .unwrap();
+    let second = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .find(|record| record.id() != first)
+        .unwrap()
+        .id();
+    session
+        .execute(&format!("racket {} suspend", second.raw()))
+        .unwrap();
+    for id in [first, second] {
+        let maximum = session
+            .state
+            .enterprises()
+            .get_enterprise(id)
+            .unwrap()
+            .kind()
+            .max_associates();
+        session
+            .execute(&format!("staff-racket {} {maximum}", id.raw()))
+            .unwrap();
+        validate_resume_enterprise(&registry, &session.state, id).unwrap();
+    }
+    let before = snapshot(&registry, &session);
+    for command in [
+        format!("resume-rackets {} {}", first.raw(), second.raw()),
+        format!("resume-rackets {} {}", second.raw(), first.raw()),
+    ] {
+        let error = session.execute(&command).unwrap_err();
+        assert!(
+            error.contains("28 recurring coordination duties"),
+            "{error}"
+        );
+        assert!(
+            snapshot(&registry, &session) == before,
+            "rejected batch must not reopen its first racket"
+        );
+    }
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    let reduced = session
+        .state
+        .enterprises()
+        .get_enterprise(second)
+        .unwrap()
+        .associates()
+        - 1;
+    session
+        .execute(&format!("staff-racket {} {reduced}", second.raw()))
+        .unwrap();
+    // Holding a valid batch across a same-minute staffing change must reject
+    // before either schedule or active membership changes.
+    let selection = BTreeSet::from([first, second]);
+    let held = crimocracy::enterprises::enterprise_execution::validate_resume_enterprises(
+        &registry,
+        &session.state,
+        &selection,
+    )
+    .unwrap();
+    let mut changed = session.state.clone();
+    crimocracy::enterprises::enterprise_execution::validate_staff_enterprise(
+        &changed,
+        second,
+        reduced + 1,
+    )
+    .unwrap()
+    .commit(&mut changed)
+    .unwrap();
+    let changed_before = bincode::serialize(&build_save(&registry, &changed).unwrap()).unwrap();
+    assert!(
+        matches!(held.commit(&mut changed), Err(crimocracy::enterprises::enterprise_execution::EnterpriseError::StaleEnterprise { enterprise, .. }) if enterprise == second)
+    );
+    assert!(
+        changed_before == bincode::serialize(&build_save(&registry, &changed).unwrap()).unwrap()
+    );
+    // A competing live job can exhaust the aggregate capacity without changing
+    // either selected enterprise's version. Recheck the entire command portfolio.
+    let ready = build_save(&registry, &session.state).unwrap();
+    let held = crimocracy::enterprises::enterprise_execution::validate_resume_enterprises(
+        &registry,
+        &session.state,
+        &selection,
+    )
+    .unwrap();
+    let additional_settlement = fresh_settlement(&mut session);
+    session
+        .execute(&format!(
+            "start-racket protection district-1 {cash} {additional_settlement} manager=char-{}",
+            manager.raw()
+        ))
+        .unwrap();
+    for id in [first, second] {
+        validate_resume_enterprise(&registry, &session.state, id).unwrap();
+    }
+    let changed_before = snapshot(&registry, &session);
+    assert_eq!(
+        held.commit(&mut session.state).unwrap_err(),
+        crimocracy::enterprises::enterprise_execution::EnterpriseError::ManagerWorkloadExceeded {
+            manager,
+            required: 32,
+            available: 27,
+        }
+    );
+    assert!(snapshot(&registry, &session) == changed_before);
+    session.state = restore_save(&registry, ready).unwrap();
+    let mut sequential = session.state.clone();
+    for id in [first, second] {
+        validate_resume_enterprise(&registry, &sequential, id)
+            .unwrap()
+            .commit(&mut sequential)
+            .unwrap();
+    }
+    let output = session
+        .execute(&format!("resume-rackets {} {}", second.raw(), first.raw()))
+        .unwrap()
+        .0;
+    assert!(output.contains("Resumed 2 selected racket(s)"), "{output}");
+    assert!(
+        snapshot(&registry, &session)
+            == bincode::serialize(&build_save(&registry, &sequential).unwrap()).unwrap()
+    );
+    let load =
+        crimocracy::enterprises::enterprise_execution::manager_workload(&session.state, manager)
+            .unwrap();
+    assert_eq!((load.required, load.available), (27, 27));
+    let after = snapshot(&registry, &session);
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(
+        after,
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn cover_rackets_renews_a_stale_mandate_without_replacing_its_manager() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let record = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .next()
+        .unwrap();
+    let id = record.id();
+    let previous = record.authority();
+    let cash = record.cash_account();
+    let settlement = record.settlement_account();
+    let version = record.version();
+    session
+        .execute(&format!("racket {} suspend", id.raw()))
+        .unwrap();
+    session
+        .execute(&format!("mandate {} revoke", previous.mandate.raw()))
+        .unwrap();
+    session
+        .execute(&format!(
+            "delegate char-{} district-1",
+            previous.manager.raw()
+        ))
+        .unwrap();
+    let replacement = session
+        .state
+        .delegation()
+        .active_for_manager(previous.manager)
+        .unwrap()
+        .id();
+    assert_ne!(replacement, previous.mandate);
+    let before = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute(&format!("resume-rackets {}", id.raw()))
+            .is_err()
+    );
+    assert!(snapshot(&registry, &session) == before);
+    let command = format!("cover-rackets char-{} {}", previous.manager.raw(), id.raw());
+    let receipt = session.execute(&command).unwrap().0;
+    assert!(
+        receipt.contains("All changes committed together"),
+        "{receipt}"
+    );
+    let record = session.state.enterprises().get_enterprise(id).unwrap();
+    assert_eq!(record.manager(), previous.manager);
+    assert_eq!(record.authority().mandate, replacement);
+    assert_eq!(record.status(), EnterpriseStatus::Active);
+    assert_eq!(record.cash_account(), cash);
+    assert_eq!(record.settlement_account(), settlement);
+    assert_eq!(record.version(), version + 3);
+    let restored = restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert!(
+        snapshot(&registry, &session)
+            == bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn resume_rackets_batch_prevalidates_every_selected_lifecycle_change() {
     let registry = crimocracy::build_registry();
     let mut session =

@@ -219,6 +219,13 @@ pub fn manager_workload(
 /// impossible reporting lines. The projection reuses the *same* workload
 /// resolver as direct player staffing and the daily maintenance phase.
 pub(crate) fn projected_command_jobs_fit(state: &AppState, jobs: &[ProjectedCommandJob]) -> bool {
+    ensure_projected_command_jobs_fit(state, jobs).is_ok()
+}
+
+pub(super) fn ensure_projected_command_jobs_fit(
+    state: &AppState,
+    jobs: &[ProjectedCommandJob],
+) -> Result<(), EnterpriseError> {
     let mut impacted = BTreeSet::new();
     for job in jobs {
         let mut person = Some(job.captain);
@@ -230,10 +237,26 @@ pub(crate) fn projected_command_jobs_fit(state: &AppState, jobs: &[ProjectedComm
                 .and_then(|record| record.supervisor());
         }
     }
-    impacted.into_iter().all(|(organization, manager)| {
-        resolve_management_workload(state, organization, manager, None, None, None, jobs)
-            .is_ok_and(|load| load.required <= load.available)
-    })
+    for (organization, manager) in impacted {
+        let load =
+            resolve_management_workload(state, organization, manager, None, None, None, jobs)?;
+        ensure_workload_fits(manager, load)?;
+    }
+    Ok(())
+}
+
+fn ensure_workload_fits(
+    manager: crate::core::id::CharacterId,
+    load: ManagerWorkload,
+) -> Result<(), EnterpriseError> {
+    if load.required > load.available {
+        return Err(EnterpriseError::ManagerWorkloadExceeded {
+            manager,
+            required: load.required,
+            available: load.available,
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn ensure_manager_capacity(
@@ -252,13 +275,7 @@ pub(crate) fn ensure_manager_capacity(
         excluding,
         &[],
     )?;
-    if workload.required > workload.available {
-        return Err(EnterpriseError::ManagerWorkloadExceeded {
-            manager,
-            required: workload.required,
-            available: workload.available,
-        });
-    }
+    ensure_workload_fits(manager, workload)?;
     // A newly operating branch also consumes capacity up the actual command
     // chain. Strong captains no longer permit an unskilled boss to personally
     // supervise an unlimited number of independent crews.
@@ -278,13 +295,7 @@ pub(crate) fn ensure_manager_capacity(
             excluding,
             &[],
         )?;
-        if upstream.required > upstream.available {
-            return Err(EnterpriseError::ManagerWorkloadExceeded {
-                manager: supervisor,
-                required: upstream.required,
-                available: upstream.available,
-            });
-        }
+        ensure_workload_fits(supervisor, upstream)?;
         child = supervisor;
     }
     Ok(())
@@ -302,8 +313,7 @@ pub(crate) fn apply_due_overstretched_manager_suspensions(
     }
     let captains = state
         .enterprises()
-        .enterprises()
-        .filter(|record| record.status() == EnterpriseStatus::Active)
+        .active_enterprises()
         .map(|record| record.manager())
         .collect::<BTreeSet<_>>();
     // Include the whole organizational reporting chain. Otherwise a captain
