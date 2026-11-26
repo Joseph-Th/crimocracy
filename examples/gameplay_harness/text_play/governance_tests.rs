@@ -7,6 +7,205 @@ fn snapshot(registry: &Registry, session: &Session<'_>) -> Vec<u8> {
 }
 
 #[test]
+fn prospects_explain_exhausted_manager_pitches_until_relationship_changes() {
+    use crimocracy::social::{
+        RelationshipDimensions, relationship_system::validate_set_relationship,
+    };
+    use crimocracy::world::{
+        AutonomyLevel, CharacterDraft, OrganizationDraft, OrganizationKind,
+        world_system::{designate_player_organization, insert_character, insert_organization},
+    };
+    let registry = crimocracy::build_registry();
+    let mut state = AppState::new(17);
+    let mut create_org = |name: &str| {
+        insert_organization(
+            &registry,
+            &mut state,
+            OrganizationDraft {
+                name: name.to_owned(),
+                kind: OrganizationKind::Criminal,
+            },
+        )
+        .unwrap()
+    };
+    let player = create_org("Test recruiting crew");
+    let rival = create_org("Test incumbent crew");
+    designate_player_organization(&mut state, player).unwrap();
+    let mut create_member = |name: &str, organization, supervisor, autonomy| {
+        insert_character(
+            &mut state,
+            CharacterDraft {
+                name: name.to_owned(),
+                organization: Some(organization),
+                supervisor,
+                autonomy,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap()
+    };
+    let boss = create_member("Recruiting executive", player, None, AutonomyLevel::Tight);
+    let manager = create_member(
+        "Recruiting manager",
+        player,
+        Some(boss),
+        AutonomyLevel::Delegated,
+    );
+    let incumbent = create_member("Incumbent executive", rival, None, AutonomyLevel::Tight);
+    let candidate = create_member(
+        "Committed associate",
+        rival,
+        Some(incumbent),
+        AutonomyLevel::Guided,
+    );
+    let strong = RelationshipDimensions {
+        trust: crate::campaign::level(100),
+        respect: crate::campaign::level(100),
+        affection: crate::campaign::level(100),
+        dependence: crate::campaign::level(100),
+        ..RelationshipDimensions::zero()
+    };
+    let weak = RelationshipDimensions {
+        trust: crate::campaign::level(10),
+        respect: crate::campaign::level(20),
+        fear: crate::campaign::level(30),
+        affection: crate::campaign::level(5),
+        ..RelationshipDimensions::zero()
+    };
+    for (to, dimensions) in [(incumbent, strong), (manager, weak)] {
+        validate_set_relationship(&state, candidate, to, dimensions)
+            .unwrap()
+            .commit(&mut state)
+            .unwrap();
+    }
+    // Fund both crews so the refusal sequence is not disrupted by unrelated payroll departures.
+    for organization in [player, rival] {
+        let owner = FinancialOwner::Organization(organization);
+        let cash = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner,
+                kind: AccountKind::StreetCash,
+            },
+        )
+        .unwrap();
+        let settlement = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner,
+                kind: AccountKind::Settlement,
+            },
+        )
+        .unwrap();
+        validate_record_transaction(
+            &state,
+            LedgerTransactionDraft {
+                occurred_at: state.now(),
+                memo: "Recruitment test opening funds".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: cash,
+                        amount: Money::from_cents(2_000_000),
+                    },
+                    LedgerPosting {
+                        account: settlement,
+                        amount: Money::from_cents(-2_000_000),
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    }
+    let mut session = Session {
+        registry: &registry,
+        state,
+        player,
+        seeds: EvaluationSeeds::new(17, 17),
+        district: "Test ward".to_owned(),
+        district_variant: "TEST",
+    };
+    session
+        .execute(&format!("delegate char-{} personnel", manager.raw()))
+        .unwrap();
+    session.execute("policy recruitment delegate").unwrap();
+    let cadence = registry
+        .recruitment()
+        .autonomous_attempt_cadence()
+        .as_minutes();
+    let cooldown = registry.recruitment().cooldown().as_minutes();
+    let step = cooldown.div_ceil(cadence) * cadence;
+    let mut approaches = BTreeSet::new();
+    let mut latest = None;
+    for _ in 0..4 {
+        session
+            .execute(&format!("advance {step} uninterrupted"))
+            .unwrap();
+        let attempt = session
+            .state
+            .recruitment()
+            .latest_attempt_for(candidate, player)
+            .unwrap();
+        assert_eq!(
+            attempt.outcome(),
+            crimocracy::recruitment::RecruitmentOutcome::Refused
+        );
+        assert!(approaches.insert(attempt.approach()));
+        latest = Some(attempt.id());
+    }
+    session
+        .execute(&format!("advance {step} uninterrupted"))
+        .unwrap();
+    assert_eq!(
+        session
+            .state
+            .recruitment()
+            .latest_attempt_for(candidate, player)
+            .map(|attempt| attempt.id()),
+        latest
+    );
+    let before = snapshot(&registry, &session);
+    let listing = session.execute("prospects").unwrap().0;
+    assert!(
+        listing.contains("all recent pitches were refused"),
+        "{listing}"
+    );
+    assert!(
+        !listing.contains("may act at the daily recruitment pass"),
+        "{listing}"
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(session.execute("prospects").unwrap().0, listing);
+    validate_set_relationship(
+        &session.state,
+        candidate,
+        manager,
+        RelationshipDimensions {
+            trust: crate::campaign::level(11),
+            ..weak
+        },
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    let listing = session.execute("prospects").unwrap().0;
+    assert!(
+        listing.contains("may act at the daily recruitment pass"),
+        "{listing}"
+    );
+    assert!(
+        !listing.contains("all recent pitches were refused"),
+        "{listing}"
+    );
+}
+
+#[test]
 fn generated_manager_can_develop_contacts_and_request_recruitment() {
     use crimocracy::world::{AutonomyLevel, CapabilityKind};
     let registry = crimocracy::build_registry();

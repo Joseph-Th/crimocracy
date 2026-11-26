@@ -226,6 +226,7 @@ contact and legal systems. `tests.rs`, `governance_tests.rs`, `openings_tests.rs
 continuation, legal ledger payments, saving, information boundaries,
 authorization, and rejection integrity.
 `run_tick` remains the only way to advance simulation time.
+`prospects_explain_exhausted_manager_pitches_until_relationship_changes` runs real daily recruitment through four distinct refusals, a deferred pass, restored read-only reporting and a changed social relationship. `connections_distinguish_existing_channels_and_dormant_acquaintances` checks existing and potential channel labels, noninstitutional acquaintances, canonical rejection of a zero-basis social link, and restored read-only output. The generated freelance contract regression also verifies that the connection directory never advertises contracted workers as standing institutional handlers.
 
 Views show public business-directory identities (not ownership), organization-held
 intelligence, its own finances, people, businesses and enterprises, delivered

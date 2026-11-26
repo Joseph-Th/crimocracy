@@ -263,7 +263,8 @@ impl ContactState {
             })
     }
 
-    pub(crate) fn active_contact_for(
+    /// The existing standing channel for a known sponsor and acquaintance.
+    pub fn active_contact_for(
         &self,
         sponsor: OrganizationId,
         contact: CharacterId,

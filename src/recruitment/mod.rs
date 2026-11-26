@@ -3,6 +3,7 @@
 
 pub(crate) mod artifacts;
 pub(crate) mod autonomous_recruitment;
+pub use autonomous_recruitment::reconsider_recruitment_pitch;
 pub mod recruitment_system;
 pub(crate) mod scoring;
 

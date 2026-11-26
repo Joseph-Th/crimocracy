@@ -525,9 +525,8 @@ pub(crate) const fn information_source_kind(kind: ContactKind) -> InformationSou
     }
 }
 
-pub(crate) fn resolve_contact_kind_for_institution_kind(
-    kind: OrganizationKind,
-) -> Option<ContactKind> {
+/// Modeled channel type for a known institutional affiliation.
+pub fn resolve_contact_kind_for_institution_kind(kind: OrganizationKind) -> Option<ContactKind> {
     match kind {
         OrganizationKind::LawEnforcement => Some(ContactKind::Police),
         OrganizationKind::LegalAuthority
@@ -540,11 +539,12 @@ pub(crate) fn resolve_contact_kind_for_institution_kind(
     }
 }
 
-fn validate_contact_dependencies(
+/// The sponsor-side prerequisites for a standing contact handler. Safe for a
+/// player's roster view: this never consults the external acquaintance's custody.
+pub fn validate_contact_handler(
     state: &AppState,
     sponsor: OrganizationId,
     handler: CharacterId,
-    contact: CharacterId,
 ) -> Result<(), ContactError> {
     let sponsor_record = state
         .world
@@ -569,6 +569,16 @@ fn validate_contact_dependencies(
             arrest: arrest.id(),
         });
     }
+    Ok(())
+}
+
+fn validate_contact_dependencies(
+    state: &AppState,
+    sponsor: OrganizationId,
+    handler: CharacterId,
+    contact: CharacterId,
+) -> Result<(), ContactError> {
+    validate_contact_handler(state, sponsor, handler)?;
     let contact_record = state
         .world
         .get_character(contact)
@@ -860,14 +870,26 @@ pub(crate) fn has_current_contact_relationship_basis(
     state: &AppState,
     contact: &InstitutionalContactRecord,
 ) -> bool {
-    state
-        .social()
-        .get_relationship(contact.handler(), contact.contact())
-        .is_some_and(|relationship| has_contact_relationship_basis(relationship.dimensions()))
-        || state
-            .social()
-            .get_relationship(contact.contact(), contact.handler())
-            .is_some_and(|relationship| has_contact_relationship_basis(relationship.dimensions()))
+    has_contact_relationship_between(state, contact.handler(), contact.contact())
+}
+
+/// Whether either known directional social edge supplies the same usable basis
+/// required to establish or maintain a channel. Does not inspect custody or knowledge.
+pub fn has_contact_relationship_between(
+    state: &AppState,
+    handler: CharacterId,
+    contact: CharacterId,
+) -> bool {
+    [(handler, contact), (contact, handler)]
+        .into_iter()
+        .any(|(from, to)| {
+            state
+                .social()
+                .get_relationship(from, to)
+                .is_some_and(|relationship| {
+                    has_contact_relationship_basis(relationship.dimensions())
+                })
+        })
 }
 
 /// A durable active contact is not necessarily a usable institutional channel.

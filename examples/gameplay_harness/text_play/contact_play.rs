@@ -4,6 +4,10 @@
 //! roster, contact-held sources, or hidden case details are offered for free.
 
 use super::*;
+use crimocracy::contacts::contact_system::{
+    has_contact_relationship_between, resolve_contact_kind_for_institution_kind,
+    validate_contact_handler,
+};
 
 impl Session<'_> {
     pub(super) fn execute_contacts(&mut self, words: &[&str]) -> Result<String, String> {
@@ -14,32 +18,31 @@ impl Session<'_> {
                     .state
                     .world()
                     .characters_in_organization(self.player)
+                    .filter(|person| {
+                        validate_contact_handler(&self.state, self.player, person.id()).is_ok()
+                    })
                     .map(|person| person.id())
                     .collect();
                 for outsider in self.known_character_ids() {
-                    if staff.contains(&outsider) {
-                        continue;
-                    }
                     let person = self
                         .state
                         .world()
                         .get_character(outsider)
                         .ok_or("known person disappeared")?;
+                    if person.organization() == Some(self.player) {
+                        continue;
+                    }
                     let institution = person
                         .organization()
                         .and_then(|org| self.state.world().get_organization(org));
+                    let employer = institution.map_or("unaffiliated", |org| org.name());
+                    let existing = self
+                        .state
+                        .contacts()
+                        .active_contact_for(self.player, outsider);
+                    let kind = institution
+                        .and_then(|org| resolve_contact_kind_for_institution_kind(org.kind()));
                     for handler in &staff {
-                        // A detainee cannot manage or establish a channel. This
-                        // is current information about our own member, not an
-                        // observation of the outsider's private legal state.
-                        if self
-                            .state
-                            .legal()
-                            .active_arrest_for_character(*handler)
-                            .is_some()
-                        {
-                            continue;
-                        }
                         if self
                             .state
                             .social()
@@ -58,10 +61,29 @@ impl Session<'_> {
                             .world()
                             .get_character(*handler)
                             .ok_or("staff member disappeared")?;
-                        let employer = institution.map_or("unaffiliated", |org| org.name());
+                        // Describe only the known social and institutional prerequisites.
+                        // Do not silently filter an outsider by private custody or case state.
+                        let channel = if let Some(existing) = existing {
+                            format!(
+                                "existing channel contact-{}; see contacts",
+                                existing.id().raw()
+                            )
+                        } else if let Some(kind) = kind {
+                            if has_contact_relationship_between(&self.state, *handler, outsider) {
+                                format!(
+                                    "potential {kind:?} channel; connect char-{} char-{} (availability checked on attempt)",
+                                    handler.raw(),
+                                    outsider.raw()
+                                )
+                            } else {
+                                "no usable social basis for a channel".to_owned()
+                            }
+                        } else {
+                            "not an institutional channel".to_owned()
+                        };
                         writeln!(
                             out,
-                            "char-{} {} | {} | known to char-{} {}",
+                            "char-{} {} | {} | known to char-{} {} | {channel}",
                             outsider.raw(),
                             person.name(),
                             employer,
@@ -73,7 +95,7 @@ impl Session<'_> {
                 }
                 if out.is_empty() {
                     out.push_str(
-                        "No identified institutional acquaintances with staff relationships.",
+                        "No identified outside acquaintances with eligible staff relationships.",
                     );
                 }
             }
@@ -105,13 +127,21 @@ impl Session<'_> {
                         .map(|fact| (fact.topic(), fact.subject()))
                         .collect::<BTreeSet<_>>()
                         .len();
-                    let availability = if self
+                    let availability = if contact.status() != ContactStatus::Active {
+                        ""
+                    } else if self
                         .state
                         .legal()
                         .active_arrest_for_character(contact.handler())
                         .is_some()
                     {
                         " | handler detained; use contact ID reassign MEMBER"
+                    } else if !has_contact_relationship_between(
+                        &self.state,
+                        contact.handler(),
+                        contact.contact(),
+                    ) {
+                        " | relationship dormant; no usable social basis"
                     } else {
                         ""
                     };

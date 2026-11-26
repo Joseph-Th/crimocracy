@@ -273,7 +273,7 @@ administrative targets; it never searches hidden case or rival rosters.
 `known-people` includes current crew, observed people, contacts, and recruitment
 prospects. The `prospects` view identifies familiar vocational skills without
 revealing private motives or acceptance odds. Managers adapt their approaches after
-refusals rather than repeating an unchanged pitch every cooldown. A recruiting
+refusals rather than repeating an unchanged pitch every cooldown; `prospects` explains when every recent pitch has been refused and the manager is waiting for a relationship change or an older refusal to expire. A recruiting
 player organization's outcomes generate sourced reports; approving a pitch displays
 the actual acceptance or refusal, not merely the approval resolution. `plan` also accepts `char-N` for witness pressure and extraction
 when the organization has learned typed, episode-specific legal status. Own-member
@@ -303,10 +303,10 @@ leadership decisions must instead be resolved with `decide`. Burglary uses
 organization-held observation for that business, then validates the opening.
 
 Institutional relationships and legal defense are player-managed.
-`connections` lists known outside acquaintances and eligible handlers;
+`connections` lists known outside acquaintances and eligible permanent handlers, distinguishing established channels, potential channels, noninstitutional acquaintances, and dormant social ties without consulting outsiders' private custody;
 `connect <handler-id> <known-person-id>` establishes a real institutional
 channel only when the modeled social relationship supports it. `contacts`
-lists established channels and outstanding disclosures;
+lists established channels, dormant relationships, detained handlers, and outstanding disclosures;
 `contact <contact-id> [ask|ask-all|end]` requests one or up to 64 available
 disclosures from the explicitly selected channel, or terminates it. Disclosures
 carry their original observation minutes. Use `contacts` to identify the channel.

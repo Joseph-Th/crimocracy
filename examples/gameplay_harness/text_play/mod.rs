@@ -702,54 +702,6 @@ impl<'a> Session<'a> {
 
     /// Share candidate-specific routes between discovery and execution. When several
     /// available executives know a candidate, prefer the lowest character ID.
-    fn player_prospects(&self) -> Result<BTreeMap<CharacterId, CharacterId>, String> {
-        let mut routes = BTreeMap::new();
-        for leader in self.state.world().characters_in_organization(self.player) {
-            if leader.supervisor().is_some()
-                || self
-                    .state
-                    .legal()
-                    .active_arrest_for_character(leader.id())
-                    .is_some()
-            {
-                continue;
-            }
-            for candidate in
-                find_recruitment_candidates(self.registry, &self.state, self.player, leader.id())
-                    .map_err(|e| e.to_string())?
-            {
-                routes
-                    .entry(candidate)
-                    .and_modify(|current: &mut CharacterId| *current = (*current).min(leader.id()))
-                    .or_insert(leader.id());
-            }
-        }
-        Ok(routes)
-    }
-
-    fn manager_prospects(&self) -> Result<Vec<(CharacterId, Vec<CharacterId>)>, String> {
-        self.state
-            .delegation()
-            .active_for_scope(ResponsibilityScope::Function(
-                ResponsibilityFunction::Personnel,
-            ))
-            .filter(|mandate| mandate.organization() == self.player)
-            .filter(|mandate| {
-                self.state
-                    .legal()
-                    .active_arrest_for_character(mandate.manager())
-                    .is_none()
-            })
-            .map(|mandate| {
-                let manager = mandate.manager();
-                let candidates =
-                    find_recruitment_candidates(self.registry, &self.state, self.player, manager)
-                        .map_err(|error| error.to_string())?;
-                Ok((manager, candidates))
-            })
-            .collect()
-    }
-
     /// Choose a current mandate with authority over this location. The canonical
     /// enterprise establishment validator will check the entire authority state.
     fn enterprise_authority(
@@ -1013,6 +965,7 @@ mod racket_play;
 mod reconnaissance;
 #[cfg(test)]
 mod reconnaissance_tests;
+mod recruitment_play;
 #[cfg(test)]
 mod staff_matching_tests;
 mod territory_play;

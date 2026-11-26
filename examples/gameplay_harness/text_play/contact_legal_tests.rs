@@ -33,6 +33,59 @@ fn lawyer_id(session: &Session<'_>) -> CharacterId {
 }
 
 #[test]
+fn connections_distinguish_existing_channels_and_dormant_acquaintances() {
+    use crimocracy::social::{
+        RelationshipDimensions, relationship_system::validate_set_relationship,
+    };
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let boss = boss_id(&session);
+    let lawyer = lawyer_id(&session);
+    let initial = snapshot(&registry, &session);
+    let listing = session.execute("connections").unwrap().0;
+    assert!(listing.lines().any(|line| line.contains("Harlan Pike") && line.contains("existing channel contact-1")), "{listing}");
+    assert!(
+        listing
+            .lines()
+            .any(|line| line.contains("Danny Ferro")
+                && line.contains("not an institutional channel")),
+        "{listing}"
+    );
+    assert!(
+        listing
+            .lines()
+            .any(|line| line.contains("Nora Keene") && line.contains("potential Legal channel")),
+        "{listing}"
+    );
+    assert_eq!(initial, snapshot(&registry, &session));
+    for (from, to) in [(boss, lawyer), (lawyer, boss)] {
+        validate_set_relationship(&session.state, from, to, RelationshipDimensions::zero())
+            .unwrap()
+            .commit(&mut session.state)
+            .unwrap();
+    }
+    let before = snapshot(&registry, &session);
+    let listing = session.execute("connections").unwrap().0;
+    let lawyer_name = session.state.world().get_character(lawyer).unwrap().name();
+    let boss_label = format!("known to char-{}", boss.raw());
+    assert!(
+        listing.lines().any(|line| line.contains(lawyer_name)
+            && line.contains(&boss_label)
+            && line.contains("no usable social basis")),
+        "{listing}"
+    );
+    assert!(
+        session
+            .execute(&format!("connect {} {}", boss.raw(), lawyer.raw()))
+            .is_err()
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(session.execute("connections").unwrap().0, listing);
+}
+
+#[test]
 fn text_play_legal_contact_can_be_established_saved_and_terminated() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
@@ -255,10 +308,24 @@ fn counsel_distinguishes_usable_defense_channels_from_dormant_and_prosecution_co
         view.contains("No currently usable defense channel"),
         "{view}"
     );
+    let contacts = session.execute("contacts").unwrap().0;
+    assert!(
+        contacts
+            .lines()
+            .any(|line| line.contains("Nora Keene") && line.contains("relationship dormant")),
+        "{contacts}"
+    );
+    assert!(
+        contacts
+            .lines()
+            .any(|line| line.contains("Test prosecutor") && !line.contains("relationship dormant")),
+        "{contacts}"
+    );
     assert_eq!(before, snapshot(&registry, &session));
     session.state =
         restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
     assert_eq!(view, session.execute("counsel").unwrap().0);
+    assert_eq!(contacts, session.execute("contacts").unwrap().0);
     validate_set_relationship(&session.state, boss, lawyer, trust)
         .unwrap()
         .commit(&mut session.state)

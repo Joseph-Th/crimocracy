@@ -483,8 +483,13 @@ fn rank_candidates_by_relationship(
     let mut ranked: Vec<_> = candidates
         .into_iter()
         .filter_map(|candidate| {
-            let approach =
-                resolve_prospect_pitch(definition, state, organization, recruiter, candidate)?;
+            let approach = reconsider_recruitment_pitch(
+                definition,
+                state,
+                organization,
+                recruiter,
+                candidate,
+            )?;
             Some(RankedRecruitmentCandidate {
                 character: candidate,
                 relationship_support: candidate_relationship_support(
@@ -542,18 +547,20 @@ fn approval_request_summary(
 /// retry window. If all four were refused under the same relationship, let the prospect
 /// rest until an old refusal ages out or the relationship changes. Only own attempt history
 /// and the existing relationship are consulted, never the candidate's latent willingness.
-fn resolve_prospect_pitch(
+/// This is a pitch-selection query, not authority, cooldown, or acceptance validation.
+/// Player views call it only for prospects discovered by the canonical candidate query.
+pub fn reconsider_recruitment_pitch(
     definition: &RecruitmentDefinition,
     state: &AppState,
     organization: OrganizationId,
     manager: &crate::world::CharacterRecord,
     candidate: CharacterId,
 ) -> Option<RecruitmentApproach> {
+    if manager.organization() != Some(organization) {
+        return None;
+    }
     let preferred = resolve_autonomous_recruitment_approach(manager);
-    let relationship = state
-        .social()
-        .get_relationship(candidate, manager.id())
-        .expect("ranked prospect must have a relationship");
+    let relationship = state.social().get_relationship(candidate, manager.id())?;
     let retry_window = u64::from(definition.cooldown().as_minutes())
         * (ALL_RECRUITMENT_APPROACHES.len() as u64 * 2);
     let mut refused = BTreeSet::new();

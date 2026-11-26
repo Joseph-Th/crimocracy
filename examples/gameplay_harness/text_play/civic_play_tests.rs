@@ -222,6 +222,57 @@ fn generated_city_has_hundreds_of_real_people_and_hires_a_freelancer_for_a_fixed
             .active_freelance_contract(worker)
             .is_some()
     );
+    // Standing institutional channels cannot be owned by temporary workers.
+    // Give this worker a real relationship to an already identified contact,
+    // not a guessed outsider ID, and compare the directory with the owner gate.
+    let outsider = session
+        .state
+        .contacts()
+        .contacts_for_sponsor(session.player)
+        .next()
+        .expect("generated opening includes a known contact")
+        .contact();
+    let dimensions = crimocracy::social::RelationshipDimensions {
+        trust: crate::campaign::level(80),
+        ..crimocracy::social::RelationshipDimensions::zero()
+    };
+    crimocracy::social::relationship_system::validate_set_relationship(
+        &session.state,
+        worker,
+        outsider,
+        dimensions,
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    let connections_before =
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
+    let connections = session.execute("connections").unwrap().0;
+    assert!(
+        !connections.contains(&format!("known to char-{} ", worker.raw())),
+        "{connections}"
+    );
+    assert!(
+        !connections
+            .lines()
+            .any(|line| line.starts_with(&format!("char-{} ", worker.raw()))),
+        "{connections}"
+    );
+    let error = session
+        .execute(&format!(
+            "connect char-{} char-{}",
+            worker.raw(),
+            outsider.raw()
+        ))
+        .unwrap_err();
+    assert!(
+        error.contains("cannot own a standing institutional channel"),
+        "{error}"
+    );
+    assert_eq!(
+        connections_before,
+        bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()
+    );
     // Establish a trusting freelance acquaintance with the hired worker.
     // The directory must not advertise a route through a temporary supervisor.
     let home = session
