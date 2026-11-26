@@ -232,6 +232,25 @@ fn sponsored_retainer_remains_manageable_after_member_defection() {
     use crimocracy::legal::prosecution_system::{
         validate_decline_prosecution_case, validate_open_prosecution_case,
     };
+    let before = snapshot(&registry, &session);
+    let queued = session.execute("counsel").unwrap().0;
+    assert!(
+        queued.contains("Awaiting initial prosecutorial review"),
+        "{queued}"
+    );
+    assert!(
+        !queued.contains("no longer needs active defense"),
+        "{queued}"
+    );
+    assert!(
+        session
+            .execute(&format!("end-counsel {} concluded", representation.raw()))
+            .is_err()
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(queued, session.execute("counsel").unwrap().0);
     let case = validate_open_prosecution_case(
         &session.state,
         crimocracy::legal::ProsecutionCaseDraft {

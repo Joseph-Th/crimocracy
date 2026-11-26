@@ -200,10 +200,6 @@ struct ReviewCandidate<'a> {
 }
 
 impl ReviewCandidate<'_> {
-    fn priority(&self) -> (bool, SimTime, ProsecutionCaseId) {
-        (!self.hearing_due, self.waiting_since, self.case.id())
-    }
-
     fn plan_action(
         &self,
         registry: &Registry,
@@ -251,6 +247,35 @@ impl ReviewCandidate<'_> {
             validate_decline_prosecution_case(state, self.case.id())?,
             decline_notice(state, self.arrest)?,
         )))
+    }
+}
+
+/// Hearings retain priority. All ordinary work shares one service queue, so
+/// new evidence cannot indefinitely displace a waiting initial referral.
+/// Existing cases retain their assigned prosecutor; only intake picks a lead.
+enum DailyCandidate<'a> {
+    Review(ReviewCandidate<'a>),
+    Intake(&'a ArrestRecord),
+}
+
+impl DailyCandidate<'_> {
+    fn priority(&self) -> (bool, SimTime, bool, bool, u32) {
+        match self {
+            Self::Review(review) => (
+                !review.hearing_due,
+                review.waiting_since,
+                review.arrest.status() != ArrestStatus::Detained,
+                false,
+                review.case.id().raw(),
+            ),
+            Self::Intake(arrest) => (
+                true,
+                arrest.arrested_at(),
+                arrest.status() != ArrestStatus::Detained,
+                true,
+                arrest.id().raw(),
+            ),
+        }
     }
 }
 
@@ -340,11 +365,9 @@ pub(crate) fn apply_due_prosecution_referrals(
     let mut used = BTreeSet::new();
     let mut reviewing_subjects = BTreeSet::new();
     let mut acted_subjects = BTreeSet::new();
-    // Prepared hearings outrank ordinary referrals. Other reviews rotate by
-    // their last actual referral rather than letting the oldest arrest monopolize
-    // a prosecutor whenever its investigation discovers another exhibit.
-    // Existing reviews still have priority over new intake.
-    let mut reviews = Vec::new();
+    // One queue covers initial referrals, supplements, and prepared hearings.
+    // Ordinary work rotates by last service (arrest time before initial intake).
+    let mut candidates = Vec::new();
     for arrest_id in state.legal().arrests_with_open_prosecutions() {
         let arrest = state
             .legal()
@@ -379,76 +402,75 @@ pub(crate) fn apply_due_prosecution_referrals(
                     .expect("review referral must exist")
                     .referred_at()
             };
-            reviews.push(ReviewCandidate {
+            candidates.push(DailyCandidate::Review(ReviewCandidate {
                 arrest,
                 case,
                 lead,
                 hearing_due,
                 waiting_since,
-            });
+            }));
         }
     }
-    reviews.sort_unstable_by_key(ReviewCandidate::priority);
-    for review in reviews {
-        let subject = (review.arrest.investigation(), review.arrest.character());
-        if used.contains(&review.lead) || acted_subjects.contains(&subject) {
-            continue;
-        }
-        let Some(action) = review.plan_action(registry, state)? else {
-            continue;
+    candidates.extend(
+        state
+            .legal()
+            .arrests_awaiting_initial_review()
+            .map(DailyCandidate::Intake),
+    );
+    candidates.sort_unstable_by_key(DailyCandidate::priority);
+    for candidate in candidates {
+        let (subject, lead, action) = match candidate {
+            DailyCandidate::Review(review) => {
+                let subject = (review.arrest.investigation(), review.arrest.character());
+                if used.contains(&review.lead) || acted_subjects.contains(&subject) {
+                    continue;
+                }
+                let Some(action) = review.plan_action(registry, state)? else {
+                    continue;
+                };
+                (subject, review.lead, action)
+            }
+            DailyCandidate::Intake(arrest) => {
+                let subject = (arrest.investigation(), arrest.character());
+                if reviewing_subjects.contains(&subject) || acted_subjects.contains(&subject) {
+                    continue;
+                }
+                let lead = prosecutors
+                    .iter()
+                    .filter(|(id, (office, _, _))| {
+                        !used.contains(*id)
+                            && validate_prosecutor(
+                                state,
+                                *office,
+                                **id,
+                                arrest.character(),
+                                arrest.investigation(),
+                            )
+                            .is_ok()
+                    })
+                    .min_by_key(|(id, (_, skill, workload))| (*workload, Reverse(*skill), **id));
+                let Some((&lead, &(office, _, _))) = lead else {
+                    continue;
+                };
+                let plan = validate_open_prosecution_case(
+                    state,
+                    ProsecutionCaseDraft {
+                        arrest: arrest.id(),
+                        prosecutor_office: office,
+                        prosecutor: lead,
+                        evidence: defendant_evidence(state, arrest)?,
+                    },
+                )?;
+                (
+                    subject,
+                    lead,
+                    Action::Open(plan, member_notice(state, arrest)?),
+                )
+            }
         };
-        if state.ids.reserve_many(&action.id_budget()).is_ok() {
-            used.insert(review.lead);
-            acted_subjects.insert(subject);
-            plans.push(action);
-        }
-    }
-
-    // Prioritize actual custody, then older referrals; released defendants remain eligible.
-    // Prior completed review is not reopened merely because the same arrest still exists.
-    let mut pending: Vec<_> = state.legal().arrests_awaiting_initial_review().collect();
-    pending.sort_unstable_by_key(|arrest| {
-        (
-            arrest.status() != ArrestStatus::Detained,
-            arrest.arrested_at(),
-            arrest.id(),
-        )
-    });
-    for arrest in pending {
-        let subject = (arrest.investigation(), arrest.character());
-        if reviewing_subjects.contains(&subject) {
-            continue;
-        }
-        let lead = prosecutors
-            .iter()
-            .filter(|(id, (office, _, _))| {
-                !used.contains(id)
-                    && validate_prosecutor(
-                        state,
-                        *office,
-                        **id,
-                        arrest.character(),
-                        arrest.investigation(),
-                    )
-                    .is_ok()
-            })
-            .min_by_key(|(id, (_, skill, workload))| (*workload, Reverse(*skill), **id));
-        let Some((&lead, &(office, _, _))) = lead else {
-            continue;
-        };
-        let plan = validate_open_prosecution_case(
-            state,
-            ProsecutionCaseDraft {
-                arrest: arrest.id(),
-                prosecutor_office: office,
-                prosecutor: lead,
-                evidence: defendant_evidence(state, arrest)?,
-            },
-        )?;
-        let action = Action::Open(plan, member_notice(state, arrest)?);
         if state.ids.reserve_many(&action.id_budget()).is_ok() {
             used.insert(lead);
-            reviewing_subjects.insert(subject);
+            acted_subjects.insert(subject);
             plans.push(action);
         }
     }

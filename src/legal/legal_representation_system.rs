@@ -53,21 +53,29 @@ pub fn sponsored_active_representations(
         })
 }
 
-/// A sponsor can know whether its own lawyer still has an open matter, without
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepresentationReviewStatus {
+    None,
+    AwaitingInitialReview,
+    Reviewing,
+}
+
+/// A sponsor can know the review status of its own engagement, without
 /// receiving unrelated prosecution files or a former member's new legal history.
-pub fn sponsored_representation_matter_open(
+pub fn sponsored_representation_review_status(
     state: &AppState,
     sponsor: OrganizationId,
     representation: LegalRepresentationId,
-) -> Option<bool> {
+) -> Option<RepresentationReviewStatus> {
     let record = state.legal().get_legal_representation(representation)?;
     if record.sponsor() != sponsor || record.status() != LegalRepresentationStatus::Active {
         return None;
     }
-    Some(
-        representation_matter_open(state, record)
-            .expect("active representation must retain its arrest"),
-    )
+    let arrest = state
+        .legal()
+        .get_arrest(record.arrest())
+        .expect("active representation must retain its arrest");
+    Some(representation_review_status(state, arrest))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -216,7 +224,7 @@ pub enum LegalRepresentationError {
     #[error("legal representation {0} is not active")]
     RepresentationNotActive(LegalRepresentationId),
     #[error(
-        "representation {representation} cannot conclude while arrest {arrest} still has custody or an open prosecution"
+        "representation {representation} cannot conclude while arrest {arrest} still has custody, pending initial review, or an open prosecution"
     )]
     MatterStillActive {
         representation: LegalRepresentationId,
@@ -1017,7 +1025,7 @@ pub fn validate_end_legal_representation(
 }
 
 /// A concluded legal matter is not the same as a sponsor withdrawing or replacing its lawyer.
-/// Custody and every still-reviewing prosecution must have ended before the historical report
+/// Custody, viable initial intake and every still-reviewing prosecution must have ended before the historical report
 /// can truthfully call the matter concluded. This is rechecked on held end tokens because filing
 /// a case does not change the representation's own version.
 fn ensure_representation_matter_concluded(
@@ -1045,9 +1053,23 @@ fn representation_matter_open(
         LegalRepresentationError::MissingArrest(representation.arrest()),
     )?;
     Ok(arrest.status() == ArrestStatus::Detained
-        || state
-            .legal
-            .has_open_prosecution_case_for_arrest(representation.arrest()))
+        || representation_review_status(state, arrest) != RepresentationReviewStatus::None)
+}
+
+fn representation_review_status(
+    state: &AppState,
+    arrest: &crate::legal::ArrestRecord,
+) -> RepresentationReviewStatus {
+    if state
+        .legal()
+        .has_open_prosecution_case_for_arrest(arrest.id())
+    {
+        RepresentationReviewStatus::Reviewing
+    } else if crate::legal::prosecution_system::initial_review_pending(state, arrest) {
+        RepresentationReviewStatus::AwaitingInitialReview
+    } else {
+        RepresentationReviewStatus::None
+    }
 }
 
 pub(crate) fn retained_representation_summary(

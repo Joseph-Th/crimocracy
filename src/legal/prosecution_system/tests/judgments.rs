@@ -281,6 +281,72 @@ fn prosecution_supplements_rotate_to_the_longest_waiting_review() {
 }
 
 #[test]
+fn waiting_initial_intake_rotates_with_ordinary_supplements() {
+    let mut fixture = fixture();
+    let first = open_case(&mut fixture);
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let other = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Defendant waiting for first review".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let waiting = detain_character(&mut fixture, other, "Waiting defendant");
+    let first_day = daily_boundary(&fixture.registry, &mut fixture.state);
+    assert_eq!(first_day.prosecution_supplements.len(), 1);
+    assert!(first_day.opened_prosecution_cases.is_empty());
+    let additional = add_evidence(
+        &mut fixture.state,
+        fixture.police,
+        fixture.investigation,
+        fixture.defendant,
+        EvidenceKind::Surveillance,
+    );
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    let second_day = daily_boundary(&fixture.registry, &mut fixture.state);
+    assert_eq!(second_day, daily_boundary(&fixture.registry, &mut restored));
+    assert_eq!(
+        second_day.opened_prosecution_cases.len(),
+        1,
+        "a new exhibit must not jump ahead of an older unserved arrest again"
+    );
+    assert!(second_day.prosecution_supplements.is_empty());
+    let opened = fixture
+        .state
+        .legal()
+        .get_prosecution_case(second_day.opened_prosecution_cases[0])
+        .unwrap();
+    assert_eq!(opened.arrest(), waiting);
+    let third_day = daily_boundary(&fixture.registry, &mut fixture.state);
+    assert_eq!(third_day, daily_boundary(&fixture.registry, &mut restored));
+    assert_eq!(third_day.prosecution_supplements.len(), 1);
+    assert!(
+        fixture
+            .state
+            .legal()
+            .get_prosecution_case(first)
+            .unwrap()
+            .evidence()
+            .contains(&additional)
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn later_review_cannot_impose_second_fine_from_already_adjudicated_evidence() {
     let mut fixture = fixture();
     let first = daily_boundary(&fixture.registry, &mut fixture.state).opened_prosecution_cases[0];

@@ -5,8 +5,8 @@
 //! policy retainers through those canonical commands.
 
 use super::{
-    LegalRepresentationError, ValidatedLegalRepresentation, validate_end_legal_representation,
-    validate_retain_legal_representation,
+    LegalRepresentationError, ValidatedLegalRepresentation, representation_matter_open,
+    validate_end_legal_representation, validate_retain_legal_representation,
 };
 use crate::core::id::{
     ArrestId, CharacterId, ContactId, FinancialAccountId, IdKind, LegalRepresentationId, MandateId,
@@ -80,7 +80,7 @@ pub(crate) fn apply_automatic_legal_support(
     registry: &crate::registry::Registry,
     state: &mut AppState,
 ) -> Result<AutomaticLegalSupportOutcome, LegalRepresentationError> {
-    // Automatic support concludes only when neither custody nor prosecution remains active.
+    // Automatic support concludes only when custody, viable queued intake and prosecution end.
     // A custody release does not dispose of the originating criminal matter: the same arrest
     // may still have a reviewing prosecution case, and automatically dismissing its defense
     // counsel at that moment would abandon an ongoing case. Once the last such review closes,
@@ -162,15 +162,7 @@ fn validate_inactive_automatic_representation_endings(
 ) -> Result<Vec<super::ValidatedLegalRepresentationEnd>, LegalRepresentationError> {
     let mut concluded = Vec::new();
     for record in state.legal.active_automatic_policy_representations() {
-        let arrest = state
-            .legal
-            .get_arrest(record.arrest())
-            .ok_or(LegalRepresentationError::MissingArrest(record.arrest()))?;
-        if arrest.status() != ArrestStatus::Detained
-            && !state
-                .legal
-                .has_open_prosecution_case_for_arrest(record.arrest())
-        {
+        if !representation_matter_open(state, record)? {
             concluded.push(record.id());
         }
     }

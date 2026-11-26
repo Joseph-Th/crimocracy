@@ -4,7 +4,7 @@ use super::*;
 use crate::core::id::ProsecutionCaseId;
 use crate::core::time::SimDuration;
 
-fn open_prosecution(fixture: &mut Fixture) -> ProsecutionCaseId {
+fn establish_prosecution_office(fixture: &mut Fixture) -> (OrganizationId, CharacterId) {
     let office = insert_organization(
         &fixture.registry,
         &mut fixture.state,
@@ -27,6 +27,11 @@ fn open_prosecution(fixture: &mut Fixture) -> ProsecutionCaseId {
         },
     )
     .expect("reviewing attorney should validate");
+    (office, prosecutor)
+}
+
+fn open_prosecution(fixture: &mut Fixture) -> ProsecutionCaseId {
+    let (office, prosecutor) = establish_prosecution_office(fixture);
     let evidence = fixture
         .state
         .legal()
@@ -394,6 +399,122 @@ fn automatic_policy_retains_counsel_for_released_defendant_with_prosecution_only
         .expect("finished automatic defense should release its legal contact");
     validate_state(&fixture.state).expect("completed automatic defense must validate");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn existing_automatic_retainer_survives_release_before_initial_referral() {
+    let mut fixture = fixture();
+    establish_prosecution_office(&mut fixture);
+    enable_automatic_defense(&mut fixture);
+    let initial = apply_automatic_legal_support(&fixture.registry, &mut fixture.state).unwrap();
+    assert_eq!(initial.retained.len(), 1);
+    let representation = initial.retained[0];
+    let payment = fixture
+        .state
+        .legal()
+        .get_legal_representation(representation)
+        .unwrap()
+        .payment();
+    let provider_balance = fixture
+        .state
+        .finance()
+        .get_account(fixture.provider)
+        .unwrap()
+        .balance();
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let tick = run_tick(&fixture.registry, state);
+        assert_eq!(
+            tick.concluded_automatic_legal_support, 0,
+            "release before a scheduled intake must not discard paid defense"
+        );
+        assert!(tick.automatic_legal_support.is_empty());
+        assert!(
+            validate_end_legal_representation(
+                state,
+                representation,
+                LegalRepresentationEndReason::MatterConcluded
+            )
+            .is_err()
+        );
+        assert_eq!(
+            state
+                .legal()
+                .active_representation_for_arrest(fixture.arrest)
+                .unwrap()
+                .id(),
+            representation
+        );
+        let delta = crate::core::time::DAY_MINUTES
+            - state.now().as_minutes() % crate::core::time::DAY_MINUTES;
+        state.advance_clock(SimDuration::from_minutes((delta - 1) as u32));
+        let tick = run_tick(&fixture.registry, state);
+        assert_eq!(tick.opened_prosecution_cases.len(), 1);
+        assert!(
+            tick.automatic_legal_support.is_empty(),
+            "the same matter cannot charge for a second automatic retainer"
+        );
+        assert_eq!(
+            state
+                .legal()
+                .active_representation_for_arrest(fixture.arrest)
+                .unwrap()
+                .id(),
+            representation
+        );
+        // The sponsor's payroll may consume reserves at midnight. The legal
+        // receipt and the provider's fee income must remain unchanged.
+        assert_eq!(
+            state
+                .legal()
+                .representations_for_arrest(fixture.arrest)
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .legal()
+                .get_legal_representation(representation)
+                .unwrap()
+                .payment(),
+            payment
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(fixture.provider)
+                .unwrap()
+                .balance(),
+            provider_balance
+        );
+        validate_decline_prosecution_case(state, tick.opened_prosecution_cases[0])
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        let finished = run_tick(&fixture.registry, state);
+        assert_eq!(finished.concluded_automatic_legal_support, 1);
+        assert_eq!(
+            state
+                .legal()
+                .get_legal_representation(representation)
+                .unwrap()
+                .end_reason(),
+            Some(LegalRepresentationEndReason::MatterConcluded)
+        );
+        build_save(&fixture.registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
 }
 
 #[test]

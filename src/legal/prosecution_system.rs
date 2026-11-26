@@ -631,6 +631,38 @@ fn assigned_prosecutor(case: &ProsecutionCaseRecord) -> Result<CharacterId, Pros
         .ok_or(ProsecutionError::CaseUnstaffed { case: case.id() })
 }
 
+/// A queued arrest can still enter review while an eligible institutional
+/// roster exists. Temporary custody of a qualified prosecutor does not end
+/// the defendant's matter; the prosecutor can return after release.
+pub(crate) fn initial_review_pending(
+    state: &AppState,
+    arrest: &crate::legal::ArrestRecord,
+) -> bool {
+    state.legal().is_awaiting_initial_review(arrest.id())
+        && state
+            .world()
+            .organizations()
+            .filter(|office| office.kind() == OrganizationKind::Prosecutor)
+            .any(|office| {
+                state
+                    .world()
+                    .characters_in_organization(office.id())
+                    .any(|person| {
+                        person.capability(CapabilityKind::LegalKnowledge).is_some()
+                            && matches!(
+                                validate_prosecutor(
+                                    state,
+                                    office.id(),
+                                    person.id(),
+                                    arrest.character(),
+                                    arrest.investigation()
+                                ),
+                                Ok(_) | Err(ProsecutionError::DetainedProsecutor(_))
+                            )
+                    })
+            })
+}
+
 fn validate_prosecutor(
     state: &AppState,
     office: OrganizationId,

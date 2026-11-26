@@ -5,8 +5,8 @@
 
 use super::*;
 use crimocracy::legal::legal_representation_system::{
-    retainer_provider_account, sponsored_active_representations,
-    sponsored_representation_matter_open, validate_counsel_channel,
+    RepresentationReviewStatus, retainer_provider_account, sponsored_active_representations,
+    sponsored_representation_review_status, validate_counsel_channel,
 };
 
 impl Session<'_> {
@@ -57,6 +57,9 @@ impl Session<'_> {
                     let representation = self.state.legal().active_representation_for_arrest(id);
                     let sponsored = representation.filter(|record| record.sponsor() == self.player);
                     let detained = record.status() == crimocracy::legal::ArrestStatus::Detained;
+                    let sponsored_review = sponsored.and_then(|rep| {
+                        sponsored_representation_review_status(&self.state, self.player, rep.id())
+                    });
                     let open_review = if current_member {
                         crimocracy::legal::prosecution_system::member_prosecution_under_review(
                             &self.state,
@@ -64,16 +67,10 @@ impl Session<'_> {
                             id,
                         )
                     } else {
-                        sponsored.is_some_and(|rep| {
-                            !detained
-                                && sponsored_representation_matter_open(
-                                    &self.state,
-                                    self.player,
-                                    rep.id(),
-                                )
-                                .unwrap_or(false)
-                        })
+                        sponsored_review == Some(RepresentationReviewStatus::Reviewing)
                     };
+                    let awaiting_review =
+                        sponsored_review == Some(RepresentationReviewStatus::AwaitingInitialReview);
                     let judgments = crimocracy::legal::prosecution_system::member_judgments(
                         &self.state,
                         self.player,
@@ -111,6 +108,8 @@ impl Session<'_> {
                     .unwrap();
                     if open_review {
                         out.push_str("  Prosecutorial review remains open; release does not end the legal matter.\n");
+                    } else if awaiting_review {
+                        out.push_str("  Awaiting initial prosecutorial review; the existing retainer covers the pending matter.\n");
                     }
                     for judgment in judgments {
                         writeln!(
@@ -137,7 +136,7 @@ impl Session<'_> {
                             representation.fee().cents()
                         )
                         .unwrap();
-                        if !detained && !open_review {
+                        if !detained && !open_review && !awaiting_review {
                             writeln!(out, "  Legal matter no longer needs active defense. This retainer remains assigned until leadership uses 'end-counsel representation-{} concluded'.", representation.id().raw()).unwrap();
                         }
                     } else if representation.is_some() {

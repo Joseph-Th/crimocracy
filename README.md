@@ -339,7 +339,11 @@ Routine autonomous custody has a sixty-day cooldown following release by the sam
 `counsel` displays current-member legal matters and your own active retainers, including those for former members. Another sponsor's retainer is indicated without revealing its management ID, lawyer, or fee. `counsel` lists only currently usable defense channels, not prosecutors or dormant relationships. `retain <arrest-id> <legal-contact-id> <fee-cents>` hires counsel for a current member through a live legal-services contact and the production ledger, using an existing provider operating account that can receive the fee.
 `end-counsel <representation-id> <concluded|replace|withdraw>` closes your sponsored representation, including after a member's departure, only when its legal constraints allow it. Alternatively,
 `policy legal automatic` enables automatic retention when a legal contact
-and funding exist. `advance` interrupts on arrests and releases of members
+and funding exist. Already-paid counsel covers the original arrest while viable
+initial prosecution intake is queued and throughout filed review; release alone
+does not trigger a second retainer. The `counsel` view distinguishes awaiting
+intake from filed review. New retainers still require custody or an open case.
+`advance` interrupts on arrests and releases of members
 so manual counsel decisions are not skipped. It also pauses on newly suspended
 own businesses or rackets, the first losing cycle in an own racket's current
 losing streak (including after reopening), and payroll shortfalls by default.

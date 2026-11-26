@@ -291,6 +291,14 @@ impl LegalState {
             .is_some()
     }
     /// Only arrests that have never entered prosecution review.
+    pub(crate) fn is_awaiting_initial_review(&self, arrest: ArrestId) -> bool {
+        self.indexes
+            .prosecutions
+            .awaiting_initial_review
+            .contains(&arrest)
+    }
+
+    /// Only arrests that have never entered prosecution review.
     pub(crate) fn arrests_awaiting_initial_review(&self) -> impl Iterator<Item = &ArrestRecord> {
         self.indexes
             .prosecutions
