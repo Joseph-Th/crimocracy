@@ -589,6 +589,94 @@ fn retain_defense(fixture: &mut Fixture) -> crate::core::id::LegalRepresentation
 }
 
 #[test]
+fn court_fine_uses_canonical_personal_payment_order() {
+    let mut fixture = fixture();
+    let sponsor = sponsor(&fixture);
+    let case = daily_boundary(&fixture.registry, &mut fixture.state).opened_prosecution_cases[0];
+    validate_release_arrest(&fixture.state, fixture.arrest)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let owner = FinancialOwner::Character(fixture.defendant);
+    let accounted = account(&mut fixture.state, owner, AccountKind::AccountedFunds);
+    let small = account(&mut fixture.state, owner, AccountKind::StreetCash);
+    let large = account(&mut fixture.state, owner, AccountKind::StreetCash);
+    let source = account(
+        &mut fixture.state,
+        FinancialOwner::Organization(sponsor),
+        AccountKind::Settlement,
+    );
+    fund(&mut fixture.state, source, accounted, 1_000_000);
+    fund(&mut fixture.state, source, small, 500);
+    fund(&mut fixture.state, source, large, 1_000_000);
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        14 * DAY_DURATION.as_minutes() - 1,
+    ));
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    let tick = run_test_tick(&fixture.registry, &mut fixture.state);
+    assert_eq!(tick, run_test_tick(&fixture.registry, &mut restored));
+    assert_eq!(tick.adjudicated_prosecution_cases, vec![case]);
+    assert_eq!(tick.court_fine_payments.len(), 1);
+    let state = &fixture.state;
+    let fine = state
+        .legal()
+        .get_prosecution_case(case)
+        .unwrap()
+        .judgment()
+        .unwrap()
+        .fine();
+    assert!(fine > Money::ZERO && fine < Money::from_cents(1_000_000));
+    let payment = state
+        .finance()
+        .get_transaction(tick.court_fine_payments[0])
+        .unwrap();
+    assert_eq!(payment.postings().len(), 2);
+    assert_eq!(
+        payment.postings()[0],
+        LedgerPosting {
+            account: large,
+            amount: fine.checked_neg().unwrap(),
+        }
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(accounted)
+            .unwrap()
+            .balance()
+            .cents(),
+        1_000_000
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(small)
+            .unwrap()
+            .balance()
+            .cents(),
+        500
+    );
+    assert_eq!(
+        state
+            .finance()
+            .get_account(large)
+            .unwrap()
+            .balance()
+            .cents(),
+        1_000_000 - fine.cents()
+    );
+    assert_eq!(state.legal().outstanding_fine(case), Money::ZERO);
+    assert_eq!(
+        bincode::serialize(state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn court_hearing_distinguishes_conviction_from_acquittal_and_collects_only_personal_funds() {
     let mut fixture = fixture();
     let sponsor = sponsor(&fixture);

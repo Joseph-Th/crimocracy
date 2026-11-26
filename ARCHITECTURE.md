@@ -434,7 +434,7 @@ determinism and client contracts.
           wage-driven departures suspend live rackets before revoking mandates and releasing membership; suspended player rackets remain recoverable by succession; history gates return; assetless final abandonment can end a player campaign
     ──► apply_due_political_campaigns     after payroll; decay, funded work, rival spending, tenure
     ──► apply_due_fine_collections
-          court fines collect only from convicted defendants' accessible personal funds, including wages; a derived unpaid-balance index drops settled judgments and is rebuilt from the authoritative judgments and payment ledger
+          court fines collect only from convicted defendants' accessible personal funds, including wages, using the canonical payment order (street cash before accounted funds, largest balance first within each kind); a derived unpaid-balance index drops settled judgments and is rebuilt from the authoritative judgments and payment ledger
     ──► apply_reputation_phase           decay and current operation/racket consequences
     ──► apply_due_autonomous_recruitment  sees current resentment + decayed/current competence
     ──► apply_due_overstretched_manager_suspensions

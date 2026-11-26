@@ -9,6 +9,7 @@ use crate::core::time::is_day_boundary;
 use crate::finance::finance_system::{
     validate_open_accounts, validate_record_transaction, validate_record_transaction_with_openings,
 };
+use crate::finance::helpers::payment_debits_up_to;
 use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
@@ -118,7 +119,7 @@ pub(crate) fn apply_due_fine_collections(
     let mut payments = Vec::new();
     // Each collection sees the balance left by previous orders. No overlapping
     // debit plan or stale account token can overdraw the same personal funds.
-    for (id, mut needed) in cases {
+    for (id, needed) in cases {
         let case = state
             .legal()
             .get_prosecution_case(id)
@@ -127,33 +128,16 @@ pub(crate) fn apply_due_fine_collections(
             continue;
         }
         debug_assert!(needed > Money::ZERO);
-        let mut postings = Vec::new();
-        let mut collected = Money::ZERO;
-        for account in state
-            .finance()
-            .accounts_for(FinancialOwner::Character(case.defendant()))
-        {
-            if !collectible(account.kind()) {
-                continue;
-            }
-            let payment = needed.min(account.available_payment_balance());
-            if payment <= Money::ZERO {
-                continue;
-            }
-            postings.push(LedgerPosting {
-                account: account.id(),
-                amount: payment.checked_neg().expect("positive fine debit"),
-            });
-            collected = collected
-                .checked_add(payment)
-                .expect("collection bounded by outstanding fine");
-            needed = needed
-                .checked_sub(payment)
-                .expect("payment bounded by debt");
-            if needed == Money::ZERO {
-                break;
-            }
-        }
+        let (mut postings, remaining) = payment_debits_up_to(
+            state
+                .finance()
+                .accounts_for(FinancialOwner::Character(case.defendant()))
+                .filter(|account| collectible(account.kind())),
+            needed,
+        );
+        let collected = needed
+            .checked_sub(remaining)
+            .expect("unpaid remainder is bounded by the fine");
         if collected == Money::ZERO {
             continue;
         }
