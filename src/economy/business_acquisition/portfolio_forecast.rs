@@ -9,7 +9,7 @@ use crate::core::id::{BusinessId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::economy::business_economy_system::{
     PortfolioAdministration, acquisition_owner_daily_displacement, daily_owner_net,
-    forecast_acquisition_business_net, forecast_live_business_net,
+    forecast_acquisition_business_net, forecast_live_business_net_after_sale,
 };
 use crate::finance::Money;
 use crate::registry::Registry;
@@ -65,7 +65,7 @@ impl PortfolioForecast {
                 .economics()
                 .cycle()
                 .as_minutes();
-            let net = forecast_live_business_net(registry, state, asset.id())?;
+            let net = forecast_live_business_net_after_sale(registry, state, asset.id(), excluded)?;
             current.include(net, cycle);
             local_purchase.include(net, cycle);
             expansion_purchase.include(net, cycle);
@@ -99,7 +99,13 @@ impl PortfolioForecast {
         };
         let overhead = projection.overhead;
         let incoming = daily_owner_net(
-            forecast_acquisition_business_net(registry, state, candidate, self.owner)?,
+            forecast_acquisition_business_net(
+                registry,
+                state,
+                candidate,
+                self.owner,
+                self.excluded,
+            )?,
             appraisal.cycle_minutes,
             overhead,
         );

@@ -9,7 +9,7 @@ mod personal_owner_dividends;
 mod portfolio_overhead;
 pub(crate) use market::{
     forecast_acquisition_business_net, forecast_competitor_disruption_gain,
-    forecast_live_business_net,
+    forecast_live_business_net, forecast_live_business_net_after_sale,
 };
 pub(crate) use portfolio_overhead::{PortfolioAdministration, daily_owner_net};
 pub use portfolio_overhead::{portfolio_overhead_basis_points, portfolio_overhead_charge};

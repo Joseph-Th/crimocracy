@@ -19,6 +19,7 @@ use crate::world::{
 use std::collections::BTreeSet;
 
 mod autonomous_portfolio;
+mod seller_portfolio;
 mod strategic_investment;
 
 const SEED: u64 = 0x0AC0_5171;
@@ -34,6 +35,56 @@ struct AcquisitionFixture {
 
 fn rating(value: u8) -> Rating {
     Rating::try_new(value).expect("fixture rating must be valid")
+}
+
+fn ward(
+    fixture: &mut AcquisitionFixture,
+    name: &str,
+    wealth: u8,
+    commerce: u8,
+) -> crate::core::id::NeighborhoodId {
+    insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: name.into(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(wealth),
+                    commercial_activity: rating(commerce),
+                    illicit_demand: rating(30),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(30),
+                },
+            },
+        },
+    )
+    .unwrap()
+}
+
+fn established_shop(
+    fixture: &mut AcquisitionFixture,
+    kind: BusinessKind,
+    owner: BusinessOwner,
+    neighborhood: crate::core::id::NeighborhoodId,
+) -> BusinessId {
+    let business = insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: format!("{kind:?} shop"),
+            kind,
+            functions: BTreeSet::from([BusinessFunction::CustomerAccess]),
+            neighborhood,
+            owner,
+        },
+    )
+    .unwrap();
+    let original = fixture.business;
+    fixture.business = business;
+    establish_existing_independent_economy(fixture);
+    fixture.business = original;
+    business
 }
 
 fn make_independent_fixture() -> AcquisitionFixture {

@@ -7,7 +7,7 @@ use crate::core::id::{BusinessId, CharacterId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::DAY_MINUTES;
 use crate::economy::business_economy_system::{
-    daily_owner_net, forecast_live_business_net, forecast_normal_business_net,
+    daily_owner_net, forecast_live_business_net_after_sale, forecast_normal_business_net,
 };
 use crate::finance::helpers::TreasuryLiquidity;
 use crate::finance::{FinancialOwner, Money};
@@ -63,11 +63,13 @@ fn proprietor_daily_income(
     registry: &Registry,
     state: &AppState,
     business: &BusinessRecord,
+    sold: Option<BusinessId>,
 ) -> Result<i128, BusinessAcquisitionError> {
-    if state
-        .economy()
-        .get_business_economy(business.id())
-        .is_none_or(|economy| !economy.is_operating())
+    if sold == Some(business.id())
+        || state
+            .economy()
+            .get_business_economy(business.id())
+            .is_none_or(|economy| !economy.is_operating())
     {
         return Ok(0);
     }
@@ -76,14 +78,15 @@ fn proprietor_daily_income(
         .economics()
         .cycle()
         .as_minutes();
-    let net = forecast_live_business_net(registry, state, business.id())?;
+    let net = forecast_live_business_net_after_sale(registry, state, business.id(), sold)?;
     Ok(daily_owner_net(net, cycle, 0).max(0))
 }
 
 /// A registered person's choice to part with an actual livelihood. An owner
-/// selling their last productive storefront requires another appraisal period
-/// of its own forecast earnings. Public quotes remain unchanged; a buyer cannot
-/// inspect this private reservation price or the reasons for refusal.
+/// losing their last productive storefront through a sale requires another
+/// appraisal period of their current forecast earnings. The retained alternative
+/// must remain profitable after the transferred storefront reopens. Public quotes
+/// remain unchanged; a buyer cannot inspect this private reservation price.
 pub(super) fn personal_seller_minimum(
     registry: &Registry,
     state: &AppState,
@@ -98,19 +101,20 @@ pub(super) fn personal_seller_minimum(
         return Err(BusinessAcquisitionError::OfferDeclined);
     }
     let base = negotiated_reference_price(registry, state, business)?;
-    let record = state
-        .world()
-        .get_business(business)
-        .ok_or(BusinessAcquisitionError::MissingBusiness(business))?;
-    let mut extra_income = proprietor_daily_income(registry, state, record)? * VALUATION_DAYS;
-    if extra_income > 0 {
-        for other in state.world().businesses_owned_by_character(seller) {
-            if other.id() != business && proprietor_daily_income(registry, state, other)? > 0 {
-                extra_income = 0;
-                break;
-            }
+    let mut current_income = 0_i128;
+    let mut retains_livelihood = false;
+    for shop in state.world().businesses_owned_by_character(seller) {
+        if proprietor_daily_income(registry, state, shop, Some(business))? > 0 {
+            retains_livelihood = true;
+            break;
         }
+        current_income += proprietor_daily_income(registry, state, shop, None)?;
     }
+    let extra_income = if retains_livelihood {
+        0
+    } else {
+        current_income * VALUATION_DAYS
+    };
     let standing = i128::from(person.life().professional_standing());
     let fatigue = i128::from(person.life().fatigue());
     let stubbornness = if person.has_trait(TraitKind::Greedy) {
@@ -132,8 +136,9 @@ pub(super) fn personal_seller_minimum(
 /// productive earning base unless the remaining portfolio covers wages, a comparably
 /// useful replacement is available, or the offer plus net liquid reserves finances an
 /// entire year's post-sale wage gap. Cash-poor sellers do not liquidate their livelihood
-/// just to cover a week's payroll. Idle or unprofitable properties can still be sold,
-/// as can surplus holdings. During the initial valuation holding period a sale
+/// just to cover a week's payroll. Idle or unprofitable properties can still be sold
+/// when reopening them under a new owner will not compromise the retained wage base,
+/// as can surplus holdings. During the initial valuation holding period a productive sale
 /// requires a buyout above the normal appraisal, not merely the routine offer
 /// that autonomous investors repeatedly submit. This prevents weekly churn
 /// without locking every traded storefront for 90 of the next 105 days.
@@ -155,34 +160,33 @@ pub(super) fn seller_preserves_earning_base(
         .world()
         .get_business(business)
         .ok_or(BusinessAcquisitionError::MissingBusiness(business))?;
-    if state
+    let operating = state
         .economy()
         .get_business_economy(business)
-        .is_none_or(|economy| !economy.is_operating())
-    {
-        return Ok(false);
-    }
+        .is_some_and(|economy| economy.is_operating());
     let current = PortfolioForecast::new(registry, state, seller, None)?;
     let retained = PortfolioForecast::new(registry, state, seller, Some(business))?;
     let remaining = retained.daily_net();
     let lost_income = current.daily_net() - remaining;
     // A sale can reduce administration on the retained holdings enough to improve income.
-    // Protect only property that actually contributes to the seller's wage base.
+    // Even a closed property can protect the seller's wage base by remaining
+    // out of the market. Transfer restarts it under the new owner.
     if lost_income <= 0 {
         return Ok(false);
     }
-    if state
-        .world()
-        .get_business_ownership_change_for_version(business, record.version())
-        .is_some_and(|change| {
-            change.previous_owner().is_some()
-                && i128::from(
-                    state
-                        .now()
-                        .as_minutes()
-                        .saturating_sub(change.changed_at().as_minutes()),
-                ) < VALUATION_DAYS * i128::from(DAY_MINUTES)
-        })
+    if operating
+        && state
+            .world()
+            .get_business_ownership_change_for_version(business, record.version())
+            .is_some_and(|change| {
+                change.previous_owner().is_some()
+                    && i128::from(
+                        state
+                            .now()
+                            .as_minutes()
+                            .saturating_sub(change.changed_at().as_minutes()),
+                    ) < VALUATION_DAYS * i128::from(DAY_MINUTES)
+            })
     {
         // A very large voluntary offer can rationally buy out a new investment.
         // Require the original standard capital plus *two* full appraisal periods

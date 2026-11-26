@@ -63,7 +63,7 @@ city size:
 
 ## Named people across the city
 
-A generated city gives individually simulated characters to private business proprietors, municipal politicians, police detectives and officers, prosecutors, lawyers, merchant and labor representatives, alongside criminal personnel. Civilian owners hold actual business titles, accounts and relationships, receive personally earned dividends from shop accounts above protected working-capital floors, and can reject or accept player offers to buy their properties. Their reservation prices reflect their careers, financial livelihood and personal traits. Selling their last profitable operating storefront requires compensation based on its expected earnings; an inactive or loss-making second shop does not replace a livelihood. Some properties remain explicitly listed for immediate public acquisition; no direct listing silently turns into a hidden seller.
+A generated city gives individually simulated characters to private business proprietors, municipal politicians, police detectives and officers, prosecutors, lawyers, merchant and labor representatives, alongside criminal personnel. Civilian owners hold actual business titles, accounts and relationships, receive personally earned dividends from shop accounts above protected working-capital floors, and can reject or accept player offers to buy their properties. Their reservation prices reflect their careers, financial livelihood and personal traits. A sale that eliminates their last profitable operating storefront requires compensation based on current expected earnings; an inactive or loss-making second shop does not replace a livelihood. Remaining shops must still be profitable after the transferred property reopens. Some properties remain explicitly listed for immediate public acquisition; no direct listing silently turns into a hidden seller.
 
 Every daily boundary assigns named civic characters a real duty or time off. Shopkeepers attend an active business, police cover existing precinct patrols or lead assigned cases, and institutional officials work in their own organizations. Career experience, fatigue and professional standing persist in saves, affect detective allocation, and alter the strength of a named mayoral incumbent and candidate at election time. Detention interrupts work. The game simulates this named professional population rather than all residents or per-minute walking routes.
 
@@ -157,7 +157,9 @@ personal owner. An owner may refuse; sufficient consideration must compensate it
 foregone operating income, and it will not sell infrastructure used by active or
 suspended rackets. A staffed criminal rival must have one undetained executive to accept an offer; divided command and executive detention prevent consent, even for held offers. Holdings without remaining personnel can still be liquidated. A staffed rival protects its productive payroll base if there is no affordable
 replacement and the offered price plus liquid reserves cannot cover a full year
-of any post-sale payroll shortfall plus a week's payroll. Recently purchased
+of any post-sale payroll shortfall plus a week's payroll. The seller accounts for a
+closed shop restarting under new ownership, including its effect on retained
+stores and feasible replacement investments. Recently purchased
 profitable storefronts ordinarily stay with the buyer for ninety days, but a
 large buyout covering their standard price plus 180 days of forecast profit
 can justify selling sooner. Rival executives still offer only the ordinary

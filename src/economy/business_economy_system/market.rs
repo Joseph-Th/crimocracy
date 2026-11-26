@@ -125,6 +125,22 @@ fn operating_condition(state: &AppState, business: BusinessId) -> Option<bool> {
         .then(|| economy.is_disrupted(state.now()))
 }
 
+/// A conveyance restarts the transferred property's books, preserving existing
+/// disruption. Use this counterfactual for retained earnings and any replacement
+/// investment considered by the seller. A terminal restart cannot compete.
+fn operating_condition_after_sale(
+    state: &AppState,
+    business: BusinessId,
+    sold: Option<BusinessId>,
+) -> Option<bool> {
+    if sold == Some(business) {
+        let economy = state.economy().get_business_economy(business)?;
+        (economy.version() < u32::MAX - 1).then(|| economy.is_disrupted(state.now()))
+    } else {
+        operating_condition(state, business)
+    }
+}
+
 fn market_snapshot(
     state: &AppState,
     record: &BusinessRecord,
@@ -139,6 +155,16 @@ fn market_snapshot(
     snapshot
 }
 
+fn live_market_snapshot_after_sale(
+    state: &AppState,
+    record: &BusinessRecord,
+    sold: Option<BusinessId>,
+) -> MarketSnapshot {
+    market_snapshot(state, record, |peer| {
+        operating_condition_after_sale(state, peer.id(), sold)
+    })
+}
+
 /// The subject is counted hypothetically as open even when forecasting a resumption.
 /// Other stores with no established operating books, a suspended economy, or an exhausted
 /// recurrence cannot compete for future sales. Capture facts before the same-minute cohort settles.
@@ -147,9 +173,7 @@ pub(super) fn resolve_market_snapshot(
     business: BusinessId,
 ) -> Result<MarketSnapshot, BusinessEconomyError> {
     let record = super::validate_business(state, business)?;
-    Ok(market_snapshot(state, record, |peer| {
-        operating_condition(state, peer.id())
-    }))
+    Ok(live_market_snapshot_after_sale(state, record, None))
 }
 
 /// Revenue an owner's *other* productive storefronts would lose if this suspended
@@ -239,7 +263,7 @@ fn activating_owner_daily_displacement(
         if !peer_economy.is_operating() {
             continue;
         }
-        let current_market = resolve_market_snapshot(state, peer.id())?;
+        let current_market = live_market_snapshot_after_sale(state, peer, excluded);
         let mut reopened_market = current_market;
         reopened_market.add_competitor(relationship, incoming_damaged);
         let cycle = registry
@@ -263,6 +287,17 @@ pub(crate) fn forecast_live_business_net(
     state: &AppState,
     business: BusinessId,
 ) -> Result<Money, BusinessEconomyError> {
+    forecast_live_business_net_after_sale(registry, state, business, None)
+}
+
+/// Seller-private retained income, including a sold property's return to the
+/// local market even when the seller had previously suspended it.
+pub(crate) fn forecast_live_business_net_after_sale(
+    registry: &Registry,
+    state: &AppState,
+    business: BusinessId,
+    sold: Option<BusinessId>,
+) -> Result<Money, BusinessEconomyError> {
     let record = super::validate_business(state, business)?;
     let economy = state
         .economy()
@@ -272,7 +307,7 @@ pub(crate) fn forecast_live_business_net(
         registry,
         state,
         record,
-        resolve_market_snapshot(state, business)?,
+        live_market_snapshot_after_sale(state, record, sold),
         economy.is_disrupted(state.now()),
     )
 }
@@ -317,10 +352,11 @@ fn owner_forecast_market_snapshot(
     state: &AppState,
     record: &BusinessRecord,
     owner: BusinessOwner,
+    sold: Option<BusinessId>,
 ) -> MarketSnapshot {
     market_snapshot(state, record, |peer| {
-        if peer.owner() == owner {
-            operating_condition(state, peer.id())
+        if sold == Some(peer.id()) || peer.owner() == owner {
+            operating_condition_after_sale(state, peer.id(), sold)
         } else {
             Some(false)
         }
@@ -334,13 +370,14 @@ pub(crate) fn forecast_acquisition_business_net(
     state: &AppState,
     business: BusinessId,
     buyer: OrganizationId,
+    sold: Option<BusinessId>,
 ) -> Result<Money, BusinessEconomyError> {
     let record = super::validate_business(state, business)?;
     forecast_net_for_market(
         registry,
         state,
         record,
-        owner_forecast_market_snapshot(state, record, BusinessOwner::Organization(buyer)),
+        owner_forecast_market_snapshot(state, record, BusinessOwner::Organization(buyer), sold),
         false,
     )
 }
@@ -370,7 +407,7 @@ pub(crate) fn forecast_competitor_disruption_gain(
         let Some(disrupted) = operating_condition(state, stake) else {
             continue;
         };
-        let healthy = owner_forecast_market_snapshot(state, record, record.owner());
+        let healthy = owner_forecast_market_snapshot(state, record, record.owner(), None);
         let mut damaged = healthy;
         match kind {
             Competition::Direct => damaged.healthy_competitors -= 1,
