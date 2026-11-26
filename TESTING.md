@@ -454,7 +454,7 @@ and lines beginning `#` ignored. Interactive command rejection prints a
 reason without ending the session; a rejected scripted command fails with its
 line number. Opportunity lifecycle tests reject replayed expired or converted
 openings and delayed old observations, then admit genuinely newer observations
-after restoring a save. Excess or malformed command arguments are rejected before any
+after restoring a save. `opportunity_authorization_preflights_both_records_and_restores_exactly` verifies rejection without allocation or mutation, stale and exhausted dependencies, and byte-identical successful composition. `spent_openings_require_new_observations_even_after_restore` also checks live and rebuilt target cutoffs and subsequent expiry. `text_play_converts_a_single_storefront_lead_with_contextual_entities` exercises atomic conversion of a valid contextual lead and restored continuation. Excess or malformed command arguments are rejected before any
 mutation. Procedural campaigns create real initial rosters, independent
 businesses, district profiles and patrol schedules from the world seed;
 authored scenario openings remain available to test fixed situations.

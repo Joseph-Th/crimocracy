@@ -37,7 +37,6 @@ impl Session<'_> {
             .count();
         let leads = self
             .known_opportunities()
-            .into_iter()
             .filter(|opp| opp.status() == OpportunityStatus::Open)
             .count();
         let members = state.world().characters_in_organization(player).count();

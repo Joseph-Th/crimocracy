@@ -752,6 +752,25 @@ fn opportunity_draft(
     }
 }
 
+fn operation_draft(fixture: &OpportunityFixture, objective: OperationObjective) -> OperationDraft {
+    OperationDraft {
+        title: "Bellmore Jewelry burglary".to_owned(),
+        kind: OperationKind::Burglary,
+        responsible_organization: fixture.organization,
+        leader: fixture.leader,
+        objective,
+        approach: OperationApproach::Covert,
+        roles: BTreeMap::from([
+            (RoleKind::Coordinator, fixture.leader),
+            (RoleKind::EntrySpecialist, fixture.entry_specialist),
+        ]),
+        intelligence: BTreeSet::from([fixture.source]),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for: fixture.state.now() + SimDuration::from_minutes(10),
+    }
+}
+
 fn authorize_operation(
     fixture: &mut OpportunityFixture,
     objective: OperationObjective,
@@ -759,22 +778,7 @@ fn authorize_operation(
     validate_authorize_operation(
         &fixture.registry,
         &fixture.state,
-        OperationDraft {
-            title: "Bellmore Jewelry burglary".to_owned(),
-            kind: OperationKind::Burglary,
-            responsible_organization: fixture.organization,
-            leader: fixture.leader,
-            objective,
-            approach: OperationApproach::Covert,
-            roles: BTreeMap::from([
-                (RoleKind::Coordinator, fixture.leader),
-                (RoleKind::EntrySpecialist, fixture.entry_specialist),
-            ]),
-            intelligence: BTreeSet::from([fixture.source]),
-            constraints: Vec::new(),
-            contingencies: Vec::new(),
-            scheduled_for: fixture.state.now() + SimDuration::from_minutes(10),
-        },
+        operation_draft(fixture, objective),
     )
     .expect("matching opportunity operation should validate")
     .commit(&mut fixture.state)
@@ -788,6 +792,121 @@ fn authorize_matching_operation(fixture: &mut OpportunityFixture) -> OperationId
             target: EntityRef::Business(fixture.business),
         },
     )
+}
+
+#[test]
+fn opportunity_authorization_preflights_both_records_and_restores_exactly() {
+    let mut fixture = make_fixture();
+    let objective = OperationObjective::AcquireProperty {
+        target: EntityRef::Business(fixture.business),
+    };
+    let short = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(10)),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let draft = operation_draft(&fixture, objective.clone());
+    let before = bincode::serialize(&fixture.state).unwrap();
+    let next_id = OperationId::from_raw(fixture.state.ids.next_raw(IdKind::Operation));
+    assert_eq!(
+        validate_authorize_from_opportunity(
+            &fixture.registry,
+            &fixture.state,
+            short,
+            draft.clone()
+        )
+        .unwrap_err(),
+        OpportunityError::OperationStartsAfterWindow {
+            operation: next_id,
+            earliest_start: SimTime::from_minutes(10),
+            valid_until: SimTime::from_minutes(10),
+        }
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    validate_dismiss_opportunity(&fixture.registry, &fixture.state, short)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let lead = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity_draft(&fixture, SimTime::from_minutes(120)),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let held =
+        validate_authorize_from_opportunity(&fixture.registry, &fixture.state, lead, draft.clone())
+            .unwrap();
+    let mut dismissed = fixture.state.clone();
+    validate_dismiss_opportunity(&fixture.registry, &dismissed, lead)
+        .unwrap()
+        .commit(&mut dismissed)
+        .unwrap();
+    let before = bincode::serialize(&dismissed).unwrap();
+    assert_eq!(
+        held.commit(&mut dismissed).unwrap_err(),
+        OpportunityError::OpportunityNotOpen {
+            opportunity: lead,
+            status: OpportunityStatus::Dismissed
+        }
+    );
+    assert_eq!(bincode::serialize(&dismissed).unwrap(), before);
+
+    let mut exhausted = fixture.state.clone();
+    let held =
+        validate_authorize_from_opportunity(&fixture.registry, &exhausted, lead, draft.clone())
+            .unwrap();
+    exhausted
+        .ids
+        .set_next_raw_for_test(IdKind::Operation, u32::MAX);
+    let before = bincode::serialize(&exhausted).unwrap();
+    assert!(matches!(
+        held.commit(&mut exhausted),
+        Err(OpportunityError::Operation(OperationError::IdExhaustion(_)))
+    ));
+    assert_eq!(bincode::serialize(&exhausted).unwrap(), before);
+
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    let mut separate = fixture.state.clone();
+    let separate_id = validate_authorize_operation(&fixture.registry, &separate, draft.clone())
+        .unwrap()
+        .commit(&mut separate)
+        .unwrap();
+    validate_convert_opportunity(&separate, lead, separate_id)
+        .unwrap()
+        .commit(&mut separate)
+        .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let before = bincode::serialize(state).unwrap();
+        let held =
+            validate_authorize_from_opportunity(&fixture.registry, state, lead, draft.clone())
+                .unwrap();
+        assert_eq!(bincode::serialize(state).unwrap(), before);
+        let id = held.commit(state).unwrap();
+        assert_eq!(id, separate_id);
+        assert_eq!(
+            state
+                .opportunities()
+                .opportunity_for_operation(id)
+                .unwrap()
+                .id(),
+            lead
+        );
+        validate_state_against_registry(&fixture.registry, state).unwrap();
+        validate_invariants(state);
+        assert_eq!(
+            bincode::serialize(state).unwrap(),
+            bincode::serialize(&separate).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -1619,11 +1738,46 @@ fn spent_openings_require_new_observations_even_after_restore() {
                 OpportunityStatus::Expired
             }
         );
+        let spent_at = fixture
+            .state
+            .opportunities()
+            .get_opportunity(opportunity)
+            .unwrap()
+            .spent_at()
+            .unwrap();
+        let assert_cutoff = |state: &AppState| {
+            assert_eq!(
+                state.opportunities().spent_at_for_target(
+                    fixture.organization,
+                    OperationKind::Burglary,
+                    EntityRef::Business(fixture.business)
+                ),
+                Some(spent_at)
+            );
+            assert_eq!(
+                state.opportunities().spent_at_for_target(
+                    fixture.organization,
+                    OperationKind::Robbery,
+                    EntityRef::Business(fixture.business)
+                ),
+                None
+            );
+            assert_eq!(
+                state.opportunities().spent_at_for_target(
+                    fixture.organization,
+                    OperationKind::Burglary,
+                    EntityRef::Character(fixture.leader)
+                ),
+                None
+            );
+        };
+        assert_cutoff(&fixture.state);
         fixture.state = restore_save(
             &fixture.registry,
             build_save(&fixture.registry, &fixture.state).unwrap(),
         )
         .unwrap();
+        assert_cutoff(&fixture.state);
         run_tick(&fixture.registry, &mut fixture.state);
         let draft = opportunity_draft(&fixture, SimTime::from_minutes(120));
         let before =
@@ -1709,6 +1863,34 @@ fn spent_openings_require_new_observations_even_after_restore() {
             OpportunityStatus::Open
         );
         validate_invariants(&restored);
+        // Expiring a later opening replaces the earlier cutoff, including after
+        // reconstructing the derived indexes a second time.
+        let mut restored = restored;
+        while restored.now() < SimTime::from_minutes(120) {
+            run_tick(&fixture.registry, &mut restored);
+        }
+        assert_eq!(
+            restored.opportunities().spent_at_for_target(
+                fixture.organization,
+                OperationKind::Burglary,
+                EntityRef::Business(fixture.business)
+            ),
+            Some(SimTime::from_minutes(120))
+        );
+        assert!(restored.opportunities().has_consistent_indexes());
+        let restored_again = restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, &restored).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored_again.opportunities().spent_at_for_target(
+                fixture.organization,
+                OperationKind::Burglary,
+                EntityRef::Business(fixture.business)
+            ),
+            Some(SimTime::from_minutes(120))
+        );
     }
 }
 
@@ -1773,6 +1955,27 @@ fn duplicate_open_opportunity_is_rejected_but_dismissal_allows_later_rediscovery
             .commit(&mut fixture.state)
             .expect("replacement opportunity should commit");
     assert_ne!(replacement, opportunity);
+    assert_eq!(
+        fixture.state.opportunities().spent_at_for_target(
+            fixture.organization,
+            OperationKind::Burglary,
+            EntityRef::Business(fixture.business)
+        ),
+        None
+    );
+    let restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored.opportunities().spent_at_for_target(
+            fixture.organization,
+            OperationKind::Burglary,
+            EntityRef::Business(fixture.business)
+        ),
+        None
+    );
     validate_invariants(&fixture.state);
 }
 

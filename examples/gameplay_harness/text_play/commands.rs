@@ -882,17 +882,35 @@ impl Session<'_> {
                     return Err("burgle <lead-id> [entry-character-id] [coordinator-character-id] [abort|ask|press]".to_owned());
                 }
                 let lead = self
-                    .known_opportunities()
-                    .into_iter()
-                    .find(|opp| opp.id().raw() == raw && opp.status() == OpportunityStatus::Open)
+                    .known_opportunity(raw)
+                    .filter(|opp| opp.status() == OpportunityStatus::Open)
                     .ok_or("lead is not open or not known")?;
                 if lead.context().operation_kind() != OperationKind::Burglary {
                     return Err("lead is not for burglary".to_owned());
                 }
-                let target = match lead.context().targets().iter().next() {
-                    Some(EntityRef::Business(id)) if lead.context().targets().len() == 1 => *id,
-                    _ => return Err("burglary requires one business target".to_owned()),
-                };
+                let mut businesses =
+                    lead.context()
+                        .targets()
+                        .iter()
+                        .filter_map(|target| match target {
+                            EntityRef::Business(id) => Some(*id),
+                            EntityRef::Organization(_)
+                            | EntityRef::Character(_)
+                            | EntityRef::Neighborhood(_)
+                            | EntityRef::Operation(_)
+                            | EntityRef::Investigation(_)
+                            | EntityRef::Evidence(_)
+                            | EntityRef::FinancialAccount(_)
+                            | EntityRef::DecisionRequest(_)
+                            | EntityRef::Mandate(_)
+                            | EntityRef::Enterprise(_) => None,
+                        });
+                let target = businesses
+                    .next()
+                    .ok_or("burglary requires one business target")?;
+                if businesses.next().is_some() {
+                    return Err("burglary lead has multiple business targets; this shortcut requires exactly one".to_owned());
+                }
                 let lead_id = lead.id();
                 let name = state
                     .world()
@@ -904,9 +922,6 @@ impl Session<'_> {
                     .now()
                     .checked_add(SimDuration::ONE_MINUTE)
                     .ok_or("simulation clock exhausted")?;
-                if lead.valid_until().is_some_and(|deadline| at >= deadline) {
-                    return Err("lead expires before the proposed operation can begin".to_owned());
-                }
                 let mut explicit = BTreeMap::new();
                 for (raw, role) in params
                     .iter()
@@ -936,9 +951,10 @@ impl Session<'_> {
                 let information_count = coverage.len();
                 let intelligence = coverage.values().map(|(id, _)| *id).collect();
                 let contingencies = police_mode.contingencies();
-                let operation = validate_authorize_operation(
+                let operation = validate_authorize_from_opportunity(
                     self.registry,
                     &self.state,
+                    lead_id,
                     OperationDraft {
                         title: format!("Burglary at {name}"),
                         kind: OperationKind::Burglary,
@@ -956,10 +972,6 @@ impl Session<'_> {
                 .map_err(|e| e.to_string())?
                 .commit(&mut self.state)
                 .map_err(|e| e.to_string())?;
-                validate_convert_opportunity(&self.state, lead_id, operation)
-                    .map_err(|e| e.to_string())?
-                    .commit(&mut self.state)
-                    .map_err(|e| e.to_string())?;
                 writeln!(
                     out,
                     "Burglary {} authorized with {} information item(s); lead {} converted. Contingency: {}.",
@@ -975,11 +987,7 @@ impl Session<'_> {
                     words.get(1).ok_or("dismiss needs a lead ID")?,
                     "opportunity",
                 )?;
-                let lead = self
-                    .known_opportunities()
-                    .into_iter()
-                    .find(|opp| opp.id().raw() == raw)
-                    .ok_or("unknown lead")?;
+                let lead = self.known_opportunity(raw).ok_or("unknown lead")?;
                 validate_dismiss_opportunity(self.registry, &self.state, lead.id())
                     .map_err(|e| e.to_string())?
                     .commit(&mut self.state)

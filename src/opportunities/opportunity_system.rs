@@ -14,8 +14,11 @@ use crate::operations::operation_basis_knowledge::{
 };
 use crate::operations::operation_objective::pressureable_witness_targets_for_cases;
 use crate::operations::operation_scheduling::resolve_operation_earliest_start;
-use crate::operations::operation_system::is_actionable_opportunity_target;
-use crate::operations::{OperationKind, OperationStatus};
+use crate::operations::operation_system::{
+    OperationError, ValidatedOperation, is_actionable_opportunity_target,
+    validate_authorize_operation,
+};
+use crate::operations::{OperationDraft, OperationKind, OperationStatus};
 use crate::opportunities::{
     OperationOpportunityContext, OperationOpportunityDraft, OpportunityRecord, OpportunityStatus,
 };
@@ -160,6 +163,8 @@ pub enum OpportunityError {
     },
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    Operation(#[from] OperationError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),
     #[error(transparent)]
@@ -324,21 +329,16 @@ fn validate_discovery_state(
     if draft.source_information.is_empty() {
         return Err(OpportunityError::MissingSourceInformation);
     }
-    let mut spent_by_target = BTreeMap::<EntityRef, SimTime>::new();
-    for previous in state
-        .opportunities
-        .opportunities_for_organization(draft.organization)
-    {
-        if previous.context().operation_kind() != draft.operation_kind {
-            continue;
-        }
-        if let Some(at) = previous.spent_at() {
-            for target in previous.context().targets().intersection(&draft.targets) {
-                let cutoff = spent_by_target.entry(*target).or_insert(at);
-                *cutoff = (*cutoff).max(at);
-            }
-        }
-    }
+    let spent_by_target: BTreeMap<_, _> = draft
+        .targets
+        .iter()
+        .filter_map(|target| {
+            state
+                .opportunities
+                .spent_at_for_target(draft.organization, draft.operation_kind, *target)
+                .map(|at| (*target, at))
+        })
+        .collect();
     let mut covered_targets = BTreeSet::new();
     let mut fresh_targets = BTreeSet::new();
     for source in &draft.source_information {
@@ -586,6 +586,54 @@ pub fn validate_dismiss_opportunity(
     })
 }
 
+/// A new operation and its originating opportunity are one player order.
+/// All authorization and conversion dependencies are rechecked before either
+/// record changes; a rejected order cannot leave an unlinked operation behind.
+#[derive(Debug)]
+pub struct ValidatedOpportunityAuthorization<'registry> {
+    opportunity: OpportunityId,
+    expected_opportunity_version: u32,
+    operation: ValidatedOperation<'registry>,
+}
+
+impl ValidatedOpportunityAuthorization<'_> {
+    pub fn commit(self, state: &mut AppState) -> Result<OperationId, OpportunityError> {
+        let opportunity = validate_convertible_opportunity(state, self.opportunity)?;
+        if opportunity.version() != self.expected_opportunity_version {
+            return Err(OpportunityError::StaleOpportunity {
+                opportunity: self.opportunity,
+                expected: self.expected_opportunity_version,
+                found: opportunity.version(),
+            });
+        }
+        let prepared = self.operation.prepare(state)?;
+        validate_conversion_match(state, opportunity, prepared.record())?;
+        let operation = prepared.commit_preflighted(state);
+        state
+            .opportunities
+            .convert(self.opportunity, operation, state.now());
+        Ok(operation)
+    }
+}
+
+pub fn validate_authorize_from_opportunity<'registry>(
+    registry: &'registry Registry,
+    state: &AppState,
+    opportunity: OpportunityId,
+    draft: OperationDraft,
+) -> Result<ValidatedOpportunityAuthorization<'registry>, OpportunityError> {
+    let record = validate_convertible_opportunity(state, opportunity)?;
+    let operation = validate_authorize_operation(registry, state, draft)?;
+    validate_conversion_match(state, record, &operation.preview_record(state)?)?;
+    Ok(ValidatedOpportunityAuthorization {
+        opportunity,
+        expected_opportunity_version: record.version(),
+        operation,
+    })
+}
+
+/// Link an already authorized operation to an opportunity. New orders should
+/// instead use validate_authorize_from_opportunity so the two changes are atomic.
 pub struct ValidatedOpportunityConversion {
     opportunity: OpportunityId,
     expected_opportunity_version: u32,
@@ -629,9 +677,7 @@ pub fn validate_convert_opportunity(
     opportunity: OpportunityId,
     operation: OperationId,
 ) -> Result<ValidatedOpportunityConversion, OpportunityError> {
-    let opportunity_record = validate_open_opportunity(state, opportunity)?;
-    ensure_version_can_advance(opportunity_record.version(), "opportunity")?;
-    validate_not_expired(state, opportunity_record)?;
+    let opportunity_record = validate_convertible_opportunity(state, opportunity)?;
     let operation_record = state
         .operations
         .get_operation(operation)
@@ -643,6 +689,16 @@ pub fn validate_convert_opportunity(
         operation,
         expected_operation_version: operation_record.version(),
     })
+}
+
+fn validate_convertible_opportunity(
+    state: &AppState,
+    opportunity: OpportunityId,
+) -> Result<&OpportunityRecord, OpportunityError> {
+    let record = validate_open_opportunity(state, opportunity)?;
+    ensure_version_can_advance(record.version(), "opportunity")?;
+    validate_not_expired(state, record)?;
+    Ok(record)
 }
 
 fn validate_open_opportunity(

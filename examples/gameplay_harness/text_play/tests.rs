@@ -827,10 +827,10 @@ fn latest_reports_use_ordered_recipient_index_after_restore() {
 fn leadership_leads_are_single_counted_across_discovery_and_expiry_reports() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
-    assert_eq!(session.known_opportunities().len(), 2);
+    assert_eq!(session.known_opportunities().count(), 2);
     assert!(session.brief().contains("Open leads: 2"));
     session.execute("advance 1d").unwrap();
-    let all_leads = session.known_opportunities();
+    let all_leads: Vec<_> = session.known_opportunities().collect();
     assert_eq!(all_leads.len(), 2);
     assert_eq!(
         all_leads
@@ -862,7 +862,10 @@ fn text_play_script_runs_canonical_scout_and_reports() {
             .contains("Burglary")
     );
     assert!(session.execute("scout 99999").is_err());
-    let business = match session.known_opportunities()[0]
+    let business = match session
+        .known_opportunities()
+        .next()
+        .unwrap()
         .context()
         .targets()
         .iter()
@@ -982,7 +985,10 @@ fn text_play_save_does_not_overwrite_an_unrelated_temporary_file() {
 fn text_play_rejects_expiring_lead_before_authorization() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
-    let deadline = session.known_opportunities()[0]
+    let deadline = session
+        .known_opportunities()
+        .next()
+        .unwrap()
         .valid_until()
         .unwrap()
         .as_minutes();
@@ -994,7 +1000,7 @@ fn text_play_rejects_expiring_lead_before_authorization() {
         session
             .execute("burgle 1 abort")
             .unwrap_err()
-            .contains("expires before")
+            .contains("at or after opportunity validity deadline")
     );
     let after = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
     assert_eq!(before, after);
@@ -1004,7 +1010,10 @@ fn text_play_rejects_expiring_lead_before_authorization() {
 fn text_play_reconnaissance_can_inform_a_later_burglary() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
-    let target = match session.known_opportunities()[0]
+    let target = match session
+        .known_opportunities()
+        .next()
+        .unwrap()
         .context()
         .targets()
         .iter()

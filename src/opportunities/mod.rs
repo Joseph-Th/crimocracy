@@ -156,10 +156,30 @@ pub struct OpportunityState {
     /// target set rather than every unrelated open opportunity in the campaign.
     #[serde(skip)]
     open_by_target: BTreeMap<(OrganizationId, OperationKind, EntityRef), OpportunityId>,
+    /// Most recent consumed opening per target. Dismissal does not spend an opening.
+    /// Rebuilt from resolved records; discovery never scans unrelated history.
+    #[serde(skip)]
+    spent_by_target: BTreeMap<(OrganizationId, OperationKind, EntityRef), SimTime>,
     #[serde(skip)]
     open_by_expiry: BTreeMap<SimTime, BTreeSet<OpportunityId>>,
     #[serde(skip)]
     by_operation: BTreeMap<OperationId, OpportunityId>,
+}
+
+fn index_spent_targets(
+    index: &mut BTreeMap<(OrganizationId, OperationKind, EntityRef), SimTime>,
+    record: &OpportunityRecord,
+    at: SimTime,
+) {
+    for target in record.context().targets() {
+        let key = (
+            record.organization(),
+            record.context().operation_kind(),
+            *target,
+        );
+        let cutoff = index.entry(key).or_insert(at);
+        *cutoff = (*cutoff).max(at);
+    }
 }
 
 impl OpportunityState {
@@ -171,6 +191,7 @@ impl OpportunityState {
         self.by_organization.clear();
         self.by_report.clear();
         self.open_by_target.clear();
+        self.spent_by_target.clear();
         self.open_by_expiry.clear();
         self.by_operation.clear();
         for record in self.records.values() {
@@ -180,6 +201,9 @@ impl OpportunityState {
                 .or_default()
                 .insert(id);
             self.by_report.insert(record.report(), id);
+            if let Some(at) = record.spent_at() {
+                index_spent_targets(&mut self.spent_by_target, record, at);
+            }
             match record.resolution() {
                 None => {
                     for target in record.context().targets() {
@@ -212,6 +236,16 @@ impl OpportunityState {
 
     pub fn get_opportunity(&self, id: OpportunityId) -> Option<&OpportunityRecord> {
         self.records.get(&id)
+    }
+
+    /// Resolve a player-entered ID within the discovering organization's history.
+    pub fn opportunity_for_organization_by_raw(
+        &self,
+        organization: OrganizationId,
+        raw: u32,
+    ) -> Option<&OpportunityRecord> {
+        self.get_opportunity(OpportunityId::from_raw(raw))
+            .filter(|record| record.organization() == organization)
     }
 
     /// Opportunities belong to their discovering organization for their entire lifecycle.
@@ -279,6 +313,18 @@ impl OpportunityState {
                         .expect("open opportunity target index must reference an opportunity")
                 })
         })
+    }
+
+    /// A fresh observation must postdate this consumed opening, if any.
+    pub(crate) fn spent_at_for_target(
+        &self,
+        organization: OrganizationId,
+        operation_kind: OperationKind,
+        target: EntityRef,
+    ) -> Option<SimTime> {
+        self.spent_by_target
+            .get(&(organization, operation_kind, target))
+            .copied()
     }
 
     pub(crate) fn opportunities(&self) -> impl Iterator<Item = &OpportunityRecord> {
@@ -364,6 +410,13 @@ impl OpportunityState {
             .expect("validated opportunity disappeared before lifecycle commit");
         debug_assert_eq!(record.status(), OpportunityStatus::Open);
         let valid_until = record.valid_until();
+        match resolution {
+            OpportunityResolution::Expired { at, .. }
+            | OpportunityResolution::Converted { at, .. } => {
+                index_spent_targets(&mut self.spent_by_target, record, at)
+            }
+            OpportunityResolution::Dismissed { .. } => {}
+        }
         for target in record.context().targets() {
             let removed = self.open_by_target.remove(&(
                 record.organization(),
@@ -396,6 +449,7 @@ impl OpportunityState {
             && self.organization_index_is_consistent()
             && self.report_index_is_consistent()
             && self.open_target_index_is_consistent()
+            && self.spent_target_index_is_consistent()
             && self.expiry_index_is_consistent()
             && self.operation_index_is_consistent()
     }
@@ -502,6 +556,24 @@ impl OpportunityState {
             }
         }
         true
+    }
+
+    fn spent_target_index_is_consistent(&self) -> bool {
+        let mut expected = BTreeMap::new();
+        for record in self.records.values() {
+            if let Some(at) = record.spent_at() {
+                for target in record.context().targets() {
+                    let key = (
+                        record.organization(),
+                        record.context().operation_kind(),
+                        *target,
+                    );
+                    let cutoff = expected.entry(key).or_insert(at);
+                    *cutoff = (*cutoff).max(at);
+                }
+            }
+        }
+        self.spent_by_target == expected
     }
 
     /// Every open target is indexed exactly once, and no resolved opportunity remains

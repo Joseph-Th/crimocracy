@@ -21,7 +21,7 @@ pub(crate) use start::validate_begin_operation;
 
 use crate::core::entity::{EntityRef, is_entity_present};
 use crate::core::id::{
-    ArrestId, CaseWitnessId, CharacterId, IdExhaustionError, InformationId, OperationId,
+    ArrestId, CaseWitnessId, CharacterId, IdExhaustionError, IdKind, InformationId, OperationId,
     OrganizationId,
 };
 use crate::core::state::AppState;
@@ -317,7 +317,7 @@ pub enum OperationError {
     VersionCapacity(#[from] VersionCapacityError),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ValidatedOperation<'registry> {
     draft: OperationDraft,
     expected_participant_versions: BTreeMap<CharacterId, u32>,
@@ -328,6 +328,27 @@ pub struct ValidatedOperation<'registry> {
 
 impl<'registry> ValidatedOperation<'registry> {
     pub fn commit(self, state: &mut AppState) -> Result<OperationId, OperationError> {
+        Ok(self.prepare(state)?.commit_preflighted(state))
+    }
+
+    /// Revalidate the authorization and reserve its ID without mutating state.
+    /// A composed owner may prove its own dependencies against the prepared record
+    /// before committing both mutations in one uninterrupted transaction.
+    pub(crate) fn prepare(self, state: &AppState) -> Result<PreparedOperation, OperationError> {
+        self.ensure_current(state)?;
+        Ok(PreparedOperation(self.into_reserved_record(state)?))
+    }
+
+    /// Inspect a validated draft's prospective record without allocating an ID.
+    /// Commit still revalidates every mutable dependency and the actual next ID.
+    pub(crate) fn preview_record(
+        &self,
+        state: &AppState,
+    ) -> Result<OperationRecord, OperationError> {
+        self.clone().into_reserved_record(state)
+    }
+
+    fn ensure_current(&self, state: &AppState) -> Result<(), OperationError> {
         if state.now() > self.draft.scheduled_for {
             return Err(OperationError::AuthorizationExpired {
                 scheduled_for: self.draft.scheduled_for.as_minutes(),
@@ -466,6 +487,12 @@ impl<'registry> ValidatedOperation<'registry> {
             &self.draft,
         )?;
 
+        Ok(())
+    }
+
+    fn into_reserved_record(self, state: &AppState) -> Result<OperationRecord, OperationError> {
+        state.ids.reserve(IdKind::Operation, 1)?;
+        let id = OperationId::from_raw(state.ids.next_raw(IdKind::Operation));
         let OperationDraft {
             title,
             kind,
@@ -480,8 +507,7 @@ impl<'registry> ValidatedOperation<'registry> {
             scheduled_for,
         } = self.draft;
         let authorized_at = state.now();
-        let id = state.ids.next_operation()?;
-        state.operations.insert(OperationRecord {
+        Ok(OperationRecord {
             identity: OperationIdentity { id, title, kind },
             command: OperationCommand {
                 responsible_organization,
@@ -510,8 +536,27 @@ impl<'registry> ValidatedOperation<'registry> {
                 abort: None,
                 version: 1,
             },
-        });
-        Ok(id)
+        })
+    }
+}
+
+/// Ephemeral authorization preflight. Commit immediately after the caller's
+/// read-only checks; no intervening mutation may invalidate the reserved ID.
+pub(crate) struct PreparedOperation(OperationRecord);
+
+impl PreparedOperation {
+    pub(crate) fn record(&self) -> &OperationRecord {
+        &self.0
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState) -> OperationId {
+        let id = state
+            .ids
+            .next_operation()
+            .expect("operation ID was preflighted");
+        assert_eq!(id, self.0.id(), "prepared operation ID must remain current");
+        state.operations.insert(self.0);
+        id
     }
 }
 

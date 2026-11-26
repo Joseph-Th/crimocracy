@@ -78,7 +78,7 @@ use crimocracy::operations::{
     OperationDraft, OperationKind, OperationObjective, OperationStatus, RoleKind,
 };
 use crimocracy::opportunities::opportunity_system::{
-    validate_convert_opportunity, validate_discover_operation_opportunity,
+    validate_authorize_from_opportunity, validate_discover_operation_opportunity,
     validate_dismiss_opportunity,
 };
 use crimocracy::opportunities::{OperationOpportunityDraft, OpportunityStatus};
@@ -929,11 +929,18 @@ impl<'a> Session<'a> {
         known
     }
 
-    fn known_opportunities(&self) -> Vec<&crimocracy::opportunities::OpportunityRecord> {
+    fn known_opportunities(
+        &self,
+    ) -> impl Iterator<Item = &crimocracy::opportunities::OpportunityRecord> {
         self.state
             .opportunities()
             .opportunities_for_organization(self.player)
-            .collect()
+    }
+
+    fn known_opportunity(&self, raw: u32) -> Option<&crimocracy::opportunities::OpportunityRecord> {
+        self.state
+            .opportunities()
+            .opportunity_for_organization_by_raw(self.player, raw)
     }
 }
 

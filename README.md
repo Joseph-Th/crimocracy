@@ -298,7 +298,7 @@ participants; explicit `Role=char-N` permits knowingly untrained people.
 `cancel operation-N` withdraws an authorized or running operation through
 the canonical abort path, files its report, and releases personnel; pending
 leadership decisions must instead be resolved with `decide`. Burglary uses
-`burgle` to consume actual leads through their conversion lifecycle.
+`burgle` to authorize an operation and consume its lead atomically. A lead may include contextual entities alongside its single business target; the shortcut rejects ambiguous leads containing multiple businesses.
 `discover business-N` selects the newest usable, operation-relevant
 organization-held observation for that business, then validates the opening.
 
