@@ -27,6 +27,7 @@ pub(super) fn allocate(
     state: &AppState,
     owner: OrganizationId,
     economically_ready: &BTreeSet<NeighborhoodId>,
+    ballot_winners: &BTreeSet<NeighborhoodId>,
 ) -> PoliticalStaffing {
     let mut candidates = BTreeMap::new();
     // Personnel eligibility is independent of the age or profitability of
@@ -74,6 +75,7 @@ pub(super) fn allocate(
             .iter()
             .filter(|(district, _)| economically_ready.contains(district)),
         &electoral,
+        ballot_winners,
     );
     PoliticalStaffing {
         candidates,
@@ -81,17 +83,33 @@ pub(super) fn allocate(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Priority {
+    BallotWinner,
+    Electoral,
+    Commercial,
+}
+
 struct Choice<'a> {
     district: NeighborhoodId,
-    priority: bool,
+    priority: Priority,
     roles: [&'a BTreeSet<CharacterId>; 2],
 }
 
-type Score = (usize, usize);
+// Lexicographic cumulative counts: winning eligible wards, all electoral-ready
+// wards, then all economically qualified wards. Ordinary planning has no winners.
+type Score = [usize; 3];
+
+fn add_match(score: &mut Score, priority: Priority) {
+    for count in &mut score[priority as usize..] {
+        *count += 1;
+    }
+}
 
 fn solve<'a>(
     candidates: impl IntoIterator<Item = (&'a NeighborhoodId, &'a DistrictCandidates)>,
     electoral: &BTreeSet<NeighborhoodId>,
+    ballot_winners: &BTreeSet<NeighborhoodId>,
 ) -> Assignments {
     let mut choices = candidates
         .into_iter()
@@ -102,15 +120,23 @@ fn solve<'a>(
         })
         .map(|(&district, local)| Choice {
             district,
-            priority: electoral.contains(&district),
+            priority: if electoral.contains(&district) {
+                if ballot_winners.contains(&district) {
+                    Priority::BallotWinner
+                } else {
+                    Priority::Electoral
+                }
+            } else {
+                Priority::Commercial
+            },
             roles: [&local.political, &local.finance],
         })
         .collect::<Vec<_>>();
-    // Electoral-ready wards have priority; scarce teams are considered first.
-    // Stable district IDs break ties and make all allocations deterministic.
+    // At the ballot, actual winning wards have priority over otherwise ready
+    // losing wards. Within each tier consider scarce teams first, then stable IDs.
     choices.sort_by_key(|choice| {
         (
-            !choice.priority,
+            choice.priority,
             choice.roles[0].len().saturating_mul(choice.roles[1].len()),
             choice.district,
         )
@@ -121,7 +147,7 @@ fn solve<'a>(
         0,
         &mut BTreeSet::new(),
         &mut Assignments::new(),
-        (0, 0),
+        Score::default(),
         &mut best,
     );
     best.assigned
@@ -143,9 +169,9 @@ impl Best {
 }
 
 /// Relax complete-district constraints to ordinary bipartite post matching.
-/// Processing priority posts first preserves their maximal match count even as
-/// later augmenting paths rematch individuals. Half of each matched post count
-/// bounds the corresponding complete-district count from above.
+/// Processing posts in priority order preserves the maximum matching size of
+/// every priority prefix as later augmenting paths rematch individuals. Half
+/// of each prefix's matched post count bounds its complete-district count.
 fn relaxed_matching(
     choices: &[Choice<'_>],
     start: usize,
@@ -174,8 +200,7 @@ fn relaxed_matching(
         false
     }
     let mut people = BTreeMap::new();
-    let mut posts = 0;
-    let mut priority_posts = 0;
+    let mut posts = Score::default();
     for (index, choice) in choices.iter().enumerate().skip(start) {
         for role in 0..2 {
             if augment(
@@ -185,8 +210,7 @@ fn relaxed_matching(
                 &mut people,
                 &mut BTreeSet::new(),
             ) {
-                posts += 1;
-                priority_posts += usize::from(choice.priority);
+                add_match(&mut posts, choice.priority);
             }
         }
     }
@@ -205,7 +229,7 @@ fn relaxed_matching(
             ))
         })
         .collect();
-    ((priority_posts / 2, posts / 2), pairs)
+    (posts.map(|count| count / 2), pairs)
 }
 
 fn search(
@@ -217,18 +241,19 @@ fn search(
     best: &mut Best,
 ) {
     let (bound, pairs) = relaxed_matching(choices, index, used);
-    let upper = (score.0 + bound.0, score.1 + bound.1);
+    let upper: Score = std::array::from_fn(|tier| score[tier] + bound[tier]);
     if upper <= best.score {
         return;
     }
     // Every complete pair in the relaxed match is already a valid assignment.
     // This often reaches the upper bound without enumerating any combinations.
     let mut feasible = current.clone();
-    let priority = choices[index..]
-        .iter()
-        .filter(|choice| choice.priority && pairs.contains_key(&choice.district))
-        .count();
-    let lower = (score.0 + priority, score.1 + pairs.len());
+    let mut lower = score;
+    for choice in &choices[index..] {
+        if pairs.contains_key(&choice.district) {
+            add_match(&mut lower, choice.priority);
+        }
+    }
     feasible.extend(pairs);
     best.consider(lower, &feasible);
     if upper <= best.score || index == choices.len() {
@@ -244,14 +269,9 @@ fn search(
                 continue;
             }
             current.insert(choice.district, (political, finance));
-            search(
-                choices,
-                index + 1,
-                used,
-                current,
-                (score.0 + usize::from(choice.priority), score.1 + 1),
-                best,
-            );
+            let mut next_score = score;
+            add_match(&mut next_score, choice.priority);
+            search(choices, index + 1, used, current, next_score, best);
             current.remove(&choice.district);
             used.remove(&finance);
             if upper <= best.score {
@@ -286,7 +306,7 @@ mod tests {
         let a = NeighborhoodId::from_raw(1);
         let b = NeighborhoodId::from_raw(2);
         let candidates = BTreeMap::from([(a, local(&[1, 2], &[1])), (b, local(&[3], &[4]))]);
-        let assigned = solve(&candidates, &BTreeSet::new());
+        let assigned = solve(&candidates, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(assigned.len(), 2);
         assert_eq!(
             assigned[&a],
@@ -304,9 +324,9 @@ mod tests {
             (b, local(&[1], &[3])),
             (c, local(&[2], &[4])),
         ]);
-        let assigned = solve(&candidates, &BTreeSet::new());
+        let assigned = solve(&candidates, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(assigned.len(), 2);
-        let assigned = solve(&candidates, &BTreeSet::from([a]));
+        let assigned = solve(&candidates, &BTreeSet::from([a]), &BTreeSet::new());
         assert_eq!(assigned.len(), 1);
         assert!(assigned.contains_key(&a));
     }
@@ -350,34 +370,55 @@ mod tests {
                     .filter(|(i, _)| priority_mask & (1 << i) != 0)
                     .map(|(_, id)| id)
                     .collect::<BTreeSet<_>>();
-                // Three people cannot fill two complete teams.
-                let expected = candidates
-                    .iter()
-                    .filter(|(_, local)| {
-                        local
-                            .political
-                            .iter()
-                            .any(|p| local.finance.iter().any(|f| p != f))
-                    })
-                    .map(|(district, _)| (usize::from(electoral.contains(district)), 1))
-                    .max()
-                    .unwrap_or((0, 0));
-                let result = solve(&candidates, &electoral);
-                assert_eq!(
-                    (
-                        result
-                            .keys()
-                            .filter(|district| electoral.contains(district))
-                            .count(),
-                        result.len()
-                    ),
-                    expected
-                );
-                let mut used = BTreeSet::new();
-                for (district, (p, f)) in result {
-                    assert!(used.insert(p) && used.insert(f));
-                    assert!(candidates[&district].political.contains(&p));
-                    assert!(candidates[&district].finance.contains(&f));
+                for winning_mask in 0..4 {
+                    let winners = districts
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(i, _)| winning_mask & (1 << i) != 0)
+                        .map(|(_, id)| id)
+                        .collect::<BTreeSet<_>>();
+                    // Three people cannot fill two complete teams.
+                    let expected = candidates
+                        .iter()
+                        .filter(|(_, local)| {
+                            local
+                                .political
+                                .iter()
+                                .any(|p| local.finance.iter().any(|f| p != f))
+                        })
+                        .map(|(district, _)| {
+                            [
+                                usize::from(
+                                    electoral.contains(district) && winners.contains(district),
+                                ),
+                                usize::from(electoral.contains(district)),
+                                1,
+                            ]
+                        })
+                        .max()
+                        .unwrap_or_default();
+                    let result = solve(&candidates, &electoral, &winners);
+                    assert_eq!(
+                        [
+                            result
+                                .keys()
+                                .filter(|district| electoral.contains(district)
+                                    && winners.contains(district))
+                                .count(),
+                            result
+                                .keys()
+                                .filter(|district| electoral.contains(district))
+                                .count(),
+                            result.len(),
+                        ],
+                        expected
+                    );
+                    let mut used = BTreeSet::new();
+                    for (district, (p, f)) in result {
+                        assert!(used.insert(p) && used.insert(f));
+                        assert!(candidates[&district].political.contains(&p));
+                        assert!(candidates[&district].finance.contains(&f));
+                    }
                 }
             }
         }

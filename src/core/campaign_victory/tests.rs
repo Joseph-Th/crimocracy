@@ -1514,6 +1514,137 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
                     .unwrap();
             }
         }
+        if day + 1 == election_day - 40 {
+            // Both wards have mature storefronts and sustained electoral support.
+            // One shared finance director can serve either, but not both. Let the
+            // earlier ward's public support erode without breaking its majority.
+            let mut contested = city.state.clone();
+            let weak = districts[0];
+            let strong = districts[1];
+            for kind in [SpecialistKind::Organizer, SpecialistKind::Strategist] {
+                crate::politics::political_system::dismiss_specialist(&mut contested, weak, kind)
+                    .unwrap();
+            }
+            let mandate = contested
+                .delegation()
+                .active_for_manager(finance_managers[0])
+                .unwrap();
+            let mut scopes = mandate.scopes().clone();
+            scopes.insert(ResponsibilityScope::Neighborhood(strong));
+            validate_revise_mandate(
+                &contested,
+                mandate.id(),
+                MandateRevisionDraft {
+                    scopes,
+                    standing_orders: mandate.standing_orders().clone(),
+                    budget: mandate.budget(),
+                },
+            )
+            .unwrap()
+            .commit(&mut contested)
+            .unwrap();
+            validate_set_character_autonomy(
+                &contested,
+                city.player,
+                finance_managers[1],
+                AutonomyLevel::Guided,
+            )
+            .unwrap()
+            .commit(&mut contested)
+            .unwrap();
+            for offset in 0..=40 {
+                if offset > 0 {
+                    contested.advance_clock(crate::core::time::DAY_DURATION);
+                    let businesses = contested
+                        .world()
+                        .businesses_owned_by_organization(city.player)
+                        .map(|business| business.id())
+                        .collect::<Vec<_>>();
+                    for business in businesses {
+                        if let Ok(plan) = decide_business_cycle(&registry, &contested, business, 0)
+                        {
+                            validate_business_cycle_plan(&contested, plan)
+                                .unwrap()
+                                .commit(&mut contested)
+                                .unwrap();
+                        }
+                    }
+                }
+                let influence = contested
+                    .politics()
+                    .organization(city.player)
+                    .unwrap()
+                    .district(weak)
+                    .unwrap()
+                    .influence();
+                if influence < 825 {
+                    validate_invest_influence(
+                        &contested,
+                        weak,
+                        i64::from(825 - influence) * crate::politics::INFLUENCE_COST_PER_POINT,
+                    )
+                    .unwrap()
+                    .commit(&mut contested)
+                    .unwrap();
+                }
+                apply_due_political_campaigns(&registry, &mut contested);
+            }
+            crate::reputation::reputation_system::apply_reputation_delta(
+                &registry,
+                &mut contested,
+                city.player,
+                crate::reputation::AudienceKind::Residents,
+                100,
+            )
+            .unwrap();
+            for district in [weak, strong] {
+                assert!(
+                    crate::politics::political_system::held_electoral_majority(
+                        &contested,
+                        city.player,
+                        district,
+                    ),
+                    "the fixture must retain the sustained majority in both wards"
+                );
+            }
+            apply_due_mayoral_elections(&registry, &mut contested);
+            let ballot = contested
+                .politics()
+                .organization(city.player)
+                .unwrap()
+                .latest_election()
+                .unwrap();
+            let weak_ballot = ballot
+                .ballots
+                .iter()
+                .find(|ward| ward.district == weak)
+                .unwrap();
+            let strong_ballot = ballot
+                .ballots
+                .iter()
+                .find(|ward| ward.district == strong)
+                .unwrap();
+            assert!(
+                weak_ballot.candidate_votes < weak_ballot.incumbent_votes,
+                "{weak_ballot:?}"
+            );
+            assert!(
+                strong_ballot.candidate_votes
+                    > strong_ballot.incumbent_votes.max(strong_ballot.rival_votes),
+                "{strong_ballot:?}"
+            );
+            assert!(
+                strong_ballot.ward_won,
+                "a losing ward cannot consume the only director available to a winning ward: {ballot:?}"
+            );
+            validate_state_against_registry(&registry, &contested).unwrap();
+            let restored =
+                restore_save(&registry, build_save(&registry, &contested).unwrap()).unwrap();
+            assert_eq!(
+                bincode::serialize(&contested).unwrap(),
+                bincode::serialize(&restored).unwrap()
+            );
+        }
         if day + 1 == election_day {
             // Run the same fully organized ballot with a depleted clean treasury.
             // The final day's specialists still get paid and local support remains
@@ -2913,6 +3044,141 @@ fn recent_storefront_losses_survive_suspension_and_title_transfer() {
     assert_eq!(
         progress(&registry, &state).unwrap().legitimate_daily_net,
         Money::ZERO
+    );
+}
+
+#[test]
+fn political_income_requires_proven_recent_storefront_operation() {
+    use crate::economy::BusinessEconomyDraft;
+    use crate::economy::business_economy_system::{
+        decide_business_cycle, validate_business_cycle_plan, validate_establish_business_economy,
+        validate_resume_business_economy, validate_suspend_business_economy,
+    };
+    use crate::world::BusinessDraft;
+    use crate::world::world_system::insert_business;
+
+    let (registry, mut state, owner, _, _) = retirement_fixture();
+    let rating = Rating::try_new(90).unwrap();
+    let district = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Prosperous ward".into(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating,
+                    commercial_activity: rating,
+                    illicit_demand: rating,
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: Rating::try_new(10).unwrap(),
+                },
+            },
+        },
+    )
+    .unwrap();
+    let shop = insert_business(
+        &registry,
+        &mut state,
+        BusinessDraft {
+            name: "Long-held idle storefront".into(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::new(),
+            neighborhood: district,
+            owner: BusinessOwner::Organization(owner),
+        },
+    )
+    .unwrap();
+    let operating = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(shop),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Business(shop),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_establish_business_economy(
+        &registry,
+        &state,
+        BusinessEconomyDraft {
+            business: shop,
+            operating_account: operating,
+            settlement_account: settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    validate_suspend_business_economy(&state, shop)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    state.advance_clock(SimDuration::from_minutes(
+        (POLITICAL_BUSINESS_ESTABLISHMENT_DAYS * DAY_MINUTES) as u32,
+    ));
+    validate_resume_business_economy(&registry, &state, shop)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let settle = |state: &mut AppState| {
+        state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+        validate_business_cycle_plan(
+            state,
+            decide_business_cycle(&registry, state, shop, 0).unwrap(),
+        )
+        .unwrap()
+        .commit(state)
+        .unwrap();
+    };
+    for _ in 1..VICTORY_PROFITABLE_CYCLES {
+        settle(&mut state);
+    }
+    let before = political_business_progress(&state, district).unwrap()[0];
+    assert_eq!(before.profitable_cycles, VICTORY_PROFITABLE_CYCLES - 1);
+    assert!(before.recent_net > Money::ZERO);
+    assert!(!before.established);
+    let row = political_district_progress(&registry, &state).unwrap()[0];
+    assert_eq!(row.mature_active, 1);
+    assert_eq!(row.established_active, 0);
+    assert_eq!(
+        row.mature_window_net,
+        Money::ZERO,
+        "idle ownership alone must not turn unproven earnings into political income"
+    );
+    assert_eq!(
+        progress(&registry, &state).unwrap().legitimate_daily_net,
+        Money::ZERO
+    );
+
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    for branch in [&mut state, &mut restored] {
+        settle(branch);
+        let title = political_business_progress(branch, district).unwrap()[0];
+        assert!(title.established);
+        assert_eq!(title.profitable_cycles, VICTORY_PROFITABLE_CYCLES);
+        assert_eq!(
+            political_district_progress(&registry, branch).unwrap()[0].mature_window_net,
+            title.recent_net,
+        );
+        assert_eq!(
+            progress(&registry, branch)
+                .unwrap()
+                .legitimate_daily_net
+                .cents(),
+            title.recent_net.cents() / VICTORY_INCOME_WINDOW_DAYS as i64,
+        );
+        validate_state_against_registry(&registry, branch).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap(),
     );
 }
 

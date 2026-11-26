@@ -60,19 +60,6 @@ pub(crate) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
 
     // Ballots use only current world state, the real campaign ledger, local
     // support and crime reputation. There is no preselected winning candidate.
-    let Ok((progress, districts)) =
-        crate::core::campaign_victory::progress_and_political_districts(registry, state)
-    else {
-        return;
-    };
-    let mut shortfalls = crate::core::campaign_victory::mayoral_ballot_shortfalls(&progress);
-    if !eligible_candidate(state, owner, candidacy.candidate)
-        && progress.mayoral_leader_eligible
-        && progress.established_political_contacts > 0
-    {
-        shortfalls.push("filed nominee no longer holds eligible executive authority".to_owned());
-    }
-    let eligible = shortfalls.is_empty();
     let incumbent = state
         .world()
         .organizations()
@@ -161,18 +148,42 @@ pub(crate) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
             + u32::from(ward.profile().economy.commercial_activity.value()) * 20;
         let [candidate_votes, incumbent_votes, rival_votes] =
             apportion_ward_votes(electorate, [candidate_score, incumbent_score, rival_score]);
-        let local_ready = districts
-            .iter()
-            .any(|entry| entry.district == district && entry.mayoral_ready);
         ballots.push(WardBallot {
             district,
             candidate_votes,
             incumbent_votes,
             rival_votes,
-            ward_won: local_ready
-                && candidate_votes > incumbent_votes
-                && candidate_votes > rival_votes,
+            ward_won: false,
         });
+    }
+    // Vote totals do not depend on the assignment of qualification directors.
+    // Solve the complete citywide coalition once, prioritizing wards that won
+    // their vote and meet the local readiness requirements.
+    let ballot_winners = ballots
+        .iter()
+        .filter(|ward| {
+            ward.candidate_votes > ward.incumbent_votes && ward.candidate_votes > ward.rival_votes
+        })
+        .map(|ward| ward.district)
+        .collect::<BTreeSet<_>>();
+    let Ok((progress, districts)) =
+        crate::core::campaign_victory::ballot_progress(registry, state, &ballot_winners)
+    else {
+        return;
+    };
+    let mut shortfalls = crate::core::campaign_victory::mayoral_ballot_shortfalls(&progress);
+    if !eligible_candidate(state, owner, candidacy.candidate)
+        && progress.mayoral_leader_eligible
+        && progress.established_political_contacts > 0
+    {
+        shortfalls.push("filed nominee no longer holds eligible executive authority".to_owned());
+    }
+    let eligible = shortfalls.is_empty();
+    for ward in &mut ballots {
+        ward.ward_won = ballot_winners.contains(&ward.district)
+            && districts
+                .iter()
+                .any(|entry| entry.district == ward.district && entry.mayoral_ready);
     }
     let wards_won = ballots.iter().filter(|ballot| ballot.ward_won).count();
     let elected = eligible && wards_won >= progress.required_political_districts;

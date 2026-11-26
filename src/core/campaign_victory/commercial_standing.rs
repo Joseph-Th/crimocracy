@@ -110,6 +110,7 @@ pub fn political_district_progress(
         organization,
         &standings,
         local_income_floor,
+        &BTreeSet::new(),
     ))
 }
 
@@ -118,13 +119,15 @@ pub(super) fn political_district_rows(
     organization: OrganizationId,
     standings: &BTreeMap<NeighborhoodId, BusinessDistrictStanding>,
     local_income_floor: i128,
+    ballot_winners: &BTreeSet<NeighborhoodId>,
 ) -> Vec<PoliticalDistrictProgress> {
     let economically_ready = standings
         .iter()
         .filter(|(_, standing)| standing.qualifies(local_income_floor))
         .map(|(&district, _)| district)
         .collect();
-    let staffing = political_staffing::allocate(state, organization, &economically_ready);
+    let staffing =
+        political_staffing::allocate(state, organization, &economically_ready, ballot_winners);
     let empty = BusinessDistrictStanding::default();
     state
         .world()
@@ -253,9 +256,8 @@ pub(super) fn business_district_standings(
     let mut standings = BTreeMap::<NeighborhoodId, BusinessDistrictStanding>::new();
     let overhead = portfolio_overhead_basis_points(state, owner);
     // Aggregate by actual settlement owner and title period, including shops sold
-    // or suspended during the window. Only mature active titles can contribute
-    // positive standing, but a recent net loss cannot be erased by closing or
-    // transferring the asset.
+    // or suspended during the window. Only established active titles contribute
+    // positive standing. Ineligible titles still contribute their net losses.
     let cutoff = recent_income_start(state.now());
     let mut remaining_income = BTreeMap::<(BusinessId, u32), TitleWindow>::new();
     for cycle in state
@@ -291,10 +293,12 @@ pub(super) fn business_district_standings(
             let window = remaining_income
                 .remove(&(business.id(), business.version()))
                 .unwrap_or_default();
-            entry.window_net += net_after_portfolio_overhead(window.net, overhead);
             if window.established(state.now(), owned_minutes) {
                 entry.established += 1;
                 entry.established_kinds.insert(business.kind());
+                entry.window_net += net_after_portfolio_overhead(window.net, overhead);
+            } else {
+                entry.window_net += window.net.min(0);
             }
         }
     }

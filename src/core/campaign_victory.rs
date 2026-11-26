@@ -337,6 +337,16 @@ pub fn progress_and_political_districts(
     registry: &Registry,
     state: &AppState,
 ) -> Result<(VictoryProgress, Vec<PoliticalDistrictProgress>), VictoryError> {
+    ballot_progress(registry, state, &BTreeSet::new())
+}
+
+/// On election day, a director shared by two eligible wards must be allocated
+/// to the one that actually won the vote before considering losing wards.
+pub(crate) fn ballot_progress(
+    registry: &Registry,
+    state: &AppState,
+    ballot_winners: &BTreeSet<NeighborhoodId>,
+) -> Result<(VictoryProgress, Vec<PoliticalDistrictProgress>), VictoryError> {
     let organization = state.player_organization().ok_or(VictoryError::NoPlayer)?;
     let total_districts = state.world().neighborhoods().count();
     let key_personnel = state
@@ -365,8 +375,13 @@ pub fn progress_and_political_districts(
         .values()
         .filter(|standing| standing.qualifies(local_income_floor))
         .count();
-    let political_rows =
-        political_district_rows(state, organization, &business_standings, local_income_floor);
+    let political_rows = political_district_rows(
+        state,
+        organization,
+        &business_standings,
+        local_income_floor,
+        ballot_winners,
+    );
     let staffed_political_districts = political_rows
         .iter()
         .filter(|district| district.qualifies)
