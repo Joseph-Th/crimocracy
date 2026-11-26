@@ -34,6 +34,37 @@ fn generated_turf_explains_own_commercial_exposure_without_exposing_rival_staff(
 }
 
 #[test]
+fn generated_accounts_distinguish_racket_clearing_from_general_settlement() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(405, 405), CityScale::Small)
+            .unwrap();
+    let racket = session
+        .state
+        .enterprises()
+        .enterprises_for_organization(session.player)
+        .next()
+        .unwrap();
+    let racket_label = format!("dedicated to {}", racket.id());
+    let racket_account = racket.settlement_account();
+    let before = snapshot(&registry, &session);
+    let output = session.execute("accounts").unwrap().0;
+    let line = output
+        .lines()
+        .find(|line| line.starts_with(&format!("{} ", racket_account.raw())))
+        .unwrap();
+    assert!(line.contains(&racket_label), "{line}");
+    assert!(line.contains("not for operation proceeds"), "{line}");
+    assert!(
+        output
+            .lines()
+            .any(|line| line.contains("general settlement")),
+        "{output}"
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+}
+
+#[test]
 fn generated_brief_exposes_derived_public_reach_without_changing_campaign_state() {
     let registry = crimocracy::build_registry();
     let session =
@@ -177,7 +208,7 @@ fn generated_rival_turf_agreement_requires_sighting_and_blocks_both_types_of_esc
     let mut session =
         Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
     let district = session.state.world().neighborhoods().nth(1).unwrap().id();
-    let (rival, venue) = session
+    let (rival, venue, target) = session
         .state
         .world()
         .public_business_directory()
@@ -188,7 +219,7 @@ fn generated_rival_turf_agreement_requires_sighting_and_blocks_both_types_of_esc
                 .enterprises()
                 .enterprises_at(EnterpriseLocation::Business(business))
                 .next()
-                .map(|enterprise| (enterprise.organization(), business))
+                .map(|enterprise| (enterprise.organization(), business, enterprise.id()))
         })
         .expect("generated seed has a foreign racket in district two");
     let negotiation = format!("negotiate district-{} org-{}", district.raw(), rival.raw());
@@ -196,11 +227,67 @@ fn generated_rival_turf_agreement_requires_sighting_and_blocks_both_types_of_esc
     assert!(session.execute(&negotiation).is_err());
     assert_eq!(before, snapshot(&registry, &session));
 
+    // Learning that a rival and a racket exist is not evidence of where
+    // that racket operates. Neither the display nor an attempted action may
+    // silently resolve its hidden location from the authoritative record.
+    use crimocracy::intelligence::{
+        InformationDraft, InformationSourceKind, InformationTopic, Reliability, Specificity,
+        intelligence_system::validate_record_information,
+    };
+    for subject in [
+        EntityRef::Organization(rival),
+        EntityRef::Enterprise(target),
+    ] {
+        let observation = InformationDraft {
+            holder: KnowledgeHolder::Organization(session.player),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::EnterpriseActivity,
+            source_entity: None,
+            subject,
+            observed_at: session.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::General,
+            summary: "Identity learned; operating location unknown.".to_owned(),
+        };
+        validate_record_information(&session.state, observation)
+            .unwrap()
+            .commit(&mut session.state)
+            .unwrap();
+    }
+    let target_label = format!("enterprise-{}", target.raw());
+    let before_location = snapshot(&registry, &session);
+    assert!(
+        session
+            .execute("known-targets")
+            .unwrap()
+            .0
+            .contains(&format!(
+                "{target_label} | learned enterprise; location unverified"
+            ))
+    );
+    assert!(!session.execute("turf").unwrap().0.contains(&target_label));
+    for verb in ["preview-contest", "contest"] {
+        assert!(
+            session
+                .execute(&format!("{verb} {target_label}"))
+                .unwrap_err()
+                .contains("location unverified")
+        );
+    }
+    assert!(
+        session
+            .execute(&negotiation)
+            .unwrap_err()
+            .contains("no identified rival racket")
+    );
+    assert_eq!(before_location, snapshot(&registry, &session));
+
     session
         .execute(&format!("plan surveillance district-{}", district.raw()))
         .unwrap();
     session.execute("advance 3h").unwrap();
     assert!(session.known_organization_ids().contains(&rival));
+    assert!(session.execute("turf").unwrap().0.contains(&target_label));
     let manager = session
         .state
         .world()

@@ -184,7 +184,9 @@ auditable ledger receipt and cannot be reversed to clean funds without using
 an actual laundering front. If an old street account is overdrawn, open a
 new `street` account and use its ID instead of silently erasing that liability.
 `operation`, `dispose` and `deposit` handle held proceeds through production
-reports and ledger transactions.
+reports and ledger transactions. `accounts` distinguishes general settlement
+accounts from accounts dedicated to a racket; the latter cannot clear operation
+proceeds.
 
 `start-racket` accepts either an owned `business-N` venue or a public
 `district-N` for rackets that do not require a physical host. Supply any
@@ -211,9 +213,11 @@ All histories are read-only and survive save/load.
 
 Territory is contested by active rackets rather than an independently owned
 district token. `turf` lists your active rackets and associates per district,
-identified rivals and any binding agreements. Unknown rival holdings and exact
-staff numbers remain private; district surveillance identifies active rival
-rackets. `preview-contest enterprise-N` inspects the legal opening and your
+observed rival rackets, the time and source of their latest location sighting,
+and any binding agreements. Knowing an enterprise's identity alone does not
+reveal its district or authorize a territorial challenge or negotiation.
+Unknown rival holdings and exact staff numbers remain private; reconnaissance
+provides the necessary location evidence. `preview-contest enterprise-N` inspects the legal opening and your
 available manpower without revealing the opponent's current strength.
 `contest enterprise-N` then challenges that rival with your actual local
 associates. The defender receives a two-associate positional advantage. The

@@ -1261,6 +1261,7 @@ mod reconnaissance;
 mod reconnaissance_tests;
 #[cfg(test)]
 mod staff_matching_tests;
+mod territory_play;
 mod time_play;
 mod treasury_play;
 mod victory_play;

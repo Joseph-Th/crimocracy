@@ -4,8 +4,52 @@
 
 use super::*;
 use crimocracy::core::id::NeighborhoodId;
+use crimocracy::intelligence::{EnterpriseLocationSignal, InformationRecord};
+use crimocracy::world::territory_conflict::district_of_racket;
 
 impl Session<'_> {
+    /// A known identity is not necessarily a located enterprise. Use the latest
+    /// held typed observation, with stable ID ordering for equal timestamps.
+    pub(super) fn enterprise_observations(&self) -> BTreeMap<EnterpriseId, &InformationRecord> {
+        let mut observations = BTreeMap::new();
+        for info in self.organization_information() {
+            if let EntityRef::Enterprise(id) = info.subject()
+                && matches!(
+                    info.signal(),
+                    Some(InformationSignal::EnterpriseLocation(_))
+                )
+            {
+                observations
+                    .entry(id)
+                    .and_modify(
+                        |current: &mut &crimocracy::intelligence::InformationRecord| {
+                            if (info.observed_at(), info.id())
+                                > (current.observed_at(), current.id())
+                            {
+                                *current = info;
+                            }
+                        },
+                    )
+                    .or_insert(info);
+            }
+        }
+        observations
+    }
+
+    pub(super) fn observed_enterprise_district(
+        &self,
+        info: &InformationRecord,
+    ) -> Option<NeighborhoodId> {
+        let InformationSignal::EnterpriseLocation(location) = info.signal()? else {
+            return None;
+        };
+        let location = match location {
+            EnterpriseLocationSignal::Neighborhood(ward) => EnterpriseLocation::Neighborhood(*ward),
+            EnterpriseLocationSignal::Business(venue) => EnterpriseLocation::Business(*venue),
+        };
+        district_of_racket(&self.state, location)
+    }
+
     pub(super) fn known_surveillance_targets(&self) -> String {
         let mut out = String::new();
         out.push_str("Public businesses/districts: see 'directory' and 'districts'.\n");
@@ -36,28 +80,7 @@ impl Session<'_> {
                 }
             }
         }
-        let mut enterprise_observations = BTreeMap::new();
-        for info in self.organization_information() {
-            if let EntityRef::Enterprise(id) = info.subject()
-                && matches!(
-                    info.signal(),
-                    Some(InformationSignal::EnterpriseLocation(_))
-                )
-            {
-                enterprise_observations
-                    .entry(id)
-                    .and_modify(
-                        |current: &mut &crimocracy::intelligence::InformationRecord| {
-                            if (info.observed_at(), info.id())
-                                > (current.observed_at(), current.id())
-                            {
-                                *current = info;
-                            }
-                        },
-                    )
-                    .or_insert(info);
-            }
-        }
+        let enterprise_observations = self.enterprise_observations();
         for id in self.known_enterprise_ids() {
             if let Some(record) = self.state.enterprises().get_enterprise(id) {
                 if record.organization() == self.player {

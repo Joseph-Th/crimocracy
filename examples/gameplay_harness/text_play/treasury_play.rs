@@ -34,7 +34,13 @@ impl Session<'_> {
                         account.kind(),
                         account.balance().cents(),
                         if account.kind() == AccountKind::Settlement {
-                            " (clearing only)".to_owned()
+                            match state.enterprises().get_by_settlement_account(account.id()) {
+                                Some(racket) => format!(
+                                    " (clearing only; dedicated to {}, not for operation proceeds)",
+                                    racket.id()
+                                ),
+                                None => " (clearing only; general settlement)".to_owned(),
+                            }
                         } else {
                             format!(
                                 " (spendable {} cents)",
