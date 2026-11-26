@@ -135,6 +135,11 @@ pub enum DecisionError {
     MissingProtectionBusiness(BusinessId),
     #[error("protection demand is no longer for your business {0}")]
     ProtectionNoLongerOwned(BusinessId),
+    #[error("protection demand from {attacker} in district {district} is no longer actionable")]
+    ProtectionThreatEnded {
+        district: crate::core::id::NeighborhoodId,
+        attacker: OrganizationId,
+    },
     #[error("protection payment requires {needed} cents, short {missing} cents in accounted funds")]
     InsufficientProtectionFunds { needed: i64, missing: i64 },
     #[error("decision {0} does not exist")]
@@ -689,7 +694,7 @@ impl ValidatedDecisionResolution {
                     let DecisionContext::ProtectionDemand(context) = decision.context() else {
                         unreachable!("protection resolution must refer to a protection demand");
                     };
-                    protection::validate_protection_business(state, self.resolver, context)?;
+                    protection::validate_protection_terms(state, self.resolver, context)?;
                     payment.ensure_current(state)?;
                     state.ids.reserve_many(&payment.id_budget())?;
                     (*payment).commit_preflighted(state);

@@ -138,9 +138,7 @@ fn autonomous_rival_campaigns(registry: &Registry, state: &mut AppState) {
             state
                 .economy()
                 .get_business_economy(business.id())
-                .is_some_and(|economy| {
-                    economy.status() == crate::economy::BusinessOperatingStatus::Active
-                })
+                .is_some_and(|economy| economy.is_operating())
         })
         .fold(
             BTreeMap::<NeighborhoodId, usize>::new(),
@@ -196,9 +194,7 @@ fn autonomous_rival_campaigns(registry: &Registry, state: &mut AppState) {
                 state
                     .economy()
                     .get_business_economy(business.id())
-                    .is_some_and(|economy| {
-                        economy.status() == crate::economy::BusinessOperatingStatus::Active
-                    })
+                    .is_some_and(|economy| economy.is_operating())
             })
             .map(|business| business.neighborhood())
             .collect::<BTreeSet<_>>();

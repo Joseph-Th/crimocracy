@@ -210,7 +210,7 @@ pub fn remaining_laundering_capacity(
         return None;
     }
     let economy = state.economy.get_business_economy(business)?;
-    if economy.status() != BusinessOperatingStatus::Active {
+    if !economy.is_operating() {
         return None;
     }
     let capacity = laundering_ceiling(registry, state, business).ok()?;

@@ -206,7 +206,7 @@ pub fn political_business_progress(
         .filter(|business| business.neighborhood() == district)
         .filter_map(|business| {
             let economy = state.economy().get_business_economy(business.id())?;
-            let active = economy.status() == BusinessOperatingStatus::Active;
+            let active = economy.is_operating();
             let owned_minutes = title_age_minutes(state, business, owner);
             let window = current_title_window(state, business, owner);
             let owned_days = owned_minutes / DAY_MINUTES;
@@ -283,7 +283,7 @@ pub(super) fn business_district_standings(
             entry.suspended += 1;
             continue;
         }
-        if economy.status() != BusinessOperatingStatus::Active {
+        if !economy.is_operating() {
             continue;
         }
         entry.active += 1;

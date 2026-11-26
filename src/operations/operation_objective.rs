@@ -94,9 +94,7 @@ pub(crate) fn resolve_objective_blocker(
             if !state
                 .economy
                 .get_business_economy(*business)
-                .is_some_and(|economy| {
-                    economy.status() == crate::economy::BusinessOperatingStatus::Active
-                })
+                .is_some_and(|economy| economy.is_operating())
             {
                 Some(OperationObjectiveBlocker::TargetEconomyInactive)
             } else {

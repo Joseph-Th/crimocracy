@@ -14,7 +14,6 @@ use crate::decisions::{
     DecisionContext, DecisionRequestDraft, DecisionResponse, DecisionStatus,
     ProtectionDemandContext,
 };
-use crate::economy::BusinessOperatingStatus;
 use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::finance::finance_system::{
     ValidatedLedgerTransaction, validate_open_accounts, validate_record_transaction,
@@ -106,7 +105,7 @@ fn active_shops(
         if state
             .economy()
             .get_business_economy(business.id())
-            .is_some_and(|economy| economy.status() == BusinessOperatingStatus::Active)
+            .is_some_and(|economy| economy.is_operating())
         {
             by_district
                 .entry(business.neighborhood())
@@ -129,6 +128,40 @@ fn offer_cents(registry: &Registry, state: &AppState, shops: &[BusinessId]) -> i
     // business's protected working capital or its private operating till.
     let monthly = daily_gross.saturating_mul(30) / 20;
     i64::try_from(monthly.clamp(5_000, 1_500_000)).expect("bounded demand")
+}
+
+/// Share the live coercive basis between offer creation and acceptance.
+/// An old request cannot authorize a payment after the rival loses local force,
+/// the defender becomes strong enough, or the parties agree to a standstill.
+fn coercive_requester(
+    state: &AppState,
+    attacker: OrganizationId,
+    defender: OrganizationId,
+    district: NeighborhoodId,
+    defense: u32,
+) -> Option<(crate::core::id::CharacterId, u32)> {
+    if active_standstill(state, attacker, district)
+        .is_some_and(|treaty| treaty.counterparty == defender)
+    {
+        return None;
+    }
+    let force = active_district_force(state, attacker, district);
+    if force <= defense.saturating_add(DEFENSIVE_ADVANTAGE) {
+        return None;
+    }
+    let requester = state
+        .enterprises()
+        .active_for_organization(attacker)
+        .filter(|racket| district_of_racket(state, racket.location()) == Some(district))
+        .filter(|racket| {
+            state
+                .legal()
+                .active_arrest_for_character(racket.manager())
+                .is_none()
+        })
+        .max_by_key(|racket| (racket.associates(), std::cmp::Reverse(racket.id())))
+        .map(|racket| racket.manager())?;
+    Some((requester, force))
 }
 
 struct Candidate {
@@ -192,28 +225,9 @@ pub(crate) fn apply_due_protection_demands(
             if rival.id() == defender || rival.kind() != OrganizationKind::Criminal {
                 continue;
             }
-            if active_standstill(state, rival.id(), district)
-                .is_some_and(|treaty| treaty.counterparty == defender)
+            if let Some((requester, force)) =
+                coercive_requester(state, rival.id(), defender, district, defense)
             {
-                continue;
-            }
-            let force = active_district_force(state, rival.id(), district);
-            if force <= defense.saturating_add(DEFENSIVE_ADVANTAGE) {
-                continue;
-            }
-            let requester = state
-                .enterprises()
-                .active_for_organization(rival.id())
-                .filter(|racket| district_of_racket(state, racket.location()) == Some(district))
-                .filter(|racket| {
-                    state
-                        .legal()
-                        .active_arrest_for_character(racket.manager())
-                        .is_none()
-                })
-                .max_by_key(|racket| (racket.associates(), std::cmp::Reverse(racket.id())))
-                .map(|racket| racket.manager());
-            if let Some(requester) = requester {
                 candidates.push(Candidate {
                     district,
                     attacker: rival.id(),
@@ -280,8 +294,9 @@ pub(crate) fn apply_due_protection_demands(
     vec![outcome]
 }
 
-/// Ownership can change without advancing the decision's own version.
-pub(super) fn validate_protection_business(
+/// Live territorial and commercial facts can change without advancing the
+/// decision's own version. Refusal remains possible even when an offer is stale.
+pub(super) fn validate_protection_terms(
     state: &AppState,
     defender: OrganizationId,
     context: ProtectionDemandContext,
@@ -295,6 +310,25 @@ pub(super) fn validate_protection_business(
     {
         return Err(DecisionError::ProtectionNoLongerOwned(context.business()));
     }
+    let defense = local_defensive_forces(state, defender)
+        .get(&context.district())
+        .copied()
+        .unwrap_or_default();
+    if defense.operating_shops == 0
+        || coercive_requester(
+            state,
+            context.attacker(),
+            defender,
+            context.district(),
+            defense.total(),
+        )
+        .is_none()
+    {
+        return Err(DecisionError::ProtectionThreatEnded {
+            district: context.district(),
+            attacker: context.attacker(),
+        });
+    }
     Ok(())
 }
 
@@ -306,7 +340,7 @@ pub(super) fn validate_protection_payment(
     defender: OrganizationId,
     context: ProtectionDemandContext,
 ) -> Result<ValidatedLedgerTransaction, DecisionError> {
-    validate_protection_business(state, defender, context)?;
+    validate_protection_terms(state, defender, context)?;
     let mut remaining = context.amount().cents();
     let mut postings = Vec::new();
     for account in state

@@ -221,6 +221,20 @@ fn exhausted_storefront_no_longer_competes_but_public_appraisal_remains_unchange
     let public = forecast_normal_business_net(&registry, &fixture.state, peer).unwrap();
     let competing = forecast_live_business_net(&registry, &fixture.state, peer).unwrap();
     assert_eq!(public, competing);
+    let district = fixture
+        .state
+        .world()
+        .get_business(peer)
+        .unwrap()
+        .neighborhood();
+    assert_eq!(
+        crate::world::territory_conflict::local_defensive_forces(
+            &fixture.state,
+            fixture.organization,
+        )[&district]
+            .operating_shops,
+        2,
+    );
     let cycle = registry
         .get_business(BusinessKind::Retail)
         .economics()
@@ -245,6 +259,12 @@ fn exhausted_storefront_no_longer_competes_but_public_appraisal_remains_unchange
     let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
     for state in [&fixture.state, &restored] {
         assert!(forecast_live_business_net(&registry, state, peer).unwrap() > competing);
+        assert_eq!(
+            crate::world::territory_conflict::local_defensive_forces(state, fixture.organization,)
+                [&district]
+                .operating_shops,
+            1,
+        );
         assert_eq!(
             forecast_normal_business_net(&registry, state, peer).unwrap(),
             public

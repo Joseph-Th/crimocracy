@@ -184,6 +184,7 @@ fn operation_phase_batch_is_terminally_blocked(error: &OperationPhaseBatchError)
             | DecisionError::Finance(_)
             | DecisionError::MissingProtectionBusiness(_)
             | DecisionError::ProtectionNoLongerOwned(_)
+            | DecisionError::ProtectionThreatEnded { .. }
             | DecisionError::InsufficientProtectionFunds { .. } => false,
         },
     }

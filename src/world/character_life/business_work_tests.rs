@@ -4,6 +4,7 @@ use crate::city_generation::{CityScale, generate_city};
 use crate::core::invariants::validate_invariants;
 use crate::core::persistence::{build_save, restore_save};
 use crate::core::time::SimDuration;
+use crate::economy::BusinessOperatingStatus;
 use crate::economy::business_economy_system::{
     decide_business_cycle, validate_business_cycle_plan, validate_suspend_business_economy,
 };

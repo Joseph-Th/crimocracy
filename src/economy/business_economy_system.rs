@@ -579,7 +579,7 @@ pub fn validate_disrupt_business_economy(
         .economy
         .get_business_economy(business)
         .ok_or(BusinessEconomyError::MissingBusinessEconomy(business))?;
-    if economy.status() != BusinessOperatingStatus::Active {
+    if !economy.is_operating() {
         return Err(BusinessEconomyError::EconomyNotActive(business));
     }
     // `disrupted_through` is inclusive, so an N-minute effect beginning now ends on minute N-1.

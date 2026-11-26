@@ -7,7 +7,6 @@
 use super::{BusinessAcquisitionError, BusinessAppraisal};
 use crate::core::id::{BusinessId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
-use crate::economy::BusinessOperatingStatus;
 use crate::economy::business_economy_system::{
     PortfolioAdministration, acquisition_owner_daily_displacement, daily_owner_net,
     forecast_acquisition_business_net, forecast_live_business_net,
@@ -57,10 +56,7 @@ impl PortfolioForecast {
                 || state
                     .economy()
                     .get_business_economy(asset.id())
-                    .is_none_or(|economy| {
-                        economy.status() != BusinessOperatingStatus::Active
-                            || economy.next_cycle_at().is_none()
-                    })
+                    .is_none_or(|economy| !economy.is_operating())
             {
                 continue;
             }

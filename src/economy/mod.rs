@@ -73,6 +73,11 @@ impl BusinessEconomyRecord {
     pub fn status(&self) -> BusinessOperatingStatus {
         self.status
     }
+    /// Whether this storefront has a live operating schedule. An active record
+    /// can remain for history after its final representable cycle.
+    pub fn is_operating(&self) -> bool {
+        self.status == BusinessOperatingStatus::Active && self.next_cycle_at.is_some()
+    }
     pub fn established_at(&self) -> SimTime {
         self.established_at
     }

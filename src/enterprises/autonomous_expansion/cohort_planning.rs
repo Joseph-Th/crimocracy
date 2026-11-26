@@ -425,9 +425,7 @@ impl ProjectedTerritoryInfluence {
                     || !state
                         .economy()
                         .get_business_economy(shop.id())
-                        .is_some_and(|books| {
-                            books.status() == crate::economy::BusinessOperatingStatus::Active
-                        })
+                        .is_some_and(|books| books.is_operating())
                 {
                     continue;
                 }

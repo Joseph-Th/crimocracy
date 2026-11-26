@@ -240,7 +240,7 @@ fn validate_active_field_objective_targets(
                 .economy
                 .get_business_economy(business)
                 .ok_or(OperationError::TargetWithoutOperatingEconomy(business))?;
-            if economy.status() != crate::economy::BusinessOperatingStatus::Active {
+            if !economy.is_operating() {
                 return Err(OperationError::TargetWithoutOperatingEconomy(business));
             }
             Ok(())

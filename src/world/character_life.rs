@@ -11,7 +11,6 @@ use crate::core::id::{BusinessId, CharacterId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, is_day_boundary};
 use crate::core::version::ensure_version_can_advance;
-use crate::economy::BusinessOperatingStatus;
 use crate::legal::{InvestigationStatus, PatrolDeploymentStatus};
 use thiserror::Error;
 
@@ -245,7 +244,7 @@ fn business_work_profit(state: &AppState, business: &super::BusinessRecord) -> O
                     .loss_streak_anchor()
                     .is_none_or(|anchor| cycle.occurred_at() > anchor)
         });
-    if economy.status() != BusinessOperatingStatus::Active && cycle.is_none() {
+    if !economy.is_operating() && cycle.is_none() {
         return None;
     }
     Some(cycle.map_or(0, |cycle| cycle.net_cash().cents()))

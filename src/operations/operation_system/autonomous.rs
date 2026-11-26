@@ -215,9 +215,7 @@ fn choose_plan<'r>(
         if state
             .economy()
             .get_business_economy(business.id())
-            .is_some_and(|economy| {
-                economy.status() == crate::economy::BusinessOperatingStatus::Active
-            })
+            .is_some_and(|economy| economy.is_operating())
         {
             sectors
                 .entry(business.neighborhood())
@@ -356,9 +354,8 @@ fn choose_plan<'r>(
             && state
                 .economy()
                 .get_business_economy(id)
-                .is_some_and(|economy| {
-                    economy.status() == crate::economy::BusinessOperatingStatus::Active
-                }) {
+                .is_some_and(|economy| economy.is_operating())
+        {
             i128::from(local_machine - 300) * 18
         } else {
             0

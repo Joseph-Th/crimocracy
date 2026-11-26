@@ -225,9 +225,7 @@ fn active_local_venues(
             state
                 .economy()
                 .get_business_economy(business.id())
-                .is_some_and(|economy| {
-                    economy.status() == crate::economy::BusinessOperatingStatus::Active
-                })
+                .is_some_and(|economy| economy.is_operating())
         })
 }
 

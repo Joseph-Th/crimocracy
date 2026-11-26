@@ -6,7 +6,6 @@ use super::{BusinessAcquisitionError, acquisition_offer, appraise_business, buye
 use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::DAY_MINUTES;
-use crate::economy::BusinessOperatingStatus;
 use crate::economy::business_economy_system::forecast_normal_business_net;
 use crate::finance::{FinancialOwner, Money};
 use crate::registry::Registry;
@@ -85,9 +84,7 @@ pub(super) fn seller_preserves_earning_base(
     if state
         .economy()
         .get_business_economy(business)
-        .is_none_or(|economy| {
-            economy.status() != BusinessOperatingStatus::Active || economy.next_cycle_at().is_none()
-        })
+        .is_none_or(|economy| !economy.is_operating())
     {
         return Ok(false);
     }

@@ -120,7 +120,8 @@ fn local_peers<'a>(
 /// do not contribute to future local sales.
 fn operating_condition(state: &AppState, business: BusinessId) -> Option<bool> {
     let economy = state.economy().get_business_economy(business)?;
-    (economy.status() == BusinessOperatingStatus::Active && economy.next_cycle_at().is_some())
+    economy
+        .is_operating()
         .then(|| economy.is_disrupted(state.now()))
 }
 
@@ -235,9 +236,7 @@ fn activating_owner_daily_displacement(
         };
         // A terminal active record has no future cycle and therefore no future
         // revenue to cannibalize. Only scheduled, live peers belong in this sum.
-        if peer_economy.status() != BusinessOperatingStatus::Active
-            || peer_economy.next_cycle_at().is_none()
-        {
+        if !peer_economy.is_operating() {
             continue;
         }
         let current_market = resolve_market_snapshot(state, peer.id())?;

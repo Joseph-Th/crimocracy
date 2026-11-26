@@ -448,6 +448,70 @@ fn protection_approval_rejects_same_minute_business_transfer() {
 }
 
 #[test]
+fn protection_approval_rejects_disappeared_local_threat_without_payment() {
+    let (registry, mut city, _) = exposed_city();
+    let (decision, context) = first_demand(&registry, &mut city);
+    fund_protection_payment(&mut city, context.amount().cents());
+    let approval = super::super::validate_resolve_decision(
+        &registry,
+        &city.state,
+        decision,
+        city.player,
+        DecisionResponse::Approve,
+    )
+    .unwrap();
+    let rackets: Vec<_> = city
+        .state
+        .enterprises()
+        .active_for_organization(context.attacker())
+        .filter(|racket| {
+            district_of_racket(&city.state, racket.location()) == Some(context.district())
+        })
+        .map(|racket| racket.id())
+        .collect();
+    assert!(!rackets.is_empty());
+    for racket in rackets {
+        crate::enterprises::enterprise_execution::validate_suspend_enterprise(&city.state, racket)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    let before = bincode::serialize(&city.state).unwrap();
+    let expected = DecisionError::ProtectionThreatEnded {
+        district: context.district(),
+        attacker: context.attacker(),
+    };
+    assert!(matches!(
+        approval.commit(&mut city.state),
+        Err(error) if error == expected
+    ));
+    assert_eq!(bincode::serialize(&city.state).unwrap(), before);
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    assert!(matches!(
+        super::super::validate_resolve_decision(
+            &registry,
+            &restored,
+            decision,
+            city.player,
+            DecisionResponse::Approve,
+        ),
+        Err(error) if error == expected
+    ));
+    assert_eq!(bincode::serialize(&restored).unwrap(), before);
+    super::super::validate_resolve_decision(
+        &registry,
+        &restored,
+        decision,
+        city.player,
+        DecisionResponse::Reject,
+    )
+    .unwrap()
+    .commit(&mut restored)
+    .unwrap();
+}
+
+#[test]
 fn protection_approval_opens_usable_cash_when_existing_receipts_would_cover_debt() {
     let (registry, mut city, _) = exposed_city();
     let (decision, context) = first_demand(&registry, &mut city);

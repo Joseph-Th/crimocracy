@@ -140,9 +140,7 @@ pub fn local_defensive_forces(
         if state
             .economy()
             .get_business_economy(shop.id())
-            .is_some_and(|economy| {
-                economy.status() == crate::economy::BusinessOperatingStatus::Active
-            })
+            .is_some_and(|economy| economy.is_operating())
         {
             districts
                 .entry(shop.neighborhood())
