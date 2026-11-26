@@ -191,30 +191,11 @@ fn resolve_enterprise_neighborhood(
     state: &AppState,
     enterprise: &EnterpriseRecord,
 ) -> Result<crate::core::id::NeighborhoodId, StateValidationError> {
-    match enterprise.location() {
-        EnterpriseLocation::Neighborhood(id) => {
-            state.world.get_neighborhood(id).ok_or(
-                StateValidationError::InvalidEnterpriseLocation {
-                    enterprise: enterprise.id(),
-                },
-            )?;
-            Ok(id)
-        }
-        EnterpriseLocation::Business(id) => {
-            let business = state.world.get_business(id).ok_or(
-                StateValidationError::InvalidEnterpriseLocation {
-                    enterprise: enterprise.id(),
-                },
-            )?;
-            state
-                .world
-                .get_neighborhood(business.neighborhood())
-                .ok_or(StateValidationError::InvalidEnterpriseLocation {
-                    enterprise: enterprise.id(),
-                })?;
-            Ok(business.neighborhood())
-        }
-    }
+    enterprise.location().neighborhood(state.world()).ok_or(
+        StateValidationError::InvalidEnterpriseLocation {
+            enterprise: enterprise.id(),
+        },
+    )
 }
 
 fn resolve_supporting_businesses<'a>(

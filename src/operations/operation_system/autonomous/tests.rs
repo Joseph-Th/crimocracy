@@ -598,7 +598,10 @@ fn abandoned_rackets_expose_clean_stores_to_gangs_without_local_commercial_compe
         .unwrap();
     let staffed = rival_racket.kind().max_associates();
     let racket_id = rival_racket.id();
-    let rival_district = district_of_racket(&city.state, rival_racket.location()).unwrap();
+    let rival_district = rival_racket
+        .location()
+        .neighborhood(city.state.world())
+        .unwrap();
     let strongest_force = u32::from(rival_racket.associates());
     let force_by_district = BTreeMap::from([(rival_district, strongest_force)]);
     assert_eq!(

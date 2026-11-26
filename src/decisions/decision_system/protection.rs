@@ -26,7 +26,7 @@ use crate::finance::{
 };
 use crate::registry::Registry;
 use crate::world::territory_conflict::{
-    DEFENSIVE_ADVANTAGE, active_district_force, district_of_racket, local_defensive_forces,
+    DEFENSIVE_ADVANTAGE, active_district_force, local_defensive_forces,
 };
 use crate::world::territory_influence::active_standstill;
 use crate::world::{BusinessOwner, OrganizationKind};
@@ -152,7 +152,7 @@ fn coercive_requester(
     let requester = state
         .enterprises()
         .active_for_organization(attacker)
-        .filter(|racket| district_of_racket(state, racket.location()) == Some(district))
+        .filter(|racket| racket.location().neighborhood(state.world()) == Some(district))
         .filter(|racket| {
             state
                 .legal()

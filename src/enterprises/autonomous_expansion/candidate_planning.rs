@@ -182,14 +182,7 @@ fn build_ranked_candidate(
     // to freeze. The production establishment owner independently checks the
     // same rule, so projected cohorts never select an impossible pact-breaking
     // candidate and cannot panic during commit.
-    let district = match location {
-        EnterpriseLocation::Neighborhood(district) => Some(district),
-        EnterpriseLocation::Business(business) => economics
-            .state
-            .world()
-            .get_business(business)
-            .map(|venue| venue.neighborhood()),
-    };
+    let district = location.neighborhood(economics.state.world());
     if district.is_some_and(|district| {
         crate::world::territory_influence::active_standstill(
             economics.state,

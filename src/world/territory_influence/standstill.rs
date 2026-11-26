@@ -157,10 +157,7 @@ fn validate_standstill_terms(
                 .enterprises_for_organization(organization)
                 .any(|racket| {
                     racket.status() == EnterpriseStatus::Suspended
-                        && crate::world::territory_conflict::district_of_racket(
-                            state,
-                            racket.location(),
-                        ) == Some(district)
+                        && racket.location().neighborhood(state.world()) == Some(district)
                         && crate::world::territory_conflict::suppression_ends_at(state, racket.id())
                             .is_some()
                 }),

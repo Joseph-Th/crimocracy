@@ -5,7 +5,6 @@
 use super::*;
 use crimocracy::core::id::NeighborhoodId;
 use crimocracy::intelligence::{EnterpriseLocationSignal, InformationRecord};
-use crimocracy::world::territory_conflict::district_of_racket;
 
 impl Session<'_> {
     /// A known identity is not necessarily a located enterprise. Use the latest
@@ -47,7 +46,7 @@ impl Session<'_> {
             EnterpriseLocationSignal::Neighborhood(ward) => EnterpriseLocation::Neighborhood(*ward),
             EnterpriseLocationSignal::Business(venue) => EnterpriseLocation::Business(*venue),
         };
-        district_of_racket(&self.state, location)
+        location.neighborhood(self.state.world())
     }
 
     pub(super) fn known_surveillance_targets(&self) -> String {

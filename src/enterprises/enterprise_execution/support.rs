@@ -92,26 +92,9 @@ pub(crate) fn resolve_location_neighborhood(
     state: &AppState,
     location: EnterpriseLocation,
 ) -> Result<crate::core::id::NeighborhoodId, EnterpriseError> {
-    match location {
-        EnterpriseLocation::Neighborhood(id) => {
-            let _ = state
-                .world
-                .get_neighborhood(id)
-                .ok_or(EnterpriseError::InvalidLocation(location))?;
-            Ok(id)
-        }
-        EnterpriseLocation::Business(id) => {
-            let business = state
-                .world
-                .get_business(id)
-                .ok_or(EnterpriseError::InvalidLocation(location))?;
-            let _ = state
-                .world
-                .get_neighborhood(business.neighborhood())
-                .ok_or(EnterpriseError::InvalidLocation(location))?;
-            Ok(business.neighborhood())
-        }
-    }
+    location
+        .neighborhood(state.world())
+        .ok_or(EnterpriseError::InvalidLocation(location))
 }
 
 pub(super) fn resolve_location_profile(
@@ -458,14 +441,8 @@ fn resolve_enterprise_district_name(
     state: &crate::core::state::AppState,
     record: &crate::enterprises::EnterpriseRecord,
 ) -> String {
-    let neighborhood = match record.location() {
-        EnterpriseLocation::Neighborhood(id) => id,
-        EnterpriseLocation::Business(business_id) => state
-            .world
-            .get_business(business_id)
-            .expect("enterprise business location must reference a persisted business")
-            .neighborhood(),
-    };
+    let neighborhood = resolve_location_neighborhood(state, record.location())
+        .expect("enterprise location must reference a persisted neighborhood");
     state
         .world
         .get_neighborhood(neighborhood)

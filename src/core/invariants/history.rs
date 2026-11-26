@@ -121,14 +121,8 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
                 || (loser != assault && loser != target)
                 || assault_record.organization() != attacker
                 || target_record.organization() != defender
-                || crate::world::territory_conflict::district_of_racket(
-                    state,
-                    assault_record.location(),
-                ) != Some(district)
-                || crate::world::territory_conflict::district_of_racket(
-                    state,
-                    target_record.location(),
-                ) != Some(district)
+                || assault_record.location().neighborhood(state.world()) != Some(district)
+                || target_record.location().neighborhood(state.world()) != Some(district)
                 || event.summary()
                     != format!(
                         "Territorial clash in {district}: {attacker} challenged {defender}; {loser} lost the confrontation."

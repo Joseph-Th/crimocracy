@@ -11,7 +11,7 @@ use crate::registry::Registry;
 use crate::reputation::AudienceKind;
 use crate::reputation::reputation_system::resolve_score;
 use crate::world::{CapabilityKind, OrganizationKind};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Proportional integer ballots using largest remainders. Truncated divisions cannot
 /// silently give all unallocated votes to the final competitor (including one with
@@ -113,6 +113,15 @@ pub(crate) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
         + u32::from(nominee.life().professional_standing()) / 2;
     let fear = resolve_score(registry, state.reputation(), owner, AudienceKind::Residents);
     let excess_fear = u32::from(fear.saturating_sub(registry.reputation().baseline()));
+    // Count each active racket once. Retired records and unrelated wards do not
+    // need to be traversed for every individual ballot.
+    let mut active_rackets_by_district = BTreeMap::new();
+    for racket in state.enterprises().active_for_organization(owner) {
+        if let Some(district) = racket.location().neighborhood(state.world()) {
+            let count = active_rackets_by_district.entry(district).or_insert(0_u32);
+            *count = count.saturating_add(1);
+        }
+    }
     let mut ballots = Vec::new();
     for ward in state.world().neighborhoods() {
         let district = ward.id();
@@ -123,22 +132,14 @@ pub(crate) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
         let machine = u32::from(office.map_or(0, DistrictCampaign::influence));
         let grassroots = u32::from(office.map_or(0, DistrictCampaign::grassroots));
         let institutions = u32::from(office.map_or(0, DistrictCampaign::institutions));
-        let local_rackets = state
-            .enterprises()
-            .enterprises_for_organization(owner)
-            .filter(|racket| racket.status() == crate::enterprises::EnterpriseStatus::Active)
-            .filter(|racket| match racket.location() {
-                crate::enterprises::EnterpriseLocation::Neighborhood(id) => id == district,
-                crate::enterprises::EnterpriseLocation::Business(id) => state
-                    .world()
-                    .get_business(id)
-                    .is_some_and(|business| business.neighborhood() == district),
-            })
-            .count() as u32;
+        let local_rackets = active_rackets_by_district
+            .get(&district)
+            .copied()
+            .unwrap_or(0);
         let candidate_score =
             (machine * 50 + grassroots * 30 + institutions * 20) / 100 + nominee_strength;
-        let candidate_score =
-            candidate_score.saturating_sub(excess_fear * 5 + local_rackets.saturating_mul(25));
+        let candidate_score = candidate_score
+            .saturating_sub((excess_fear * 5).saturating_add(local_rackets.saturating_mul(25)));
         let incumbent_score = 320_u32
             + incumbent_strength
             + u32::from(ward.profile().institutions.police_presence.value()) / 2;

@@ -30,8 +30,7 @@ use crate::registry::Registry;
 use crate::reputation::{AudienceKind, reputation_system::resolve_score};
 use crate::world::organization_pressure::public_prominence_tier;
 use crate::world::territory_conflict::{
-    DEFENSIVE_ADVANTAGE, DistrictDefense, available_named_enforcers, district_of_racket,
-    local_defensive_forces,
+    DEFENSIVE_ADVANTAGE, DistrictDefense, available_named_enforcers, local_defensive_forces,
 };
 use crate::world::{AutonomyLevel, BusinessKind, BusinessOwner, OrganizationKind};
 use std::cmp::Reverse;
@@ -225,7 +224,7 @@ fn choose_plan<'r>(
     }
     let mut force_by_district = BTreeMap::new();
     for racket in state.enterprises().active_for_organization(organization) {
-        if let Some(district) = district_of_racket(state, racket.location()) {
+        if let Some(district) = racket.location().neighborhood(state.world()) {
             *force_by_district.entry(district).or_insert(0_u32) += u32::from(racket.associates());
         }
     }

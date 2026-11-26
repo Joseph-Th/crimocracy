@@ -1813,6 +1813,44 @@ fn establish_business_economy_for_enterprise_business(
 }
 
 #[test]
+fn location_resolution_requires_persisted_district_or_venue() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let district = fixture
+        .location
+        .neighborhood(fixture.state.world())
+        .unwrap();
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Located Shop",
+        BusinessKind::Retail,
+        BTreeSet::from([BusinessFunction::CustomerAccess]),
+        BusinessOwner::Independent,
+    );
+    for location in [
+        EnterpriseLocation::Neighborhood(district),
+        EnterpriseLocation::Business(venue),
+    ] {
+        assert_eq!(location.neighborhood(fixture.state.world()), Some(district));
+        assert_eq!(
+            resolve_location_neighborhood(&fixture.state, location),
+            Ok(district)
+        );
+    }
+    for location in [
+        EnterpriseLocation::Neighborhood(NeighborhoodId::from_raw(u32::MAX)),
+        EnterpriseLocation::Business(BusinessId::from_raw(u32::MAX)),
+    ] {
+        assert_eq!(location.neighborhood(fixture.state.world()), None);
+        assert!(matches!(
+            resolve_location_neighborhood(&fixture.state, location),
+            Err(EnterpriseError::InvalidLocation(invalid)) if invalid == location
+        ));
+    }
+}
+
+#[test]
 fn suspended_host_blocks_establishment_and_held_establishment_commit() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();

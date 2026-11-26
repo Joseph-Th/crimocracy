@@ -399,7 +399,7 @@ fn generated_rival_turf_agreement_requires_sighting_and_blocks_both_types_of_esc
 
 #[test]
 fn generated_rival_clash_then_postwar_negotiation_uses_actual_player_orders() {
-    use crimocracy::world::territory_conflict::{district_of_racket, suppression_ends_at};
+    use crimocracy::world::territory_conflict::suppression_ends_at;
     let registry = crimocracy::build_registry();
     let mut session =
         Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
@@ -500,7 +500,7 @@ fn generated_rival_clash_then_postwar_negotiation_uses_actual_player_orders() {
         .enterprises_for_organization(session.player)
         .find(|racket| {
             racket.status() == crimocracy::enterprises::EnterpriseStatus::Active
-                && district_of_racket(&session.state, racket.location()) == Some(district)
+                && racket.location().neighborhood(session.state.world()) == Some(district)
         })
         .unwrap()
         .id();

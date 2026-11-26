@@ -34,7 +34,7 @@ fn exposed_city() -> (Registry, GeneratedCity, NeighborhoodId) {
         .active_for_organization(rival)
         .find_map(|racket| {
             (u32::from(racket.associates()) > 4)
-                .then(|| district_of_racket(&city.state, racket.location()))
+                .then(|| racket.location().neighborhood(city.state.world()))
                 .flatten()
         })
         .unwrap();
@@ -465,7 +465,7 @@ fn protection_approval_rejects_disappeared_local_threat_without_payment() {
         .enterprises()
         .active_for_organization(context.attacker())
         .filter(|racket| {
-            district_of_racket(&city.state, racket.location()) == Some(context.district())
+            racket.location().neighborhood(city.state.world()) == Some(context.district())
         })
         .map(|racket| racket.id())
         .collect();
@@ -757,7 +757,7 @@ fn latest_protection_history_preserves_each_gangs_terms_across_renewal_and_resto
         .state
         .enterprises()
         .enterprises_for_organization(first_gang)
-        .filter(|racket| district_of_racket(&city.state, racket.location()) == Some(district))
+        .filter(|racket| racket.location().neighborhood(city.state.world()) == Some(district))
         .filter(|racket| racket.status() != EnterpriseStatus::Retired)
         .map(|racket| (racket.id(), racket.status()))
         .collect();

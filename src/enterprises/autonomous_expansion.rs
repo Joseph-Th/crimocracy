@@ -633,11 +633,7 @@ mod tests {
                 .iter()
                 .map(|action| {
                     (
-                        crate::world::territory_conflict::district_of_racket(
-                            &state,
-                            action.plan.location,
-                        )
-                        .unwrap(),
+                        action.plan.location.neighborhood(state.world()).unwrap(),
                         action.plan.authority_rank,
                     )
                 })
@@ -750,10 +746,7 @@ mod tests {
                 .enterprises()
                 .enterprises_for_organization(city.player)
                 .all(
-                    |racket| crate::world::territory_conflict::district_of_racket(
-                        &city.state,
-                        racket.location()
-                    ) != Some(untouched)
+                    |racket| racket.location().neighborhood(city.state.world()) != Some(untouched)
                 ),
             "the player has never operated a criminal racket in the newly owned ward"
         );
@@ -769,15 +762,12 @@ mod tests {
             plan_due_autonomous_expansions(&registry, &city.state, &BTreeSet::new()).unwrap();
         assert!(
             planned.actions.iter().any(|action| {
-                added.contains(&match action.plan.location {
-                    EnterpriseLocation::Neighborhood(ward) => ward,
-                    EnterpriseLocation::Business(business) => city
-                        .state
-                        .world()
-                        .get_business(business)
-                        .unwrap()
-                        .neighborhood(),
-                }) && city.rivals.contains(&action.organization)
+                action
+                    .plan
+                    .location
+                    .neighborhood(city.state.world())
+                    .is_some_and(|district| added.contains(&district))
+                    && city.rivals.contains(&action.organization)
             }),
             "an eligible rival must actually prioritize a profitable racket in the exposed wards"
         );
@@ -801,11 +791,10 @@ mod tests {
             rival_entered_clean_ward |= live.autonomous_enterprises.iter().any(|id| {
                 let racket = city.state.enterprises().get_enterprise(*id).unwrap();
                 city.rivals.contains(&racket.organization())
-                    && crate::world::territory_conflict::district_of_racket(
-                        &city.state,
-                        racket.location(),
-                    )
-                    .is_some_and(|district| added.contains(&district))
+                    && racket
+                        .location()
+                        .neighborhood(city.state.world())
+                        .is_some_and(|district| added.contains(&district))
             });
         }
         assert!(

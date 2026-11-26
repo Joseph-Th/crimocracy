@@ -11,7 +11,6 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current};
 use crate::economy::business_economy_system::portfolio_overhead_basis_points;
-use crate::enterprises::EnterpriseStatus;
 use crate::finance::finance_system::FinanceError;
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::history::history_system::{HistoryError, validate_campaign_victory_event};
@@ -434,20 +433,11 @@ pub(crate) fn ballot_progress(
     // every neighborhood when the player opens the victory-progress view.
     let own_rackets = state
         .enterprises()
-        .enterprises_for_organization(organization)
-        .filter(|enterprise| enterprise.status() == EnterpriseStatus::Active)
+        .active_for_organization(organization)
         .collect::<Vec<_>>();
-    let racket_district =
-        |enterprise: &crate::enterprises::EnterpriseRecord| match enterprise.location() {
-            crate::enterprises::EnterpriseLocation::Neighborhood(id) => Some(id),
-            crate::enterprises::EnterpriseLocation::Business(id) => state
-                .world()
-                .get_business(id)
-                .map(|business| business.neighborhood()),
-        };
     let own_active_racket_districts = own_rackets
         .iter()
-        .filter_map(|enterprise| racket_district(enterprise))
+        .filter_map(|enterprise| enterprise.location().neighborhood(state.world()))
         .collect::<BTreeSet<_>>()
         .len();
     // Inactive chronology, not just earned income, determines the clean interval.
@@ -469,7 +459,7 @@ pub(crate) fn ballot_progress(
         .enterprises()
         .enterprises_for_organization(organization)
     {
-        if let Some(district) = racket_district(racket) {
+        if let Some(district) = racket.location().neighborhood(state.world()) {
             let standing = racket_standing(state, racket);
             let (net, count) = rackets_by_district.entry(district).or_default();
             *net += if standing.established {
@@ -524,7 +514,7 @@ pub(crate) fn ballot_progress(
         .active_enterprises()
         .filter(|racket| racket.organization() != organization)
     {
-        if let Some(district) = racket_district(racket) {
+        if let Some(district) = racket.location().neighborhood(state.world()) {
             *rival_workers_by_district.entry(district).or_default() +=
                 u64::from(racket.associates());
         }

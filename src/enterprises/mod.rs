@@ -101,7 +101,18 @@ impl EnterpriseKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum EnterpriseLocation {
     Neighborhood(NeighborhoodId),
-    Business(crate::core::id::BusinessId),
+    Business(BusinessId),
+}
+
+impl EnterpriseLocation {
+    /// Resolve either location form to a persisted neighborhood.
+    pub fn neighborhood(self, world: &crate::world::WorldState) -> Option<NeighborhoodId> {
+        let district = match self {
+            Self::Neighborhood(district) => district,
+            Self::Business(business) => world.get_business(business)?.neighborhood(),
+        };
+        world.get_neighborhood(district).map(|record| record.id())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

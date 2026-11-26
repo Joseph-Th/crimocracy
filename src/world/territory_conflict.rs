@@ -34,19 +34,6 @@ pub const CLASH_COOLDOWN_DAYS: u64 = 7;
 pub const CLASH_SUPPRESSION_DAYS: u64 = 7;
 pub(crate) const DEFENSIVE_ADVANTAGE: u32 = 2;
 
-pub fn district_of_racket(
-    state: &AppState,
-    location: EnterpriseLocation,
-) -> Option<NeighborhoodId> {
-    match location {
-        EnterpriseLocation::Neighborhood(district) => Some(district),
-        EnterpriseLocation::Business(venue) => state
-            .world()
-            .get_business(venue)
-            .map(|business| business.neighborhood()),
-    }
-}
-
 /// How many staffed rank-and-file associates an outfit actually has active here.
 pub fn active_district_force(
     state: &AppState,
@@ -56,7 +43,7 @@ pub fn active_district_force(
     state
         .enterprises()
         .active_for_organization(organization)
-        .filter(|racket| district_of_racket(state, racket.location()) == Some(district))
+        .filter(|racket| racket.location().neighborhood(state.world()) == Some(district))
         .map(|racket| u32::from(racket.associates()))
         .sum()
 }
@@ -128,7 +115,7 @@ pub fn local_defensive_forces(
     let named = available_named_enforcers(state, organization);
     let mut districts = BTreeMap::<NeighborhoodId, DistrictDefense>::new();
     for racket in state.enterprises().active_for_organization(organization) {
-        if let Some(ward) = district_of_racket(state, racket.location()) {
+        if let Some(ward) = racket.location().neighborhood(state.world()) {
             let force = districts.entry(ward).or_default();
             force.active_rackets += 1;
             force.associates = force
@@ -328,7 +315,9 @@ fn validate_clash_terms(
     }) {
         return Err(TerritoryConflictError::InvalidGang);
     }
-    let district = district_of_racket(state, enemy.location())
+    let district = enemy
+        .location()
+        .neighborhood(state.world())
         .ok_or(TerritoryConflictError::MissingRacket(target))?;
     // A bilateral ceasefire forbids fighting the named counterparty, not defending
     // against an unrelated gang or challenging a third party in the same district.
@@ -353,7 +342,7 @@ fn validate_clash_terms(
     let assault = state
         .enterprises()
         .active_for_organization(attacker)
-        .filter(|racket| district_of_racket(state, racket.location()) == Some(district))
+        .filter(|racket| racket.location().neighborhood(state.world()) == Some(district))
         .max_by_key(|racket| (racket.associates(), std::cmp::Reverse(racket.id())))
         .map(|record| record.id())
         .ok_or(TerritoryConflictError::NoLocalFootprint)?;
@@ -484,7 +473,7 @@ pub(crate) fn apply_due_autonomous_territory_clashes(
     let mut districts =
         BTreeMap::<NeighborhoodId, BTreeMap<OrganizationId, DistrictRackets>>::new();
     for racket in state.enterprises().active_enterprises() {
-        let Some(district) = district_of_racket(state, racket.location()) else {
+        let Some(district) = racket.location().neighborhood(state.world()) else {
             continue;
         };
         let position = districts
