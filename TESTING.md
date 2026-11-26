@@ -316,6 +316,12 @@ starts two losing rackets with the same settlement minute and verifies both
 appear in the review. `exhausted_laundering_front_agrees_with_its_capacity_query`
 settles the final representable business cycle through the economy owner,
 rejects further laundering without mutation, and repeats the check after restore.
+`laundering_orders_pool_split_street_balances_without_extra_transactions` proves
+maximum and reserve-preserving player orders consume eligible fragmented balances
+in one transaction per front, with exact save/restore.
+`laundering_validates_every_selected_source_and_rechecks_split_debits` rejects
+foreign and wrong-kind sources, stale held payments, and verifies the committed
+split debits and restored ledger provenance.
 The rival campaign
 reserve regression tests that organization-owned legitimate operating balances
 protect actual payroll while making existing accounted funds available for civic

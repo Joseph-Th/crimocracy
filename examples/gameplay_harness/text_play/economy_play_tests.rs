@@ -221,6 +221,109 @@ fn explicit_max_and_reserved_laundering_orders_use_real_front_capacity() {
 }
 
 #[test]
+fn laundering_orders_pool_split_street_balances_without_extra_transactions() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let owner = FinancialOwner::Organization(session.player);
+    let front = session
+        .state
+        .world()
+        .businesses_owned_by_organization(session.player)
+        .find(|business| {
+            remaining_laundering_capacity(&registry, &session.state, session.player, business.id())
+                .is_some_and(|room| room.cents() >= 10_000)
+        })
+        .unwrap()
+        .id();
+    let source = session
+        .state
+        .finance()
+        .accounts_for(owner)
+        .find(|account| account.kind() == AccountKind::StreetCash)
+        .unwrap();
+    let street = source.id();
+    let surplus = source.balance().cents() - 10_000;
+    let second = insert_account(
+        &mut session.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut session.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &session.state,
+        LedgerTransactionDraft {
+            occurred_at: session.state.now(),
+            memo: "Split test treasury".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: street,
+                    amount: Money::from_cents(-surplus - 4_000),
+                },
+                LedgerPosting {
+                    account: second,
+                    amount: Money::from_cents(4_000),
+                },
+                LedgerPosting {
+                    account: settlement,
+                    amount: Money::from_cents(surplus),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    let opening = build_save(&registry, &session.state).unwrap();
+    for (command, expected, reserve) in [
+        (format!("launder {} max", front.raw()), 10_000, 0),
+        ("launder-all 2000".to_owned(), 8_000, 2_000),
+    ] {
+        session.state = restore_save(&registry, opening.clone()).unwrap();
+        let before_count = session
+            .state
+            .finance()
+            .recent_transactions_for_owner(owner, 100)
+            .len();
+        let result = session.execute(&command).unwrap().0;
+        assert!(result.contains(&expected.to_string()), "{result}");
+        assert_eq!(
+            session
+                .state
+                .finance()
+                .recent_transactions_for_owner(owner, 100)
+                .len(),
+            before_count + 1
+        );
+        let remaining: i64 = session
+            .state
+            .finance()
+            .accounts_for(owner)
+            .filter(|account| account.kind() == AccountKind::StreetCash)
+            .map(|account| account.available_payment_balance().cents())
+            .sum();
+        assert_eq!(remaining, reserve, "{result}");
+        let saved = build_save(&registry, &session.state).unwrap();
+        let restored = restore_save(&registry, saved.clone()).unwrap();
+        assert_eq!(
+            bincode::serialize(&saved).unwrap(),
+            bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+        );
+    }
+}
+
+#[test]
 fn resume_rackets_batch_prevalidates_every_selected_lifecycle_change() {
     let registry = crimocracy::build_registry();
     let mut session =

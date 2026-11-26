@@ -573,7 +573,7 @@ fn resume_retains_laundering_window_until_settlement() {
             &fixture.state,
             LaunderingDraft {
                 organization: retry.organization,
-                street_account: retry.street_account,
+                street_accounts: retry.street_accounts.clone(),
                 business: retry.business,
                 accounted_account: retry.accounted_account,
                 amount: retry.amount,
@@ -735,7 +735,10 @@ fn acquisition_restarts_laundering_window_without_prior_ownership_provenance() {
             memo: "Fixture acquisition capitalization".to_owned(),
             postings: vec![
                 LedgerPosting {
-                    account: funding.street_account,
+                    account: *funding
+                        .street_accounts
+                        .first()
+                        .expect("fixture street source"),
                     amount: price.checked_neg().unwrap(),
                 },
                 LedgerPosting {
@@ -887,7 +890,10 @@ fn acquisition_rebases_operating_capital_floor_to_inherited_cash() {
             memo: "Fixture acquisition capitalization".to_owned(),
             postings: vec![
                 LedgerPosting {
-                    account: funding.street_account,
+                    account: *funding
+                        .street_accounts
+                        .first()
+                        .expect("fixture street source"),
                     amount: price.checked_neg().expect("purchase price must negate"),
                 },
                 LedgerPosting {
@@ -1383,7 +1389,7 @@ fn fund_laundering(fixture: &mut BusinessEconomyFixture, amount: Money) -> Laund
     .expect("test cash transfer should commit");
     LaunderingDraft {
         organization: fixture.organization,
-        street_account: street,
+        street_accounts: BTreeSet::from([street]),
         business: fixture.business,
         accounted_account: accounted,
         amount,
@@ -3235,7 +3241,10 @@ fn generic_ledger_cannot_post_through_an_established_business_till() {
             memo: "Forbidden direct till capitalization".to_owned(),
             postings: vec![
                 LedgerPosting {
-                    account: funding.street_account,
+                    account: *funding
+                        .street_accounts
+                        .first()
+                        .expect("fixture street source"),
                     amount: amount.checked_neg().expect("test amount must negate"),
                 },
                 LedgerPosting {
@@ -3299,7 +3308,10 @@ fn generic_ledger_token_becomes_stale_when_its_account_becomes_a_business_till()
             memo: "Pre-establishment till capitalization".to_owned(),
             postings: vec![
                 LedgerPosting {
-                    account: funding.street_account,
+                    account: *funding
+                        .street_accounts
+                        .first()
+                        .expect("fixture street source"),
                     amount: amount.checked_neg().expect("test amount must negate"),
                 },
                 LedgerPosting {

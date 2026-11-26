@@ -148,6 +148,158 @@ fn fund_street_cash(fixture: &mut LaunderingFixture) {
 }
 
 #[test]
+fn laundering_validates_every_selected_source_and_rechecks_split_debits() {
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+    fund_street_cash(&mut fixture);
+    let owner = FinancialOwner::Organization(fixture.organization);
+    let second = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let foreign_owner = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Other crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let foreign = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(foreign_owner),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let draft = LaunderingDraft {
+        organization: fixture.organization,
+        street_accounts: BTreeSet::from([fixture.street, second]),
+        business: fixture.business,
+        accounted_account: fixture.accounted,
+        amount: Money::from_cents(1000),
+    };
+    for (invalid, expected) in [
+        (
+            foreign,
+            LaunderingError::AccountOwnerMismatch {
+                account: foreign,
+                organization: fixture.organization,
+            },
+        ),
+        (
+            fixture.accounted,
+            LaunderingError::InvalidStreetAccountKind(fixture.accounted),
+        ),
+    ] {
+        let mut mixed = draft.clone();
+        mixed.street_accounts.insert(invalid);
+        let before = bincode::serialize(&fixture.state).unwrap();
+        assert_eq!(
+            validate_launder_funds(&registry, &fixture.state, mixed).err(),
+            Some(expected)
+        );
+        assert_eq!(before, bincode::serialize(&fixture.state).unwrap());
+    }
+    // Leave 600 cents in each source, so both must participate in one validated payment.
+    let clearing = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Test split funding".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: fixture.street,
+                    amount: Money::from_cents(-999_400),
+                },
+                LedgerPosting {
+                    account: second,
+                    amount: Money::from_cents(600),
+                },
+                LedgerPosting {
+                    account: clearing,
+                    amount: Money::from_cents(998_800),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let held = validate_launder_funds(&registry, &fixture.state, draft.clone()).unwrap();
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Change second source".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: second,
+                    amount: Money::from_cents(-100),
+                },
+                LedgerPosting {
+                    account: clearing,
+                    amount: Money::from_cents(100),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert!(matches!(
+        held.commit(&mut fixture.state),
+        Err(LaunderingError::Finance(_))
+    ));
+    assert_eq!(before, bincode::serialize(&fixture.state).unwrap());
+    let transaction = validate_launder_funds(&registry, &fixture.state, draft)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let postings = fixture
+        .state
+        .finance()
+        .get_transaction(transaction)
+        .unwrap()
+        .postings();
+    assert_eq!(postings.len(), 4);
+    assert!(
+        postings
+            .iter()
+            .any(|p| p.account == fixture.street && p.amount == Money::from_cents(-600))
+    );
+    assert!(
+        postings
+            .iter()
+            .any(|p| p.account == second && p.amount == Money::from_cents(-400))
+    );
+    validate_invariants(&fixture.state);
+    let saved = crate::core::persistence::build_save(&registry, &fixture.state).unwrap();
+    let restored = crate::core::persistence::restore_save(&registry, saved).unwrap();
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn exhausted_laundering_front_agrees_with_its_capacity_query() {
     use crate::economy::business_economy_system::{
         decide_business_cycle, validate_business_cycle_plan,
@@ -178,7 +330,7 @@ fn exhausted_laundering_front_agrees_with_its_capacity_query() {
     );
     let draft = LaunderingDraft {
         organization: fixture.organization,
-        street_account: fixture.street,
+        street_accounts: BTreeSet::from([fixture.street]),
         business: fixture.business,
         accounted_account: fixture.accounted,
         amount: Money::from_cents(100),
@@ -221,7 +373,7 @@ fn laundering_names_suspended_economy_instead_of_missing_books() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: Money::from_cents(100),
@@ -251,7 +403,7 @@ fn laundering_rejects_non_criminal_organization() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: Money::from_cents(100),
@@ -305,7 +457,7 @@ fn laundering_rejects_amount_that_would_bypass_the_laundering_fee() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: Money::from_cents(3),
@@ -388,7 +540,7 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: capacity,
@@ -511,7 +663,7 @@ fn held_laundering_rechecks_capacity_after_local_market_changes() {
     .unwrap();
     let draft = LaunderingDraft {
         organization: fixture.organization,
-        street_account: fixture.street,
+        street_accounts: BTreeSet::from([fixture.street]),
         business: fixture.business,
         accounted_account: fixture.accounted,
         amount: capacity,
@@ -656,7 +808,7 @@ fn remaining_laundering_capacity_tracks_the_budget_and_clamps_after_sabotage() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: Money::from_cents(before.cents() + 1),
@@ -682,7 +834,7 @@ fn remaining_laundering_capacity_tracks_the_budget_and_clamps_after_sabotage() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: before,
@@ -715,7 +867,7 @@ fn remaining_laundering_capacity_tracks_the_budget_and_clamps_after_sabotage() {
             &fixture.state,
             LaunderingDraft {
                 organization: fixture.organization,
-                street_account: fixture.street,
+                street_accounts: BTreeSet::from([fixture.street]),
                 business: fixture.business,
                 accounted_account: fixture.accounted,
                 amount: Money::from_cents(1),
@@ -779,7 +931,7 @@ fn laundering_token_rejects_after_front_changes_owner() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: Money::from_cents(100),
@@ -892,7 +1044,7 @@ fn laundering_above_plausible_capacity_is_rejected_without_state_change() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: Money::from_cents(capacity.cents() + 1),
@@ -922,7 +1074,7 @@ fn laundering_requires_a_street_cash_source_account() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.accounted, // wrong kind: AccountedFunds as source
+            street_accounts: BTreeSet::from([fixture.accounted]), // wrong kind: AccountedFunds as source
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: Money::from_cents(1_000),
@@ -965,7 +1117,7 @@ fn laundering_more_than_the_street_balance_is_rejected_without_minting_funds() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: Money::from_cents(1_000),
@@ -975,15 +1127,13 @@ fn laundering_more_than_the_street_balance_is_rejected_without_minting_funds() {
         Ok(_) => panic!("laundering beyond the street balance must be rejected"),
     };
     let LaunderingError::InsufficientStreetCash {
-        account,
-        balance_cents,
+        available_cents,
         requested_cents,
     } = error
     else {
         panic!("expected InsufficientStreetCash, found {error}");
     };
-    assert_eq!(account, fixture.street);
-    assert_eq!(balance_cents, 0);
+    assert_eq!(available_cents, 0);
     assert_eq!(requested_cents, 1_000);
     let after_balances: Vec<(crate::core::id::FinancialAccountId, i64)> = fixture
         .state
@@ -1067,7 +1217,7 @@ fn disrupted_front_capacity_shrinks_with_degraded_books() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: Money::from_cents(degraded_capacity.cents() + 1),
@@ -1084,7 +1234,7 @@ fn disrupted_front_capacity_shrinks_with_degraded_books() {
         &fixture.state,
         LaunderingDraft {
             organization: fixture.organization,
-            street_account: fixture.street,
+            street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
             amount: degraded_capacity,

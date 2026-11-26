@@ -5,6 +5,15 @@ use crimocracy::intelligence::InformationTopic;
 use crimocracy::world::BusinessOwner;
 
 impl Session<'_> {
+    fn spendable_street_cash(&self) -> i128 {
+        self.state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(self.player))
+            .filter(|account| account.kind() == AccountKind::StreetCash)
+            .map(|account| i128::from(account.available_payment_balance().cents()))
+            .sum()
+    }
+
     fn settle_laundering(&mut self, business: BusinessId, cents: i64) -> Result<u32, String> {
         let owner = FinancialOwner::Organization(self.player);
         let accounted_account = self
@@ -14,37 +23,19 @@ impl Session<'_> {
             .find(|account| account.kind() == AccountKind::AccountedFunds)
             .ok_or("no accounted-funds account")?
             .id();
-        let street_account = self
+        let street_accounts = self
             .state
             .finance()
             .accounts_for(owner)
-            .filter(|account| {
-                account.kind() == AccountKind::StreetCash
-                    && account.available_payment_balance().cents() >= cents
-            })
-            .max_by_key(|account| {
-                (
-                    account.balance().cents(),
-                    std::cmp::Reverse(account.id().raw()),
-                )
-            })
-            .ok_or("no street-cash account holds the requested amount")?
-            .id();
-        let capacity =
-            remaining_laundering_capacity(self.registry, &self.state, self.player, business)
-                .ok_or("business has no active cash-intensive laundering channel")?;
-        if capacity.cents() < cents {
-            return Err(format!(
-                "front can absorb only {} more cents this cycle",
-                capacity.cents()
-            ));
-        }
+            .filter(|account| account.kind() == AccountKind::StreetCash)
+            .map(|account| account.id())
+            .collect();
         validate_launder_funds(
             self.registry,
             &self.state,
             LaunderingDraft {
                 organization: self.player,
-                street_account,
+                street_accounts,
                 business,
                 accounted_account,
                 amount: Money::from_cents(cents),
@@ -256,18 +247,11 @@ impl Session<'_> {
                     )
                     .ok_or("business has no active cash-intensive laundering channel")?
                     .cents();
-                    let largest_street = self
-                        .state
-                        .finance()
-                        .accounts_for(FinancialOwner::Organization(self.player))
-                        .filter(|account| account.kind() == AccountKind::StreetCash)
-                        .map(|account| account.available_payment_balance().cents())
-                        .max()
-                        .unwrap_or(0);
-                    let amount = capacity.min(largest_street);
+                    let street_cash = self.spendable_street_cash();
+                    let amount = i128::from(capacity).min(street_cash) as i64;
                     if amount <= 0 {
                         return Err(format!(
-                            "no available laundering amount: front room {capacity} cents, largest spendable street account {largest_street} cents"
+                            "no available laundering amount: front room {capacity} cents, total spendable street cash {street_cash} cents"
                         ));
                     }
                     amount
@@ -307,29 +291,13 @@ impl Session<'_> {
                 let mut settled = 0_usize;
                 let mut skipped = 0_usize;
                 for business in fronts {
-                    let accounts = self
-                        .state
-                        .finance()
-                        .accounts_for(FinancialOwner::Organization(self.player))
-                        .filter(|account| account.kind() == AccountKind::StreetCash)
-                        .collect::<Vec<_>>();
-                    let total_spendable: i128 = accounts
-                        .iter()
-                        .map(|account| {
-                            i128::from(account.available_payment_balance().cents().max(0))
-                        })
-                        .sum();
+                    let total_spendable = self.spendable_street_cash();
                     let budget = (total_spendable - i128::from(reserve))
                         .max(0)
                         .min(i128::from(i64::MAX)) as i64;
                     if budget == 0 {
                         break;
                     }
-                    let largest_street = accounts
-                        .iter()
-                        .map(|account| account.available_payment_balance().cents())
-                        .max()
-                        .unwrap_or(0);
                     let capacity = remaining_laundering_capacity(
                         self.registry,
                         &self.state,
@@ -337,7 +305,7 @@ impl Session<'_> {
                         business,
                     )
                     .map_or(0, |room| room.cents());
-                    let amount = budget.min(capacity).min(largest_street);
+                    let amount = budget.min(capacity);
                     if amount <= 0 {
                         continue;
                     }

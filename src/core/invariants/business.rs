@@ -300,10 +300,10 @@ fn laundering_transaction_amounts(
     organization: crate::core::id::OrganizationId,
     transaction: &crate::finance::LedgerTransactionRecord,
 ) -> Option<LaunderingTransactionAmounts> {
-    if transaction.postings().len() != 3 {
+    if transaction.postings().len() < 3 {
         return None;
     }
-    let mut amount = None;
+    let mut amount = Money::ZERO;
     let mut accounted = None;
     let mut fee = None;
     for posting in transaction.postings() {
@@ -311,9 +311,8 @@ fn laundering_transaction_amounts(
         if posting.amount < Money::ZERO
             && account.owner() == FinancialOwner::Organization(organization)
             && account.kind() == AccountKind::StreetCash
-            && amount.is_none()
         {
-            amount = posting.amount.checked_neg();
+            amount = amount.checked_add(posting.amount.checked_neg()?)?;
         } else if posting.amount > Money::ZERO
             && account.owner() == FinancialOwner::Organization(organization)
             && account.kind() == AccountKind::AccountedFunds
@@ -331,7 +330,6 @@ fn laundering_transaction_amounts(
             return None;
         }
     }
-    let amount = amount?;
     let accounted = accounted?;
     let fee = fee?;
     (accounted.checked_add(fee) == Some(amount)).then_some(LaunderingTransactionAmounts {
