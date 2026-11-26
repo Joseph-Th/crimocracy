@@ -550,6 +550,7 @@ fn relevant_operation_intelligence(kind: OperationKind) -> BTreeSet<InformationT
         ],
         OperationKind::Sabotage | OperationKind::Arson => &[
             InformationTopic::TargetSecurity,
+            InformationTopic::MarketAccess,
             InformationTopic::Personnel,
             InformationTopic::Schedule,
             InformationTopic::PoliceActivity,

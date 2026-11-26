@@ -3563,6 +3563,87 @@ fn resume_rejects_pause_that_pushes_completion_past_hard_deadline() {
 }
 
 #[test]
+fn paused_booking_does_not_reserve_crew_past_hard_deadline() {
+    let deadline = SimTime::from_minutes(12);
+    let (registry, mut state, _, _, operation) = make_exposed_operation_fixture_with_constraints(
+        OperationKind::Intimidation,
+        true,
+        vec![OperationContingency::RequestDecisionOnPoliceArrival],
+        vec![OperationConstraint::CompleteBy(deadline)],
+    );
+    designate_operation_owner_as_player(&mut state, operation);
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    let original = state.operations().get_operation(operation).unwrap();
+    let organization = original.responsible_organization();
+    let leader = original.leader();
+    let objective = original.objective().clone();
+    assert_eq!(original.resolution_due_at(), Some(deadline));
+    assert_eq!(
+        run_until_police_arrival_decision(&registry, &mut state, operation),
+        SimTime::from_minutes(5)
+    );
+    for _ in 0..3 {
+        run_tick(&registry, &mut state);
+    }
+    assert_eq!(state.now(), SimTime::from_minutes(8));
+    let follow_up = |scheduled_for| OperationDraft {
+        title: "Post-deadline follow-up".to_owned(),
+        kind: OperationKind::Intimidation,
+        responsible_organization: organization,
+        leader,
+        objective: objective.clone(),
+        approach: OperationApproach::Intimidating,
+        roles: BTreeMap::from([(RoleKind::Coordinator, leader)]),
+        intelligence: BTreeSet::new(),
+        constraints: Vec::new(),
+        contingencies: Vec::new(),
+        scheduled_for,
+    };
+    let before = bincode::serialize(&state).unwrap();
+    assert!(matches!(
+        validate_authorize_operation(&registry, &state, follow_up(SimTime::from_minutes(11))),
+        Err(OperationError::ParticipantBusy { character, operation: busy })
+            if character == leader && busy == operation
+    ));
+    assert_eq!(before, bincode::serialize(&state).unwrap());
+    let start = deadline.checked_add(SimDuration::ONE_MINUTE).unwrap();
+    assert!(
+        crate::operations::operation_system::participant_available_for_plan(
+            &registry,
+            &state,
+            leader,
+            OperationKind::Intimidation,
+            start,
+            &[]
+        ),
+        "crew cannot remain booked by a hypothetical resume beyond a hard deadline"
+    );
+    let next = validate_authorize_operation(&registry, &state, follow_up(start))
+        .expect("follow-up after hard deadline must be authorizable")
+        .commit(&mut state)
+        .unwrap();
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    while state.now() < start {
+        let tick = run_tick(&registry, &mut state);
+        assert_eq!(tick, run_tick(&registry, &mut restored));
+        if tick.now < start {
+            assert!(tick.started_operations.is_empty());
+        } else {
+            assert_eq!(tick.aborted_operations, vec![operation]);
+            assert_eq!(tick.started_operations, vec![next]);
+        }
+    }
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    build_save(&registry, &state).unwrap();
+}
+
+#[test]
 fn due_follow_up_starts_when_prior_deadline_cleanup_releases_boundary() {
     let (registry, mut state, _police, _neighborhood, operation) =
         make_exposed_operation_fixture_with_constraints(

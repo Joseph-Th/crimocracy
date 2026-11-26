@@ -114,13 +114,32 @@ pub(crate) fn projected_operation_window(
     ) {
         return None;
     }
-    let start = existing.started_at().unwrap_or(existing.scheduled_for());
-    let mut end = existing.resolution_due_at()?;
-    if existing.status() == OperationStatus::AwaitingDecision
-        && let Some(paused_at) = existing.awaiting_decision_since()
+    projected_started_window(existing, now)
+}
+
+/// Use the same projection for admission and historical overlap validation.
+/// An unresolved pause cannot reserve personnel past the first minute on which
+/// deadline cleanup would abort the operation. The deadline minute itself is
+/// still reserved when continuing would exceed it. Begin-time checks continue
+/// to require actual release, even when cleanup cannot commit.
+fn projected_started_window(
+    operation: &OperationRecord,
+    at: SimTime,
+) -> Option<(SimTime, SimTime)> {
+    let start = operation.started_at()?;
+    let mut end = operation.resolution_due_at()?;
+    if operation.status() == OperationStatus::AwaitingDecision
+        && let Some(paused_at) = operation.awaiting_decision_since()
+        && paused_at <= at
     {
-        end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, now))
+        end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, at))
             .unwrap_or(SimTime::MAX);
+        if let Some(deadline) = operation.completion_deadline() {
+            let cleanup = deadline
+                .checked_add(SimDuration::ONE_MINUTE)
+                .unwrap_or(SimTime::MAX);
+            end = end.min(cleanup);
+        }
     }
     Some((start, end))
 }
@@ -171,16 +190,7 @@ pub(crate) fn resolve_operation_booking_window_at(
     ) {
         return None;
     }
-    let start = operation.started_at()?;
-    let mut end = operation.resolution_due_at()?;
-    if operation.status() == OperationStatus::AwaitingDecision
-        && let Some(paused_at) = operation.awaiting_decision_since()
-        && paused_at <= at
-    {
-        end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, at))
-            .unwrap_or(SimTime::MAX);
-    }
-    Some((start, end))
+    projected_started_window(operation, at)
 }
 
 pub(crate) fn has_overlapping_operation_window(

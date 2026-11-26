@@ -470,16 +470,18 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
         "no second plan with active work"
     );
     finish_operation(&registry, &mut state, scout);
-    assert!(
-        state
-            .intelligence()
-            .information_for_holder_subject(
-                KnowledgeHolder::Organization(rival),
-                EntityRef::Business(competitor)
-            )
-            .any(|info| info.topic() == InformationTopic::MarketAccess
-                && info.source_kind() == InformationSourceKind::Surveillance)
-    );
+    let access = state
+        .intelligence()
+        .information_for_holder_subject(
+            KnowledgeHolder::Organization(rival),
+            EntityRef::Business(competitor),
+        )
+        .find(|info| {
+            info.topic() == InformationTopic::MarketAccess
+                && info.source_kind() == InformationSourceKind::Surveillance
+        })
+        .expect("successful reconnaissance discovers venue access")
+        .id();
 
     let mut control = state.clone();
     let manager = control
@@ -498,6 +500,47 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
         .active_for_manager(manager)
         .unwrap()
         .id();
+    // The same authentic venue-access observation is applicable to the other
+    // authored property-disruption kind, without enabling autonomous arson.
+    let mut explicit_arson = state.clone();
+    let objective = OperationObjective::DisruptBusiness {
+        target: EntityRef::Business(competitor),
+    };
+    let scheduled_for = state.now() + SimDuration::ONE_MINUTE;
+    let specialist = state.operations().get_operation(scout).unwrap().leader();
+    let arson = validate_authorize_operation(
+        &registry,
+        &explicit_arson,
+        OperationDraft {
+            title: "Explicit venue disruption".to_owned(),
+            kind: OperationKind::Arson,
+            responsible_organization: rival,
+            leader: manager,
+            objective,
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([
+                (RoleKind::Coordinator, manager),
+                (RoleKind::EntrySpecialist, specialist),
+            ]),
+            intelligence: BTreeSet::from([access]),
+            constraints: vec![
+                crate::operations::OperationConstraint::RequireIntelligenceTopic(
+                    InformationTopic::MarketAccess,
+                ),
+            ],
+            contingencies: Vec::new(),
+            scheduled_for,
+        },
+    )
+    .unwrap()
+    .commit(&mut explicit_arson)
+    .unwrap();
+    assert!(
+        run_test_tick(&registry, &mut explicit_arson)
+            .started_operations
+            .contains(&arson)
+    );
+    restore_save(&registry, build_save(&registry, &explicit_arson).unwrap()).unwrap();
     crate::delegation::delegation_system::validate_revoke_mandate(&control, mandate)
         .unwrap()
         .commit(&mut control)
@@ -522,7 +565,23 @@ fn rival_scouts_local_competitor_then_disrupts_actual_player_business_after_rest
     assert_eq!(record.kind(), OperationKind::Sabotage);
     assert_eq!(record.objective().business_target(), Some(competitor));
     assert_eq!(record.responsible_organization(), rival);
+    assert!(
+        record.intelligence().contains(&access),
+        "the hostile operation must actually use the access observation that justified it"
+    );
     finish_operation(&registry, &mut state, strike);
+    assert!(
+        state
+            .operations()
+            .get_operation(strike)
+            .unwrap()
+            .resolution()
+            .unwrap()
+            .factors()
+            .intelligence_topics_covered()
+            >= 2,
+        "venue access and the observed patrol pattern both contribute to the operation"
+    );
     assert!(
         state
             .economy()

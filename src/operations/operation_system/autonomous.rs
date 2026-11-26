@@ -168,6 +168,9 @@ fn predatory_stake(
     let district = shop.neighborhood();
     let local_force = force_by_district.get(&district).copied().unwrap_or(0);
     let projected_force = local_force.max(strongest_force.saturating_sub(1));
+    if projected_force <= DEFENSIVE_ADVANTAGE {
+        return 0;
+    }
     // The same finite local defense used for protection demands must deter
     // opportunistic strikes. Using only baseline racket associates here would
     // make extra paid crew and named violent enforcers meaningless to the AI.
@@ -189,12 +192,22 @@ fn predatory_stake(
     i128::from(gross) * if local_force > 0 { 2 } else { 1 } / 2
 }
 
+/// These public prominence and live defense projections depend on the shared,
+/// immutable planning state, not on which rival is considering a storefront.
+/// Reuse them across the entire daily authorization cohort.
+#[derive(Default)]
+struct RivalPlanningContext {
+    prominence: BTreeMap<OrganizationId, u8>,
+    defenses: BTreeMap<OrganizationId, BTreeMap<NeighborhoodId, DistrictDefense>>,
+}
+
 fn choose_plan<'r>(
     registry: &'r Registry,
     state: &AppState,
     organization: OrganizationId,
     managers: &[CharacterId],
     scheduled_for: SimTime,
+    context: &mut RivalPlanningContext,
 ) -> Option<ValidatedOperation<'r>> {
     if resolve_score(
         registry,
@@ -239,6 +252,9 @@ fn choose_plan<'r>(
         .max()
         .unwrap_or(0)
         .max(named_force);
+    if sectors.is_empty() && strongest_force <= DEFENSIVE_ADVANTAGE {
+        return None;
+    }
 
     let mut last = BTreeMap::<(BusinessId, OperationKind), _>::new();
     let mut recent_strikes = BTreeMap::<BusinessId, usize>::new();
@@ -292,11 +308,10 @@ fn choose_plan<'r>(
     );
     let mut candidates = Vec::new();
     let mut gains = BTreeMap::<(_, BusinessKind), i128>::new();
-    let mut prominence_by_owner = BTreeMap::<OrganizationId, u8>::new();
-    // The entire candidate search is read-only. Reuse each defender's finite
-    // force allocation across its storefronts instead of rescanning the roster.
-    let mut defenses = BTreeMap::new();
     for (id, name, kind, district) in state.world().public_business_directory() {
+        if owned.contains(&id) {
+            continue;
+        }
         let target_owner = state
             .world()
             .get_business(id)
@@ -304,13 +319,14 @@ fn choose_plan<'r>(
         // Publicly conspicuous competitors provoke longer campaigns. Small owners still
         // receive the old two-strike respite and an attacker still needs a real local stake.
         let prominence = match target_owner {
-            Some(BusinessOwner::Organization(owner)) => *prominence_by_owner
+            Some(BusinessOwner::Organization(owner)) => *context
+                .prominence
                 .entry(owner)
                 .or_insert_with(|| public_prominence_tier(state, owner)),
             _ => 0,
         };
         let strike_limit = if prominence >= 3 { 4 } else { 2 };
-        if owned.contains(&id) || recent_strikes.get(&id).copied().unwrap_or(0) >= strike_limit {
+        if recent_strikes.get(&id).copied().unwrap_or(0) >= strike_limit {
             continue;
         }
         let player_owned = state
@@ -331,7 +347,7 @@ fn choose_plan<'r>(
             id,
             &force_by_district,
             strongest_force,
-            &mut defenses,
+            &mut context.defenses,
         );
         // Rival businesses also have a political reason to oppose a local
         // challenger: displacing an established civic venue can interrupt the
@@ -503,10 +519,18 @@ pub(crate) fn apply_due_rival_operations(
     let Some(scheduled_for) = state.now().checked_add(SimDuration::ONE_MINUTE) else {
         return Vec::new();
     };
+    let mut context = RivalPlanningContext::default();
     let plans: Vec<_> = eligible_managers(state)
         .into_iter()
         .filter_map(|(organization, managers)| {
-            choose_plan(registry, state, organization, &managers, scheduled_for)
+            choose_plan(
+                registry,
+                state,
+                organization,
+                &managers,
+                scheduled_for,
+                &mut context,
+            )
         })
         .collect();
     let count = u32::try_from(plans.len()).expect("organization count fits ID capacity");

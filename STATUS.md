@@ -122,7 +122,7 @@ These are scope boundaries, not evidence for unmodeled design goals.
 These two numbers gate `core::persistence::restore_save` (`src/core/persistence.rs`):
 mismatched saves are rejected. Keep them in sync with the owners.
 
-The current authored content revision is 64.
+The current authored content revision is 65.
 
 The current in-memory state schema version is 129.
 

@@ -291,10 +291,14 @@ has an actual authored entry stage, then asks leadership on later arrivals.
 before authorization. `preview` accepts the same options as `plan` and validates
 the same order without committing it; it lists the crew, planned start, and
 best usable observation per applicable topic at that start, including missing topics.
+Venue-access observations from successful business surveillance are applicable
+to sabotage and arson as well as burglary.
 The production owner validates every constraint and crew
 booking. Automatic staffing excludes detained and overlapping participants and solves the whole crew assignment to maximize
 trained capability, with stable ID-based tie-breaking and no duplicate
 participants; explicit `Role=char-N` permits knowingly untrained people.
+A decision-paused operation cannot reserve future crew time beyond its
+hard-deadline cleanup minute; an authorized follow-up still waits for actual release.
 `cancel operation-N` withdraws an authorized or running operation through
 the canonical abort path, files its report, and releases personnel; pending
 leadership decisions must instead be resolved with `decide`. Burglary uses
