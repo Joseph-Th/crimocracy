@@ -353,7 +353,11 @@ fn vice_inquiry_observes_distinct_operating_cycles_then_detains_and_refers_manag
     let next = run_tick(&registry, &mut fixture.state);
     assert_eq!(next, run_tick(&registry, &mut restored));
     assert_eq!(next.evidence_arrests.len(), 1);
-    let arrest = next.evidence_arrests[0];
+    assert_eq!(
+        next.evidence_arrests[0].organization,
+        Some(fixture.organization)
+    );
+    let arrest = next.evidence_arrests[0].arrest;
     assert_eq!(
         fixture
             .state

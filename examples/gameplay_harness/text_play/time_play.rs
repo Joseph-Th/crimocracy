@@ -65,8 +65,8 @@ impl Session<'_> {
         let mut advanced = 0;
         let mut new_reports = 0;
         let mut reason = None;
-        let mut deferred_custody = 0_u32;
-        let mut deferred_releases = 0_u32;
+        let mut deferred_custody = 0_usize;
+        let mut deferred_releases = 0_usize;
         let mut deferred_contracts = 0_usize;
         let mut deferred_departures = 0_usize;
         // Player assets cannot autonomously reopen or retire during advancement.
@@ -112,15 +112,11 @@ impl Session<'_> {
                         .get_operation(*id)
                         .is_some_and(|op| op.responsible_organization() == self.player)
                 });
-            let own_custody_event = |arrests: &[ArrestId]| {
-                arrests.iter().any(|id| {
-                    self.state.legal().get_arrest(*id).is_some_and(|arrest| {
-                        self.state
-                            .world()
-                            .get_character(arrest.character())
-                            .is_some_and(|person| person.organization() == Some(self.player))
-                    })
-                })
+            let own_custody_event = |events: &[crimocracy::core::simulation::CustodyEvent]| {
+                events
+                    .iter()
+                    .filter(|event| event.organization == Some(self.player))
+                    .count()
             };
             let own_arrest = own_custody_event(&tick.evidence_arrests);
             let own_release = own_custody_event(&tick.custody_releases);
@@ -198,8 +194,8 @@ impl Session<'_> {
                 .attention_settings()
                 .is_auto_pause_enabled(crimocracy::core::attention::AttentionClass::Exception);
             if uninterrupted {
-                deferred_custody += u32::from(own_arrest);
-                deferred_releases += u32::from(own_release);
+                deferred_custody += own_arrest;
+                deferred_releases += own_release;
                 deferred_contracts += own_contract_expirations;
                 deferred_departures += own_payroll_departures;
                 deferred_losses += u32::from(own_new_racket_loss);
@@ -219,9 +215,9 @@ impl Session<'_> {
                 .is_some()
             {
                 reason = Some("leadership decision pending");
-            } else if !uninterrupted && own_arrest {
+            } else if !uninterrupted && own_arrest > 0 {
                 reason = Some("your member entered custody; review 'counsel' and 'contacts'");
-            } else if !uninterrupted && own_release {
+            } else if !uninterrupted && own_release > 0 {
                 reason = Some("your member was released from custody; review 'counsel'");
             } else if !uninterrupted && own_contract_expirations > 0 {
                 reason = Some("a freelance contract expired; review 'people' and 'freelancers'");
@@ -320,6 +316,245 @@ mod tests {
 
         let next = session.execute("advance 1m uninterrupted").unwrap().0;
         assert!(next.contains("0 shutdown event(s)"), "{next}");
+    }
+
+    #[test]
+    fn custody_review_counts_people_and_retains_releases_before_contract_expiry() {
+        use crimocracy::legal::investigation_system::{
+            validate_add_evidence, validate_open_investigation,
+        };
+        use crimocracy::legal::{
+            Admissibility, EvidenceDraft, EvidenceKind, EvidenceReliability, EvidenceStrength,
+            InvestigationDraft,
+        };
+        use crimocracy::social::relationship_system::validate_set_relationship;
+        use crimocracy::social::{RelationshipDimensions, RelationshipLevel};
+        use crimocracy::world::character_life::validate_set_civic_occupation;
+        use crimocracy::world::freelance_contracts::validate_hire_freelancer;
+        use crimocracy::world::world_system::{
+            designate_player_organization, insert_character, insert_neighborhood,
+            insert_organization,
+        };
+        use crimocracy::world::{
+            AutonomyLevel, CharacterDraft, IndependentVocation, NeighborhoodDraft,
+            NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile, NeighborhoodProfile,
+            OrganizationDraft, OrganizationKind, Rating,
+        };
+
+        let registry = crimocracy::build_registry();
+        let mut state = AppState::new(17);
+        let mut organization = |name: &str, kind| {
+            insert_organization(
+                &registry,
+                &mut state,
+                OrganizationDraft {
+                    name: name.to_owned(),
+                    kind,
+                },
+            )
+            .unwrap()
+        };
+        let player = organization("Test crew", OrganizationKind::Criminal);
+        let police = organization("Test police", OrganizationKind::LawEnforcement);
+        designate_player_organization(&mut state, player).unwrap();
+        let rating = Rating::try_new(50).unwrap();
+        let district = insert_neighborhood(
+            &mut state,
+            NeighborhoodDraft {
+                name: "Test ward".into(),
+                profile: NeighborhoodProfile {
+                    economy: NeighborhoodEconomyProfile {
+                        wealth: rating,
+                        commercial_activity: rating,
+                        illicit_demand: rating,
+                    },
+                    institutions: NeighborhoodInstitutionProfile {
+                        police_presence: rating,
+                    },
+                },
+            },
+        )
+        .unwrap();
+        let mut person = |name: &str, organization, supervisor| {
+            insert_character(
+                &mut state,
+                CharacterDraft {
+                    name: name.to_owned(),
+                    organization,
+                    supervisor,
+                    autonomy: AutonomyLevel::Guided,
+                    capabilities: BTreeMap::new(),
+                    traits: BTreeSet::new(),
+                    drives: BTreeMap::new(),
+                },
+            )
+            .unwrap()
+        };
+        let boss = person("Boss", Some(player), None);
+        let member = person("Associate", Some(player), Some(boss));
+        let freelancer = person("Freelancer", None, None);
+        let outsider = person("Unrelated suspect", None, None);
+        validate_set_civic_occupation(
+            &state,
+            freelancer,
+            district,
+            IndependentVocation::FreelanceCriminal,
+        )
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+        let mut relation = RelationshipDimensions::zero();
+        relation.trust = RelationshipLevel::try_new(80).unwrap();
+        validate_set_relationship(&state, freelancer, boss, relation)
+            .unwrap()
+            .commit(&mut state)
+            .unwrap();
+        let owner = FinancialOwner::Organization(player);
+        let street = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner,
+                kind: AccountKind::StreetCash,
+            },
+        )
+        .unwrap();
+        let clearing = insert_account(
+            &mut state,
+            FinancialAccountDraft {
+                owner,
+                kind: AccountKind::Settlement,
+            },
+        )
+        .unwrap();
+        validate_record_transaction(
+            &state,
+            LedgerTransactionDraft {
+                occurred_at: state.now(),
+                memo: "Fund the test crew".to_owned(),
+                postings: vec![
+                    LedgerPosting {
+                        account: street,
+                        amount: Money::from_cents(1_000_000),
+                    },
+                    LedgerPosting {
+                        account: clearing,
+                        amount: Money::from_cents(-1_000_000),
+                    },
+                ],
+                authorization: None,
+            },
+        )
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+        validate_hire_freelancer(&state, player, freelancer, boss, 1)
+            .unwrap()
+            .commit(&mut state)
+            .unwrap();
+
+        let suspects = [member, freelancer, outsider];
+        let investigation = validate_open_investigation(
+            &state,
+            InvestigationDraft {
+                owner: police,
+                title: "Independent custody evidence for three subjects".to_owned(),
+                subjects: suspects.into_iter().map(EntityRef::Character).collect(),
+            },
+        )
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+        for character in suspects {
+            for kind in [EvidenceKind::Document, EvidenceKind::FinancialRecord] {
+                validate_add_evidence(
+                    &state,
+                    EvidenceDraft {
+                        investigation,
+                        custodian: police,
+                        subject: EntityRef::Character(character),
+                        origin: None,
+                        kind,
+                        strength: EvidenceStrength::Strong,
+                        reliability: EvidenceReliability::HighlyReliable,
+                        admissibility: Admissibility::Admissible,
+                        discovered_at: state.now(),
+                    },
+                )
+                .unwrap()
+                .commit(&mut state)
+                .unwrap();
+            }
+        }
+        let mut session = Session {
+            registry: &registry,
+            state,
+            player,
+            seeds: EvaluationSeeds::new(17, 17),
+            district: "Test ward".to_owned(),
+            district_variant: "TEST",
+        };
+        let review = session.execute("advance 1m uninterrupted").unwrap().0;
+        for character in suspects {
+            assert!(
+                session
+                    .state
+                    .legal()
+                    .active_arrest_for_character(character)
+                    .is_some()
+            );
+        }
+        let release_at = session.state.now() + registry.legal().maximum_detention();
+        // The freelancer remains employed while custody prevents an expired
+        // term ending. On the release minute both real events must be visible.
+        while session.state.now().as_minutes() + 1 < release_at.as_minutes() {
+            run_tick(&registry, &mut session.state).unwrap();
+        }
+        assert!(
+            session
+                .state
+                .world()
+                .active_freelance_contract(freelancer)
+                .is_some()
+        );
+        let mut restored = Session {
+            registry: &registry,
+            state: restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap(),
+            player,
+            seeds: EvaluationSeeds::new(17, 17),
+            district: "Test ward".to_owned(),
+            district_variant: "TEST",
+        };
+        let released = session.execute("advance 1m uninterrupted").unwrap().0;
+        assert_eq!(
+            released,
+            restored.execute("advance 1m uninterrupted").unwrap().0
+        );
+        assert!(
+            session
+                .state
+                .world()
+                .active_freelance_contract(freelancer)
+                .is_none()
+        );
+        assert_eq!(
+            session
+                .state
+                .world()
+                .get_character(freelancer)
+                .unwrap()
+                .organization(),
+            None
+        );
+        assert!(review.contains("2 custody event(s)"), "{review}");
+        assert!(released.contains("2 release(s)"), "{released}");
+        assert!(
+            released.contains("1 freelance contract end(s)"),
+            "{released}"
+        );
+        assert_eq!(
+            bincode::serialize(&session.state).unwrap(),
+            bincode::serialize(&restored.state).unwrap(),
+        );
     }
 
     #[test]

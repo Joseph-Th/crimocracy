@@ -389,6 +389,14 @@ and summarizes deferred events. The shutdown tally counts distinct newly suspend
 player storefronts and rackets, including custody, dependent-front closures, payroll
 departures, and territorial displacement. The generated seed-12 seven-day regression
 checks custody suspension and verifies that the next advance does not recount it.
+Custody totals count individual arrests and releases, not minutes containing an event.
+The tick captures each subject's organization at the custody phase, so a later
+same-minute contract expiry cannot hide that person's release. The
+`custody_review_counts_people_and_retains_releases_before_contract_expiry` test
+arrests two player members and an unrelated person in one minute, then checks
+the exact player-only totals and same-minute expired-contract release against
+a restored save. Successful extraction also surfaces its actual custody release
+through the tick outcome; ordinary custody expiry is counted only once.
 `uninterrupted_advance_discloses_player_crew_departures_not_just_shortfalls` also
 checks that recovery identifies a departed captain as a former member, reports
 the canonical resumption blocker, remains read-only, and is identical after restore.

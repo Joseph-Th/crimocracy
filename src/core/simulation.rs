@@ -5,9 +5,9 @@
 //! New autonomous work must slot explicitly here with a "runs after X so Y" comment.
 
 use crate::core::id::{
-    BusinessCycleId, CharacterId, EnterpriseCycleId, IdKind, InvestigationId, InvestigationWorkId,
-    OperationId, OpportunityId, PoliceResponseId, ProsecutionCaseId, RecruitmentAttemptId,
-    ReportId,
+    ArrestId, BusinessCycleId, CharacterId, EnterpriseCycleId, IdKind, InvestigationId,
+    InvestigationWorkId, OperationId, OpportunityId, OrganizationId, PoliceResponseId,
+    ProsecutionCaseId, RecruitmentAttemptId, ReportId,
 };
 use crate::core::invariants::validate_invariants;
 use crate::core::state::AppState;
@@ -31,6 +31,34 @@ use thiserror::Error;
 mod operations_phase;
 mod scheduled_phases;
 
+/// A custody change observed at its own simulation phase. Membership may change
+/// later in the same minute, so adapters must not reconstruct affiliation from
+/// the end-of-tick character roster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CustodyEvent {
+    pub arrest: ArrestId,
+    pub organization: Option<OrganizationId>,
+}
+
+impl CustodyEvent {
+    fn capture(state: &AppState, arrest: ArrestId) -> Self {
+        let character = state
+            .legal()
+            .get_arrest(arrest)
+            .expect("custody event must reference a persisted arrest")
+            .character();
+        let organization = state
+            .world()
+            .get_character(character)
+            .expect("custody event must reference a persisted character")
+            .organization();
+        Self {
+            arrest,
+            organization,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TickOutcome {
     pub now: SimTime,
@@ -47,7 +75,7 @@ pub struct TickOutcome {
     pub scheduled_investigation_work: Vec<InvestigationWorkId>,
     pub scheduled_witness_interviews: Vec<InvestigationWorkId>,
     pub resolved_investigation_work: Vec<InvestigationWorkId>,
-    pub evidence_arrests: Vec<crate::core::id::ArrestId>,
+    pub evidence_arrests: Vec<CustodyEvent>,
     pub staffed_prosecution_cases: Vec<(ProsecutionCaseId, CharacterId)>,
     pub opened_prosecution_cases: Vec<ProsecutionCaseId>,
     pub prosecution_supplements: Vec<crate::core::id::ProsecutionReferralId>,
@@ -56,7 +84,8 @@ pub struct TickOutcome {
     pub court_fine_payments: Vec<crate::core::id::LedgerTransactionId>,
     pub informant_recruitments: Vec<crate::core::id::InformantId>,
     pub informant_disclosures: Vec<crate::core::id::InformantDisclosureId>,
-    pub custody_releases: Vec<crate::core::id::ArrestId>,
+    /// Actual releases through custody expiry or successful extraction.
+    pub custody_releases: Vec<CustodyEvent>,
     pub automatic_legal_support: Vec<crate::core::id::LegalRepresentationId>,
     /// Automatic-policy retainers ended because their represented matter is no longer active.
     /// The legal-support owner reports this separately from newly retained counsel so a
@@ -130,11 +159,14 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // otherwise influence systems after its authored end instant. The informant decision delay is
     // required by registry validation to be strictly shorter than maximum detention, so canonical
     // minute-by-minute ticks always give that detainee decision its intended earlier window.
-    let custody_releases = crate::legal::arrest_system::apply_due_custody_releases(
+    let mut custody_releases: Vec<_> = crate::legal::arrest_system::apply_due_custody_releases(
         state,
         registry.legal().maximum_detention(),
     )
-    .expect("valid state should release custody that reached the authored maximum");
+    .expect("valid state should release custody that reached the authored maximum")
+    .into_iter()
+    .map(|arrest| CustodyEvent::capture(state, arrest))
+    .collect();
     // On ordinary minutes, conclude expired freelancer employment before new operations
     // are started or new personnel assignments can rely on a term that already ended.
     // At midnight, keep the member through the just-finished day's payroll below;
@@ -161,6 +193,18 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
         aborted: aborted_operations,
         resolved: resolved_operations,
     } = run_operations_phase(registry, state);
+    // A successful extraction is a real release, even when the rescued person
+    // does not belong to the organization that commissioned the operation.
+    custody_releases.extend(resolved_operations.iter().filter_map(|operation| {
+        let arrest = state
+            .operations()
+            .get_operation(*operation)
+            .expect("resolved operation must persist")
+            .resolution()
+            .expect("resolved operation must retain its outcome")
+            .extraction_arrest()?;
+        Some(CustodyEvent::capture(state, arrest))
+    }));
     let staffed_investigations = apply_autonomous_investigator_staffing(state)
         .expect("valid state should staff available investigators onto active cases");
     // Autonomous casework traverses the active-case index once per minute. Reviewable evidence
@@ -179,7 +223,10 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // the same minute's arrest decision.
     let evidence_arrests =
         crate::legal::arrest_system::apply_autonomous_evidence_arrests(registry, state)
-            .expect("valid state should convert qualifying case evidence into custody");
+            .expect("valid state should convert qualifying case evidence into custody")
+            .into_iter()
+            .map(|arrest| CustodyEvent::capture(state, arrest))
+            .collect();
     // Custody can remove a prosecutor from every review they were carrying. Restaff immediately
     // after arrests so one individual's detention cannot freeze unrelated prosecution matters.
     let staffed_prosecution_cases =

@@ -2158,7 +2158,15 @@ fn due_custody_release_bounds_detention_at_the_authored_window() {
     let outcome = run_tick(&fixture.registry, &mut fixture.state);
     assert_eq!(
         outcome.custody_releases,
-        vec![arrest],
+        vec![crate::core::simulation::CustodyEvent {
+            arrest,
+            organization: fixture
+                .state
+                .world()
+                .get_character(fixture.suspect)
+                .unwrap()
+                .organization(),
+        }],
         "the canonical minute pipeline must surface the authored custody release"
     );
     let record = fixture
@@ -3183,7 +3191,18 @@ fn custody_aborts_authorized_operation_before_start() {
         maximum_detention.as_minutes() - 1,
     ));
     let released_tick = run_tick(&fixture.registry, &mut fixture.state);
-    assert_eq!(released_tick.custody_releases, vec![arrest]);
+    assert_eq!(
+        released_tick.custody_releases,
+        vec![crate::core::simulation::CustodyEvent {
+            arrest,
+            organization: fixture
+                .state
+                .world()
+                .get_character(fixture.suspect)
+                .unwrap()
+                .organization(),
+        }],
+    );
     assert!(released_tick.started_operations.is_empty());
     assert_eq!(
         fixture

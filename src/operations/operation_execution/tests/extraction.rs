@@ -578,7 +578,13 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
     ));
     let expiry_outcome = run_tick(&registry, &mut expiry_state);
     assert_eq!(expiry_outcome.now, release_at);
-    assert_eq!(expiry_outcome.custody_releases, vec![arrest]);
+    assert_eq!(
+        expiry_outcome.custody_releases,
+        vec![crate::core::simulation::CustodyEvent {
+            arrest,
+            organization: Some(crew),
+        }],
+    );
     assert_eq!(expiry_outcome.resolved_operations, vec![expiry_extraction]);
     let expiry_resolution = expiry_state
         .operations()
@@ -653,7 +659,15 @@ fn successful_extraction_frees_detained_member_through_canonical_release() {
       } if character == detainee && operation == extraction
     ));
     let operation_count = state.operations().operations().count();
-    run_until_operation_resolved(&registry, &mut state, extraction);
+    let outcome = run_until_operation_resolved(&registry, &mut state, extraction);
+    assert_eq!(
+        outcome.custody_releases,
+        vec![crate::core::simulation::CustodyEvent {
+            arrest,
+            organization: Some(crew),
+        }],
+        "the canonical operation phase must surface the extraction release exactly once",
+    );
     let record = state
         .operations()
         .get_operation(extraction)

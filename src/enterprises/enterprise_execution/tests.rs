@@ -3317,7 +3317,13 @@ fn detained_enterprise_manager_suspends_cycles_until_owner_resumes() {
     // Release removes the custody blocker, but does not reopen player operations or accrue
     // an overdue payout. Recovery is an explicit governance decision.
     let released_tick = run_tick(&registry, &mut fixture.state);
-    assert_eq!(released_tick.custody_releases, vec![arrest]);
+    assert_eq!(
+        released_tick.custody_releases,
+        vec![crate::core::simulation::CustodyEvent {
+            arrest,
+            organization: Some(fixture.organization),
+        }],
+    );
     assert!(released_tick.enterprise_cycles.is_empty());
     assert_eq!(
         fixture
