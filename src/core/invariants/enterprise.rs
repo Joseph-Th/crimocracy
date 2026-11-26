@@ -284,6 +284,19 @@ fn validate_enterprise_schedule(
         || enterprise
             .loss_streak_anchor()
             .is_some_and(|anchor| anchor < enterprise.established_at() || anchor > state.now())
+        || (enterprise.status() == EnterpriseStatus::Active)
+            != enterprise.inactive_since().is_none()
+        || enterprise.inactive_since().is_some_and(|since| {
+            since < enterprise.established_at()
+                || since > state.now()
+                || enterprise.last_cycle_at().is_some_and(|last| last > since)
+                || enterprise
+                    .loss_streak_anchor()
+                    .is_some_and(|anchor| anchor > since)
+                || enterprise
+                    .retired_at()
+                    .is_some_and(|retired| since > retired)
+        })
         || enterprise.retired_at().is_some_and(|retired_at| {
             retired_at < enterprise.established_at()
                 || retired_at > state.now()

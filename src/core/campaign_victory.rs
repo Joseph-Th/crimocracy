@@ -144,7 +144,9 @@ pub struct VictoryProgress {
     pub required_mayoral_reserve_cents: i64,
     pub mayoral_leader_eligible: bool,
     pub legitimate_transition_ready: bool,
-    pub days_since_last_racket_cycle: Option<u64>,
+    /// Whole days since all rackets stopped operating; zero while any remains active,
+    /// and None for a portfolio that has never operated a racket.
+    pub days_since_last_racket_activity: Option<u64>,
     pub mayoral_nominated_for_day: Option<u64>,
     pub latest_election_day: Option<u64>,
     pub latest_election_won: bool,
@@ -448,14 +450,16 @@ pub(crate) fn ballot_progress(
         .filter_map(|enterprise| racket_district(enterprise))
         .collect::<BTreeSet<_>>()
         .len();
-    let days_since_last_racket_cycle = state
+    // Inactive chronology, not just earned income, determines the clean interval.
+    // A reopened racket resets it immediately, even before the next settlement.
+    let days_since_last_racket_activity = state
         .enterprises()
         .enterprises_for_organization(organization)
-        .filter_map(|racket| racket.last_cycle_at())
+        .map(|racket| racket.inactive_since().unwrap_or(state.now()))
         .max()
         .map(|last| state.now().as_minutes().saturating_sub(last.as_minutes()) / DAY_MINUTES);
-    let legitimate_transition_ready = own_rackets.is_empty()
-        && days_since_last_racket_cycle.is_none_or(|days| days >= POLITICAL_CLEAN_OPERATION_DAYS);
+    let legitimate_transition_ready =
+        days_since_last_racket_activity.is_none_or(|days| days >= POLITICAL_CLEAN_OPERATION_DAYS);
     let mut rackets_by_district: BTreeMap<_, (i128, u64)> = BTreeMap::new();
     let mut captains_by_district = BTreeMap::<NeighborhoodId, BTreeSet<CharacterId>>::new();
     let mut mature_workers_by_district = BTreeMap::<NeighborhoodId, u64>::new();
@@ -659,7 +663,7 @@ pub(crate) fn ballot_progress(
         required_mayoral_reserve_cents: MAYORAL_LIQUID_RESERVE_REQUIRED,
         mayoral_leader_eligible,
         legitimate_transition_ready,
-        days_since_last_racket_cycle,
+        days_since_last_racket_activity,
         mayoral_nominated_for_day,
         latest_election_day: latest_election.map(|election| election.election_day),
         latest_election_won: latest_election.is_some_and(|election| election.elected),

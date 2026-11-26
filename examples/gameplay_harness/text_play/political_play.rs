@@ -72,8 +72,15 @@ impl Session<'_> {
             progress.latest_election_won
         )
         .unwrap();
-        writeln!(out, "Legitimate transition: {} | days since last racket settlement: {:?} (365 required; no active rackets)",
-            progress.legitimate_transition_ready, progress.days_since_last_racket_cycle).unwrap();
+        writeln!(
+            out,
+            "Legitimate transition: {} | uninterrupted racket-free days: {} (365 required)",
+            progress.legitimate_transition_ready,
+            progress
+                .days_since_last_racket_activity
+                .map_or_else(|| "never operated".to_owned(), |days| days.to_string())
+        )
+        .unwrap();
         for row in rows {
             let district = self
                 .state

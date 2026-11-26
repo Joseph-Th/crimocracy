@@ -572,6 +572,7 @@ struct EnterpriseRuntimeWire {
     status: EnterpriseStatus,
     established_at: SimTime,
     retired_at: Option<SimTime>,
+    inactive_since: Option<SimTime>,
     next_cycle_at: Option<SimTime>,
     last_cycle_at: Option<SimTime>,
     loss_streak_anchor: Option<SimTime>,
@@ -606,6 +607,7 @@ fn enterprise_wire(record: &crate::enterprises::EnterpriseRecord) -> EnterpriseR
             status: record.status(),
             established_at: record.established_at(),
             retired_at: record.retired_at(),
+            inactive_since: record.inactive_since(),
             next_cycle_at: record.next_cycle_at(),
             last_cycle_at: record.last_cycle_at(),
             loss_streak_anchor: record.loss_streak_anchor(),
@@ -628,7 +630,6 @@ fn replace_serialized_enterprise(
     );
     let replacement_bytes =
         bincode::serialize(replacement).expect("replacement enterprise should serialize");
-    assert_eq!(replacement_bytes.len(), original_bytes.len());
     let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
     let matches: Vec<_> = envelope_bytes
         .windows(original_bytes.len())
@@ -641,9 +642,65 @@ fn replace_serialized_enterprise(
         "serialized enterprise must appear exactly once in the save envelope"
     );
     let start = matches[0];
-    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
-    bincode::deserialize(&envelope_bytes)
-        .expect("same-layout enterprise corruption must remain decodable")
+    envelope_bytes.splice(start..start + original_bytes.len(), replacement_bytes);
+    bincode::deserialize(&envelope_bytes).expect("enterprise corruption must remain decodable")
+}
+
+#[test]
+fn restore_rejects_impossible_enterprise_inactive_chronology() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let state = &mut fixture.state;
+    let active = state.enterprises().get_enterprise(enterprise).unwrap();
+    let mut forged = enterprise_wire(active);
+    forged.runtime.inactive_since = Some(state.now());
+    let save = build_save(&registry, state).unwrap();
+    let invalid = StateValidationError::InvalidEnterpriseSchedule { enterprise };
+    assert_eq!(
+        restore_save(
+            &registry,
+            replace_serialized_enterprise(save, active, &forged)
+        )
+        .err(),
+        Some(LoadError::InvalidState(invalid.clone()))
+    );
+
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    validate_suspend_enterprise(state, enterprise)
+        .unwrap()
+        .commit(state)
+        .unwrap();
+    let suspended_at = state.now();
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    validate_retire_enterprise(state, enterprise)
+        .unwrap()
+        .commit(state)
+        .unwrap();
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    let retired = state.enterprises().get_enterprise(enterprise).unwrap();
+    assert_eq!(retired.inactive_since(), Some(suspended_at));
+    let save = build_save(&registry, state).unwrap();
+    restore_save(&registry, save.clone()).unwrap();
+    for since in [
+        None,
+        Some(SimTime::ZERO),
+        Some(state.now()),
+        Some(SimTime::from_minutes(state.now().as_minutes() + 1)),
+    ] {
+        let mut forged = enterprise_wire(retired);
+        forged.runtime.inactive_since = since;
+        assert_eq!(
+            restore_save(
+                &registry,
+                replace_serialized_enterprise(save.clone(), retired, &forged)
+            )
+            .err(),
+            Some(LoadError::InvalidState(invalid.clone())),
+            "inactive chronology {since:?} must be rejected"
+        );
+    }
 }
 
 #[test]

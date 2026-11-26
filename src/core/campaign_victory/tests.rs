@@ -819,11 +819,9 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
             .commit(&mut city.state)
             .unwrap();
     }
-    assert!(
-        progress(&registry, &city.state)
-            .unwrap()
-            .legitimate_transition_ready
-    );
+    let newly_closed = progress(&registry, &city.state).unwrap();
+    assert_eq!(newly_closed.days_since_last_racket_activity, Some(0));
+    assert!(!newly_closed.legitimate_transition_ready);
     let council = city
         .state
         .world()
@@ -1047,6 +1045,11 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         }
     }
     let established = progress(&registry, &city.state).unwrap();
+    assert!(established.legitimate_transition_ready);
+    assert_eq!(
+        established.days_since_last_racket_activity,
+        Some(POLITICAL_BUSINESS_ESTABLISHMENT_DAYS)
+    );
     assert!(
         established.established_business_districts >= established.required_political_districts,
         "qualifying productive business districts: {:?}; districts: {:?}",
@@ -3618,24 +3621,80 @@ fn political_legitimacy_requires_a_year_after_criminal_operating_income() {
         .commit(&mut city.state)
         .unwrap();
     let recent = progress(&registry, &city.state).unwrap();
-    assert_eq!(recent.days_since_last_racket_cycle, Some(0));
+    assert_eq!(recent.days_since_last_racket_activity, Some(0));
     assert!(!recent.legitimate_transition_ready);
     city.state
         .advance_clock(crate::core::time::SimDuration::from_minutes(
             ((POLITICAL_CLEAN_OPERATION_DAYS - 1) * DAY_MINUTES) as u32,
         ));
     let almost = progress(&registry, &city.state).unwrap();
-    assert_eq!(almost.days_since_last_racket_cycle, Some(364));
+    assert_eq!(almost.days_since_last_racket_activity, Some(364));
     assert!(!almost.legitimate_transition_ready);
     city.state
         .advance_clock(crate::core::time::SimDuration::from_minutes(
             DAY_MINUTES as u32,
         ));
     let clean = progress(&registry, &city.state).unwrap();
-    assert_eq!(clean.days_since_last_racket_cycle, Some(365));
+    assert_eq!(clean.days_since_last_racket_activity, Some(365));
     assert!(clean.legitimate_transition_ready);
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(progress(&registry, &restored).unwrap(), clean);
+
+    // Reopening a racket is renewed criminal activity even if it closes before
+    // the first new settlement. The previously completed clean year is lost.
+    use crate::enterprises::enterprise_execution::validate_resume_enterprise;
+    validate_resume_enterprise(&registry, &city.state, racket)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    assert!(
+        !progress(&registry, &city.state)
+            .unwrap()
+            .legitimate_transition_ready
+    );
+    city.state.advance_clock(SimDuration::ONE_MINUTE);
+    validate_suspend_enterprise(&city.state, racket)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let closed = progress(&registry, &city.state).unwrap();
+    assert_eq!(closed.days_since_last_racket_activity, Some(0));
+    assert!(!closed.legitimate_transition_ready);
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut restored] {
+        state.advance_clock(SimDuration::from_minutes(
+            ((POLITICAL_CLEAN_OPERATION_DAYS - 1) * DAY_MINUTES) as u32,
+        ));
+        // Retiring a long-suspended racket must not reset the clean clock:
+        // it has not operated since its actual suspension.
+        validate_retire_enterprise(state, racket)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        assert!(
+            !progress(&registry, state)
+                .unwrap()
+                .legitimate_transition_ready
+        );
+        state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32 - 1));
+        assert!(
+            !progress(&registry, state)
+                .unwrap()
+                .legitimate_transition_ready
+        );
+        state.advance_clock(SimDuration::ONE_MINUTE);
+        assert!(
+            progress(&registry, state)
+                .unwrap()
+                .legitimate_transition_ready
+        );
+        restore_save(&registry, build_save(&registry, state).unwrap()).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
 }
 
 #[test]

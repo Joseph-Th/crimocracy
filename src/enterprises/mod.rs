@@ -143,6 +143,9 @@ struct EnterpriseRuntime {
     /// and other historical projections need the exact instant at which they stopped existing
     /// as live rackets rather than inferring chronology from their current terminal status.
     retired_at: Option<SimTime>,
+    /// Beginning of the current uninterrupted inactive period. Retirement preserves it;
+    /// resumption clears it even if no new cycle has settled.
+    inactive_since: Option<SimTime>,
     next_cycle_at: Option<SimTime>,
     last_cycle_at: Option<SimTime>,
     /// Trailing-loss counting starts at this instant. Set when the racket resumes after any
@@ -235,6 +238,10 @@ impl EnterpriseRecord {
 
     pub fn retired_at(&self) -> Option<SimTime> {
         self.runtime.retired_at
+    }
+
+    pub(crate) fn inactive_since(&self) -> Option<SimTime> {
+        self.runtime.inactive_since
     }
 
     pub fn next_cycle_at(&self) -> Option<SimTime> {
@@ -389,6 +396,7 @@ fn build_enterprise_record(
             status: EnterpriseStatus::Active,
             established_at,
             retired_at: None,
+            inactive_since: None,
             next_cycle_at: Some(next_cycle_at),
             last_cycle_at: None,
             loss_streak_anchor: None,

@@ -25,8 +25,15 @@ impl Session<'_> {
             standing.key_personnel, standing.required_political_personnel,
             crimocracy::core::campaign_victory::POLITICAL_HEADQUARTERS_PERSONNEL,
             standing.staffed_political_districts, standing.required_political_districts).unwrap();
-        writeln!(out, "    Legitimate transition: {} | days since last racket settlement: {:?} (365 required; no active rackets)",
-            standing.legitimate_transition_ready, standing.days_since_last_racket_cycle).unwrap();
+        writeln!(
+            out,
+            "    Legitimate transition: {} | uninterrupted racket-free days: {} (365 required)",
+            standing.legitimate_transition_ready,
+            standing
+                .days_since_last_racket_activity
+                .map_or_else(|| "never operated".to_owned(), |days| days.to_string())
+        )
+        .unwrap();
         out.push_str("    Each district needs at least three mature profitable businesses across two kinds, plus two different, active, undetained managers: one Neighborhood + Political delegate and one Neighborhood + Finance director. Both need Delegated or Broad autonomy; neither may represent another qualifying district.\n");
         writeln!(out, "    Mature legitimate income after {} bp administrative overhead: {} cents/day realized over 30 days; daily payroll: {} cents; covered: {}",
             standing.portfolio_overhead_basis_points, standing.legitimate_daily_net.cents(), standing.daily_payroll.cents(),

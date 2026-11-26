@@ -466,6 +466,7 @@ impl EnterpriseState {
         if suspend_after_settlement {
             enterprise.runtime.status = EnterpriseStatus::Suspended;
             enterprise.runtime.retired_at = None;
+            enterprise.runtime.inactive_since = Some(cycle.occurred_at());
         }
         enterprise.runtime.version = advance_version_preflighted(enterprise.runtime.version);
         if suspend_after_settlement {
@@ -599,6 +600,11 @@ impl EnterpriseState {
         record.runtime.status = status;
         record.runtime.next_cycle_at = next_cycle_at;
         record.runtime.retired_at = (status == EnterpriseStatus::Retired).then_some(changed_at);
+        if will_be_active {
+            record.runtime.inactive_since = None;
+        } else if was_active {
+            record.runtime.inactive_since = Some(changed_at);
+        }
         if let Some(anchor) = loss_streak_anchor {
             record.runtime.loss_streak_anchor = Some(anchor);
         }
