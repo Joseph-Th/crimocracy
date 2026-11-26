@@ -40,13 +40,24 @@ impl Session<'_> {
             if standing.legitimate_self_sufficient { "yes" } else { "no" }).unwrap();
         writeln!(out, "    Sustained contested electoral majorities: {} / {} districts (800/1000 local influence, stronger than rivals for 90 days)",
             standing.mayoral_majority_districts, standing.required_political_districts).unwrap();
-        writeln!(out, "    Nomination filed for: {}; latest election: {}, elected: {}. Only an actual winning municipal ballot permits the political victory claim.",
-            election_date_label(standing.mayoral_nominated_for_day), election_date_label(standing.latest_election_day),
-            standing.latest_election_won).unwrap();
+        writeln!(
+            out,
+            "    Nomination filed for: {}; latest election: {}, elected: {}.",
+            election_date_label(standing.mayoral_nominated_for_day),
+            election_date_label(standing.latest_election_day),
+            standing.latest_election_won
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    Political certification: {}.",
+            standing.political_certification.label()
+        )
+        .unwrap();
         writeln!(out, "    Campaign spending: {} / {} cents; remaining clean reserve: {} / {} cents; leader eligible: {}",
             standing.campaign_spent_cents, standing.required_campaign_spent_cents,
             standing.accounted_net.cents(), standing.required_mayoral_reserve_cents,
-            standing.mayoral_leader_eligible).unwrap();
+            standing.sole_executive_available).unwrap();
         out.push_str("    Machine influence, grassroots voters and institutional support all need maintenance. Local initiatives, manager skills and election-day reputation matter. Use 'campaign', 'campaign-event', 'nominate-mayor' and 'election' for the actual political campaign.\n");
         let local_floor = i128::from(self.registry.upkeep().per_member_daily().cents())
             * i128::from(crimocracy::core::campaign_victory::VICTORY_INCOME_WINDOW_DAYS);
@@ -129,6 +140,9 @@ impl Session<'_> {
             crimocracy::core::campaign_victory::RETIREMENT_MIN_KEY_PERSONNEL).unwrap();
         if standing.contracted_personnel > 0 {
             writeln!(out, "    Retirement blocked: {} open freelance contract(s); finish the terms and obtain lawful release before settling severance (see 'people').", standing.contracted_personnel).unwrap();
+        }
+        if !standing.sole_executive_available {
+            out.push_str("    Retirement blocked: a sole undetained executive must authorize the final settlement.\n");
         }
         writeln!(out, "  Underboss: active rackets in {} districts, {} productive mature districts ({} required); local majority and superior strength relative to rivals required",
             standing.own_active_racket_districts, standing.established_racket_districts,

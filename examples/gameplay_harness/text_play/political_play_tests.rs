@@ -87,6 +87,13 @@ fn real_text_campaign_orders_expose_funded_civic_work_and_official_election_sche
     let saved = bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap();
     let campaign = session.execute("campaign").unwrap().0;
     assert!(campaign.contains("grassroots 0/1000"), "{campaign}");
+    for view in [campaign.as_str(), &session.execute("victory").unwrap().0] {
+        assert!(
+            view.contains("Political certification: requires a winning municipal ballot."),
+            "{view}"
+        );
+    }
+    assert!(session.execute("claim-victory political").is_err());
     assert!(
         campaign.contains(
             "Next election: day 181 00:00 | earliest ballot for a new filing: day 181 00:00"

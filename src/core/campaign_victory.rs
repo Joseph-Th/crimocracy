@@ -38,7 +38,10 @@ use command_staffing::{racket_district_assignment, staffed_racket_districts};
 use commercial_standing::{business_district_standings, political_district_rows};
 pub use commercial_standing::{political_business_progress, political_district_progress};
 pub(crate) use retirement::retirement_settlement_matches;
-use retirement::{ValidatedRetirementSettlement, prepare_retirement_payment, retirement_members};
+use retirement::{
+    ValidatedRetirementSettlement, prepare_retirement_payment, retirement_funding_requirement,
+    retirement_members,
+};
 use underboss::{
     independent_captain, institutional_reach, operating_reserve, racket_standing,
     senior_command_count,
@@ -144,7 +147,8 @@ pub struct VictoryProgress {
     pub campaign_spent_cents: i64,
     pub required_campaign_spent_cents: i64,
     pub required_mayoral_reserve_cents: i64,
-    pub mayoral_leader_eligible: bool,
+    /// Exactly one command root exists and is not detained; shared by all ending routes.
+    pub sole_executive_available: bool,
     pub legitimate_transition_ready: bool,
     /// Whole days since all rackets stopped operating; zero while any remains active,
     /// and None for a portfolio that has never operated a racket.
@@ -152,6 +156,8 @@ pub struct VictoryProgress {
     pub mayoral_nominated_for_day: Option<u64>,
     pub latest_election_day: Option<u64>,
     pub latest_election_won: bool,
+    /// Current authority to certify the durable election result, distinct from ballot eligibility.
+    pub political_certification: PoliticalCertificationStatus,
     pub required_underboss_districts: usize,
     pub own_active_racket_districts: usize,
     pub established_racket_districts: usize,
@@ -252,11 +258,15 @@ pub enum VictoryError {
     #[error("Campaign over: victory has already been claimed")]
     AlreadyWon,
     #[error(
-        "becoming mayor requires a long-standing political contact, a year without operating rackets, durable profitable diverse businesses and independent political delegates, sustained competitive majorities, major clean campaign expenditures and reserves, and legitimate income covering payroll"
+        "political victory requires a winning municipal ballot; inspect 'campaign' and 'election' for qualification and filing requirements"
     )]
     PoliticalNotReady,
     #[error(
-        "funded retirement needs four permanent named crew, 90 profitable racket settlements and $10,000 net racket income in the last 180 days, one leader, no pending decisions, active operations or open freelance contracts, and clean money for the $1,000,000 nest egg plus crew severance"
+        "the elected nominee must be the sole available executive to certify political victory; the winning ballot remains recorded"
+    )]
+    PoliticalExecutiveUnavailable,
+    #[error(
+        "funded retirement needs four permanent named crew, 90 profitable racket settlements and $10,000 net racket income in the last 180 days, a sole undetained executive, no pending decisions, active operations or open freelance contracts, and clean money for the $1,000,000 nest egg plus crew severance"
     )]
     RetirementNotReady,
     #[error(
@@ -340,6 +350,48 @@ pub fn progress(registry: &Registry, state: &AppState) -> Result<VictoryProgress
     Ok(progress_and_political_districts(registry, state)?.0)
 }
 
+/// A won ballot is historical evidence. Certification still needs the elected
+/// person to hold the same live executive authority required at the ballot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoliticalCertificationStatus {
+    NoWinningBallot,
+    ExecutiveUnavailable,
+    Ready,
+}
+
+impl PoliticalCertificationStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NoWinningBallot => "requires a winning municipal ballot",
+            Self::ExecutiveUnavailable => {
+                "blocked: elected nominee must be the sole undetained executive"
+            }
+            Self::Ready => "winning ballot and elected executive available",
+        }
+    }
+}
+
+pub fn political_certification_status(
+    state: &AppState,
+    owner: OrganizationId,
+) -> PoliticalCertificationStatus {
+    let Some(election) = state
+        .politics()
+        .organization(owner)
+        .and_then(|campaign| campaign.latest_election())
+        .filter(|election| election.elected)
+    else {
+        return PoliticalCertificationStatus::NoWinningBallot;
+    };
+    if crate::world::world_system::sole_available_executive(state, owner)
+        == Some(election.candidate)
+    {
+        PoliticalCertificationStatus::Ready
+    } else {
+        PoliticalCertificationStatus::ExecutiveUnavailable
+    }
+}
+
 /// Single assessment for consumers that need aggregate victory progress
 /// and the district teams that produced it. Do not solve the same exact
 /// citywide matching twice for one election or dossier.
@@ -415,7 +467,7 @@ pub(crate) fn ballot_progress(
         .politics()
         .organization(organization)
         .and_then(|campaign| campaign.latest_election());
-    let mayoral_leader_eligible =
+    let sole_executive_available =
         crate::world::world_system::sole_available_executive(state, organization).is_some();
     let legitimate_window_net = business_standings
         .values()
@@ -627,9 +679,7 @@ pub(crate) fn ballot_progress(
         .saturating_mul(UNDERBOSS_LIQUID_RUNWAY_DAYS)
         .saturating_add(underboss_operating_buffer)
         .saturating_add(underboss_campaign_buffer);
-    let retirement_total = retirement_members(registry, state, organization)
-        .map(|(_, total)| total)
-        .unwrap_or(RETIREMENT_NEST_EGG);
+    let retirement_total = retirement_funding_requirement(registry, key_personnel)?;
     let (retirement_net, retirement_profitable_racket_cycles) =
         retirement_racket_record(state, organization);
     let standing = VictoryProgress {
@@ -648,12 +698,13 @@ pub(crate) fn ballot_progress(
         campaign_spent_cents,
         required_campaign_spent_cents: MAYORAL_CAMPAIGN_SPEND_REQUIRED,
         required_mayoral_reserve_cents: MAYORAL_LIQUID_RESERVE_REQUIRED,
-        mayoral_leader_eligible,
+        sole_executive_available,
         legitimate_transition_ready,
         days_since_last_racket_activity,
         mayoral_nominated_for_day,
         latest_election_day: latest_election.map(|election| election.election_day),
         latest_election_won: latest_election.is_some_and(|election| election.elected),
+        political_certification: political_certification_status(state, organization),
         required_underboss_districts,
         own_active_racket_districts,
         established_racket_districts: established_racket_districts.len(),
@@ -710,7 +761,7 @@ pub(crate) fn ballot_progress(
             && underboss_contact_handlers >= UNDERBOSS_CONTACT_HANDLERS
             && mature_racket_count > rival_active as u64
             && mature_associates > rival_associates
-            && mayoral_leader_eligible
+            && sole_executive_available
             && daily_payroll > 0
             && racket_window_net >= daily_payroll * income_window
             && underboss_liquid_reserve >= required_underboss_reserve,
@@ -771,7 +822,7 @@ pub(crate) fn mayoral_ballot_shortfalls(standing: &VictoryProgress) -> Vec<Strin
             standing.required_mayoral_reserve_cents
         ));
     }
-    if !standing.mayoral_leader_eligible {
+    if !standing.sole_executive_available {
         shortfalls.push("no sole available executive".to_owned());
     }
     if !standing.legitimate_self_sufficient {
@@ -788,7 +839,7 @@ fn ensure_eligible(
     registry: &Registry,
     state: &AppState,
     path: VictoryPath,
-) -> Result<VictoryProgress, VictoryError> {
+) -> Result<(VictoryProgress, Vec<PoliticalDistrictProgress>), VictoryError> {
     if state.player_organization_defeated() {
         return Err(VictoryError::Defeated);
     }
@@ -796,29 +847,19 @@ fn ensure_eligible(
         return Err(VictoryError::AlreadyWon);
     }
     let owner = state.player_organization().ok_or(VictoryError::NoPlayer)?;
-    let standing = progress(registry, state)?;
+    let (standing, districts) = progress_and_political_districts(registry, state)?;
     match path {
-        VictoryPath::PoliticalPower
-            if !state
-                .politics()
-                .organization(owner)
-                .and_then(|campaign| campaign.latest_election())
-                .is_some_and(|election| {
-                    election.elected
-                        && state
-                            .world()
-                            .get_character(election.candidate)
-                            .is_some_and(|person| {
-                                person.organization() == Some(owner)
-                                    && person.supervisor().is_none()
-                            })
-                }) =>
-        {
-            Err(VictoryError::PoliticalNotReady)
-        }
+        VictoryPath::PoliticalPower => match standing.political_certification {
+            PoliticalCertificationStatus::NoWinningBallot => Err(VictoryError::PoliticalNotReady),
+            PoliticalCertificationStatus::ExecutiveUnavailable => {
+                Err(VictoryError::PoliticalExecutiveUnavailable)
+            }
+            PoliticalCertificationStatus::Ready => Ok(()),
+        },
         VictoryPath::FundedRetirement => {
             let (_, required) = retirement_members(registry, state, owner)?;
-            if standing.key_personnel < RETIREMENT_MIN_KEY_PERSONNEL
+            if !standing.sole_executive_available
+                || standing.key_personnel < RETIREMENT_MIN_KEY_PERSONNEL
                 || standing.contracted_personnel != 0
                 || standing.retirement_profitable_racket_cycles
                     < RETIREMENT_MIN_PROFITABLE_RACKET_CYCLES
@@ -848,9 +889,9 @@ fn ensure_eligible(
         VictoryPath::CityUnderboss if !standing.underboss_ready => {
             Err(VictoryError::UnderbossNotReady)
         }
-        VictoryPath::PoliticalPower | VictoryPath::CityUnderboss => Ok(()),
+        VictoryPath::CityUnderboss => Ok(()),
     }?;
-    Ok(standing)
+    Ok((standing, districts))
 }
 
 pub struct ValidatedCampaignVictory {
@@ -872,7 +913,7 @@ pub fn validate_claim_victory(
     state: &AppState,
     path: VictoryPath,
 ) -> Result<ValidatedCampaignVictory, VictoryError> {
-    let standing = ensure_eligible(registry, state, path)?;
+    let (standing, districts) = ensure_eligible(registry, state, path)?;
     let owner = state.player_organization().ok_or(VictoryError::NoPlayer)?;
     let settlement = if path == VictoryPath::FundedRetirement {
         Some(prepare_retirement_payment(registry, state, owner)?)
@@ -881,7 +922,7 @@ pub fn validate_claim_victory(
     };
     // Preflight the report at validation. Its observations are rebuilt at commit
     // after same-minute state changes, before any payment or history mutation.
-    prepare_victory_report(registry, state, owner, path, &standing)?;
+    prepare_victory_report(state, owner, path, &standing, &districts)?;
     let mut budget = vec![(IdKind::HistoryEvent, 1), (IdKind::Report, 1)];
     if let Some(payment) = &settlement {
         budget.extend(payment.id_budget());
@@ -905,11 +946,11 @@ impl ValidatedCampaignVictory {
         if state.player_organization() != Some(self.owner) {
             return Err(VictoryError::Stale);
         }
-        let standing = ensure_eligible(registry, state, self.path)?;
+        let (standing, districts) = ensure_eligible(registry, state, self.path)?;
         if let Some(settlement) = &self.settlement {
             settlement.ensure_current(registry, state, self.owner)?;
         }
-        let report = prepare_victory_report(registry, state, self.owner, self.path, &standing)?;
+        let report = prepare_victory_report(state, self.owner, self.path, &standing, &districts)?;
         let mut budget = vec![(IdKind::HistoryEvent, 1), (IdKind::Report, 1)];
         if let Some(settlement) = &self.settlement {
             budget.extend(settlement.id_budget());
@@ -935,5 +976,7 @@ impl ValidatedCampaignVictory {
     }
 }
 
+#[cfg(test)]
+mod certification_tests;
 #[cfg(test)]
 mod tests;

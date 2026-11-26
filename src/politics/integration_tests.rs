@@ -534,7 +534,7 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
         assert!(
             !progress(&registry, &divided)
                 .unwrap()
-                .mayoral_leader_eligible
+                .sole_executive_available
         );
         let police = divided
             .world()
@@ -590,7 +590,7 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
         assert!(
             !progress(&registry, &divided)
                 .unwrap()
-                .mayoral_leader_eligible,
+                .sole_executive_available,
             "one free executive plus a detained second root is not a unified leadership"
         );
         assert_eq!(
@@ -614,7 +614,7 @@ fn nomination_requires_a_real_sponsor_and_elections_record_loss_with_determinist
                 .unwrap()
                 .commit(state)
                 .unwrap();
-            assert!(progress(&registry, state).unwrap().mayoral_leader_eligible);
+            assert!(progress(&registry, state).unwrap().sole_executive_available);
             validate_nominate_mayor(state, city.boss)
                 .unwrap()
                 .commit(state)

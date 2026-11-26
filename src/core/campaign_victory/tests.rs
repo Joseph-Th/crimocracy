@@ -544,6 +544,79 @@ fn retirement_requires_a_million_for_the_leader_plus_staff_severance() {
 }
 
 #[test]
+fn funded_retirement_cannot_terminate_campaign_while_executive_is_detained() {
+    use crate::legal::arrest_system::validate_release_arrest;
+    let (registry, mut state, owner, boss, member) = retirement_ready_fixture();
+    let required = progress(&registry, &state).unwrap().retirement_total;
+    fund(&mut state, owner, required.cents());
+    let held = validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).unwrap();
+    let arrest = super::certification_tests::detain(&registry, &mut state, boss);
+    let standing = progress(&registry, &state).unwrap();
+    assert_eq!(
+        standing.retirement_total, required,
+        "custody does not change the roster's financial obligation"
+    );
+    assert!(!standing.sole_executive_available);
+    let before = bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(
+        validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).err(),
+        Some(VictoryError::RetirementNotReady),
+        "a detained executive cannot complete an exit that permanently stops custody and simulation",
+    );
+    assert_eq!(
+        held.commit(&registry, &mut state).err(),
+        Some(VictoryError::RetirementNotReady)
+    );
+    assert_eq!(
+        before,
+        bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap()
+    );
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    for branch in [&mut state, &mut restored] {
+        validate_release_arrest(branch, arrest)
+            .unwrap()
+            .commit(branch)
+            .unwrap();
+        // A subordinate's custody does not erase earned severance.
+        let member_arrest = super::certification_tests::detain(&registry, branch, member);
+        let outcome = validate_claim_victory(&registry, branch, VictoryPath::FundedRetirement)
+            .unwrap()
+            .commit(&registry, branch)
+            .unwrap();
+        assert!(outcome.settlement.is_some());
+        let expected = registry
+            .upkeep()
+            .per_member_daily()
+            .checked_mul(RETIREMENT_SEVERANCE_DAYS)
+            .unwrap();
+        assert!(
+            branch
+                .finance()
+                .accounts_for(FinancialOwner::Character(member))
+                .any(|account| account.kind() == AccountKind::AccountedFunds
+                    && account.balance() == expected)
+        );
+        assert_eq!(
+            branch
+                .legal()
+                .active_arrest_for_character(member)
+                .unwrap()
+                .id(),
+            member_arrest
+        );
+        validate_invariants(branch);
+    }
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    // A terminal snapshot cannot describe a later simulation minute.
+    state.advance_clock(SimDuration::ONE_MINUTE);
+    assert!(build_save(&registry, &state).is_err());
+}
+
+#[test]
 fn funded_retirement_pays_boss_and_staff_and_survives_reload_as_terminal() {
     let (registry, mut state, owner, boss, member) = retirement_ready_fixture();
     let severance = registry
@@ -701,6 +774,17 @@ fn retirement_rechecks_the_complete_payee_roster_before_settlement() {
         .unwrap()
         .commit(&mut succession)
         .unwrap();
+    let divided = progress(&registry, &succession).unwrap();
+    assert!(!divided.sole_executive_available);
+    assert_eq!(
+        divided.retirement_total,
+        original_required.checked_add(severance).unwrap(),
+        "divided command does not reduce the eventual severance obligation"
+    );
+    assert_eq!(
+        validate_claim_victory(&registry, &succession, VictoryPath::FundedRetirement).err(),
+        Some(VictoryError::RetirementNotReady)
+    );
     validate_set_character_supervisor(&succession, boss, Some(recruit))
         .unwrap()
         .commit(&mut succession)
@@ -1879,6 +1963,13 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
         .latest_election()
         .unwrap()
         .clone();
+    super::certification_tests::verify_elected_executive_certification(
+        &registry,
+        &city.state,
+        city.player,
+        city.boss,
+        &ballot,
+    );
     let mut changed = city.state.clone();
     let held = validate_claim_victory(&registry, &changed, VictoryPath::PoliticalPower).unwrap();
     for &manager in &managers {

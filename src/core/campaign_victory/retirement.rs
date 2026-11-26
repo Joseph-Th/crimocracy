@@ -21,17 +21,41 @@ use std::collections::BTreeMap;
 const SETTLEMENT_MEMO: &str =
     "Final campaign retirement settlement: leader nest egg and crew severance";
 
+fn retirement_severance(registry: &Registry) -> Result<Money, VictoryError> {
+    registry
+        .upkeep()
+        .per_member_daily()
+        .checked_mul(RETIREMENT_SEVERANCE_DAYS)
+        .ok_or(VictoryError::Arithmetic)
+}
+
+fn retirement_total(severance: Money, permanent_count: usize) -> Result<Money, VictoryError> {
+    RETIREMENT_NEST_EGG
+        .checked_add(
+            severance
+                .checked_mul(
+                    i64::try_from(permanent_count.saturating_sub(1))
+                        .map_err(|_| VictoryError::Arithmetic)?,
+                )
+                .ok_or(VictoryError::Arithmetic)?,
+        )
+        .ok_or(VictoryError::Arithmetic)
+}
+
+/// Funding remains necessary even when command authority temporarily prevents settlement.
+pub(super) fn retirement_funding_requirement(
+    registry: &Registry,
+    permanent_count: usize,
+) -> Result<Money, VictoryError> {
+    retirement_total(retirement_severance(registry)?, permanent_count)
+}
+
 pub(super) fn retirement_members(
     registry: &Registry,
     state: &AppState,
     organization: OrganizationId,
 ) -> Result<(Vec<(CharacterId, Money)>, Money), VictoryError> {
-    let severance = registry
-        .upkeep()
-        .per_member_daily()
-        .checked_mul(RETIREMENT_SEVERANCE_DAYS)
-        .ok_or(VictoryError::Arithmetic)?;
-    retirement_payees(state, organization, severance)
+    retirement_payees(state, organization, retirement_severance(registry)?)
 }
 
 fn retirement_payees(
@@ -57,13 +81,7 @@ fn retirement_payees(
         };
         payees.push((member.id(), amount));
     }
-    let required = RETIREMENT_NEST_EGG
-        .checked_add(
-            severance
-                .checked_mul(i64::try_from(payees.len() - 1).map_err(|_| VictoryError::Arithmetic)?)
-                .ok_or(VictoryError::Arithmetic)?,
-        )
-        .ok_or(VictoryError::Arithmetic)?;
+    let required = retirement_total(severance, payees.len())?;
     Ok((payees, required))
 }
 

@@ -278,25 +278,18 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
             };
             if victory_seen
                 || state.player_organization() != Some(organization)
+                || event.occurred_at() != state.now()
                 || (path == crate::core::campaign_victory::VictoryPath::PoliticalPower
-                    && !state
-                        .politics()
-                        .organization(organization)
-                        .and_then(|campaign| campaign.latest_election())
-                        .is_some_and(|election| {
-                            election.elected
-                                && election.held_at <= event.occurred_at()
-                                && state.world().get_character(election.candidate).is_some_and(
-                                    |person| {
-                                        person.organization() == Some(organization)
-                                            && person.supervisor().is_none()
-                                    },
-                                )
-                        }))
-                || state
-                    .world()
-                    .characters_in_organization(organization)
-                    .next()
+                    && (crate::core::campaign_victory::political_certification_status(
+                        state,
+                        organization,
+                    ) != crate::core::campaign_victory::PoliticalCertificationStatus::Ready
+                        || !state
+                            .politics()
+                            .organization(organization)
+                            .and_then(|campaign| campaign.latest_election())
+                            .is_some_and(|election| election.held_at <= event.occurred_at())))
+                || crate::world::world_system::sole_available_executive(state, organization)
                     .is_none()
                 || !settlement_valid
                 || report_count != 1

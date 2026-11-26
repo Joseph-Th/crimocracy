@@ -1,8 +1,8 @@
 //! Victory certification reports: persisted election evidence and explicitly current context.
 
 use super::{
-    POLITICAL_CONTACT_DAYS, RETIREMENT_CRIME_WINDOW_DAYS, VICTORY_INCOME_WINDOW_DAYS, VictoryError,
-    VictoryPath, VictoryProgress, established_for, political_district_progress,
+    POLITICAL_CONTACT_DAYS, PoliticalDistrictProgress, RETIREMENT_CRIME_WINDOW_DAYS,
+    VICTORY_INCOME_WINDOW_DAYS, VictoryError, VictoryPath, VictoryProgress, established_for,
 };
 use crate::contacts::ContactKind;
 use crate::contacts::contact_system::usable_contacts_of_kind;
@@ -10,17 +10,16 @@ use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::OrganizationId;
 use crate::core::state::AppState;
-use crate::registry::Registry;
 use crate::reports::report_system::{ValidatedReport, validate_report_draft};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn prepare_victory_report(
-    registry: &Registry,
     state: &AppState,
     owner: OrganizationId,
     path: VictoryPath,
     standing: &VictoryProgress,
+    districts: &[PoliticalDistrictProgress],
 ) -> Result<ValidatedReport, VictoryError> {
     let mut entries = vec![ReportEntry {
         attention: AttentionClass::Crisis,
@@ -99,8 +98,8 @@ pub(super) fn prepare_victory_report(
                 decision: None,
             });
         }
-        let current: BTreeMap<_, _> = political_district_progress(registry, state)?
-            .into_iter()
+        let current: BTreeMap<_, _> = districts
+            .iter()
             .map(|district| (district.district, district))
             .collect();
         for ward in election.ballots.iter().filter(|ward| ward.ward_won) {

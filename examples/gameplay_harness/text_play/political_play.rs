@@ -74,6 +74,12 @@ impl Session<'_> {
         .unwrap();
         writeln!(
             out,
+            "Political certification: {}.",
+            progress.political_certification.label()
+        )
+        .unwrap();
+        writeln!(
+            out,
             "Legitimate transition: {} | uninterrupted racket-free days: {} (365 required)",
             progress.legitimate_transition_ready,
             progress
@@ -163,6 +169,16 @@ impl Session<'_> {
             result.wards_needed,
             result.elected
         );
+        writeln!(
+            out,
+            "Political certification: {}.",
+            crimocracy::core::campaign_victory::political_certification_status(
+                &self.state,
+                self.player
+            )
+            .label()
+        )
+        .unwrap();
         for ballot in &result.ballots {
             let ward = self
                 .state

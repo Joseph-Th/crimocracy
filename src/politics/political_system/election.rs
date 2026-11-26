@@ -174,7 +174,7 @@ pub(crate) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppSt
     };
     let mut shortfalls = crate::core::campaign_victory::mayoral_ballot_shortfalls(&progress);
     if !eligible_candidate(state, owner, candidacy.candidate)
-        && progress.mayoral_leader_eligible
+        && progress.sole_executive_available
         && progress.established_political_contacts > 0
     {
         shortfalls.push("filed nominee no longer holds eligible executive authority".to_owned());
