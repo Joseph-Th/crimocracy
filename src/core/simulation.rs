@@ -221,7 +221,7 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // The police institution converts accumulated case evidence into custody after detective
     // work resolves, so an interview or forensic analysis finishing this minute is visible to
     // the same minute's arrest decision.
-    let evidence_arrests =
+    let evidence_arrests: Vec<_> =
         crate::legal::arrest_system::apply_autonomous_evidence_arrests(registry, state)
             .expect("valid state should convert qualifying case evidence into custody")
             .into_iter()
@@ -260,6 +260,20 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // decay does not perturb any domain RNG sequence.
     let cold_case_decay = apply_cold_case_decay(state, registry.legal().cold_case_window())
         .expect("valid state should resolve cold-case decay");
+    // A final operation may end exactly at the contract deadline, extraction may
+    // release a detainee, or an arrest may abort another member's booking.
+    // Retry after the legal phase so newly detained workers stay bound, but
+    // anyone now free leaves in this minute, not the next one. Midnight already
+    // has its own expiry pass after payroll and the completed workday.
+    if !is_day_boundary(state.now())
+        && (!resolved_operations.is_empty()
+            || !aborted_operations.is_empty()
+            || !evidence_arrests.is_empty())
+    {
+        freelance_contract_expirations
+            .extend(crate::world::freelance_contracts::apply_due_freelance_expirations(state));
+        freelance_contract_expirations.sort_unstable();
+    }
     let business_cycles = run_business_cycle_phase(registry, state)
         .expect("valid state should settle the complete due business-cycle cohort");
     // Legitimate-business recovery follows today's settlements so a chronic-loss suspension has
@@ -305,8 +319,8 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     crate::world::character_life::apply_due_character_lives(state);
     // Boundary-aligned terms finish after earned payroll and the completed workday,
     // before wage-driven departures can mistake a completed term for a resignation.
-    // Other terms were already checked before this minute's work. A still-booked
-    // or detained freelancer remains scheduled until release is lawful.
+    // Other terms were checked before this minute's work and, if bindings
+    // changed, after legal work. A still-bound freelancer remains scheduled.
     if is_day_boundary(state.now()) {
         freelance_contract_expirations =
             crate::world::freelance_contracts::apply_due_freelance_expirations(state);

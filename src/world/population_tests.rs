@@ -1144,3 +1144,108 @@ fn freelance_expiration_uses_its_signed_minute_without_charging_an_extra_day() {
         bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
     );
 }
+
+#[test]
+fn final_operation_releases_a_freelancer_on_the_exact_completion_minute() {
+    use crate::core::entity::EntityRef;
+    use crate::core::simulation::run_tick;
+    use crate::core::time::SimTime;
+    use crate::operations::operation_system::validate_authorize_operation;
+    use crate::operations::{
+        OperationApproach, OperationDraft, OperationKind, OperationObjective, OperationStatus,
+        RoleKind,
+    };
+    use crate::world::freelance_contracts::freelance_contact_available;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let worker = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            freelance_contact_available(&city.state, city.player, person.id(), city.boss)
+        })
+        .unwrap()
+        .id();
+    run_tick(&registry, &mut city.state).unwrap();
+    validate_hire_freelancer(&city.state, city.player, worker, city.boss, 1)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let expiry = city
+        .state
+        .world()
+        .active_freelance_contract(worker)
+        .unwrap()
+        .expires_at();
+    let duration = registry
+        .get_operation(OperationKind::Surveillance)
+        .execution()
+        .duration();
+    let start = SimTime::from_minutes(expiry.as_minutes() - u64::from(duration.as_minutes()));
+    let operation = validate_authorize_operation(
+        &registry,
+        &city.state,
+        OperationDraft {
+            title: "Final shift reconnaissance".into(),
+            kind: OperationKind::Surveillance,
+            responsible_organization: city.player,
+            leader: worker,
+            objective: OperationObjective::GatherInformation {
+                target: EntityRef::Neighborhood(city.home),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Surveillance, worker)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: start,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    let before_start =
+        u32::try_from(start.as_minutes() - city.state.now().as_minutes() - 1).unwrap();
+    city.state
+        .advance_clock(SimDuration::from_minutes(before_start));
+    while city.state.now().as_minutes() + 1 < expiry.as_minutes() {
+        run_tick(&registry, &mut city.state).unwrap();
+    }
+    assert_eq!(
+        city.state
+            .operations()
+            .get_operation(operation)
+            .unwrap()
+            .status(),
+        OperationStatus::InProgress
+    );
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut restored] {
+        let tick = run_tick(&registry, state).unwrap();
+        assert_eq!(state.now(), expiry);
+        assert!(tick.resolved_operations.contains(&operation));
+        assert!(state.legal().active_arrest_for_character(worker).is_none());
+        assert_eq!(tick.freelance_contract_expirations, vec![worker]);
+        assert_eq!(
+            state
+                .world()
+                .latest_freelance_contract(worker)
+                .unwrap()
+                .ended_at(),
+            Some(expiry)
+        );
+        assert_eq!(
+            state.world().get_character(worker).unwrap().organization(),
+            None
+        );
+    }
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+}

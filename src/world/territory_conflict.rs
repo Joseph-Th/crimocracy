@@ -25,7 +25,7 @@ use crate::operations::OperationStatus;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::territory_influence::active_standstill;
-use crate::world::{CapabilityKind, OrganizationKind};
+use crate::world::{CapabilityKind, CharacterRecord, OrganizationKind};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -52,9 +52,17 @@ pub fn active_district_force(
 /// headcount, detained members, and personnel already in the field do not add
 /// territorial fighting capacity.
 pub(crate) fn available_named_enforcers(state: &AppState, organization: OrganizationId) -> usize {
-    state
-        .world()
-        .characters_in_organization(organization)
+    count_available_named_enforcers(
+        state,
+        state.world().characters_in_organization(organization),
+    )
+}
+
+fn count_available_named_enforcers<'a>(
+    state: &AppState,
+    members: impl Iterator<Item = &'a CharacterRecord>,
+) -> usize {
+    members
         .filter(|member| {
             state
                 .legal()
@@ -112,7 +120,29 @@ pub fn local_defensive_forces(
     state: &AppState,
     organization: OrganizationId,
 ) -> BTreeMap<NeighborhoodId, DistrictDefense> {
-    let named = available_named_enforcers(state, organization);
+    allocate_local_defensive_forces(
+        state,
+        organization,
+        available_named_enforcers(state, organization),
+    )
+}
+
+/// Durable command qualification uses the same footprint and allocation, but
+/// cannot rely on guards whose paid contracts will shortly end.
+pub(crate) fn permanent_local_defensive_forces(
+    state: &AppState,
+    organization: OrganizationId,
+) -> BTreeMap<NeighborhoodId, DistrictDefense> {
+    let named =
+        count_available_named_enforcers(state, state.world().permanent_members(organization));
+    allocate_local_defensive_forces(state, organization, named)
+}
+
+fn allocate_local_defensive_forces(
+    state: &AppState,
+    organization: OrganizationId,
+    named: usize,
+) -> BTreeMap<NeighborhoodId, DistrictDefense> {
     let mut districts = BTreeMap::<NeighborhoodId, DistrictDefense>::new();
     for racket in state.enterprises().active_for_organization(organization) {
         if let Some(ward) = racket.location().neighborhood(state.world()) {

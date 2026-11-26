@@ -334,6 +334,16 @@ impl WorldState {
                     .expect("organization-character index must reference a character")
             })
     }
+    /// Standing members, excluding workers whose signed fixed term is still open.
+    /// An overdue term awaiting lawful release remains temporary. Payroll and
+    /// immediate operational capacity continue to use the full membership roster.
+    pub(crate) fn permanent_members(
+        &self,
+        id: OrganizationId,
+    ) -> impl Iterator<Item = &CharacterRecord> {
+        self.characters_in_organization(id)
+            .filter(|person| self.active_freelance_contract(person.id()).is_none())
+    }
     pub fn direct_reports(&self, id: CharacterId) -> impl Iterator<Item = &CharacterRecord> {
         self.characters
             .by_supervisor

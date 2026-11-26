@@ -21,7 +21,7 @@ impl Session<'_> {
             standing.established_political_contacts, standing.active_political_contacts,
             standing.owned_operating_business_districts, standing.established_business_districts,
             standing.required_political_districts, standing.total_districts).unwrap();
-        writeln!(out, "    Named political staff: {} / {} required ({} headquarters and two independent local managers per required district); staffed mature districts: {} / {}",
+        writeln!(out, "    Named political staff: {} / {} required (permanent crew, {} headquarters and two independent local managers per required district); staffed mature districts: {} / {}",
             standing.key_personnel, standing.required_political_personnel,
             crimocracy::core::campaign_victory::POLITICAL_HEADQUARTERS_PERSONNEL,
             standing.staffed_political_districts, standing.required_political_districts).unwrap();
@@ -119,7 +119,7 @@ impl Session<'_> {
             standing.accounted_net.cents(), standing.retirement_total.cents(),
             crimocracy::core::campaign_victory::RETIREMENT_NEST_EGG.cents() / 100,
             crimocracy::core::campaign_victory::RETIREMENT_SEVERANCE_DAYS).unwrap();
-        writeln!(out, "    Criminal career: {} / {} profitable racket cycles and {} / {} cents net racket proceeds over {} days; named crew {} / {} required. Passive storefronts alone cannot earn retirement.",
+        writeln!(out, "    Criminal career: {} / {} profitable racket cycles and {} / {} cents net racket proceeds over {} days; permanent named crew {} / {} required. Passive storefronts alone cannot earn retirement.",
             standing.retirement_profitable_racket_cycles,
             crimocracy::core::campaign_victory::RETIREMENT_MIN_PROFITABLE_RACKET_CYCLES,
             standing.retirement_racket_net.cents(),
@@ -127,6 +127,9 @@ impl Session<'_> {
             crimocracy::core::campaign_victory::RETIREMENT_CRIME_WINDOW_DAYS,
             standing.key_personnel,
             crimocracy::core::campaign_victory::RETIREMENT_MIN_KEY_PERSONNEL).unwrap();
+        if standing.contracted_personnel > 0 {
+            writeln!(out, "    Retirement blocked: {} open freelance contract(s); finish the terms and obtain lawful release before settling severance (see 'people').", standing.contracted_personnel).unwrap();
+        }
         writeln!(out, "  Underboss: active rackets in {} districts, {} productive mature districts ({} required); local majority and superior strength relative to rivals required",
             standing.own_active_racket_districts, standing.established_racket_districts,
             standing.required_underboss_districts).unwrap();
@@ -138,14 +141,14 @@ impl Session<'_> {
             UNDERBOSS_OPERATING_RUNWAY_DAYS, UNDERBOSS_RACKET_KINDS_PER_DISTRICT,
             UNDERBOSS_SENIOR_MANAGEMENT_RATING,
         };
-        writeln!(out, "    Available named command staff: {} / {} required ({} on payroll); independent captains in defended districts: {} / {} required ({} proven captains per district, never shared)",
-            standing.available_underboss_personnel, standing.required_underboss_personnel, standing.key_personnel,
+        writeln!(out, "    Available named command staff: {} / {} required (permanent crew; {} on payroll, including {} contractors); independent captains in defended districts: {} / {} required ({} proven captains per district, never shared)",
+            standing.available_underboss_personnel, standing.required_underboss_personnel, standing.key_personnel + standing.contracted_personnel, standing.contracted_personnel,
             standing.staffed_underboss_districts, standing.required_underboss_districts,
             UNDERBOSS_CAPTAINS_PER_DISTRICT).unwrap();
         writeln!(out, "    Proven associates: {}; uncontested districts with at least {} proven associates across {} racket kinds and more workers than all local rivals combined: {} / {}",
             standing.mature_associates, UNDERBOSS_ASSOCIATES_PER_DISTRICT, UNDERBOSS_RACKET_KINDS_PER_DISTRICT,
             standing.workforce_ready_districts, standing.required_underboss_districts).unwrap();
-        writeln!(out, "    Defended mature districts with at least {} available named enforcers each: {} / {}",
+        writeln!(out, "    Defended mature districts with at least {} available permanent named enforcers each: {} / {}",
             UNDERBOSS_ENFORCERS_PER_DISTRICT, standing.defended_underboss_districts, standing.required_underboss_districts).unwrap();
         writeln!(out, "    Fully backed districts: {} / {} required (same defended and independently commanded districts, with {} machine influence and {} institutional support each; see 'campaign')",
             standing.influential_underboss_districts, standing.required_underboss_districts,

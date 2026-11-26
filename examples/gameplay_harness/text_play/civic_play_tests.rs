@@ -218,6 +218,12 @@ fn generated_city_has_hundreds_of_real_people_and_hires_a_freelancer_for_a_fixed
         roster.contains(&format!("Freelance contract expires {expiry}")),
         "{roster}"
     );
+    let victory = session.execute("victory").unwrap().0;
+    assert!(
+        victory.contains("Retirement blocked: 1 open freelance contract(s)"),
+        "{victory}"
+    );
+    assert!(victory.contains("including 1 contractors"), "{victory}");
     assert_eq!(
         before,
         bincode::serialize(&build_save(&registry, &session.state).unwrap()).unwrap()

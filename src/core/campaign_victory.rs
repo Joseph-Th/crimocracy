@@ -126,8 +126,10 @@ fn required_underboss_personnel(required_districts: usize) -> usize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VictoryProgress {
     pub total_districts: usize,
-    /// Current named leadership, not an estimate of unnamed racket employees.
+    /// Permanent named leadership, excluding fixed-term contractors and unnamed associates.
     pub key_personnel: usize,
+    /// Fixed-term workers still on the payroll, including those awaiting lawful release.
+    pub contracted_personnel: usize,
     pub required_political_personnel: usize,
     pub required_underboss_personnel: usize,
     pub required_political_districts: usize,
@@ -254,7 +256,7 @@ pub enum VictoryError {
     )]
     PoliticalNotReady,
     #[error(
-        "funded retirement needs four named crew, 90 profitable racket settlements and $10,000 net racket income in the last 180 days, one leader, no pending decisions or active operations, and clean money for the $1,000,000 nest egg plus crew severance"
+        "funded retirement needs four permanent named crew, 90 profitable racket settlements and $10,000 net racket income in the last 180 days, one leader, no pending decisions, active operations or open freelance contracts, and clean money for the $1,000,000 nest egg plus crew severance"
     )]
     RetirementNotReady,
     #[error(
@@ -357,10 +359,12 @@ pub(crate) fn ballot_progress(
 ) -> Result<(VictoryProgress, Vec<PoliticalDistrictProgress>), VictoryError> {
     let organization = state.player_organization().ok_or(VictoryError::NoPlayer)?;
     let total_districts = state.world().neighborhoods().count();
-    let key_personnel = state
+    let payroll_members = state
         .world()
         .characters_in_organization(organization)
         .count();
+    let key_personnel = state.world().permanent_members(organization).count();
+    let contracted_personnel = payroll_members - key_personnel;
     let required_political_districts = (total_districts * 3).div_ceil(4);
     let required_political_personnel = required_political_districts
         .saturating_mul(POLITICAL_STAFF_PER_DISTRICT)
@@ -369,7 +373,7 @@ pub(crate) fn ballot_progress(
     let required_underboss_personnel = required_underboss_personnel(required_underboss_districts);
     let per_member_wage = i128::from(registry.upkeep().per_member_daily().cents());
     let daily_payroll =
-        per_member_wage * i128::try_from(key_personnel).expect("member count fits i128");
+        per_member_wage * i128::try_from(payroll_members).expect("member count fits i128");
     let income_window = i128::from(VICTORY_INCOME_WINDOW_DAYS);
     // A local holding company must fund at least one wage from earned net income.
     // The organization as a whole must cover *all* named directors' actual wages.
@@ -542,7 +546,8 @@ pub(crate) fn ballot_progress(
         .collect::<BTreeSet<_>>();
     // Territorial control, proven labor, named defenders and independent command
     // must hold in the SAME districts, not in unrelated sets of locations.
-    let defenses = crate::world::territory_conflict::local_defensive_forces(state, organization);
+    let defenses =
+        crate::world::territory_conflict::permanent_local_defensive_forces(state, organization);
     let defended_districts = workforce_ready
         .iter()
         .filter(|district| {
@@ -573,7 +578,7 @@ pub(crate) fn ballot_progress(
     let influential_underboss_districts = influential_assignment.len();
     let available_underboss_personnel = state
         .world()
-        .characters_in_organization(organization)
+        .permanent_members(organization)
         .filter(|person| {
             state
                 .legal()
@@ -630,6 +635,7 @@ pub(crate) fn ballot_progress(
     let standing = VictoryProgress {
         total_districts,
         key_personnel,
+        contracted_personnel,
         required_political_personnel,
         required_underboss_personnel,
         required_political_districts,
@@ -813,6 +819,7 @@ fn ensure_eligible(
         VictoryPath::FundedRetirement => {
             let (_, required) = retirement_members(registry, state, owner)?;
             if standing.key_personnel < RETIREMENT_MIN_KEY_PERSONNEL
+                || standing.contracted_personnel != 0
                 || standing.retirement_profitable_racket_cycles
                     < RETIREMENT_MIN_PROFITABLE_RACKET_CYCLES
                 || standing.retirement_racket_net < RETIREMENT_MIN_RACKET_NET

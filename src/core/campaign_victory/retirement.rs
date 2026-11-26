@@ -39,10 +39,7 @@ fn retirement_payees(
     organization: OrganizationId,
     severance: Money,
 ) -> Result<(Vec<(CharacterId, Money)>, Money), VictoryError> {
-    let members: Vec<_> = state
-        .world()
-        .characters_in_organization(organization)
-        .collect();
+    let members: Vec<_> = state.world().permanent_members(organization).collect();
     let leaders: Vec<_> = members
         .iter()
         .filter(|member| member.supervisor().is_none())
@@ -81,6 +78,20 @@ pub(crate) fn retirement_settlement_matches(
     at: SimTime,
     registry: Option<&Registry>,
 ) -> bool {
+    // Retirement terminates simulation: an outstanding paid term cannot be
+    // left waiting for a future release that will never occur.
+    if state
+        .world()
+        .characters_in_organization(organization)
+        .any(|person| {
+            state
+                .world()
+                .active_freelance_contract(person.id())
+                .is_some()
+        })
+    {
+        return false;
+    }
     let Some(record) = state.finance().get_transaction(transaction) else {
         return false;
     };
@@ -120,7 +131,7 @@ pub(crate) fn retirement_settlement_matches(
     } else {
         let Some(severance) = state
             .world()
-            .characters_in_organization(organization)
+            .permanent_members(organization)
             .filter(|member| member.supervisor().is_some())
             .find_map(|member| paid.get(&member.id()).copied())
         else {

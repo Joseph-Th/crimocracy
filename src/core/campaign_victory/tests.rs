@@ -375,6 +375,115 @@ fn retirement_recognizes_retired_racket_results_but_not_ancient_illicit_earnings
 }
 
 #[test]
+fn temporary_contracts_cannot_supply_permanent_victory_staff_or_retirement_severance() {
+    use crate::world::IndependentVocation;
+    use crate::world::character_life::validate_set_civic_occupation;
+    use crate::world::freelance_contracts::validate_hire_freelancer;
+    use crate::world::territory_conflict::{
+        local_defensive_forces, permanent_local_defensive_forces,
+    };
+
+    let (registry, mut state, owner, boss, _) = retirement_ready_fixture();
+    let district = state.world().neighborhoods().next().unwrap().id();
+    let baseline = progress(&registry, &state).unwrap();
+    fund(
+        &mut state,
+        owner,
+        baseline.retirement_total.cents() + 1_000_000,
+    );
+    assert!(validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).is_ok());
+    let worker = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Fixed-term guard".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Violence,
+                Rating::try_new(90).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_set_civic_occupation(
+        &state,
+        worker,
+        district,
+        IndependentVocation::FreelanceCriminal,
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let mut relation = crate::social::RelationshipDimensions::zero();
+    relation.trust = crate::social::RelationshipLevel::try_new(90).unwrap();
+    crate::social::relationship_system::validate_set_relationship(&state, worker, boss, relation)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let before_force = local_defensive_forces(&state, owner)[&district].named_enforcers;
+    validate_hire_freelancer(&state, owner, worker, boss, 1)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let standing = progress(&registry, &state).unwrap();
+    assert_eq!(standing.key_personnel, baseline.key_personnel);
+    assert_eq!(standing.contracted_personnel, 1);
+    assert_eq!(
+        standing.available_underboss_personnel,
+        baseline.available_underboss_personnel
+    );
+    assert_eq!(
+        standing.daily_payroll,
+        baseline
+            .daily_payroll
+            .checked_add(registry.upkeep().per_member_daily())
+            .unwrap()
+    );
+    assert_eq!(standing.retirement_total, baseline.retirement_total);
+    assert_eq!(
+        local_defensive_forces(&state, owner)[&district].named_enforcers,
+        before_force + 1
+    );
+    assert_eq!(
+        permanent_local_defensive_forces(&state, owner)[&district].named_enforcers,
+        before_force
+    );
+    let saved = build_save(&registry, &state).unwrap();
+    assert!(validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement).is_err());
+    let mut restored = restore_save(&registry, saved).unwrap();
+    assert_eq!(standing, progress(&registry, &restored).unwrap());
+    for _ in 0..DAY_MINUTES {
+        run_tick(&registry, &mut state).unwrap();
+        run_tick(&registry, &mut restored).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    assert!(state.world().active_freelance_contract(worker).is_none());
+    let outcome = validate_claim_victory(&registry, &state, VictoryPath::FundedRetirement)
+        .unwrap()
+        .commit(&registry, &mut state)
+        .unwrap();
+    let transaction = state
+        .finance()
+        .get_transaction(outcome.settlement.unwrap())
+        .unwrap();
+    assert!(!transaction.postings().iter().any(|posting| {
+        state
+            .finance()
+            .get_account(posting.account)
+            .unwrap()
+            .owner()
+            == FinancialOwner::Character(worker)
+    }));
+    restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+}
+
+#[test]
 fn retirement_requires_a_million_for_the_leader_plus_staff_severance() {
     let (registry, mut state, owner, boss, _) = retirement_ready_fixture();
     hire_additional_staff(&mut state, owner, boss, 4);
