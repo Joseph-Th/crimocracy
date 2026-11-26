@@ -15,7 +15,7 @@ use crate::enterprises::enterprise_execution::{
 };
 use crate::enterprises::{EnterpriseDraft, EnterpriseKind, EnterpriseLocation};
 use crate::finance::finance_system::{insert_account, validate_record_transaction};
-use crate::finance::{FinancialAccountDraft, LedgerPosting, LedgerTransactionDraft};
+use crate::finance::{AccountKind, FinancialAccountDraft, LedgerPosting, LedgerTransactionDraft};
 use crate::reports::ReportKind;
 use crate::world::BusinessOwner;
 use crate::world::world_system::{

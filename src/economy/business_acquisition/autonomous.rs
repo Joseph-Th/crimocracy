@@ -9,6 +9,7 @@ use super::{
 use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, is_recurring_boundary};
+use crate::finance::helpers::TreasuryLiquidity;
 use crate::finance::{AccountKind, FinancialOwner, Money};
 use crate::registry::Registry;
 use crate::world::world_system::sole_available_executive;
@@ -77,29 +78,21 @@ fn invest(
         i128::from(registry.upkeep().per_member_daily().cents()) * member_count as i128;
     let wage_gap = (daily_payroll - expected_daily_net).max(0);
     let reserve = daily_payroll * i128::from(REVIEW_DAYS);
-    let mut funding_accounts = BTreeSet::new();
-    let mut accounted = 0_i128;
-    let mut other_liquidity = 0_i128;
-    for account in state
-        .finance
-        .accounts_for(FinancialOwner::Organization(organization))
-    {
-        let spendable = account.available_payment_balance();
-        if spendable == Money::ZERO {
-            continue;
-        }
-        if account.kind() == AccountKind::AccountedFunds {
-            accounted += i128::from(spendable.cents());
-            funding_accounts.insert(account.id());
-        } else {
-            other_liquidity += i128::from(spendable.cents());
-        }
-    }
-    // Never count dirty cash toward the price; it only reduces the clean wage reserve.
-    let budget = accounted - (reserve - other_liquidity).max(0);
-    if budget <= 0 {
+    let owner = FinancialOwner::Organization(organization);
+    let treasury = TreasuryLiquidity::from_accounts(state.finance().accounts_for(owner));
+    let budget = treasury.accounted_after_reserve(reserve);
+    if budget == 0 {
         return None;
     }
+    let funding_accounts = state
+        .finance()
+        .accounts_for(owner)
+        .filter(|account| {
+            account.kind() == AccountKind::AccountedFunds
+                && account.available_payment_balance() > Money::ZERO
+        })
+        .map(|account| account.id())
+        .collect::<BTreeSet<_>>();
     let mut candidates = Vec::new();
     for (id, _, _, district) in state.world.public_business_directory() {
         if state

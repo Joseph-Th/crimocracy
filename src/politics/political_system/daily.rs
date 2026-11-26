@@ -7,7 +7,8 @@ use super::{
 use crate::core::id::{NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, is_day_boundary};
-use crate::finance::{AccountKind, FinancialOwner};
+use crate::finance::FinancialOwner;
+use crate::finance::helpers::TreasuryLiquidity;
 use crate::politics::{DistrictCampaign, INFLUENCE_CAP, INFLUENCE_COST_PER_POINT};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
@@ -97,23 +98,12 @@ pub(in crate::politics) fn affordable_rival_campaign_points(
 ) -> u16 {
     let members = state.world().characters_in_organization(owner).count() as i128;
     let reserve = i128::from(registry.upkeep().per_member_daily().cents()) * members * 7;
-    let mut clean = 0_i128;
-    let mut other = 0_i128;
-    for account in state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(owner))
-    {
-        let available = i128::from(account.available_payment_balance().cents());
-        if account.kind() == AccountKind::AccountedFunds {
-            clean += available;
-        } else if account.kind().is_liquid() {
-            // A legitimate operating pocket owned by the gang can fund wages too.
-            // Only accounted funds can buy electoral influence, but every other
-            // spendable kind reduces how much clean liquidity must be reserved.
-            other += available;
-        }
-    }
-    let spendable = (clean - (reserve - other).max(0)).max(0);
+    let treasury = TreasuryLiquidity::from_accounts(
+        state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(owner)),
+    );
+    let spendable = treasury.accounted_after_reserve(reserve);
     u16::try_from((spendable / i128::from(INFLUENCE_COST_PER_POINT)).min(220))
         .expect("campaign points are bounded at 220")
 }

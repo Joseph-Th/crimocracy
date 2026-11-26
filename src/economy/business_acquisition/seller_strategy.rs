@@ -7,6 +7,7 @@ use crate::core::id::{BusinessId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::DAY_MINUTES;
 use crate::economy::business_economy_system::forecast_normal_business_net;
+use crate::finance::helpers::TreasuryLiquidity;
 use crate::finance::{FinancialOwner, Money};
 use crate::registry::Registry;
 use crate::world::OrganizationKind;
@@ -132,33 +133,21 @@ pub(super) fn seller_preserves_earning_base(
     }
     // Sale proceeds are clean, but still need to leave one week of payroll uncommitted.
     // The seller's own other liquid funds can supply that reserve, not the price.
-    let (mut accounted, mut other) = (i128::from(offer.cents()), 0_i128);
-    let mut net_liquid_after_sale = i128::from(offer.cents());
-    for account in state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(seller))
-    {
-        // Available cash funds replacement purchases; negative liquid balances are
-        // still genuine obligations when judging whether the sale leaves a secure runway.
-        if account.kind().is_liquid() {
-            net_liquid_after_sale += i128::from(account.balance().cents());
-        }
-        let balance = i128::from(account.available_payment_balance().cents());
-        if account.kind() == crate::finance::AccountKind::AccountedFunds {
-            accounted += balance;
-        } else {
-            other += balance;
-        }
-    }
+    let treasury = TreasuryLiquidity::from_accounts(
+        state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(seller)),
+    )
+    .with_accounted_receipt(offer);
     // A mature cash-rich organization can rationally accept a strong offer even
     // with no remaining independent listings. Without this exit, a fully-owned city
     // can freeze its property market forever. This is seller-private information;
     // the buyer still receives only the generic refusal on an unsuccessful offer.
     let post_sale_gap = daily_payroll - remaining;
-    if net_liquid_after_sale >= post_sale_gap * SALE_RUNWAY_DAYS + daily_payroll * 7 {
+    if treasury.net_liquid() >= post_sale_gap * SALE_RUNWAY_DAYS + daily_payroll * 7 {
         return Ok(false);
     }
-    let available = accounted - (daily_payroll * 7 - other).max(0);
+    let available = treasury.accounted_after_reserve(daily_payroll * 7);
     let minimum_replacement = lost_income.min(daily_payroll - remaining);
     for (id, _, _, district) in state.world().public_business_directory() {
         if state

@@ -4,6 +4,61 @@ use crate::core::id::FinancialAccountId;
 use crate::core::time::SimTime;
 use crate::finance::{AccountKind, FinancialAccountRecord, LedgerPosting, Money};
 
+/// Current accessible treasury positions, separating payment capacity from liabilities.
+/// Gross capacity funds ordinary payments; net reserves additionally deduct deficits.
+/// Clearing accounts never count, and exhausted positive accounts cannot fund future work.
+/// Wide totals are safe for the full typed account-ID space.
+#[derive(Default)]
+pub(crate) struct TreasuryLiquidity {
+    accounted: i128,
+    other: i128,
+    accounted_deficits: i128,
+    other_deficits: i128,
+}
+
+impl TreasuryLiquidity {
+    pub(crate) fn from_accounts<'a>(
+        accounts: impl IntoIterator<Item = &'a FinancialAccountRecord>,
+    ) -> Self {
+        let mut result = Self::default();
+        for account in accounts {
+            if !account.kind().is_liquid() {
+                continue;
+            }
+            let available = i128::from(account.available_payment_balance().cents());
+            let deficit = i128::from(account.balance().cents().min(0));
+            if account.kind() == AccountKind::AccountedFunds {
+                result.accounted += available;
+                result.accounted_deficits += deficit;
+            } else {
+                result.other += available;
+                result.other_deficits += deficit;
+            }
+        }
+        result
+    }
+
+    /// Project a real clean receipt without mutating any ledger.
+    pub(crate) fn with_accounted_receipt(mut self, receipt: Money) -> Self {
+        debug_assert!(receipt >= Money::ZERO);
+        self.accounted += i128::from(receipt.cents());
+        self
+    }
+
+    /// Leave gross payment capacity for unrestricted wages before discretionary clean spending.
+    pub(crate) fn accounted_after_reserve(&self, reserve: i128) -> i128 {
+        (self.accounted - (reserve - self.other).max(0)).max(0)
+    }
+
+    pub(crate) fn net_accounted(&self) -> i128 {
+        self.accounted + self.accounted_deficits
+    }
+
+    pub(crate) fn net_liquid(&self) -> i128 {
+        self.net_accounted() + self.other + self.other_deficits
+    }
+}
+
 /// Canonical deterministic spending order for unrestricted organizational expenses. Consume
 /// dirty street cash, then concealed reserves, then clean money; among equivalent money
 /// states, draw the largest available pool first to reduce ledger postings. Persistent account

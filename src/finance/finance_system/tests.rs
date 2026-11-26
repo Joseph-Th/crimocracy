@@ -1385,6 +1385,73 @@ fn payment_planning_excludes_exhausted_accounts_and_reports_exact_shortfall() {
 }
 
 #[test]
+fn victory_reserves_exclude_unpostable_cash_and_retain_deficits() {
+    use crate::core::campaign_victory::progress;
+    use crate::world::world_system::designate_player_organization;
+
+    let registry = build_registry();
+    let mut state = AppState::new(32);
+    let organization = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Reserve test organization".into(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut state, organization).unwrap();
+    let owner = FinancialOwner::Organization(organization);
+    let mut open =
+        |kind| insert_account(&mut state, FinancialAccountDraft { owner, kind }).unwrap();
+    let clean = open(AccountKind::AccountedFunds);
+    let locked = open(AccountKind::AccountedFunds);
+    let debt = open(AccountKind::AccountedFunds);
+    let operating = open(AccountKind::LegitimateOperating);
+    let street_debt = open(AccountKind::StreetCash);
+    let settlement = open(AccountKind::Settlement);
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Mixed victory reserve fixture".into(),
+            postings: [
+                (clean, 10_000),
+                (locked, 20_000),
+                (debt, -3_000),
+                (operating, 8_000),
+                (street_debt, -2_000),
+                (settlement, -33_000),
+            ]
+            .into_iter()
+            .map(|(account, cents)| LedgerPosting {
+                account,
+                amount: Money::from_cents(cents),
+            })
+            .collect(),
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    let before = progress(&registry, &state).unwrap();
+    assert_eq!(before.accounted_net.cents(), 27_000);
+    assert_eq!(before.underboss_liquid_reserve.cents(), 33_000);
+    assert_eq!(progress(&registry, &restored).unwrap(), before);
+
+    // Finance-owner synthetic version rail, not a persistable fixture: constructing
+    // billions of historical ledger entries would not improve this boundary proof.
+    state.finance.accounts.get_mut(&locked).unwrap().version = u32::MAX;
+    let snapshot = bincode::serialize(&state).unwrap();
+    let terminal = progress(&registry, &state).unwrap();
+    assert_eq!(terminal.accounted_net.cents(), 7_000);
+    assert_eq!(terminal.underboss_liquid_reserve.cents(), 13_000);
+    assert_eq!(bincode::serialize(&state).unwrap(), snapshot);
+}
+
+#[test]
 fn planned_account_transaction_opens_and_funds_account_atomically() {
     let registry = build_registry();
     let mut state = AppState::new(32);

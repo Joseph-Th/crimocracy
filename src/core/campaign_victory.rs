@@ -12,7 +12,8 @@ use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, ensure_time_current};
 use crate::economy::business_economy_system::portfolio_overhead_basis_points;
 use crate::finance::finance_system::FinanceError;
-use crate::finance::{AccountKind, FinancialOwner, Money};
+use crate::finance::helpers::TreasuryLiquidity;
+use crate::finance::{FinancialOwner, Money};
 use crate::history::history_system::{HistoryError, validate_campaign_victory_event};
 use crate::politics::{MAYORAL_CAMPAIGN_SPEND_REQUIRED, MAYORAL_LIQUID_RESERVE_REQUIRED};
 use crate::registry::Registry;
@@ -183,6 +184,7 @@ pub struct VictoryProgress {
     /// and non-liquid settlement accounts do not count toward this reserve.
     pub underboss_liquid_reserve: Money,
     pub required_underboss_liquid_reserve: Money,
+    /// Accessible accounted funds less all accounted-funds deficits.
     pub accounted_net: Money,
     pub retirement_total: Money,
     /// Recent settled proceeds and profitable cycles, including retired rackets.
@@ -600,27 +602,16 @@ pub(crate) fn ballot_progress(
         .sum::<u64>();
     let mature_associates = mature_workers_by_district.values().sum::<u64>();
     let rival_associates = rival_workers_by_district.values().sum::<u64>();
-    // Include negative accounted balances; a debt cannot be ignored by spending another pocket.
-    let net = state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(organization))
-        .filter(|account| account.kind() == AccountKind::AccountedFunds)
-        .map(|account| i128::from(account.balance().cents()))
-        .sum::<i128>()
+    // All victory reserves represent accessible funds net of relevant liabilities.
+    let treasury = TreasuryLiquidity::from_accounts(
+        state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(organization)),
+    );
+    let net = treasury
+        .net_accounted()
         .clamp(i128::from(i64::MIN), i128::from(i64::MAX));
-    let underboss_liquid_reserve = state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(organization))
-        .filter(|account| account.kind().is_liquid())
-        .map(|account| {
-            let balance = i128::from(account.balance().cents());
-            if balance < 0 {
-                balance
-            } else {
-                i128::from(account.available_payment_balance().cents())
-            }
-        })
-        .sum::<i128>();
+    let underboss_liquid_reserve = treasury.net_liquid();
     let underboss_operating_buffer = operating_reserve(registry, state, &own_rackets)?;
     let campaign_daily_payroll =
         crate::politics::political_system::campaign_salary_commitment(state, organization)
@@ -821,18 +812,11 @@ fn ensure_eligible(
         }
         VictoryPath::FundedRetirement => {
             let (_, required) = retirement_members(registry, state, owner)?;
-            let spendable: i128 = state
-                .finance()
-                .accounts_for(FinancialOwner::Organization(owner))
-                .filter(|account| account.kind() == AccountKind::AccountedFunds)
-                .map(|account| i128::from(account.available_payment_balance().cents()))
-                .sum();
             if standing.key_personnel < RETIREMENT_MIN_KEY_PERSONNEL
                 || standing.retirement_profitable_racket_cycles
                     < RETIREMENT_MIN_PROFITABLE_RACKET_CYCLES
                 || standing.retirement_racket_net < RETIREMENT_MIN_RACKET_NET
                 || standing.accounted_net < required
-                || spendable < i128::from(required.cents())
                 || state
                     .decisions()
                     .pending_for_recipient(owner)
