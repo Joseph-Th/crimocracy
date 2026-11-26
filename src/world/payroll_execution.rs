@@ -60,7 +60,7 @@ pub struct PayrollOutcome {
 
 struct OrganizationPayrollPlan {
     organization: OrganizationId,
-    funding: Vec<FinancialAccountId>,
+    funding: Vec<LedgerPosting>,
     per_member: Money,
     owed: Money,
     paid: Money,
@@ -135,8 +135,8 @@ pub fn payroll_funding_snapshot(
 ) -> Result<(Money, Money), PayrollError> {
     let member_count = state.world.characters_in_organization(organization).count();
     let owed = payroll_obligation(registry.upkeep().per_member_daily(), member_count)?;
-    let funding = find_funding_accounts(state, organization);
-    Ok((owed, resolve_payroll_liquidity(state, &funding, owed)))
+    let (_, paid) = plan_payroll_debits(state, organization, owed);
+    Ok((owed, paid))
 }
 
 /// Payroll shares the executive brief's day-boundary cadence: it runs exactly once per
@@ -220,11 +220,10 @@ fn plan_organization_payroll(
     }
     let per_member = registry.upkeep().per_member_daily();
     let owed = payroll_obligation(per_member, members.len())?;
-    let funding = find_funding_accounts(state, organization);
     // Payroll is an organization-level obligation, so every organization-owned liquid cash
     // account is eligible. Enterprise records may reference the same cash account as one another
     // or as the general treasury; those references do not create ownership or segregation.
-    let paid = resolve_payroll_liquidity(state, &funding, owed);
+    let (funding, paid) = plan_payroll_debits(state, organization, owed);
     let allocations = allocate_member_payments(
         &members,
         per_member,
@@ -246,47 +245,9 @@ fn preflight_organization_payroll(
     state: &AppState,
     plan: &OrganizationPayrollPlan,
 ) -> Result<(), PayrollError> {
-    use crate::core::version::ensure_version_can_advance;
-
-    // Existing funding accounts that will actually be debited must retain one version slot.
-    let mut remaining = plan.paid;
-    for account_id in &plan.funding {
-        if remaining == Money::ZERO {
-            break;
-        }
-        let account = state
-            .finance()
-            .get_account(*account_id)
-            .expect("planned payroll funding came from the finance owner index");
-        let spendable = account.spendable_balance();
-        if spendable == Money::ZERO {
-            continue;
-        }
-        ensure_version_can_advance(account.version(), "financial account")
-            .map_err(FinanceError::from)?;
-        remaining = remaining
-            .checked_sub(spendable.min(remaining))
-            .expect("planned payroll debit cannot exceed remaining wages");
-    }
-    debug_assert_eq!(remaining, Money::ZERO);
-
-    // Existing wage pockets also need one version slot and enough numeric balance headroom.
-    // Missing pockets are covered by the aggregate FinancialAccount ID reservation.
-    for (member, _, amount) in &plan.allocations {
-        if *amount == Money::ZERO {
-            continue;
-        }
-        if let Some(account) = find_existing_wage_account(state, *member, *amount) {
-            ensure_version_can_advance(account.version(), "financial account")
-                .map_err(FinanceError::from)?;
-            account
-                .balance()
-                .checked_add(*amount)
-                .ok_or(PayrollError::Finance(FinanceError::BalanceOverflow(
-                    account.id(),
-                )))?;
-        }
-    }
+    // The funding planner already proved each selected debit's spendable balance and
+    // version headroom. Wage destinations are chosen by can_receive_liquid_payment;
+    // missing destinations are covered by the aggregate account-ID reservation.
 
     let short = plan.short();
     if short > Money::ZERO {
@@ -324,8 +285,8 @@ fn apply_organization_payroll(
     state: &mut AppState,
     plan: OrganizationPayrollPlan,
 ) -> Result<PayrollOutcome, PayrollError> {
-    let transaction = validate_payroll_payment(state, &plan.funding, &plan.allocations, plan.paid)?;
     let short = plan.short();
+    let transaction = validate_payroll_payment(state, plan.funding, &plan.allocations, plan.paid)?;
     let mut outcome = PayrollOutcome {
         organization: plan.organization,
         owed: plan.owed,
@@ -385,64 +346,32 @@ fn payroll_obligation(per_member: Money, member_count: usize) -> Result<Money, P
         .ok_or(PayrollError::ArithmeticOverflow)
 }
 
-fn resolve_payroll_liquidity(
+fn plan_payroll_debits(
     state: &AppState,
-    funding: &[FinancialAccountId],
+    organization: OrganizationId,
     owed: Money,
-) -> Money {
-    let owed_cents = i128::from(owed.cents());
-    let available_cents = funding
-        .iter()
-        .map(|account| {
-            state
-                .finance()
-                .get_account(*account)
-                .expect("payroll funding came from the finance owner index")
-                .spendable_balance()
-                .cents()
-        })
-        .fold(0_i128, |total, cents| {
-            (total + i128::from(cents)).min(owed_cents)
-        });
-    Money::from_cents(
-        i64::try_from(available_cents).expect("available payroll is bounded by money owed"),
-    )
+) -> (Vec<LedgerPosting>, Money) {
+    let (postings, short) = crate::finance::helpers::payment_debits_up_to(
+        state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(organization)),
+        owed,
+    );
+    let paid = owed
+        .checked_sub(short)
+        .expect("unpaid remainder is bounded by obligation");
+    (postings, paid)
 }
 
 fn validate_payroll_payment(
     state: &AppState,
-    funding: &[FinancialAccountId],
+    mut postings: Vec<LedgerPosting>,
     allocations: &[(CharacterId, Option<CharacterId>, Money)],
     paid: Money,
 ) -> Result<Option<ValidatedLedgerTransaction>, PayrollError> {
     if paid == Money::ZERO {
         return Ok(None);
     }
-
-    let mut postings = Vec::new();
-    let mut remaining = paid;
-    for account in funding {
-        if remaining == Money::ZERO {
-            break;
-        }
-        let spendable = state
-            .finance()
-            .get_account(*account)
-            .expect("payroll funding came from the finance owner index")
-            .spendable_balance();
-        if spendable == Money::ZERO {
-            continue;
-        }
-        let debit = spendable.min(remaining);
-        postings.push(LedgerPosting {
-            account: *account,
-            amount: debit.checked_neg().expect("positive balance negates"),
-        });
-        remaining = remaining
-            .checked_sub(debit)
-            .expect("debit cannot exceed payable payroll");
-    }
-    debug_assert_eq!(remaining, Money::ZERO);
 
     let (wage_accounts, openings) = plan_wage_accounts(state, allocations)?;
     for ((_, _, amount), account) in allocations.iter().zip(wage_accounts) {
@@ -565,27 +494,6 @@ fn plan_wage_accounts(
         Some(openings)
     };
     Ok((resolved, openings))
-}
-
-fn find_funding_accounts(
-    state: &AppState,
-    organization: OrganizationId,
-) -> Vec<FinancialAccountId> {
-    let owner = FinancialOwner::Organization(organization);
-    let mut accounts: Vec<_> = state
-        .finance()
-        .accounts_for(owner)
-        .filter_map(|account| {
-            let spendable = account.available_payment_balance();
-            (spendable > Money::ZERO).then_some((account.kind(), spendable, account.id()))
-        })
-        .collect();
-    // Wages are an informal carrying cost. Spend exposed street cash first, then hidden dirty
-    // reserves, before consuming clean liquidity that can finance legitimate purchases and
-    // delegated budgets. Within an equal semantic class, use the largest balance first to keep
-    // ordinary payroll transactions compact; account ID is only the deterministic final tie.
-    crate::finance::helpers::sort_unrestricted_payment_sources(&mut accounts);
-    accounts.into_iter().map(|(_, _, id)| id).collect()
 }
 
 fn find_existing_wage_account(

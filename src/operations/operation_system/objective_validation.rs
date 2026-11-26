@@ -146,7 +146,7 @@ fn validate_active_field_objective_targets(
                     target: *target,
                 });
             };
-            validate_cash_target_not_suspended(state, business)
+            validate_cash_target_operating(state, business)
         }
         // Authorization proves only what the organization knows: a fresh typed witness episode.
         // Hidden case closure, cooperation changes, or custody are practical execution facts and
@@ -279,19 +279,12 @@ fn validate_active_field_objective_targets(
     }
 }
 
-/// Ambient independent businesses need not have detailed operating books, so absence of a
-/// business-economy record is not closure. Once books exist, however, Suspended is an explicit
-/// world fact that the business is not currently operating. Cash-generating operations cannot
-/// mint a till, protection payment, delivery payment, or gambling take from that shuttered state.
-fn validate_cash_target_not_suspended(
+/// Use the execution owner's liveness rule for discovery and authorization.
+fn validate_cash_target_operating(
     state: &AppState,
     business: crate::core::id::BusinessId,
 ) -> Result<(), OperationError> {
-    if state
-        .economy
-        .get_business_economy(business)
-        .is_some_and(|economy| economy.status() != crate::economy::BusinessOperatingStatus::Active)
-    {
+    if !crate::operations::operation_objective::cash_target_is_operating(state, business) {
         return Err(OperationError::InactiveObjectiveTarget(
             EntityRef::Business(business),
         ));

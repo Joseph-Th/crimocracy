@@ -5,7 +5,7 @@
 //! practical effect for a tactically successful crew to achieve.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{CaseWitnessId, CharacterId, OrganizationId};
+use crate::core::id::{BusinessId, CaseWitnessId, CharacterId, OrganizationId};
 use crate::core::state::AppState;
 use crate::legal::{InvestigationStatus, WitnessCooperation};
 use crate::operations::{
@@ -26,6 +26,16 @@ pub(crate) const fn resolve_effective_objective_outcome(
     } else {
         base
     }
+}
+
+/// Ambient businesses without operating books remain valid cash objectives.
+/// Once books exist, the same live operating predicate governs discovery,
+/// authorization and execution, including terminal recurrence exhaustion.
+pub(crate) fn cash_target_is_operating(state: &AppState, business: BusinessId) -> bool {
+    state
+        .economy()
+        .get_business_economy(business)
+        .is_none_or(|economy| economy.is_operating())
 }
 
 /// Mutable execution-time condition that prevents a non-failed objective from producing its
@@ -81,12 +91,7 @@ pub(crate) fn resolve_objective_blocker(
         } => None,
         OperationObjective::ObtainCash {
             target: EntityRef::Business(business),
-        } => state
-            .economy
-            .get_business_economy(*business)
-            .is_some_and(|economy| {
-                economy.status() != crate::economy::BusinessOperatingStatus::Active
-            })
+        } => (!cash_target_is_operating(state, *business))
             .then_some(OperationObjectiveBlocker::TargetEconomyInactive),
         OperationObjective::DisruptBusiness {
             target: EntityRef::Business(business),

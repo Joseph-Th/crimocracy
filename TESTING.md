@@ -427,7 +427,15 @@ deterministic save/restore. Contact briefing tests exercise the canonical per-so
 disclosure path and observation timestamps. Long advances interrupt fresh
 own-business/racket suspensions and payroll exceptions; the client test proves
 payroll interruption at the exact boundary, read-only coverage, and persistent
-attention preferences. The police-response integration test resolves two complete
+attention preferences. `payroll_snapshot_and_settlement_share_capped_payment_allocation`
+compares forecast, exact and partial debit plans, actual postings and restored
+continuation across split liquid funds, deficits and non-liquid clearing balances.
+`daily_patrol_projection_respects_authority_home_and_suspended_deployments`
+compares daily duties with active deployments in a multi-authority city and proves
+suspending one authority does not close another's routes, including after restore.
+`recurrence_exhausted_cash_target_is_unavailable_to_discovery_and_execution`
+settles the final representable business cycle and verifies both discovery and
+execution reject that target without mutation, before and after restoration. The police-response integration test resolves two complete
 identifying operations and verifies one active file, independent evidence, actual
 custody, and deterministic continuation from a save between incidents.
 The autonomous repeat-custody regression preserves fresh qualifying testimony

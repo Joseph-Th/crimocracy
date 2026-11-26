@@ -11,7 +11,8 @@ use crate::core::id::{BusinessId, CharacterId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, is_day_boundary};
 use crate::core::version::ensure_version_can_advance;
-use crate::legal::{InvestigationStatus, PatrolDeploymentStatus};
+use crate::legal::InvestigationStatus;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -250,7 +251,40 @@ fn business_work_profit(state: &AppState, business: &super::BusinessRecord) -> O
     Some(cycle.map_or(0, |cycle| cycle.net_cash().cents()))
 }
 
-fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
+/// Read the active deployment index once per completed day. Multiple officers
+/// in a precinct share the same ordered district list, and multiple deployments
+/// in one district must not give that district extra weight in patrol rotation.
+#[derive(Default)]
+struct PatrolDistricts(BTreeMap<OrganizationId, Vec<NeighborhoodId>>);
+
+impl PatrolDistricts {
+    fn from_state(state: &AppState) -> Self {
+        let mut districts = BTreeMap::<OrganizationId, Vec<NeighborhoodId>>::new();
+        for ward in state.world().neighborhoods() {
+            for deployment in state
+                .legal()
+                .active_patrol_deployments_for_neighborhood(ward.id())
+            {
+                let local = districts.entry(deployment.organization()).or_default();
+                if local.last() != Some(&ward.id()) {
+                    local.push(ward.id());
+                }
+            }
+        }
+        Self(districts)
+    }
+
+    fn for_authority(&self, authority: OrganizationId) -> &[NeighborhoodId] {
+        self.0.get(&authority).map_or(&[], Vec::as_slice)
+    }
+}
+
+fn choose_work(
+    state: &AppState,
+    character: CharacterId,
+    day: u64,
+    patrols: &PatrolDistricts,
+) -> DayWork {
     let detained = state
         .legal()
         .active_arrest_for_character(character)
@@ -323,20 +357,7 @@ fn choose_work(state: &AppState, character: CharacterId, day: u64) -> DayWork {
                 {
                     Some(CivicActivity::DetectiveWork(case.id()))
                 } else {
-                    let districts: Vec<_> = state
-                        .world()
-                        .neighborhoods()
-                        .filter(|ward| {
-                            state
-                                .legal()
-                                .active_patrol_deployments_for_neighborhood(ward.id())
-                                .any(|deployment| {
-                                    deployment.organization() == organization
-                                        && deployment.status() == PatrolDeploymentStatus::Active
-                                })
-                        })
-                        .map(|ward| ward.id())
-                        .collect();
+                    let districts = patrols.for_authority(organization);
                     let assigned = person.life().home().filter(|home| districts.contains(home));
                     assigned
                         .or_else(|| {
@@ -457,11 +478,12 @@ pub(crate) fn apply_due_character_lives(state: &mut AppState) {
         return;
     }
     let day = state.now().as_minutes() / DAY_MINUTES;
+    let patrols = PatrolDistricts::from_state(state);
     let changes: Vec<_> = state
         .world()
         .characters()
         .filter_map(|person| {
-            let work = choose_work(state, person.id(), day);
+            let work = choose_work(state, person.id(), day, &patrols);
             let life = finish_day(person.life(), state.now(), work);
             (person.life() != life).then_some((person.id(), life))
         })

@@ -350,7 +350,12 @@ fn reopened_proprietor_does_not_reuse_pre_suspension_earnings() {
     let working_day = (day..day + 7)
         .find(|&day| !(day + u64::from(owner.raw())).is_multiple_of(7))
         .unwrap();
-    let work = choose_work(&city.state, owner, working_day);
+    let work = choose_work(
+        &city.state,
+        owner,
+        working_day,
+        &PatrolDistricts::from_state(&city.state),
+    );
     assert_eq!(
         work.action,
         Some(CivicActivity::BusinessManagement(business))
@@ -359,7 +364,13 @@ fn reopened_proprietor_does_not_reuse_pre_suspension_earnings() {
     let mut restored =
         restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
     assert_eq!(
-        choose_work(&restored, owner, working_day).business_profit,
+        choose_work(
+            &restored,
+            owner,
+            working_day,
+            &PatrolDistricts::from_state(&restored)
+        )
+        .business_profit,
         0
     );
 
@@ -382,7 +393,12 @@ fn reopened_proprietor_does_not_reuse_pre_suspension_earnings() {
             .unwrap();
         let net = state.economy().get_cycle(cycle).unwrap().net_cash();
         assert_ne!(net, Money::ZERO);
-        let work = choose_work(state, owner, working_day);
+        let work = choose_work(
+            state,
+            owner,
+            working_day,
+            &PatrolDistricts::from_state(state),
+        );
         assert_eq!(work.business_profit, if net > Money::ZERO { 1 } else { -1 });
         validate_invariants(state);
 
@@ -391,7 +407,12 @@ fn reopened_proprietor_does_not_reuse_pre_suspension_earnings() {
         // still works, but the old result cannot earn another day's standing
         // or impose another day's loss penalty.
         state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
-        let work = choose_work(state, owner, working_day);
+        let work = choose_work(
+            state,
+            owner,
+            working_day,
+            &PatrolDistricts::from_state(state),
+        );
         assert_eq!(
             work.action,
             Some(CivicActivity::BusinessManagement(business))
@@ -492,7 +513,12 @@ fn new_proprietor_does_not_inherit_previous_owners_earnings_record() {
     let working_day = (day..day + 7)
         .find(|&day| !(day + u64::from(successor.raw())).is_multiple_of(7))
         .unwrap();
-    let work = choose_work(&city.state, successor, working_day);
+    let work = choose_work(
+        &city.state,
+        successor,
+        working_day,
+        &PatrolDistricts::from_state(&city.state),
+    );
     assert_eq!(
         work.action,
         Some(CivicActivity::BusinessManagement(business))
@@ -501,7 +527,12 @@ fn new_proprietor_does_not_inherit_previous_owners_earnings_record() {
 
     validate_invariants(&city.state);
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
-    let restored_work = choose_work(&restored, successor, working_day);
+    let restored_work = choose_work(
+        &restored,
+        successor,
+        working_day,
+        &PatrolDistricts::from_state(&restored),
+    );
     assert_eq!(restored_work.action, work.action);
     assert_eq!(restored_work.business_profit, work.business_profit);
 }

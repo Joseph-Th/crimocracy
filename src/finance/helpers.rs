@@ -29,6 +29,25 @@ pub(crate) fn payment_debits<'a>(
     amount: Money,
 ) -> Result<Vec<LedgerPosting>, Money> {
     debug_assert!(amount > Money::ZERO);
+    let (postings, remaining) = payment_debits_up_to(accounts, amount);
+    if remaining == Money::ZERO {
+        Ok(postings)
+    } else {
+        Err(remaining)
+    }
+}
+
+/// Plan a capped payment for obligations that expressly allow partial settlement.
+/// Return the actual debits and the unpaid remainder; exact-payment callers use
+/// the wrapper above and cannot accidentally commit a partial payment.
+pub(crate) fn payment_debits_up_to<'a>(
+    accounts: impl IntoIterator<Item = &'a FinancialAccountRecord>,
+    amount: Money,
+) -> (Vec<LedgerPosting>, Money) {
+    debug_assert!(amount >= Money::ZERO);
+    if amount == Money::ZERO {
+        return (Vec::new(), Money::ZERO);
+    }
     let mut sources: Vec<_> = accounts
         .into_iter()
         .filter_map(|account| {
@@ -49,10 +68,10 @@ pub(crate) fn payment_debits<'a>(
             .checked_sub(debit)
             .expect("payment debit cannot exceed the amount remaining");
         if remaining == Money::ZERO {
-            return Ok(postings);
+            break;
         }
     }
-    Err(remaining)
+    (postings, remaining)
 }
 
 /// Weighted contribution of a rating point value without overflow.

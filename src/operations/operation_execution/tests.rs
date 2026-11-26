@@ -1456,6 +1456,70 @@ fn kidnapping_ransom_target_shuttered_mid_execution_reports_cash_failure_not_sab
 }
 
 #[test]
+fn recurrence_exhausted_cash_target_is_unavailable_to_discovery_and_execution() {
+    use crate::economy::business_economy_system::{
+        decide_business_cycle, validate_business_cycle_plan,
+    };
+    use crate::operations::operation_objective::resolve_objective_blocker;
+    use crate::operations::operation_system::is_actionable_opportunity_target;
+    let (registry, mut state, _, _, operation) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, false, Vec::new());
+    let record = state.operations().get_operation(operation).unwrap();
+    let business = record.objective().taken_business().unwrap();
+    let organization = record.responsible_organization();
+    let target = EntityRef::Business(business);
+    assert!(is_actionable_opportunity_target(
+        &registry,
+        &state,
+        organization,
+        OperationKind::Intimidation,
+        target
+    ));
+    assert_eq!(resolve_objective_blocker(&state, record), None);
+    let duration = registry
+        .get_business(BusinessKind::Retail)
+        .economics()
+        .cycle();
+    state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(duration.as_minutes()) + 1,
+    ));
+    let plan = decide_business_cycle(&registry, &state, business, 0).unwrap();
+    validate_business_cycle_plan(&state, plan)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let economy = state.economy().get_business_economy(business).unwrap();
+    assert_eq!(
+        economy.status(),
+        crate::economy::BusinessOperatingStatus::Active
+    );
+    assert!(
+        !economy.is_operating(),
+        "the final representable cycle exhausted recurrence"
+    );
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    for branch in [&state, &restored] {
+        let before = bincode::serialize(branch).unwrap();
+        assert!(!is_actionable_opportunity_target(
+            &registry,
+            branch,
+            organization,
+            OperationKind::Intimidation,
+            target
+        ));
+        assert_eq!(
+            resolve_objective_blocker(
+                branch,
+                branch.operations().get_operation(operation).unwrap()
+            ),
+            Some(OperationObjectiveBlocker::TargetEconomyInactive)
+        );
+        assert_eq!(before, bincode::serialize(branch).unwrap());
+        validate_invariants(branch);
+    }
+}
+
+#[test]
 fn cash_target_suspended_mid_execution_records_practical_failure_without_proceeds() {
     let (registry, mut state, _police, _neighborhood, operation) =
         make_exposed_operation_fixture(OperationKind::Intimidation, false, Vec::new());

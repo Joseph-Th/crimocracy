@@ -1033,6 +1033,94 @@ fn payroll_spends_dirty_cash_before_clean_reserves() {
 }
 
 #[test]
+fn payroll_snapshot_and_settlement_share_capped_payment_allocation() {
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let owner = FinancialOwner::Organization(fixture.organization);
+    let mut open =
+        |kind| insert_account(&mut fixture.state, FinancialAccountDraft { owner, kind }).unwrap();
+    let larger = open(AccountKind::StreetCash);
+    let concealed = open(AccountKind::ConcealedCash);
+    let clean = open(AccountKind::AccountedFunds);
+    let debt = open(AccountKind::StreetCash);
+    let clearing = open(AccountKind::Settlement);
+    for (account, cents) in [
+        (fixture.treasury, 100),
+        (larger, 400),
+        (concealed, 200),
+        (clean, 301),
+        (debt, -900),
+        (clearing, 50_000),
+    ] {
+        credit_account(&mut fixture.state, fixture.boss, account, cents);
+    }
+    let owed = registry.upkeep().per_member_daily().checked_mul(2).unwrap();
+    let paid = Money::from_cents(1001);
+    let initial = bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap();
+    assert_eq!(
+        payroll_funding_snapshot(&registry, &fixture.state, fixture.organization).unwrap(),
+        (owed, paid)
+    );
+    assert_eq!(
+        initial,
+        bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap()
+    );
+    let (partial, missing) = crate::finance::helpers::payment_debits_up_to(
+        fixture.state.finance().accounts_for(owner),
+        owed,
+    );
+    assert_eq!(missing, owed.checked_sub(paid).unwrap());
+    assert_eq!(
+        crate::finance::helpers::payment_debits(fixture.state.finance().accounts_for(owner), owed),
+        Err(missing)
+    );
+    let expected = [
+        (larger, -400),
+        (fixture.treasury, -100),
+        (concealed, -200),
+        (clean, -301),
+    ]
+    .map(|(account, cents)| LedgerPosting {
+        account,
+        amount: Money::from_cents(cents),
+    });
+    assert_eq!(partial, expected);
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        state.advance_clock(SimDuration::from_minutes(DAY_MINUTES));
+        let outcome = apply_daily_payroll(&registry, state).unwrap().remove(0);
+        assert_eq!(
+            (outcome.owed(), outcome.paid(), outcome.short()),
+            (owed, paid, missing)
+        );
+        let transaction = state
+            .finance()
+            .get_transaction(outcome.transaction().unwrap())
+            .unwrap();
+        assert_eq!(&transaction.postings()[..expected.len()], &expected);
+        assert_eq!(
+            state.finance().get_account(debt).unwrap().balance().cents(),
+            -900
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(clearing)
+                .unwrap()
+                .balance()
+                .cents(),
+            50_000
+        );
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn shortfall_distributes_available_cash_and_breeds_supervisor_resentment() {
     let registry = build_registry();
     let mut fixture = make_test_payroll_fixture();

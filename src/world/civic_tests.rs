@@ -80,6 +80,100 @@ fn police_departments_stagger_weekly_rest_instead_of_closing_citywide() {
 }
 
 #[test]
+fn daily_patrol_projection_respects_authority_home_and_suspended_deployments() {
+    use crate::legal::patrol_system::{PatrolDeploymentTransition, validate_patrol_transition};
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Medium.config(562_365)).unwrap();
+    let authority = city.police[0];
+    let deployments: Vec<_> = city
+        .state
+        .world()
+        .neighborhoods()
+        .flat_map(|ward| {
+            city.state
+                .legal()
+                .active_patrol_deployments_for_neighborhood(ward.id())
+        })
+        .filter(|deployment| deployment.organization() == authority)
+        .map(|deployment| deployment.id())
+        .collect();
+    assert!(!deployments.is_empty());
+    for id in deployments {
+        validate_patrol_transition(&city.state, id, PatrolDeploymentTransition::Suspend)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut restored] {
+        state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+        crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, state)
+            .unwrap();
+        apply_due_character_lives(state);
+        let day = state.now().as_minutes() / DAY_MINUTES;
+        let mut inactive = 0;
+        let mut active = 0;
+        for person in state.world().characters().filter(|p| {
+            state.world().civic_profession(p.id()) == Some(CivicProfession::PoliceOfficer)
+        }) {
+            if (day + u64::from(person.id().raw())).is_multiple_of(7)
+                || state
+                    .legal()
+                    .active_investigation_for_investigator(person.id())
+                    .is_some()
+            {
+                continue;
+            }
+            let organization = person.organization().unwrap();
+            let districts: Vec<_> = state
+                .world()
+                .neighborhoods()
+                .filter(|ward| {
+                    state
+                        .legal()
+                        .active_patrol_deployments_for_neighborhood(ward.id())
+                        .any(|deployment| deployment.organization() == organization)
+                })
+                .map(|ward| ward.id())
+                .collect();
+            let expected = person
+                .life()
+                .home()
+                .filter(|home| districts.contains(home))
+                .or_else(|| {
+                    districts
+                        .get(
+                            ((day + u64::from(person.id().raw())) % districts.len().max(1) as u64)
+                                as usize,
+                        )
+                        .copied()
+                });
+            assert_eq!(
+                person.life().last_activity(),
+                expected.map(|district| (state.now(), CivicActivity::PolicePatrol(district)))
+            );
+            if organization == authority {
+                assert!(expected.is_none());
+                inactive += 1;
+            } else if expected.is_some() {
+                active += 1;
+            }
+        }
+        assert!(inactive > 0);
+        assert!(
+            active > 0,
+            "suspending one authority cannot close all other precincts"
+        );
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &restored).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn long_running_detective_assignment_recovers_on_actual_weekly_rest_days() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
