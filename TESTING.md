@@ -435,7 +435,13 @@ compares daily duties with active deployments in a multi-authority city and prov
 suspending one authority does not close another's routes, including after restore.
 `recurrence_exhausted_cash_target_is_unavailable_to_discovery_and_execution`
 settles the final representable business cycle and verifies both discovery and
-execution reject that target without mutation, before and after restoration. The police-response integration test resolves two complete
+execution reject that target without mutation, before and after restoration.
+`manual_owner_draw_uses_receivable_treasury_and_reports_actual_receipt` verifies
+that an explicit withdrawal leaves unrelated debt untouched and credits a usable
+account, with byte-identical restored continuation. The library regression
+`manual_owner_distribution_reuses_headroom_and_opens_only_the_remainder`
+compares manual and automatic postings across multiple receiving accounts and
+one atomic account opening. The police-response integration test resolves two complete
 identifying operations and verifies one active file, independent evidence, actual
 custody, and deterministic continuation from a save between incidents.
 The autonomous repeat-custody regression preserves fresh qualifying testimony

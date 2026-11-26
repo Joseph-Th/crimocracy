@@ -55,14 +55,29 @@ pub(super) struct ProfitDistribution {
     pub(super) postings: Vec<LedgerPosting>,
 }
 
-/// Settle one complete owner cohort atomically. Reuse existing receipt capacity
-/// first, and reserve every required account and ledger ID before mutation.
-/// The caller supplies distinct owners in deterministic order.
+/// Settle the complete automatic cohort or defer it on shared allocator exhaustion.
 pub(super) fn settle_profit_distributions(
     state: &mut AppState,
     groups: impl IntoIterator<Item = (FinancialOwner, ProfitDistribution)>,
     memo: &str,
 ) -> Result<Option<LedgerTransactionId>, BusinessProfitSweepError> {
+    match validate_profit_distributions(state, groups, memo) {
+        Ok(Some(transaction)) => Ok(Some(transaction.commit(state)?)),
+        Ok(None) | Err(BusinessProfitSweepError::Finance(FinanceError::IdExhaustion(_))) => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Plan a balanced owner distribution, including any required new accounts.
+/// Manual and recurring withdrawals share this receipt policy. The caller
+/// supplies distinct owners in deterministic order.
+fn validate_profit_distributions(
+    state: &AppState,
+    groups: impl IntoIterator<Item = (FinancialOwner, ProfitDistribution)>,
+    memo: &str,
+) -> Result<Option<ValidatedLedgerTransaction>, BusinessProfitSweepError> {
     let mut distributions = Vec::new();
     let mut drafts = Vec::new();
     for (owner, group) in groups {
@@ -86,16 +101,13 @@ pub(super) fn settle_profit_distributions(
         return Ok(None);
     }
     let openings_count = u32::try_from(drafts.len()).expect("owner count fits account ID width");
-    if state
+    state
         .ids
         .reserve_many(&[
             (IdKind::FinancialAccount, openings_count),
             (IdKind::LedgerTransaction, 1),
         ])
-        .is_err()
-    {
-        return Ok(None);
-    }
+        .map_err(FinanceError::from)?;
 
     let openings = if drafts.is_empty() {
         None
@@ -134,7 +146,7 @@ pub(super) fn settle_profit_distributions(
         }
         None => validate_record_business_transaction(state, draft)?,
     };
-    Ok(Some(transaction.commit(state)?))
+    Ok(Some(transaction))
 }
 
 /// An owner's draw on a business it owns: legitimate till cash becomes spendable organization
@@ -144,7 +156,6 @@ pub(super) fn settle_profit_distributions(
 pub struct BusinessProfitSweepDraft {
     pub organization: OrganizationId,
     pub business: BusinessId,
-    pub destination: FinancialAccountId,
     pub amount: Money,
 }
 
@@ -169,17 +180,6 @@ pub enum BusinessProfitSweepError {
         business: BusinessId,
         account: FinancialAccountId,
     },
-    #[error("destination account {0} does not exist")]
-    MissingDestinationAccount(FinancialAccountId),
-    #[error("destination account {account} is not owned by organization {organization}")]
-    DestinationOwnerMismatch {
-        account: FinancialAccountId,
-        organization: OrganizationId,
-    },
-    #[error(
-        "destination account {0} must hold accounted funds: till cash enters the books as legitimate wealth"
-    )]
-    InvalidDestinationKind(FinancialAccountId),
     #[error(
         "business {business} till holds {available_cents} cents and cannot sweep {requested_cents}"
     )]
@@ -229,6 +229,17 @@ pub struct ValidatedBusinessProfitSweep {
     expected_business_version: u32,
     expected_economy_version: u32,
     expected_overhead_basis_points: u16,
+    gross: Money,
+    fee: Money,
+}
+
+/// Actual committed withdrawal, distinct from the gross amount requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusinessProfitSweepOutcome {
+    pub transaction: LedgerTransactionId,
+    pub gross: Money,
+    pub administration: Money,
+    pub received: Money,
 }
 
 impl std::fmt::Debug for ValidatedBusinessProfitSweep {
@@ -243,7 +254,10 @@ impl std::fmt::Debug for ValidatedBusinessProfitSweep {
 }
 
 impl ValidatedBusinessProfitSweep {
-    pub fn commit(self, state: &mut AppState) -> Result<(), BusinessProfitSweepError> {
+    pub fn commit(
+        self,
+        state: &mut AppState,
+    ) -> Result<BusinessProfitSweepOutcome, BusinessProfitSweepError> {
         let business_record = state
             .world
             .get_business(self.business)
@@ -273,8 +287,16 @@ impl ValidatedBusinessProfitSweep {
         {
             return Err(BusinessProfitSweepError::StalePortfolio);
         }
-        self.transaction.commit(state)?;
-        Ok(())
+        let transaction = self.transaction.commit(state)?;
+        Ok(BusinessProfitSweepOutcome {
+            transaction,
+            gross: self.gross,
+            administration: self.fee,
+            received: self
+                .gross
+                .checked_sub(self.fee)
+                .expect("fee does not exceed gross"),
+        })
     }
 }
 
@@ -286,7 +308,6 @@ pub fn validate_sweep_business_profits(
         return Err(BusinessProfitSweepError::NonPositiveAmount);
     }
     let context = resolve_business_profit_sweep_context(state, draft.organization, draft.business)?;
-    validate_business_profit_sweep_destination(state, &draft)?;
     validate_business_profit_sweep_capacity(
         &draft,
         context.operating_balance,
@@ -311,25 +332,23 @@ pub fn validate_sweep_business_profits(
             amount: fee,
         });
     }
-    if owner_receipt > Money::ZERO {
-        postings.push(LedgerPosting {
-            account: draft.destination,
-            amount: owner_receipt,
-        });
-    }
-    let transaction = validate_record_business_transaction(
+    let memo = format!(
+        "Owner withdrawal of {} from {} till",
+        format_money_cents(draft.amount.cents()),
+        context.business_name,
+    );
+    let transaction = validate_profit_distributions(
         state,
-        LedgerTransactionDraft {
-            occurred_at: state.now(),
-            memo: format!(
-                "Owner withdrawal of {} from {} till",
-                format_money_cents(draft.amount.cents()),
-                context.business_name,
-            ),
-            postings,
-            authorization: None,
-        },
-    )?;
+        [(
+            FinancialOwner::Organization(draft.organization),
+            ProfitDistribution {
+                total: owner_receipt,
+                postings,
+            },
+        )],
+        &memo,
+    )?
+    .expect("a positive owner receipt creates a distribution");
     Ok(ValidatedBusinessProfitSweep {
         transaction,
         business: draft.business,
@@ -337,6 +356,8 @@ pub fn validate_sweep_business_profits(
         expected_business_version: context.business_version,
         expected_economy_version: context.economy_version,
         expected_overhead_basis_points: overhead,
+        gross: draft.amount,
+        fee,
     })
 }
 
@@ -400,27 +421,6 @@ pub(super) fn resolve_business_profit_sweep_context(
         business_version: business_record.version(),
         economy_version: economy.version(),
     })
-}
-
-fn validate_business_profit_sweep_destination(
-    state: &AppState,
-    draft: &BusinessProfitSweepDraft,
-) -> Result<(), BusinessProfitSweepError> {
-    let destination = state.finance.get_account(draft.destination).ok_or(
-        BusinessProfitSweepError::MissingDestinationAccount(draft.destination),
-    )?;
-    if destination.owner() != FinancialOwner::Organization(draft.organization) {
-        return Err(BusinessProfitSweepError::DestinationOwnerMismatch {
-            account: draft.destination,
-            organization: draft.organization,
-        });
-    }
-    if destination.kind() != AccountKind::AccountedFunds {
-        return Err(BusinessProfitSweepError::InvalidDestinationKind(
-            draft.destination,
-        ));
-    }
-    Ok(())
 }
 
 /// Read the earned surplus currently eligible for an organization owner's withdrawal.

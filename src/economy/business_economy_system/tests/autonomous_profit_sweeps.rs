@@ -128,7 +128,6 @@ fn portfolio_overhead_is_paid_from_both_manual_and_automatic_profit_distribution
             BusinessProfitSweepDraft {
                 organization: fixture.organization,
                 business: fixture.business,
-                destination,
                 amount: Money::from_cents(1),
             }
         )
@@ -137,18 +136,26 @@ fn portfolio_overhead_is_paid_from_both_manual_and_automatic_profit_distribution
         "a one-cent draw must not silently consume all of the owner's proceeds",
     );
     assert_eq!(bincode::serialize(&manual).unwrap(), before_penny);
-    validate_sweep_business_profits(
+    let withdrawal = validate_sweep_business_profits(
         &manual,
         BusinessProfitSweepDraft {
             organization: fixture.organization,
             business: fixture.business,
-            destination,
             amount: gross,
         },
     )
     .unwrap()
     .commit(&mut manual)
     .unwrap();
+    assert_eq!(withdrawal.gross, gross);
+    assert_eq!(withdrawal.administration, fee);
+    assert_eq!(withdrawal.received, retained);
+    assert!(
+        manual
+            .finance()
+            .get_transaction(withdrawal.transaction)
+            .is_some()
+    );
     assert_eq!(
         manual.finance().get_account(destination).unwrap().balance(),
         retained
@@ -290,7 +297,6 @@ fn finance_directors_reduce_overhead_but_cannot_preserve_stale_withdrawal_quotes
     let draft = BusinessProfitSweepDraft {
         organization: fixture.organization,
         business: fixture.business,
-        destination,
         amount: funding,
     };
     let held = validate_sweep_business_profits(&fixture.state, draft.clone()).unwrap();
@@ -383,6 +389,99 @@ fn accounted_treasury_with_headroom(
     .commit(state)
     .expect("treasury capitalizes");
     accounted
+}
+
+#[test]
+fn manual_owner_distribution_reuses_headroom_and_opens_only_the_remainder() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(ONE_DAY));
+    validate_business_cycle_plan(
+        &fixture.state,
+        decide_business_cycle(&registry, &fixture.state, fixture.business, 0).unwrap(),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let surplus =
+        resolve_available_business_profit(&fixture.state, fixture.organization, fixture.business)
+            .unwrap();
+    assert!(surplus.cents() > 6);
+    let first_headroom = surplus.cents() / 3;
+    let second_headroom = first_headroom + 1;
+    let first =
+        accounted_treasury_with_headroom(&mut fixture.state, fixture.organization, first_headroom);
+    let second =
+        accounted_treasury_with_headroom(&mut fixture.state, fixture.organization, second_headroom);
+    let next = fixture.state.ids.next_raw(IdKind::FinancialAccount);
+    let draft = BusinessProfitSweepDraft {
+        organization: fixture.organization,
+        business: fixture.business,
+        amount: surplus,
+    };
+    let original = bincode::serialize(&fixture.state).unwrap();
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    let mut automatic = fixture.state.clone();
+    let automatic_id = apply_due_autonomous_profit_sweeps(&mut automatic)
+        .unwrap()
+        .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let held = validate_sweep_business_profits(state, draft.clone()).unwrap();
+        assert_eq!(bincode::serialize(state).unwrap(), original);
+        let result = held.commit(state).unwrap();
+        assert_eq!(result.received, surplus);
+        assert_eq!(result.administration, Money::ZERO);
+        assert_eq!(state.ids.next_raw(IdKind::FinancialAccount), next + 1);
+        assert_eq!(
+            state
+                .finance()
+                .get_account(first)
+                .unwrap()
+                .balance()
+                .cents(),
+            i64::MAX
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(second)
+                .unwrap()
+                .balance()
+                .cents(),
+            i64::MAX
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(FinancialAccountId::from_raw(next))
+                .unwrap()
+                .balance()
+                .cents(),
+            surplus.cents() - first_headroom - second_headroom
+        );
+        let postings = state
+            .finance()
+            .get_transaction(result.transaction)
+            .unwrap()
+            .postings();
+        assert_eq!(
+            postings,
+            automatic
+                .finance()
+                .get_transaction(automatic_id)
+                .unwrap()
+                .postings()
+        );
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
 }
 
 #[test]

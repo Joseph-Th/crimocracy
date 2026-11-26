@@ -950,20 +950,11 @@ fn acquisition_rebases_operating_capital_floor_to_inherited_cash() {
     assert_eq!(record.capital_floor_business_version(), business.version());
     assert_eq!(record.capital_floor_set_at(), fixture.state.now());
 
-    let destination = insert_account(
-        &mut fixture.state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Organization(fixture.organization),
-            kind: AccountKind::AccountedFunds,
-        },
-    )
-    .expect("owner destination should validate");
     let error = validate_sweep_business_profits(
         &fixture.state,
         BusinessProfitSweepDraft {
             organization: fixture.organization,
             business: fixture.business,
-            destination,
             amount: Money::from_cents(1),
         },
     )
@@ -3033,7 +3024,6 @@ fn owner_sweep_preserves_opening_operating_capital_until_later_profit_is_earned(
         BusinessProfitSweepDraft {
             organization: fixture.organization,
             business: fixture.business,
-            destination,
             amount: Money::from_cents(1),
         },
     )
@@ -3066,7 +3056,6 @@ fn owner_sweep_preserves_opening_operating_capital_until_later_profit_is_earned(
         BusinessProfitSweepDraft {
             organization: fixture.organization,
             business: fixture.business,
-            destination,
             amount: earned,
         },
     )
@@ -3194,7 +3183,6 @@ fn owner_sweep_moves_till_cash_into_accounted_funds() {
         BusinessProfitSweepDraft {
             organization: fixture.organization,
             business: fixture.business,
-            destination,
             amount: sweep,
         },
     )
@@ -3346,76 +3334,49 @@ fn profit_sweep_rejections_leave_state_unchanged() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture();
     establish_business_economy(&registry, &mut fixture);
-    let destination = insert_account(
+    let foreign = insert_organization(
+        &registry,
         &mut fixture.state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Organization(fixture.organization),
-            kind: AccountKind::AccountedFunds,
+        OrganizationDraft {
+            name: "Foreign owner".to_owned(),
+            kind: OrganizationKind::Criminal,
         },
     )
-    .expect("accounted destination should validate");
-    let foreign_destination = insert_account(
-        &mut fixture.state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Business(fixture.business),
-            kind: AccountKind::LegitimateOperating,
-        },
-    )
-    .expect("foreign destination should validate");
-    // Empty till: any positive sweep exceeds real liquidity. Validation is read-only,
-    // so these assertions pin balances rather than whole-state equality.
-    let balances_before: Vec<(FinancialAccountId, i64)> = fixture
-        .state
-        .finance()
-        .accounts()
-        .map(|account| (account.id(), account.balance().cents()))
-        .collect();
-    let error = validate_sweep_business_profits(
-        &fixture.state,
-        BusinessProfitSweepDraft {
-            organization: fixture.organization,
-            business: fixture.business,
-            destination,
-            amount: Money::from_cents(1),
-        },
-    )
-    .expect_err("sweep beyond till liquidity must reject");
-    assert!(matches!(
-        error,
-        BusinessProfitSweepError::InsufficientTillCash { .. }
-    ));
-    let error = validate_sweep_business_profits(
-        &fixture.state,
-        BusinessProfitSweepDraft {
-            organization: fixture.organization,
-            business: fixture.business,
-            destination,
-            amount: Money::ZERO,
-        },
-    )
-    .expect_err("non-positive sweep must reject");
-    assert!(matches!(error, BusinessProfitSweepError::NonPositiveAmount));
-    let error = validate_sweep_business_profits(
-        &fixture.state,
-        BusinessProfitSweepDraft {
-            organization: fixture.organization,
-            business: fixture.business,
-            destination: foreign_destination,
-            amount: Money::from_cents(1),
-        },
-    )
-    .expect_err("sweep into a business-owned account must reject");
-    assert!(matches!(
-        error,
-        BusinessProfitSweepError::DestinationOwnerMismatch { .. }
-    ));
-    let balances_after: Vec<(FinancialAccountId, i64)> = fixture
-        .state
-        .finance()
-        .accounts()
-        .map(|account| (account.id(), account.balance().cents()))
-        .collect();
-    assert_eq!(balances_before, balances_after);
+    .unwrap();
+    let before = bincode::serialize(&fixture.state).unwrap();
+    for (organization, amount, expected) in [
+        (
+            fixture.organization,
+            Money::from_cents(1),
+            BusinessProfitSweepError::InsufficientTillCash {
+                business: fixture.business,
+                available_cents: 0,
+                requested_cents: 1,
+            },
+        ),
+        (
+            fixture.organization,
+            Money::ZERO,
+            BusinessProfitSweepError::NonPositiveAmount,
+        ),
+        (
+            foreign,
+            Money::from_cents(1),
+            BusinessProfitSweepError::ForeignBusiness(fixture.business),
+        ),
+    ] {
+        let error = validate_sweep_business_profits(
+            &fixture.state,
+            BusinessProfitSweepDraft {
+                organization,
+                business: fixture.business,
+                amount,
+            },
+        )
+        .expect_err("invalid owner withdrawal must reject");
+        assert_eq!(error, expected);
+        assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    }
 }
 
 #[test]
@@ -3423,14 +3384,6 @@ fn profit_sweep_rejects_stale_economy_after_settlement() {
     let registry = build_registry();
     let mut fixture = make_business_economy_fixture();
     establish_business_economy(&registry, &mut fixture);
-    let destination = insert_account(
-        &mut fixture.state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Organization(fixture.organization),
-            kind: AccountKind::AccountedFunds,
-        },
-    )
-    .expect("accounted destination should validate");
     let seed = Money::from_cents(50_000);
     validate_record_business_transaction(
         &fixture.state,
@@ -3458,7 +3411,6 @@ fn profit_sweep_rejects_stale_economy_after_settlement() {
         BusinessProfitSweepDraft {
             organization: fixture.organization,
             business: fixture.business,
-            destination,
             amount: Money::from_cents(5_000),
         },
     )

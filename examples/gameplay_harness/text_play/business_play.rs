@@ -409,18 +409,11 @@ impl Session<'_> {
                     .find(|b| b.id().raw() == raw)
                     .ok_or("not an owned business")?
                     .id();
-                let destination = state
-                    .finance()
-                    .accounts_for(FinancialOwner::Organization(self.player))
-                    .find(|account| account.kind() == AccountKind::AccountedFunds)
-                    .ok_or("organization has no accounted-funds account")?
-                    .id();
-                validate_sweep_business_profits(
+                let outcome = validate_sweep_business_profits(
                     &self.state,
                     BusinessProfitSweepDraft {
                         organization: self.player,
                         business,
-                        destination,
                         amount: Money::from_cents(cents),
                     },
                 )
@@ -429,7 +422,8 @@ impl Session<'_> {
                 .map_err(|e| e.to_string())?;
                 writeln!(
                     out,
-                    "Withdrew {cents} cents of actual earned business surplus."
+                    "Withdrew {} cents of actual earned business surplus; received {} cents, administration {} cents (transaction-{}).",
+                    outcome.gross.cents(), outcome.received.cents(), outcome.administration.cents(), outcome.transaction.raw()
                 )
                 .unwrap();
             }

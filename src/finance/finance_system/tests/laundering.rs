@@ -604,7 +604,6 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
         BusinessProfitSweepDraft {
             organization: fixture.organization,
             business: fixture.business,
-            destination: fixture.accounted,
             amount: fee,
         },
     )

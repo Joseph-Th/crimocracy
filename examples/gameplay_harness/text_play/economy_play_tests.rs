@@ -128,6 +128,111 @@ fn recovered_acquired_storefront_never_leaks_previous_owners_cycle_books() {
 }
 
 #[test]
+fn manual_owner_draw_uses_receivable_treasury_and_reports_actual_receipt() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    let owner = FinancialOwner::Organization(session.player);
+    let indebted = session
+        .state
+        .finance()
+        .accounts_for(owner)
+        .find(|account| account.kind() == AccountKind::AccountedFunds)
+        .unwrap()
+        .id();
+    let clearing = insert_account(
+        &mut session.state,
+        FinancialAccountDraft {
+            owner,
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &session.state,
+        LedgerTransactionDraft {
+            occurred_at: session.state.now(),
+            memo: "Test existing accounted obligation".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: indebted,
+                    amount: Money::from_cents(-1_000),
+                },
+                LedgerPosting {
+                    account: clearing,
+                    amount: Money::from_cents(1_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    session.execute("open-account accounted").unwrap();
+    let receiver = session
+        .state
+        .finance()
+        .accounts_for(owner)
+        .find(|account| account.kind() == AccountKind::AccountedFunds && account.id() != indebted)
+        .unwrap()
+        .id();
+    session.execute("advance 1d uninterrupted").unwrap();
+    let business = session
+        .state
+        .world()
+        .businesses_owned_by_organization(session.player)
+        .find(|business| {
+            crimocracy::economy::business_economy_system::resolve_available_business_profit(
+                &session.state,
+                session.player,
+                business.id(),
+            )
+            .is_ok_and(|amount| amount.cents() >= 1_000)
+        })
+        .unwrap()
+        .id();
+    let before = snapshot(&registry, &session);
+    let output = session
+        .execute(&format!("sweep {} 1000", business.raw()))
+        .unwrap()
+        .0;
+    assert_eq!(
+        session
+            .state
+            .finance()
+            .get_account(indebted)
+            .unwrap()
+            .balance()
+            .cents(),
+        -1_000,
+        "an ordinary owner distribution must not implicitly pay an unrelated debt"
+    );
+    assert_eq!(
+        session
+            .state
+            .finance()
+            .get_account(receiver)
+            .unwrap()
+            .balance()
+            .cents(),
+        1_000
+    );
+    assert!(output.contains("received 1000 cents"), "{output}");
+    assert!(output.contains("administration 0 cents"), "{output}");
+    let after = snapshot(&registry, &session);
+    session.state = restore_save(&registry, bincode::deserialize(&before).unwrap()).unwrap();
+    assert_eq!(
+        session
+            .execute(&format!("sweep {} 1000", business.raw()))
+            .unwrap()
+            .0,
+        output
+    );
+    assert_eq!(snapshot(&registry, &session), after);
+}
+
+#[test]
 fn explicit_max_and_reserved_laundering_orders_use_real_front_capacity() {
     let registry = crimocracy::build_registry();
     let mut session =
