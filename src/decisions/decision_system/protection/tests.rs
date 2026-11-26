@@ -148,6 +148,45 @@ fn unanswered_protection_demand_only_suspends_rival_for_one_day() {
 }
 
 #[test]
+fn unanswered_protection_offer_expires_and_can_be_replaced() {
+    let (registry, mut city, district) = exposed_city();
+    let (request, terms) = first_demand(&registry, &mut city);
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut restored] {
+        state.advance_clock(SimDuration::from_minutes((30 * DAY_MINUTES) as u32));
+        assert!(!rival_pressure_blocked(state, terms.attacker(), district));
+        let renewed = apply_due_protection_demands(&registry, state);
+        let expired = state.decisions().get_decision(request).unwrap();
+        assert_eq!(expired.status(), DecisionStatus::Cancelled);
+        assert_eq!(
+            expired.cancellation().unwrap().reason(),
+            DecisionCancellationReason::ProtectionOfferExpired
+        );
+        assert!(expired.resolution().is_none());
+        assert!(!recently_refused_protection(
+            state,
+            terms.attacker(),
+            district
+        ));
+        let replacement = state
+            .decisions()
+            .pending_protection_demand(district)
+            .unwrap();
+        assert_ne!(replacement, request);
+        assert!(
+            renewed
+                .iter()
+                .any(|outcome| outcome.decision == replacement)
+        );
+    }
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn named_muscle_is_distributed_not_multiplied_across_legitimate_wards() {
     let (_registry, city, exposed) = exposed_city();
     let named = city

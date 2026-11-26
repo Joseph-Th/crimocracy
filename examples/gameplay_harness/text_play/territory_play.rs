@@ -55,6 +55,19 @@ impl Session<'_> {
                             .expect("agreed counterpart exists");
                         writeln!(out, "  Standstill with {} (org-{}) until {} | no new rackets or offensive business operations",
                             rival.name(), rival.id().raw(), time_label(standstill.expires_at.as_minutes())).unwrap();
+                        if let Some(receipt) = standstill.settlement {
+                            let direction = if standstill.initiator == self.player {
+                                "paid"
+                            } else {
+                                "received"
+                            };
+                            writeln!(
+                                out,
+                                "    Tribute {direction}: {} cents street cash | ledger {receipt}",
+                                standstill.tribute.cents()
+                            )
+                            .unwrap();
+                        }
                     }
                     if let Some(sightings) = by_district.get(&district.id()) {
                         for (id, organization, info) in sightings {

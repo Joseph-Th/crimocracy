@@ -62,6 +62,7 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
         (u64, crate::core::id::OrganizationId),
     >::new();
     let mut victory_seen = false;
+    let mut standstill_receipts = BTreeSet::new();
     for event in state.history.events() {
         if event.summary().trim().is_empty() {
             return Err(StateValidationError::EmptyHistorySummary { event: event.id() });
@@ -181,6 +182,8 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
             district,
             initiator,
             counterparty,
+            tribute,
+            settlement,
         } = event.kind()
         {
             let invalid = || StateValidationError::InvalidTerritoryStandstill { event: event.id() };
@@ -202,6 +205,16 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
                 || !criminal(initiator)
                 || !criminal(counterparty)
                 || state.world().get_neighborhood(district).is_none()
+                || !crate::world::territory_influence::standstill_tribute_matches(
+                    state,
+                    district,
+                    initiator,
+                    counterparty,
+                    tribute,
+                    settlement,
+                    event.occurred_at(),
+                )
+                || settlement.is_some_and(|id| !standstill_receipts.insert(id))
                 || event.entities()
                     != &BTreeSet::from([
                         EntityRef::Neighborhood(district),
@@ -209,13 +222,15 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
                         EntityRef::Organization(counterparty),
                     ])
                 || event.summary()
-                    != format!(
-                        "Thirty-day territorial standstill in {} between {initiator} and {counterparty}.",
+                    != crate::history::history_system::territory_standstill_summary(
                         state
                             .world()
                             .get_neighborhood(district)
                             .ok_or_else(invalid)?
-                            .name()
+                            .name(),
+                        initiator,
+                        counterparty,
+                        tribute,
                     )
                 || [initiator, counterparty].into_iter().any(|org| {
                     previous_standstills

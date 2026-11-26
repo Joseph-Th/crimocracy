@@ -32,6 +32,8 @@ pub enum HistoryEventKind {
         district: NeighborhoodId,
         initiator: OrganizationId,
         counterparty: OrganizationId,
+        tribute: Money,
+        settlement: Option<crate::core::id::LedgerTransactionId>,
     },
     TerritoryClash {
         district: NeighborhoodId,
@@ -99,6 +101,7 @@ impl TerritoryHistoryIndexes {
                 district,
                 initiator,
                 counterparty,
+                ..
             } => {
                 self.latest_standstill
                     .insert((initiator, district), event.id());
@@ -132,6 +135,19 @@ impl HistoryState {
     }
     pub fn get_event(&self, id: HistoryEventId) -> Option<&HistoryEventRecord> {
         self.records.get(&id)
+    }
+    #[cfg(test)]
+    pub(crate) fn replace_standstill_receipt_for_test(
+        &mut self,
+        id: HistoryEventId,
+        receipt: Option<crate::core::id::LedgerTransactionId>,
+    ) {
+        let HistoryEventKind::TerritoryStandstill { settlement, .. } =
+            &mut self.records.get_mut(&id).unwrap().kind
+        else {
+            panic!("expected a standstill event");
+        };
+        *settlement = receipt;
     }
     pub(crate) fn events(&self) -> impl DoubleEndedIterator<Item = &HistoryEventRecord> {
         self.records.values()

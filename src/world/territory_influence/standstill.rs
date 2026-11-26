@@ -4,7 +4,9 @@
 //! derived economic footprint supplies the current negotiation terms.
 
 use super::resolve_neighborhood_influence;
-use crate::core::id::{HistoryEventId, IdExhaustionError, IdKind, NeighborhoodId, OrganizationId};
+use crate::core::id::{
+    HistoryEventId, IdExhaustionError, IdKind, LedgerTransactionId, NeighborhoodId, OrganizationId,
+};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, is_day_boundary};
 use crate::enterprises::EnterpriseStatus;
@@ -17,9 +19,7 @@ use crate::finance::{
     Money,
 };
 use crate::history::HistoryEventKind;
-use crate::history::history_system::{
-    HistoryError, ValidatedHistoryEvent, validate_territory_standstill_event,
-};
+use crate::history::history_system::{HistoryError, validate_territory_standstill_event};
 use crate::world::OrganizationKind;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -34,6 +34,9 @@ pub struct TerritoryStandstill {
     pub district: NeighborhoodId,
     pub counterparty: OrganizationId,
     pub expires_at: SimTime,
+    pub initiator: OrganizationId,
+    pub tribute: Money,
+    pub settlement: Option<LedgerTransactionId>,
 }
 
 pub fn active_standstill(
@@ -47,6 +50,8 @@ pub fn active_standstill(
     let HistoryEventKind::TerritoryStandstill {
         initiator,
         counterparty,
+        tribute,
+        settlement,
         ..
     } = event.kind()
     else {
@@ -65,6 +70,9 @@ pub fn active_standstill(
             initiator
         },
         expires_at: SimTime::from_minutes(end),
+        initiator,
+        tribute,
+        settlement,
     })
 }
 
@@ -185,7 +193,6 @@ pub struct ValidatedTerritoryStandstill {
     counterparty: OrganizationId,
     district: NeighborhoodId,
     validated_at: SimTime,
-    history: ValidatedHistoryEvent,
     tribute: Money,
     payment: Option<ValidatedLedgerTransaction>,
 }
@@ -213,11 +220,27 @@ impl ValidatedTerritoryStandstill {
             budget.extend(payment.id_budget());
         }
         state.ids.reserve_many(&budget)?;
-        let history = self.history.commit(state)?;
-        if let Some(payment) = self.payment {
-            payment.commit_preflighted(state);
-        }
-        Ok(history)
+        // The ledger allocator may have advanced since validation because of
+        // unrelated same-minute work. Bind the actual next ID only after preflight.
+        let settlement = self
+            .payment
+            .as_ref()
+            .map(|_| LedgerTransactionId::from_raw(state.ids.next_raw(IdKind::LedgerTransaction)));
+        let history = validate_territory_standstill_event(
+            state,
+            self.district,
+            self.initiator,
+            self.counterparty,
+            self.tribute,
+            settlement,
+        )?;
+        let paid = self
+            .payment
+            .map(|payment| payment.commit_preflighted(state));
+        debug_assert_eq!(paid, settlement);
+        Ok(history
+            .commit(state)
+            .expect("preflighted standstill history must commit"))
     }
 }
 
@@ -265,9 +288,7 @@ pub fn validate_negotiate_standstill_with_tribute(
             });
             LedgerTransactionDraft {
                 occurred_at: state.now(),
-                memo: format!(
-                    "Territorial standstill tribute for {district}: {initiator} to {counterparty}"
-                ),
+                memo: tribute_memo(district, initiator, counterparty),
                 postings,
                 authorization: None,
             }
@@ -302,7 +323,17 @@ pub fn validate_negotiate_standstill_with_tribute(
     } else {
         None
     };
-    let history = validate_territory_standstill_event(state, district, initiator, counterparty)?;
+    let settlement = payment
+        .as_ref()
+        .map(|_| LedgerTransactionId::from_raw(state.ids.next_raw(IdKind::LedgerTransaction)));
+    validate_territory_standstill_event(
+        state,
+        district,
+        initiator,
+        counterparty,
+        tribute,
+        settlement,
+    )?;
     let mut budget = vec![(IdKind::HistoryEvent, 1)];
     if let Some(payment) = &payment {
         budget.extend(payment.id_budget());
@@ -313,10 +344,72 @@ pub fn validate_negotiate_standstill_with_tribute(
         counterparty,
         district,
         validated_at: state.now(),
-        history,
         tribute,
         payment,
     })
+}
+
+fn tribute_memo(
+    district: NeighborhoodId,
+    initiator: OrganizationId,
+    counterparty: OrganizationId,
+) -> String {
+    format!("Territorial standstill tribute for {district}: {initiator} to {counterparty}")
+}
+
+/// An agreement is valid only when its optional receipt proves the exact
+/// negotiated amount, minute, payer, receiver and money kind. Free agreements
+/// must not claim a receipt. No current balances enter historical validation.
+pub(crate) fn standstill_tribute_matches(
+    state: &AppState,
+    district: NeighborhoodId,
+    initiator: OrganizationId,
+    counterparty: OrganizationId,
+    tribute: Money,
+    settlement: Option<LedgerTransactionId>,
+    at: SimTime,
+) -> bool {
+    if tribute == Money::ZERO {
+        return settlement.is_none();
+    }
+    if tribute < Money::ZERO {
+        return false;
+    }
+    let Some(record) = settlement.and_then(|id| state.finance().get_transaction(id)) else {
+        return false;
+    };
+    if record.occurred_at() != at
+        || record.memo() != tribute_memo(district, initiator, counterparty)
+        || record.budget_usage().is_some()
+    {
+        return false;
+    }
+    let mut debited = 0_i128;
+    let mut credits = 0;
+    for posting in record.postings() {
+        let Some(account) = state.finance().get_account(posting.account) else {
+            return false;
+        };
+        if account.kind() != AccountKind::StreetCash {
+            return false;
+        }
+        match account.owner() {
+            FinancialOwner::Organization(owner)
+                if owner == initiator && posting.amount < Money::ZERO =>
+            {
+                debited -= i128::from(posting.amount.cents())
+            }
+            FinancialOwner::Organization(owner)
+                if owner == counterparty && posting.amount == tribute =>
+            {
+                credits += 1
+            }
+            FinancialOwner::Organization(_)
+            | FinancialOwner::Character(_)
+            | FinancialOwner::Business(_) => return false,
+        }
+    }
+    credits == 1 && debited == i128::from(tribute.cents())
 }
 
 /// Gangs which actually fought, and were left with a live or recently

@@ -194,6 +194,8 @@ pub enum DecisionCancellationReason {
     /// The organization-level recruitment policy that supplied this approval's effective rule
     /// changed, so the pending request no longer represents current delegated authority.
     RecruitmentOrganizationPolicyChanged(OrganizationId),
+    /// An unpaid protection offer reached the end of its acceptance window.
+    ProtectionOfferExpired,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

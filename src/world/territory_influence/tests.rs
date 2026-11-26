@@ -1450,10 +1450,49 @@ fn an_outnumbered_gang_can_buy_peace_with_real_street_cash() {
         Money::from_cents(25_000),
     )
     .expect("real street-cash tribute satisfies stronger rival");
+    // Other same-minute work can consume the next transaction ID without
+    // touching the prepared treaty's account dependencies.
+    let unrelated_source = fresh_settlement(&mut fixture.state, fixture.dominant);
+    let unrelated_destination = fresh_settlement(&mut fixture.state, fixture.challenger);
+    let unrelated = validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Independent receipt".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: unrelated_source,
+                    amount: Money::from_cents(-25_000),
+                },
+                LedgerPosting {
+                    account: unrelated_destination,
+                    amount: Money::from_cents(25_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
     let history = offer
         .commit(&mut fixture.state)
         .expect("payment and treaty commit together");
-    assert!(fixture.state.history().get_event(history).is_some());
+    let event = fixture.state.history().get_event(history).unwrap();
+    assert!(
+        event.summary().contains("25000 cents"),
+        "the authoritative treaty must retain its paid terms"
+    );
+    let crate::history::HistoryEventKind::TerritoryStandstill {
+        tribute,
+        settlement: Some(receipt),
+        ..
+    } = event.kind()
+    else {
+        panic!("paid agreement must retain its actual receipt");
+    };
+    assert_eq!(tribute, Money::from_cents(25_000));
+    assert_ne!(receipt, unrelated);
     assert_eq!(
         fixture
             .state
@@ -1479,7 +1518,7 @@ fn an_outnumbered_gang_can_buy_peace_with_real_street_cash() {
         fixture
             .state
             .finance()
-            .get_transaction(crate::core::id::LedgerTransactionId::from_raw(2))
+            .get_transaction(receipt)
             .unwrap()
             .postings()
             .len(),
@@ -1498,7 +1537,27 @@ fn an_outnumbered_gang_can_buy_peace_with_real_street_cash() {
             .cents(),
         75_000
     );
-    assert!(active_standstill(&restored, fixture.dominant, fixture.neighborhood).is_some());
+    assert_eq!(
+        restored.history().get_event(history).unwrap().kind(),
+        fixture.state.history().get_event(history).unwrap().kind()
+    );
+    let terms = active_standstill(&restored, fixture.dominant, fixture.neighborhood).unwrap();
+    assert_eq!(terms.settlement, Some(receipt));
+    assert_eq!(terms.tribute, tribute);
+    assert_eq!(terms.initiator, fixture.dominant);
+    for wrong in [
+        None,
+        Some(unrelated),
+        Some(crate::core::id::LedgerTransactionId::from_raw(u32::MAX)),
+    ] {
+        let mut malformed = restored.clone();
+        malformed
+            .history
+            .replace_standstill_receipt_for_test(history, wrong);
+        assert!(
+            matches!(build_save(&registry, &malformed), Err(crate::core::persistence::SaveError::InvalidState(crate::core::invariants::StateValidationError::InvalidTerritoryStandstill { event })) if event == history)
+        );
+    }
 }
 
 #[test]

@@ -115,6 +115,8 @@ pub(crate) fn validate_territory_standstill_event(
     district: NeighborhoodId,
     initiator: OrganizationId,
     counterparty: OrganizationId,
+    tribute: Money,
+    settlement: Option<crate::core::id::LedgerTransactionId>,
 ) -> Result<ValidatedHistoryEvent, HistoryError> {
     let name = state
         .world()
@@ -130,16 +132,35 @@ pub(crate) fn validate_territory_standstill_event(
                 district,
                 initiator,
                 counterparty,
+                tribute,
+                settlement,
             },
-            summary: format!(
-                "Thirty-day territorial standstill in {name} between {initiator} and {counterparty}."
-            ),
+            summary: territory_standstill_summary(name, initiator, counterparty, tribute),
             entities: BTreeSet::from([
                 EntityRef::Neighborhood(district),
                 EntityRef::Organization(initiator),
                 EntityRef::Organization(counterparty),
             ]),
         },
+    )
+}
+
+pub(crate) fn territory_standstill_summary(
+    name: &str,
+    initiator: OrganizationId,
+    counterparty: OrganizationId,
+    tribute: Money,
+) -> String {
+    let terms = if tribute == Money::ZERO {
+        "No tribute.".to_owned()
+    } else {
+        format!(
+            "{initiator} paid {} cents in street-cash tribute to {counterparty}.",
+            tribute.cents()
+        )
+    };
+    format!(
+        "Thirty-day territorial standstill in {name} between {initiator} and {counterparty}. {terms}"
     )
 }
 

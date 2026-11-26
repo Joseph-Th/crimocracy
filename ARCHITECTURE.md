@@ -125,7 +125,12 @@ graduated by its local racket advantage; any offered tribute is one
 balanced, preflighted inter-organization ledger payment drawn from the paying
 gang's combined spendable street-cash pockets, never invented cash.
 The history owner commits a typed `TerritoryStandstill` or `TerritoryClash`
-event. The restriction and expiry are derived from typed durable history with
+event. A standstill stores the actual negotiated tribute and optional ledger receipt,
+bound at commit after checking current accounts and allocator capacity. Save/load
+validation checks the exact payment minute, parties, street-cash postings and amount,
+and prohibits receipt reuse; free agreements must have no receipt. The player's turf
+view shows paid or received tribute and its receipt while the agreement is active.
+The restriction and expiry are derived from typed durable history with
 no redundant persistent territory map; history validates parties, chronology,
 typed entity linkage and clash cooldown across save/restore. The enterprise
 owner checks a standstill when validating and committing new rackets, but not

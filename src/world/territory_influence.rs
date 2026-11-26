@@ -12,10 +12,12 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 mod standstill;
-pub(crate) use standstill::apply_due_autonomous_territory_standstills;
 pub use standstill::{
     STANDSTILL_DAYS, TerritoryNegotiationError, TerritoryStandstill, ValidatedTerritoryStandstill,
     active_standstill, validate_negotiate_standstill, validate_negotiate_standstill_with_tribute,
+};
+pub(crate) use standstill::{
+    apply_due_autonomous_territory_standstills, standstill_tribute_matches,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]

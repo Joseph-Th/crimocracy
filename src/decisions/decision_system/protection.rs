@@ -9,10 +9,10 @@ use super::{DecisionError, DecisionRequestOutcome, insert_pending_decision_reque
 use crate::core::attention::AttentionClass;
 use crate::core::id::{BusinessId, DecisionRequestId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
-use crate::core::time::{DAY_MINUTES, is_day_boundary};
+use crate::core::time::{DAY_MINUTES, SimTime, is_day_boundary};
 use crate::decisions::{
-    DecisionContext, DecisionRequestDraft, DecisionResponse, DecisionStatus,
-    ProtectionDemandContext,
+    DecisionCancellationReason, DecisionContext, DecisionRequestDraft, DecisionResponse,
+    DecisionStatus, ProtectionDemandContext, build_cancellation,
 };
 use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::finance::finance_system::{
@@ -33,11 +33,39 @@ use crate::world::{BusinessOwner, OrganizationKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const PROTECTION_DAYS: u64 = 30;
+const OFFER_VALIDITY_DAYS: u64 = 30;
 const REFUSAL_COOLDOWN_DAYS: u64 = 7;
 const NEGOTIATION_GRACE_DAYS: u64 = 1;
 
 fn within_days(now: u64, at: u64, days: u64) -> bool {
     now.saturating_sub(at) < days * DAY_MINUTES
+}
+
+pub(crate) fn protection_offer_expired(requested_at: SimTime, now: SimTime) -> bool {
+    !within_days(
+        now.as_minutes(),
+        requested_at.as_minutes(),
+        OFFER_VALIDITY_DAYS,
+    )
+}
+
+fn expire_unanswered_offers(state: &mut AppState, defender: OrganizationId) {
+    let now = state.now();
+    let expired: Vec<_> = state
+        .decisions()
+        .pending_for_recipient(defender)
+        .filter(|record| {
+            matches!(record.context(), DecisionContext::ProtectionDemand(_))
+                && protection_offer_expired(record.requested_at(), now)
+        })
+        .map(|record| record.id())
+        .collect();
+    for decision in expired {
+        state.decisions.cancel(
+            decision,
+            build_cancellation(now, DecisionCancellationReason::ProtectionOfferExpired),
+        );
+    }
 }
 
 /// The demanding gang holds its crews for one day while leadership considers
@@ -187,6 +215,7 @@ pub(crate) fn apply_due_protection_demands(
     let Some(defender) = state.player_organization() else {
         return Vec::new();
     };
+    expire_unanswered_offers(state, defender);
     let shops = active_shops(state, defender);
     if shops.is_empty() {
         return Vec::new();
@@ -210,7 +239,7 @@ pub(crate) fn apply_due_protection_demands(
                     (resolution.resolved_at().as_minutes(), PROTECTION_DAYS)
                 }
                 Some(resolution) => (resolution.resolved_at().as_minutes(), REFUSAL_COOLDOWN_DAYS),
-                None => (previous.requested_at().as_minutes(), PROTECTION_DAYS),
+                None => (previous.requested_at().as_minutes(), OFFER_VALIDITY_DAYS),
             };
             if within_days(state.now().as_minutes(), since, interval) {
                 continue;
@@ -270,7 +299,7 @@ pub(crate) fn apply_due_protection_demands(
         )),
         attention: AttentionClass::Exception,
         summary: format!(
-            "{} has established a local street presence and demands {} for 30 days of protection over your businesses in {}. You can currently muster {} local defenders across rackets and available muscle. Approve to pay from accounted funds, or reject and face attempts to displace your commercial foothold.",
+            "{} has established a local street presence and demands {} for 30 days of protection over your businesses in {}. You can currently muster {} local defenders across rackets and available muscle. Approve to pay from accounted funds, or reject and face attempts to displace your commercial foothold. The rival waits one day; the unpaid offer expires after 30 days.",
             rival.name(),
             format_money_cents(offer.amount.cents()),
             ward.name(),

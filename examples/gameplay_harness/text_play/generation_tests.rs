@@ -532,31 +532,21 @@ fn generated_rival_clash_then_postwar_negotiation_uses_actual_player_orders() {
     );
     let peace = session
         .execute(&format!(
-            "negotiate district-{} org-{}",
+            "negotiate district-{} org-{} tribute=25000",
             district.raw(),
             rival.raw(),
         ))
         .expect("recently defeated gang can still settle")
         .0;
     assert!(peace.contains("Agreed a 30-day"), "{peace}");
-    assert!(
-        session
-            .execute("turf")
-            .unwrap()
-            .0
-            .contains("Standstill with")
-    );
+    let turf = session.execute("turf").unwrap().0;
+    assert!(turf.contains("Standstill with"));
+    assert!(turf.contains("Tribute paid"), "{turf}");
     let before = snapshot(&registry, &session);
     session.state =
         restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
     assert_eq!(before, snapshot(&registry, &session));
-    assert!(
-        session
-            .execute("turf")
-            .unwrap()
-            .0
-            .contains("Standstill with")
-    );
+    assert_eq!(session.execute("turf").unwrap().0, turf);
 }
 
 #[test]

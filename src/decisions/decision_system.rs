@@ -4,7 +4,8 @@ mod protection;
 mod recruitment_approval;
 
 pub(crate) use protection::{
-    apply_due_protection_demands, recently_refused_protection, rival_pressure_blocked,
+    apply_due_protection_demands, protection_offer_expired, recently_refused_protection,
+    rival_pressure_blocked,
 };
 
 use recruitment_approval::validate_recruitment_approval_authority_snapshot;
@@ -837,6 +838,9 @@ pub fn validate_resolve_decision(
             validate_recruitment_resolution_action(registry, state, decision, response, context)?
         }
         DecisionContext::ProtectionDemand(context) => {
+            if protection_offer_expired(record.requested_at(), state.now()) {
+                return Err(DecisionError::DecisionNotPending(decision));
+            }
             let payment = match response {
                 DecisionResponse::Approve => Some(Box::new(
                     protection::validate_protection_payment(state, decision, resolver, context)?,

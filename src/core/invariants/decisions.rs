@@ -86,11 +86,20 @@ fn validate_protection_demand_decision(
             .world
             .get_business(context.business())
             .is_none_or(|shop| shop.neighborhood() != context.district())
-        || decision.status() == DecisionStatus::Cancelled
+    {
+        return Err(invalid());
+    }
+    use crate::decisions::decision_system::protection_offer_expired;
+    if let Some(cancellation) = decision.cancellation()
+        && (cancellation.reason() != DecisionCancellationReason::ProtectionOfferExpired
+            || !protection_offer_expired(decision.requested_at(), cancellation.cancelled_at()))
     {
         return Err(invalid());
     }
     if let Some(resolution) = decision.resolution() {
+        if protection_offer_expired(decision.requested_at(), resolution.resolved_at()) {
+            return Err(invalid());
+        }
         match resolution.response() {
             DecisionResponse::Approve => {
                 let memo = format!("Protection payment for decision {}", decision.id().raw());
@@ -477,7 +486,8 @@ fn validate_cancelled_operation_decision(
     let character = match cancellation.reason() {
         DecisionCancellationReason::OperationParticipantDetained(character) => character,
         DecisionCancellationReason::RecruitmentAuthorityChanged(_)
-        | DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(_) => {
+        | DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(_)
+        | DecisionCancellationReason::ProtectionOfferExpired => {
             return Err(invalid_decision_context(decision));
         }
     };
@@ -654,7 +664,8 @@ fn validate_cancelled_recruitment_approval(
                             .is_some_and(|current| current > version)
                 )
         }
-        DecisionCancellationReason::OperationParticipantDetained(_) => {
+        DecisionCancellationReason::OperationParticipantDetained(_)
+        | DecisionCancellationReason::ProtectionOfferExpired => {
             return Err(invalid_decision_context(decision));
         }
     };
