@@ -4848,11 +4848,182 @@ fn institutional_character_target_inherits_organization_jurisdiction() {
         },
     )
     .expect("officer fixture should validate");
+    let profile = state
+        .world()
+        .get_neighborhood(neighborhood)
+        .unwrap()
+        .profile();
+    let home = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Officer's residential ward".into(),
+            profile,
+        },
+    )
+    .unwrap();
+    crate::world::character_life::validate_set_civic_occupation(
+        &state,
+        officer,
+        home,
+        crate::world::IndependentVocation::Resident,
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
 
     assert_eq!(
         resolve_target_neighborhoods(&state, vec![EntityRef::Character(officer)]),
         BTreeSet::from([neighborhood]),
         "an institutional character must inherit the same jurisdiction footprint as their organization"
+    );
+}
+
+#[test]
+fn civilian_surveillance_uses_recorded_home_when_no_workplace_footprint_exists() {
+    use crate::world::IndependentVocation;
+    use crate::world::character_life::validate_set_civic_occupation;
+
+    let registry = build_registry();
+    let mut state = AppState::new(0x51E7);
+    let crew = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Observer crew".into(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let home = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Residential ward".into(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: Rating::try_new(50).unwrap(),
+                    commercial_activity: Rating::try_new(50).unwrap(),
+                    illicit_demand: Rating::try_new(50).unwrap(),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: Rating::try_new(85).unwrap(),
+                },
+            },
+        },
+    )
+    .unwrap();
+    let observer = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Observer".into(),
+            organization: Some(crew),
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Surveillance,
+                Rating::try_new(100).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let resident = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Independent resident".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_set_civic_occupation(&state, resident, home, IndependentVocation::Resident)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let other_profile = state.world().get_neighborhood(home).unwrap().profile();
+    let other_home = insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Observer's residential ward".into(),
+            profile: other_profile,
+        },
+    )
+    .unwrap();
+    validate_set_civic_occupation(&state, observer, other_home, IndependentVocation::Resident)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    assert_eq!(
+        resolve_target_neighborhoods(
+            &state,
+            vec![
+                EntityRef::Character(resident),
+                EntityRef::Character(observer)
+            ]
+        ),
+        BTreeSet::from([home, other_home]),
+        "home fallback applies per person, including a member of an organization without a footprint"
+    );
+    let operation = validate_authorize_operation(
+        &registry,
+        &state,
+        OperationDraft {
+            title: "Watch a named civilian".into(),
+            kind: OperationKind::Surveillance,
+            responsible_organization: crew,
+            leader: observer,
+            objective: OperationObjective::GatherInformation {
+                target: EntityRef::Character(resident),
+            },
+            approach: OperationApproach::Covert,
+            roles: BTreeMap::from([(RoleKind::Surveillance, observer)]),
+            intelligence: BTreeSet::new(),
+            constraints: Vec::new(),
+            contingencies: Vec::new(),
+            scheduled_for: SimTime::from_minutes(1),
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    assert_eq!(
+        resolve_operation_police_alert_context(
+            &registry,
+            &state,
+            operation,
+            SimTime::from_minutes(1)
+        )
+        .neighborhood(),
+        Some(home),
+        "a resident's persisted home is a real operational venue, not a locationless target"
+    );
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    for state in [&mut state, &mut restored] {
+        run_until_operation_resolved(&registry, state, operation);
+        let resolved = state
+            .operations()
+            .get_operation(operation)
+            .unwrap()
+            .resolution()
+            .unwrap();
+        assert_eq!(
+            resolved
+                .exposure()
+                .factors()
+                .target_police_presence()
+                .map(Rating::value),
+            Some(85)
+        );
+        assert_eq!(resolved.exposure().neighborhood(), Some(home));
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
     );
 }
 

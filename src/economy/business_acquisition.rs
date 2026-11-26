@@ -43,7 +43,7 @@ use crate::reports::report_system::{ReportError, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::world_system::WorldError;
 use crate::world::world_system::validate_transfer_business_ownership;
-use crate::world::{BusinessFunction, BusinessOwner, OrganizationKind, TraitKind};
+use crate::world::{BusinessFunction, BusinessOwner, OrganizationKind};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
@@ -53,7 +53,9 @@ mod portfolio_forecast;
 mod seller_strategy;
 pub(crate) use autonomous::apply_due_autonomous_acquisitions;
 use payment::validate_funding_accounts;
-use seller_strategy::{negotiated_reference_price, seller_preserves_earning_base};
+use seller_strategy::{
+    negotiated_reference_price, personal_seller_minimum, seller_preserves_earning_base,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum BusinessAcquisitionError {
@@ -695,48 +697,6 @@ fn eligible_offer_seller(
         return Err(BusinessAcquisitionError::OfferDeclined);
     }
     Ok(seller)
-}
-
-/// A registered person's choice to part with an actual livelihood. Reliable
-/// profits, professional standing and disposition all influence the price;
-/// exhaustion can make an owner more willing to exit. A single-shop proprietor
-/// requires another 90 days of expected earnings to compensate for losing work.
-/// This is a private reservation price, not an advertised market quotation.
-fn personal_seller_minimum(
-    registry: &Registry,
-    state: &AppState,
-    seller: crate::core::id::CharacterId,
-    business: BusinessId,
-) -> Result<i128, BusinessAcquisitionError> {
-    let person = state
-        .world()
-        .get_character(seller)
-        .ok_or(BusinessAcquisitionError::OfferDeclined)?;
-    if state.legal().active_arrest_for_character(seller).is_some() {
-        return Err(BusinessAcquisitionError::OfferDeclined);
-    }
-    let base = negotiated_reference_price(registry, state, business)?;
-    let only_livelihood = state.world().businesses_owned_by_character(seller).count() == 1;
-    let extra_income = if only_livelihood {
-        seller_strategy::daily_net(registry, state, business)?.max(0) * 90
-    } else {
-        0
-    };
-    let standing = i128::from(person.life().professional_standing());
-    let fatigue = i128::from(person.life().fatigue());
-    let stubbornness = if person.has_trait(TraitKind::Greedy) {
-        18
-    } else if person.has_trait(TraitKind::Proud) {
-        12
-    } else if person.has_trait(TraitKind::Cautious) {
-        8
-    } else if person.has_trait(TraitKind::Impulsive) {
-        -8
-    } else {
-        0
-    };
-    let multiplier = (90 + standing / 4 - fatigue / 3 + stubbornness).clamp(65, 150);
-    Ok(base.saturating_add(extra_income).saturating_mul(multiplier) / 100)
 }
 
 /// Submit a binding offer for a non-player organization's property. Unlike a listing, the

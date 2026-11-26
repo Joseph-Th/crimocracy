@@ -3,14 +3,16 @@
 
 use super::portfolio_forecast::PortfolioForecast;
 use super::{BusinessAcquisitionError, acquisition_offer, appraise_business, buyer_adjusted_price};
-use crate::core::id::{BusinessId, OrganizationId};
+use crate::core::id::{BusinessId, CharacterId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::DAY_MINUTES;
-use crate::economy::business_economy_system::forecast_normal_business_net;
+use crate::economy::business_economy_system::{
+    daily_owner_net, forecast_live_business_net, forecast_normal_business_net,
+};
 use crate::finance::helpers::TreasuryLiquidity;
 use crate::finance::{FinancialOwner, Money};
 use crate::registry::Registry;
-use crate::world::OrganizationKind;
+use crate::world::{BusinessRecord, OrganizationKind, TraitKind};
 
 /// Public appraisal horizon. It is also the minimum period over which a staffed
 /// outfit expects to exploit a newly acquired productive business before reselling.
@@ -53,6 +55,77 @@ pub(super) fn appraisal_reference_offer(
     i128::from(standard_price.cents())
         + i128::from(cycle_net.cents().max(0)) * VALUATION_DAYS * i128::from(DAY_MINUTES)
             / i128::from(cycle_minutes)
+}
+
+/// A private proprietor knows the productive condition of their own holdings.
+/// Closed, terminal and loss-making storefronts cannot replace a livelihood.
+fn proprietor_daily_income(
+    registry: &Registry,
+    state: &AppState,
+    business: &BusinessRecord,
+) -> Result<i128, BusinessAcquisitionError> {
+    if state
+        .economy()
+        .get_business_economy(business.id())
+        .is_none_or(|economy| !economy.is_operating())
+    {
+        return Ok(0);
+    }
+    let cycle = registry
+        .get_business(business.kind())
+        .economics()
+        .cycle()
+        .as_minutes();
+    let net = forecast_live_business_net(registry, state, business.id())?;
+    Ok(daily_owner_net(net, cycle, 0).max(0))
+}
+
+/// A registered person's choice to part with an actual livelihood. An owner
+/// selling their last productive storefront requires another appraisal period
+/// of its own forecast earnings. Public quotes remain unchanged; a buyer cannot
+/// inspect this private reservation price or the reasons for refusal.
+pub(super) fn personal_seller_minimum(
+    registry: &Registry,
+    state: &AppState,
+    seller: CharacterId,
+    business: BusinessId,
+) -> Result<i128, BusinessAcquisitionError> {
+    let person = state
+        .world()
+        .get_character(seller)
+        .ok_or(BusinessAcquisitionError::OfferDeclined)?;
+    if state.legal().active_arrest_for_character(seller).is_some() {
+        return Err(BusinessAcquisitionError::OfferDeclined);
+    }
+    let base = negotiated_reference_price(registry, state, business)?;
+    let record = state
+        .world()
+        .get_business(business)
+        .ok_or(BusinessAcquisitionError::MissingBusiness(business))?;
+    let mut extra_income = proprietor_daily_income(registry, state, record)? * VALUATION_DAYS;
+    if extra_income > 0 {
+        for other in state.world().businesses_owned_by_character(seller) {
+            if other.id() != business && proprietor_daily_income(registry, state, other)? > 0 {
+                extra_income = 0;
+                break;
+            }
+        }
+    }
+    let standing = i128::from(person.life().professional_standing());
+    let fatigue = i128::from(person.life().fatigue());
+    let stubbornness = if person.has_trait(TraitKind::Greedy) {
+        18
+    } else if person.has_trait(TraitKind::Proud) {
+        12
+    } else if person.has_trait(TraitKind::Cautious) {
+        8
+    } else if person.has_trait(TraitKind::Impulsive) {
+        -8
+    } else {
+        0
+    };
+    let multiplier = (90 + standing / 4 - fatigue / 3 + stubbornness).clamp(65, 150);
+    Ok(base.saturating_add(extra_income).saturating_mul(multiplier) / 100)
 }
 
 /// Staffed criminal enterprises are ongoing employers, not passive sellers. Preserve a

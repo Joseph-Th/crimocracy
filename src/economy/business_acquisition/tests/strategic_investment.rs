@@ -96,6 +96,141 @@ fn owner(fixture: &AcquisitionFixture, business: BusinessId) -> BusinessOwner {
 }
 
 #[test]
+fn proprietor_requires_livelihood_compensation_when_other_shop_closes() {
+    use crate::economy::business_economy_system::{
+        validate_disrupt_business_economy, validate_resume_business_economy,
+        validate_suspend_business_economy,
+    };
+
+    let mut fixture = make_independent_fixture();
+    let proprietor = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Private proprietor".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    establish_existing_independent_economy(&mut fixture);
+    let property = fixture.business;
+    validate_transfer_business_ownership(
+        &fixture.state,
+        property,
+        BusinessOwner::Character(proprietor),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let minimum = |registry: &Registry, state: &AppState| {
+        super::super::personal_seller_minimum(registry, state, proprietor, property).unwrap()
+    };
+    let sole_livelihood = minimum(&fixture.registry, &fixture.state);
+    let other = another_property(&mut fixture, BusinessOwner::Character(proprietor), true);
+    let diversified = minimum(&fixture.registry, &fixture.state);
+    assert!(diversified < sole_livelihood);
+    let mut damaged = fixture.state.clone();
+    let public_quote = appraise_business(&fixture.registry, &damaged, property).unwrap();
+    validate_disrupt_business_economy(&fixture.registry, &damaged, other)
+        .unwrap()
+        .commit(&mut damaged)
+        .unwrap();
+    assert!(
+        business_economy_system::forecast_live_business_net(&fixture.registry, &damaged, other)
+            .unwrap()
+            < Money::ZERO
+    );
+    assert_eq!(
+        minimum(&fixture.registry, &damaged),
+        sole_livelihood,
+        "an operating but loss-making alternative does not replace the owner's livelihood"
+    );
+    assert_eq!(
+        appraise_business(&fixture.registry, &damaged, property).unwrap(),
+        public_quote,
+        "the proprietor's private circumstances must not change the public appraisal"
+    );
+    validate_invariants(&damaged);
+    let price = Money::from_cents(i64::try_from(diversified).unwrap());
+    fund_accounted_from_street(&mut fixture, price.cents());
+    let offer = validate_offer_business(
+        &fixture.registry,
+        &fixture.state,
+        acquisition_draft(&fixture),
+        price,
+    )
+    .unwrap();
+
+    validate_suspend_business_economy(&fixture.state, other)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        minimum(&fixture.registry, &fixture.state),
+        sole_livelihood,
+        "ownership of an inactive storefront does not replace a productive livelihood"
+    );
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert!(matches!(
+        offer.commit(&fixture.registry, &mut fixture.state),
+        Err(BusinessAcquisitionError::OfferDeclined)
+    ));
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(minimum(&fixture.registry, &restored), sole_livelihood);
+    for state in [&mut fixture.state, &mut restored] {
+        assert!(matches!(
+            validate_offer_business(
+                &fixture.registry,
+                state,
+                BusinessAcquisitionDraft {
+                    organization: fixture.organization,
+                    business: property,
+                    funding_accounts: BTreeSet::from([fixture.accounted]),
+                },
+                price,
+            ),
+            Err(BusinessAcquisitionError::OfferDeclined)
+        ));
+        validate_resume_business_economy(&fixture.registry, state, other)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        assert_eq!(minimum(&fixture.registry, state), diversified);
+        validate_offer_business(
+            &fixture.registry,
+            state,
+            BusinessAcquisitionDraft {
+                organization: fixture.organization,
+                business: property,
+                funding_accounts: BTreeSet::from([fixture.accounted]),
+            },
+            price,
+        )
+        .unwrap()
+        .commit(&fixture.registry, state)
+        .unwrap();
+        assert_eq!(
+            state.world().get_business(property).unwrap().owner(),
+            BusinessOwner::Organization(fixture.organization)
+        );
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn ambiguous_rival_executive_cannot_commission_acquisition() {
     let mut fixture = make_independent_fixture();
     let rival = fixture.organization;

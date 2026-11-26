@@ -5,7 +5,6 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{CharacterId, NeighborhoodId, OperationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::enterprises::EnterpriseLocation;
 use crate::intelligence::InformationTopic;
 use crate::legal::patrol_system::{
     PatrolPresenceSnapshot, resolve_patrol_presence_interval_snapshot,
@@ -263,150 +262,154 @@ fn resolve_target_police_snapshot_from(
     }
 }
 
-/// Venue proxy for operations against entities with no modeled meeting point: every
-/// neighborhood an objective entity occupies, including the full asset footprint of
-/// organization and character targets. Exposure incidents, patrol snapshots, and
-/// investigation heat all attribute through this one derivation so the three consumers
-/// agree on where an operation "happened".
+/// Venue proxy for operations against entities with no modeled meeting point. Prefer
+/// the existing personal and organizational asset footprint, with a recorded home
+/// as the fallback for a person without any other geographic attachment. Exposure,
+/// patrol snapshots, and investigation heat all share this derivation.
 pub(super) fn resolve_target_neighborhoods(
     state: &AppState,
     entities: Vec<EntityRef>,
 ) -> BTreeSet<NeighborhoodId> {
     let mut neighborhoods = BTreeSet::new();
-    // Control-plane targets proxy to the world footprint of their owner, mirroring
-    // FreeDetainee custody proxying: surveilling an active case or another crew's plan
-    // happens where that authority operates, not nowhere. Without the proxy, exposure and
-    // police response for such operations could never attribute to a neighborhood.
-    let mut queue: Vec<EntityRef> = entities;
-    while let Some(entity) = queue.pop() {
-        collect_target_entity_neighborhoods(state, entity, &mut queue, &mut neighborhoods);
+    // Cases can name several members, operations, or administrative records belonging
+    // to the same authority. Compute each organization's footprint only once per query.
+    let mut organizations = BTreeMap::new();
+    for entity in entities {
+        match entity {
+            EntityRef::Neighborhood(id) => {
+                neighborhoods.insert(id);
+            }
+            EntityRef::Business(id) => {
+                let business = state
+                    .world()
+                    .get_business(id)
+                    .expect("validated business target must reference a persisted business");
+                neighborhoods.insert(business.neighborhood());
+            }
+            EntityRef::Organization(id) => {
+                neighborhoods.extend(organization_target_neighborhoods(
+                    state,
+                    id,
+                    &mut organizations,
+                ));
+            }
+            EntityRef::Character(id) => {
+                collect_character_target_neighborhoods(
+                    state,
+                    id,
+                    &mut organizations,
+                    &mut neighborhoods,
+                );
+            }
+            EntityRef::Enterprise(id) => {
+                neighborhoods.insert(enterprise_target_neighborhood(state, id));
+            }
+            // Control-plane targets proxy to the world footprint of their owner.
+            EntityRef::Operation(id) => {
+                let operation = state
+                    .operations()
+                    .get_operation(id)
+                    .expect("validated operation target must reference a persisted operation");
+                neighborhoods.extend(organization_target_neighborhoods(
+                    state,
+                    operation.responsible_organization(),
+                    &mut organizations,
+                ));
+            }
+            EntityRef::Investigation(id) => {
+                let investigation = state
+                    .legal()
+                    .get_investigation(id)
+                    .expect("validated investigation target must reference a persisted case");
+                neighborhoods.extend(organization_target_neighborhoods(
+                    state,
+                    investigation.owner(),
+                    &mut organizations,
+                ));
+            }
+            // Administrative targets without a geographic proxy have no venue.
+            EntityRef::Evidence(_)
+            | EntityRef::FinancialAccount(_)
+            | EntityRef::DecisionRequest(_)
+            | EntityRef::Mandate(_) => {}
+        }
     }
     neighborhoods
 }
 
-fn collect_target_entity_neighborhoods(
-    state: &AppState,
-    entity: EntityRef,
-    queue: &mut Vec<EntityRef>,
-    neighborhoods: &mut BTreeSet<NeighborhoodId>,
-) {
-    match entity {
-        EntityRef::Neighborhood(id) => {
-            neighborhoods.insert(id);
-        }
-        EntityRef::Business(id) => collect_business_target_neighborhood(state, id, neighborhoods),
-        EntityRef::Organization(id) => {
-            collect_organization_target_neighborhoods(state, id, queue, neighborhoods);
-        }
-        EntityRef::Character(id) => {
-            collect_character_target_neighborhoods(state, id, queue, neighborhoods);
-        }
-        EntityRef::Enterprise(id) => {
-            collect_enterprise_target_neighborhood(state, id, neighborhoods)
-        }
-        EntityRef::Operation(id) => {
-            let operation = state
-                .operations
-                .get_operation(id)
-                .expect("validated operation target must reference a persisted operation");
-            queue.push(EntityRef::Organization(
-                operation.responsible_organization(),
-            ));
-        }
-        EntityRef::Investigation(id) => {
-            let investigation = state
-                .legal
-                .get_investigation(id)
-                .expect("validated investigation target must reference a persisted case");
-            queue.push(EntityRef::Organization(investigation.owner()));
-        }
-        // Unsupported surveillance targets can never reach this derivation validated.
-        EntityRef::Evidence(_)
-        | EntityRef::FinancialAccount(_)
-        | EntityRef::DecisionRequest(_)
-        | EntityRef::Mandate(_) => {}
-    }
-}
-
-fn collect_business_target_neighborhood(
-    state: &AppState,
-    business: crate::core::id::BusinessId,
-    neighborhoods: &mut BTreeSet<NeighborhoodId>,
-) {
-    let business = state
-        .world
-        .get_business(business)
-        .expect("validated business target must reference a persisted business");
-    neighborhoods.insert(business.neighborhood());
-}
-
-fn collect_organization_target_neighborhoods(
+fn organization_target_neighborhoods<'a>(
     state: &AppState,
     organization: crate::core::id::OrganizationId,
-    queue: &mut Vec<EntityRef>,
-    neighborhoods: &mut BTreeSet<NeighborhoodId>,
-) {
-    state
-        .world
-        .get_organization(organization)
-        .expect("validated organization target must reference a persisted organization");
-    for business in state.world.businesses_owned_by_organization(organization) {
-        neighborhoods.insert(business.neighborhood());
-    }
-    // Criminal organizations also operate through neighborhood-scoped rackets that need not sit
-    // inside organization-owned real estate. Only active enterprises belong to the current
-    // operational footprint; suspended and retired rackets remain durable history.
-    queue.extend(
+    cache: &'a mut BTreeMap<crate::core::id::OrganizationId, BTreeSet<NeighborhoodId>>,
+) -> &'a BTreeSet<NeighborhoodId> {
+    cache.entry(organization).or_insert_with(|| {
         state
-            .enterprises
-            .active_for_organization(organization)
-            .map(|enterprise| EntityRef::Enterprise(enterprise.id())),
-    );
-    if let Some(jurisdiction) = state.legal.get_jurisdiction(organization) {
-        neighborhoods.extend(jurisdiction.neighborhoods().iter().copied());
-    }
+            .world()
+            .get_organization(organization)
+            .expect("validated organization target must reference a persisted organization");
+        let mut neighborhoods = state
+            .world()
+            .businesses_owned_by_organization(organization)
+            .map(|business| business.neighborhood())
+            .collect::<BTreeSet<_>>();
+        // Only active rackets contribute to the current organizational footprint.
+        neighborhoods.extend(
+            state
+                .enterprises()
+                .active_for_organization(organization)
+                .map(|enterprise| {
+                    enterprise
+                        .location()
+                        .neighborhood(state.world())
+                        .expect("active enterprise must have a persisted neighborhood")
+                }),
+        );
+        if let Some(jurisdiction) = state.legal().get_jurisdiction(organization) {
+            neighborhoods.extend(jurisdiction.neighborhoods().iter().copied());
+        }
+        neighborhoods
+    })
 }
 
 fn collect_character_target_neighborhoods(
     state: &AppState,
     character: CharacterId,
-    queue: &mut Vec<EntityRef>,
+    organizations: &mut BTreeMap<crate::core::id::OrganizationId, BTreeSet<NeighborhoodId>>,
     neighborhoods: &mut BTreeSet<NeighborhoodId>,
 ) {
-    let character_record = state
-        .world
+    let person = state
+        .world()
         .get_character(character)
         .expect("validated character target must reference a persisted character");
-    if let Some(organization) = character_record.organization() {
-        // Reuse organization resolution rather than duplicating only its business half here.
-        // Institutional characters also operate inside their authority's jurisdiction.
-        queue.push(EntityRef::Organization(organization));
+    let mut has_footprint = false;
+    if let Some(organization) = person.organization() {
+        let footprint = organization_target_neighborhoods(state, organization, organizations);
+        has_footprint = !footprint.is_empty();
+        neighborhoods.extend(footprint);
     }
-    neighborhoods.extend(
-        state
-            .world
-            .businesses_owned_by_character(character)
-            .map(|business| business.neighborhood()),
-    );
+    for business in state.world().businesses_owned_by_character(character) {
+        has_footprint = true;
+        neighborhoods.insert(business.neighborhood());
+    }
+    // Determine the fallback per person, not from the aggregate set: another
+    // case subject may already occupy a district even when this person has no
+    // workplace or organizational presence of their own.
+    if !has_footprint {
+        neighborhoods.extend(person.life().home());
+    }
 }
 
-fn collect_enterprise_target_neighborhood(
+fn enterprise_target_neighborhood(
     state: &AppState,
     enterprise: crate::core::id::EnterpriseId,
-    neighborhoods: &mut BTreeSet<NeighborhoodId>,
-) {
-    let enterprise = state
-        .enterprises
+) -> NeighborhoodId {
+    state
+        .enterprises()
         .get_enterprise(enterprise)
-        .expect("validated enterprise target must reference a persisted enterprise");
-    match enterprise.location() {
-        EnterpriseLocation::Neighborhood(neighborhood) => {
-            neighborhoods.insert(neighborhood);
-        }
-        EnterpriseLocation::Business(business) => {
-            collect_business_target_neighborhood(state, business, neighborhoods);
-        }
-    }
+        .expect("validated enterprise target must reference a persisted enterprise")
+        .location()
+        .neighborhood(state.world())
+        .expect("validated enterprise target must occupy a persisted neighborhood")
 }
 
 /// Neighborhoods an investigation targets, derived from its subjects and, for
