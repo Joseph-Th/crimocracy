@@ -336,7 +336,7 @@ evidence that a specific person is a witness.
 
 Routine autonomous custody has a sixty-day cooldown following release by the same police authority. Continuing observations of an already-cited racket cannot restart custody merely because that cooldown expires or an unrelated arrest intervenes. Distinct new racket evidence remains actionable after the cooldown; a newly completed criminal operation can justify earlier custody. The direct arrest evidence gate, pending prosecutions, and ongoing enforcement costs remain intact.
 
-`counsel` displays current-member legal matters and your own active retainers, including those for former members. Another sponsor's retainer is indicated without revealing its management ID, lawyer, or fee. `retain <arrest-id> <legal-contact-id> <fee-cents>` hires counsel for a current member through a live legal contact and the production ledger.
+`counsel` displays current-member legal matters and your own active retainers, including those for former members. Another sponsor's retainer is indicated without revealing its management ID, lawyer, or fee. `counsel` lists only currently usable defense channels, not prosecutors or dormant relationships. `retain <arrest-id> <legal-contact-id> <fee-cents>` hires counsel for a current member through a live legal-services contact and the production ledger, using an existing provider operating account that can receive the fee.
 `end-counsel <representation-id> <concluded|replace|withdraw>` closes your sponsored representation, including after a member's departure, only when its legal constraints allow it. Alternatively,
 `policy legal automatic` enables automatic retention when a legal contact
 and funding exist. `advance` interrupts on arrests and releases of members

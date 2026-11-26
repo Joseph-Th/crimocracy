@@ -350,6 +350,10 @@ the production legal phase on the arrest minute when contact and funds exist.
 The independently employed lawyer in the authored opening does not grant free
 representation. Production saves retain these relationships, cases, and payments
 and reconstruct their indexes on restoration.
+`counsel_distinguishes_usable_defense_channels_from_dormant_and_prosecution_contacts`
+checks the defense list against actual relationship eligibility and save/restore.
+The real-custody retention regression also verifies that a full provider account
+does not prevent payment to another available operating account at the same firm.
 
 The economy client also exposes manual storefront suspension/resumption and
 district-wide enterprises backed by zero or more actual owned support businesses.

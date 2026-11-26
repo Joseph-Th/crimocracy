@@ -5,7 +5,8 @@
 
 use super::*;
 use crimocracy::legal::legal_representation_system::{
-    sponsored_active_representations, sponsored_representation_matter_open,
+    retainer_provider_account, sponsored_active_representations,
+    sponsored_representation_matter_open, validate_counsel_channel,
 };
 
 impl Session<'_> {
@@ -152,15 +153,16 @@ impl Session<'_> {
                 } else if out.is_empty() {
                     out.push_str("No known current member matters require legal attention.\n");
                 }
+                let mut usable = 0;
                 for contact in self
                     .state
                     .contacts()
                     .contacts_for_sponsor(self.player)
                     .filter(|contact| {
-                        contact.kind() == ContactKind::Legal
-                            && contact.status() == ContactStatus::Active
+                        validate_counsel_channel(&self.state, self.player, contact.id()).is_ok()
                     })
                 {
+                    usable += 1;
                     let counsel = self
                         .state
                         .world()
@@ -173,6 +175,9 @@ impl Session<'_> {
                         counsel.name()
                     )
                     .unwrap();
+                }
+                if usable == 0 {
+                    out.push_str("No currently usable defense channel. See 'connections' and 'contacts' for institutional relationships.\n");
                 }
             }
             "retain" => {
@@ -198,25 +203,21 @@ impl Session<'_> {
                     .state
                     .contacts()
                     .contacts_for_sponsor(self.player)
-                    .find(|contact| {
-                        contact.id().raw() == contact_raw
-                            && contact.kind() == ContactKind::Legal
-                            && contact.status() == ContactStatus::Active
-                    })
-                    .ok_or("legal contact is not active for your organization")?;
-                let provider = contact.institution();
-                let provider_account = self
-                    .state
-                    .finance()
-                    .accounts_for(FinancialOwner::Organization(provider))
-                    .find(|account| account.kind() == AccountKind::LegitimateOperating)
-                    .ok_or("legal-services provider has no operating account")?
+                    .find(|contact| contact.id().raw() == contact_raw)
+                    .ok_or("contact is not known to your organization")?
                     .id();
                 let fee_cents = words[3]
                     .parse::<i64>()
                     .ok()
                     .filter(|fee| *fee > 0)
                     .ok_or("retainer must be a positive amount in cents")?;
+                let provider_account = retainer_provider_account(
+                    &self.state,
+                    self.player,
+                    contact,
+                    Money::from_cents(fee_cents),
+                )
+                .map_err(|error| error.to_string())?;
                 let payer_accounts = self
                     .state
                     .finance()
@@ -227,7 +228,7 @@ impl Session<'_> {
                 let draft = LegalRepresentationDraft {
                     arrest,
                     sponsor: self.player,
-                    contact: contact.id(),
+                    contact,
                     fee: Money::from_cents(fee_cents),
                     payer_accounts,
                     provider_account,

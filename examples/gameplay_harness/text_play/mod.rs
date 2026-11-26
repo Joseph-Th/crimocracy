@@ -6,11 +6,13 @@
 use crate::campaign::{EvaluationSeeds, FixtureVariation, ScenarioProfile, parse_seed_value};
 use crate::scenario::build_scenario;
 use crimocracy::city_generation::{CityScale, generate_city};
+#[cfg(test)]
+use crimocracy::contacts::ContactKind;
+use crimocracy::contacts::ContactStatus;
 use crimocracy::contacts::contact_system::{
     InstitutionalContactDraft, find_pending_disclosure_sources, validate_contact_disclosure,
     validate_establish_contact, validate_reassign_contact_handler, validate_terminate_contact,
 };
-use crimocracy::contacts::{ContactKind, ContactStatus};
 use crimocracy::core::entity::EntityRef;
 use crimocracy::core::id::{
     ArrestId, BusinessId, CharacterId, EnterpriseId, InvestigationId, OperationId, OrganizationId,

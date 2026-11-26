@@ -8,7 +8,6 @@ use super::{
     LegalRepresentationError, ValidatedLegalRepresentation, validate_end_legal_representation,
     validate_retain_legal_representation,
 };
-use crate::contacts::{ContactKind, ContactStatus};
 use crate::core::id::{
     ArrestId, CharacterId, ContactId, FinancialAccountId, IdKind, LegalRepresentationId, MandateId,
     OrganizationId,
@@ -20,7 +19,7 @@ use crate::delegation::delegation_system::{
 };
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::finance::finance_system::{FinanceError, resolve_budget_usage};
-use crate::finance::{AccountKind, FinancialOwner, Money};
+use crate::finance::{FinancialOwner, Money};
 use crate::legal::{ArrestStatus, LegalRepresentationDraft, LegalRepresentationEndReason};
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::cmp::Reverse;
@@ -573,42 +572,34 @@ fn resolve_best_usable_automatic_counsel(
     // tie-breakers only, so adding a stronger later relationship can improve automatic defense.
     let mut best: Option<(Reverse<u8>, ContactId, FinancialAccountId)> = None;
     for contact in state.contacts.contacts_for_sponsor(candidate.sponsor) {
-        if contact.status() != ContactStatus::Active
-            || contact.kind() != ContactKind::Legal
-            || !crate::contacts::contact_system::are_channel_endpoints_available(state, contact)
-            || !crate::contacts::contact_system::has_current_contact_relationship_basis(
-                state, contact,
-            )
-        {
-            continue;
+        match super::validate_counsel_channel(state, candidate.sponsor, contact.id()) {
+            Ok(_) => {}
+            Err(
+                error @ (LegalRepresentationError::MissingContact(_)
+                | LegalRepresentationError::MissingHandler(_)
+                | LegalRepresentationError::MissingCounsel(_)
+                | LegalRepresentationError::MissingCounselInstitution(_)),
+            ) => return Err(error),
+            Err(_) => continue,
         }
-        let institution = state.world.get_organization(contact.institution()).ok_or(
-            LegalRepresentationError::MissingCounselInstitution(contact.institution()),
-        )?;
-        if institution.kind() != OrganizationKind::LegalServices {
-            continue;
-        }
-        let counsel = state
+        let legal_knowledge = state
             .world
             .get_character(contact.contact())
-            .ok_or(LegalRepresentationError::MissingCounsel(contact.contact()))?;
-        let Some(legal_knowledge) = counsel.capability(CapabilityKind::LegalKnowledge) else {
-            continue;
-        };
-        let Some(provider_account) = state
-            .finance
-            .accounts_for(FinancialOwner::Organization(contact.institution()))
-            .filter(|account| account.kind() == AccountKind::LegitimateOperating)
-            .filter(|account| projection.account_has_posting_headroom(account))
-            .filter(|account| projection.balance(account).checked_add(fee).is_some())
-            .min_by_key(|account| account.id())
+            .expect("validated counsel exists")
+            .capability(CapabilityKind::LegalKnowledge)
+            .expect("validated counsel has legal knowledge");
+        let Some(provider_account) =
+            super::find_retainer_provider_account(state, contact.institution(), |account| {
+                projection.account_has_posting_headroom(account)
+                    && projection.balance(account).checked_add(fee).is_some()
+            })
         else {
             continue;
         };
         let ranked = (
             Reverse(legal_knowledge.value()),
             contact.id(),
-            provider_account.id(),
+            provider_account,
         );
         if best.is_none_or(|current| ranked < current) {
             best = Some(ranked);

@@ -146,6 +146,130 @@ fn text_play_legal_contact_can_be_established_saved_and_terminated() {
 }
 
 #[test]
+fn counsel_distinguishes_usable_defense_channels_from_dormant_and_prosecution_contacts() {
+    use crimocracy::social::{
+        RelationshipDimensions, relationship_system::validate_set_relationship,
+    };
+    use crimocracy::world::{
+        AutonomyLevel, CapabilityKind, CharacterDraft, OrganizationDraft, OrganizationKind,
+        world_system::{insert_character, insert_organization},
+    };
+    let registry = crimocracy::build_registry();
+    let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
+    let boss = boss_id(&session);
+    let lawyer = lawyer_id(&session);
+    session
+        .execute(&format!("connect {} {}", boss.raw(), lawyer.raw()))
+        .unwrap();
+    let office = insert_organization(
+        &registry,
+        &mut session.state,
+        OrganizationDraft {
+            name: "Test prosecution office".to_owned(),
+            kind: OrganizationKind::Prosecutor,
+        },
+    )
+    .unwrap();
+    let prosecutor = insert_character(
+        &mut session.state,
+        CharacterDraft {
+            name: "Test prosecutor".to_owned(),
+            organization: Some(office),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::LegalKnowledge,
+                crate::campaign::rating(90),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let trust = RelationshipDimensions {
+        trust: crate::campaign::level(70),
+        ..RelationshipDimensions::zero()
+    };
+    validate_set_relationship(&session.state, boss, prosecutor, trust)
+        .unwrap()
+        .commit(&mut session.state)
+        .unwrap();
+    let prosecution_contact = validate_establish_contact(
+        &session.state,
+        InstitutionalContactDraft {
+            sponsor: session.player,
+            handler: boss,
+            contact: prosecutor,
+        },
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    let defense = session
+        .state
+        .contacts()
+        .contacts_for_sponsor(session.player)
+        .find(|contact| contact.contact() == lawyer)
+        .unwrap()
+        .id();
+    let view = session.execute("counsel").unwrap().0;
+    assert!(
+        view.contains(&format!(
+            "Legal channel: contact-{} Nora Keene",
+            defense.raw()
+        )),
+        "{view}"
+    );
+    assert!(
+        !view.contains(&format!(
+            "Legal channel: contact-{} Test prosecutor",
+            prosecution_contact.raw()
+        )),
+        "{view}"
+    );
+    assert!(
+        session
+            .execute("contacts")
+            .unwrap()
+            .0
+            .contains("Test prosecutor")
+    );
+    let collapsed = RelationshipDimensions {
+        resentment: crate::campaign::level(80),
+        ..RelationshipDimensions::zero()
+    };
+    validate_set_relationship(&session.state, boss, lawyer, collapsed)
+        .unwrap()
+        .commit(&mut session.state)
+        .unwrap();
+    let before = snapshot(&registry, &session);
+    let view = session.execute("counsel").unwrap().0;
+    assert!(
+        !view.contains(&format!(
+            "Legal channel: contact-{} Nora Keene",
+            defense.raw()
+        )),
+        "{view}"
+    );
+    assert!(
+        view.contains("No currently usable defense channel"),
+        "{view}"
+    );
+    assert_eq!(before, snapshot(&registry, &session));
+    session.state =
+        restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    assert_eq!(view, session.execute("counsel").unwrap().0);
+    validate_set_relationship(&session.state, boss, lawyer, trust)
+        .unwrap()
+        .commit(&mut session.state)
+        .unwrap();
+    assert!(session.execute("counsel").unwrap().0.contains(&format!(
+        "Legal channel: contact-{} Nora Keene",
+        defense.raw()
+    )));
+}
+
+#[test]
 fn text_play_police_disclosure_and_new_legal_channel_remain_independent() {
     let registry = crimocracy::build_registry();
     let mut session = Session::new(&registry, EvaluationSeeds::new(12, 12)).unwrap();
@@ -411,6 +535,82 @@ fn text_play_player_can_retain_and_withdraw_counsel_in_real_custody() {
         );
         assert_eq!(saved, snapshot(&registry, &session));
     }
+    // A full provider pocket is not a reason to turn away an otherwise funded client
+    // when the same institution has another available operating account.
+    let opening = build_save(&registry, &session.state).unwrap();
+    let institution = session
+        .state
+        .contacts()
+        .get_contact(legal_contact)
+        .unwrap()
+        .institution();
+    let alternate = insert_account(
+        &mut session.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(institution),
+            kind: AccountKind::LegitimateOperating,
+        },
+    )
+    .unwrap();
+    let clearing = insert_account(
+        &mut session.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(institution),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    let top_up = i64::MAX - provider_before;
+    validate_record_transaction(
+        &session.state,
+        LedgerTransactionDraft {
+            occurred_at: session.state.now(),
+            memo: "Provider account headroom fixture".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: clearing,
+                    amount: Money::from_cents(-top_up),
+                },
+                LedgerPosting {
+                    account: provider,
+                    amount: Money::from_cents(top_up),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    session
+        .execute(&format!(
+            "retain arrest-{} contact-{} 5000",
+            arrest.raw(),
+            legal_contact.raw()
+        ))
+        .unwrap();
+    assert_eq!(
+        session
+            .state
+            .finance()
+            .get_account(provider)
+            .unwrap()
+            .balance()
+            .cents(),
+        i64::MAX
+    );
+    assert_eq!(
+        session
+            .state
+            .finance()
+            .get_account(alternate)
+            .unwrap()
+            .balance()
+            .cents(),
+        5000
+    );
+    restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
+    session.state = restore_save(&registry, opening).unwrap();
     let receipt = session
         .execute(&format!(
             "retain arrest-{} contact-{} 5000",

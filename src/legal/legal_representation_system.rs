@@ -1,7 +1,7 @@
 //! Retained legal counsel transactions backed by real contacts, capabilities, and ledger payments,
 //! including canonical representation closure when counsel becomes unavailable through custody.
 
-use crate::contacts::{ContactKind, ContactStatus};
+use crate::contacts::{ContactKind, ContactStatus, InstitutionalContactRecord};
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
 use crate::core::id::{
@@ -139,6 +139,10 @@ pub enum LegalRepresentationError {
         account: FinancialAccountId,
         provider: OrganizationId,
     },
+    #[error(
+        "legal-services organization {provider} has no operating account able to receive the requested retainer"
+    )]
+    ProviderAccountUnavailable { provider: OrganizationId },
     #[error(
         "sponsor liquid accounts have {available_cents} cents but retainer requires {required_cents} cents"
     )]
@@ -479,26 +483,59 @@ fn validate_representation_dependencies(
         });
     }
 
+    let contact = validate_counsel_channel(state, draft.sponsor, draft.contact)?;
+    let handler = state
+        .world
+        .get_character(contact.handler())
+        .expect("validated counsel handler");
+    let counsel = state
+        .world
+        .get_character(contact.contact())
+        .expect("validated counsel");
+
+    validate_authority(state, draft.sponsor, draft.authorization)?;
+
+    Ok(RepresentationDependencies {
+        defendant: arrest.character(),
+        counsel: contact.contact(),
+        counsel_institution: contact.institution(),
+        handler: contact.handler(),
+        arrest_version: arrest.version(),
+        defendant_version: defendant.version(),
+        counsel_version: counsel.version(),
+        handler_version: handler.version(),
+        contact_version: contact.version(),
+    })
+}
+
+/// Check the current defense relationship independently of any particular arrest or fee.
+/// An active Legal contact can be a prosecutor, a dormant relationship, or have a detained
+/// endpoint. The same typed gate is used for direct and automatic retention and player views.
+pub fn validate_counsel_channel(
+    state: &AppState,
+    sponsor: OrganizationId,
+    contact_id: ContactId,
+) -> Result<&InstitutionalContactRecord, LegalRepresentationError> {
     let contact = state
         .contacts
-        .get_contact(draft.contact)
-        .ok_or(LegalRepresentationError::MissingContact(draft.contact))?;
+        .get_contact(contact_id)
+        .ok_or(LegalRepresentationError::MissingContact(contact_id))?;
     if contact.status() != ContactStatus::Active {
-        return Err(LegalRepresentationError::InactiveContact(draft.contact));
+        return Err(LegalRepresentationError::InactiveContact(contact_id));
     }
-    if contact.sponsor() != draft.sponsor {
+    if contact.sponsor() != sponsor {
         return Err(LegalRepresentationError::ContactSponsorMismatch {
-            contact: draft.contact,
-            expected: draft.sponsor,
+            contact: contact_id,
+            expected: sponsor,
             actual: contact.sponsor(),
         });
     }
     if contact.kind() != ContactKind::Legal {
-        return Err(LegalRepresentationError::ContactNotLegal(draft.contact));
+        return Err(LegalRepresentationError::ContactNotLegal(contact_id));
     }
     if !crate::contacts::contact_system::has_current_contact_relationship_basis(state, contact) {
         return Err(LegalRepresentationError::ContactRelationshipUnavailable(
-            draft.contact,
+            contact_id,
         ));
     }
 
@@ -506,7 +543,7 @@ fn validate_representation_dependencies(
         .world
         .get_character(contact.handler())
         .ok_or(LegalRepresentationError::MissingHandler(contact.handler()))?;
-    if handler.organization() != Some(draft.sponsor)
+    if handler.organization() != Some(sponsor)
         || state
             .legal
             .active_arrest_for_character(contact.handler())
@@ -514,7 +551,7 @@ fn validate_representation_dependencies(
     {
         return Err(LegalRepresentationError::UnavailableHandler {
             handler: contact.handler(),
-            sponsor: draft.sponsor,
+            sponsor,
         });
     }
 
@@ -547,20 +584,42 @@ fn validate_representation_dependencies(
             contact.institution(),
         ));
     }
+    Ok(contact)
+}
 
-    validate_authority(state, draft.sponsor, draft.authorization)?;
-
-    Ok(RepresentationDependencies {
-        defendant: arrest.character(),
-        counsel: contact.contact(),
-        counsel_institution: contact.institution(),
-        handler: contact.handler(),
-        arrest_version: arrest.version(),
-        defendant_version: defendant.version(),
-        counsel_version: counsel.version(),
-        handler_version: handler.version(),
-        contact_version: contact.version(),
+/// Select an existing provider account without exposing foreign balances to leadership.
+/// The ledger still validates the actual payment, including freshness, at commitment.
+pub fn retainer_provider_account(
+    state: &AppState,
+    sponsor: OrganizationId,
+    contact: ContactId,
+    fee: Money,
+) -> Result<FinancialAccountId, LegalRepresentationError> {
+    if fee <= Money::ZERO {
+        return Err(LegalRepresentationError::InvalidFee);
+    }
+    let channel = validate_counsel_channel(state, sponsor, contact)?;
+    let provider = channel.institution();
+    find_retainer_provider_account(state, provider, |account| {
+        account.version() < u32::MAX && account.balance().checked_add(fee).is_some()
     })
+    .ok_or(LegalRepresentationError::ProviderAccountUnavailable { provider })
+}
+
+/// Both manual and automatic counsel selection use the same account-kind and
+/// stable-ID rule. The automatic pass supplies its projected balance/version predicate.
+fn find_retainer_provider_account(
+    state: &AppState,
+    provider: OrganizationId,
+    can_credit: impl Fn(&crate::finance::FinancialAccountRecord) -> bool,
+) -> Option<FinancialAccountId> {
+    state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(provider))
+        .filter(|account| account.kind() == AccountKind::LegitimateOperating)
+        .filter(|account| can_credit(account))
+        .map(|account| account.id())
+        .min()
 }
 
 fn validate_authority(
