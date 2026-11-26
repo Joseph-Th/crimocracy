@@ -73,6 +73,8 @@ pub enum LaunderingError {
     MissingBusinessEconomy(crate::core::id::BusinessId),
     #[error("business {0}'s operating economy is suspended and cannot route laundered revenue")]
     EconomySuspended(crate::core::id::BusinessId),
+    #[error("business {0} has no further operating cycles to support laundering")]
+    EconomyRecurrenceExhausted(crate::core::id::BusinessId),
     #[error(
         "street-cash account {account} holds {balance_cents} cents and cannot launder {requested_cents}"
     )]
@@ -199,6 +201,7 @@ pub fn remaining_laundering_capacity(
     organization: crate::core::id::OrganizationId,
     business: crate::core::id::BusinessId,
 ) -> Option<Money> {
+    validate_laundering_organization(state, organization).ok()?;
     let record = state.world.get_business(business)?;
     if record.owner() != BusinessOwner::Organization(organization) {
         return None;
@@ -355,6 +358,9 @@ fn validate_laundering_front<'a>(
         .ok_or(LaunderingError::MissingBusinessEconomy(draft.business))?;
     if economy.status() != BusinessOperatingStatus::Active {
         return Err(LaunderingError::EconomySuspended(draft.business));
+    }
+    if !economy.is_operating() {
+        return Err(LaunderingError::EconomyRecurrenceExhausted(draft.business));
     }
     ensure_version_can_advance(economy.version(), "business economy")?;
     Ok((business, economy))

@@ -73,7 +73,7 @@ impl Session<'_> {
         // Compare the endpoints instead of guessing every possible shutdown cause
         // from individual tick fields or rescanning the player's holdings every minute.
         let initially_suspended = uninterrupted.then(|| self.own_suspended_assets());
-        let mut deferred_losses = 0_u32;
+        let mut deferred_losses = 0_usize;
         let mut deferred_payroll = 0_u32;
         let mut deferred_operations = 0_u32;
         let mut deferred_urgent = 0_u32;
@@ -181,14 +181,18 @@ impl Session<'_> {
                 });
             // A first loss is an actionable change, not a routine daily settlement. Do not
             // repeatedly interrupt an acknowledged losing streak or reveal rival results.
-            let own_new_racket_loss = tick.enterprise_cycles.iter().any(|id| {
-                let enterprises = self.state.enterprises();
-                let cycle = enterprises.get_cycle(*id).expect("settled cycle");
-                enterprises
-                    .get_enterprise(cycle.enterprise())
-                    .is_some_and(|racket| racket.organization() == self.player)
-                    && enterprises.cycle_starts_current_loss_streak(*id)
-            });
+            let own_new_racket_losses = tick
+                .enterprise_cycles
+                .iter()
+                .filter(|&&id| {
+                    let enterprises = self.state.enterprises();
+                    let cycle = enterprises.get_cycle(id).expect("settled cycle");
+                    enterprises
+                        .get_enterprise(cycle.enterprise())
+                        .is_some_and(|racket| racket.organization() == self.player)
+                        && enterprises.cycle_starts_current_loss_streak(id)
+                })
+                .count();
             let pause_exceptions = self
                 .state
                 .attention_settings()
@@ -198,7 +202,7 @@ impl Session<'_> {
                 deferred_releases += own_release;
                 deferred_contracts += own_contract_expirations;
                 deferred_departures += own_payroll_departures;
-                deferred_losses += u32::from(own_new_racket_loss);
+                deferred_losses += own_new_racket_losses;
                 deferred_payroll += u32::from(own_payroll_shortfall);
                 deferred_operations += u32::from(operation_ended);
                 deferred_urgent += u32::from(urgent);
@@ -237,7 +241,7 @@ impl Session<'_> {
                 );
             } else if !uninterrupted && pause_exceptions && own_racket_suspended {
                 reason = Some("your racket has suspended operations; review 'enterprises'");
-            } else if !uninterrupted && pause_exceptions && own_new_racket_loss {
+            } else if !uninterrupted && pause_exceptions && own_new_racket_losses > 0 {
                 reason = Some(
                     "your racket has entered a losing cycle; review 'enterprises' and 'racket-outlook'",
                 );
@@ -850,22 +854,17 @@ mod tests {
         assert_eq!(session.execute("recovery").unwrap().0, recovery);
     }
 
-    #[test]
-    fn first_enterprise_loss_interrupts_but_repeat_losses_do_not() {
+    fn start_unprofitable_racket(session: &mut Session<'_>, name: &str) -> EnterpriseLocation {
         use crimocracy::world::world_system::insert_neighborhood;
         use crimocracy::world::{
             NeighborhoodDraft, NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile,
             NeighborhoodProfile, Rating,
         };
-        let registry = crimocracy::build_registry();
-        let mut session =
-            Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small)
-                .unwrap();
         let rating = |n| Rating::try_new(n).unwrap();
         let district = insert_neighborhood(
             &mut session.state,
             NeighborhoodDraft {
-                name: "Unprofitable ward".to_owned(),
+                name: name.to_owned(),
                 profile: NeighborhoodProfile {
                     economy: NeighborhoodEconomyProfile {
                         wealth: rating(0),
@@ -928,6 +927,28 @@ mod tests {
                 manager.raw()
             ))
             .unwrap();
+        EnterpriseLocation::Neighborhood(district)
+    }
+
+    #[test]
+    fn uninterrupted_advance_counts_each_new_loss_streak() {
+        let registry = crimocracy::build_registry();
+        let mut session =
+            Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small)
+                .unwrap();
+        start_unprofitable_racket(&mut session, "Unprofitable ward one");
+        start_unprofitable_racket(&mut session, "Unprofitable ward two");
+        let review = session.execute("advance 1d uninterrupted").unwrap().0;
+        assert!(review.contains("2 new loss streak(s)"), "{review}");
+    }
+
+    #[test]
+    fn first_enterprise_loss_interrupts_but_repeat_losses_do_not() {
+        let registry = crimocracy::build_registry();
+        let mut session =
+            Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small)
+                .unwrap();
+        let location = start_unprofitable_racket(&mut session, "Unprofitable ward");
         let first = session.execute("advance 2d").unwrap().0;
         assert!(first.contains("entered a losing cycle"), "{first}");
         assert_eq!(session.state.now().as_minutes(), DAY_MINUTES);
@@ -939,7 +960,7 @@ mod tests {
             .state
             .enterprises()
             .enterprises_for_organization(session.player)
-            .find(|racket| racket.location() == EnterpriseLocation::Neighborhood(district))
+            .find(|racket| racket.location() == location)
             .unwrap();
         let id = racket.id();
         if racket.status() == EnterpriseStatus::Active {

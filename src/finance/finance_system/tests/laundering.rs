@@ -113,19 +113,7 @@ fn make_laundering_fixture_for_kind(kind: OrganizationKind) -> LaunderingFixture
     }
 }
 
-/// A suspended front names its real state: the books exist but cannot route revenue,
-/// so the rejection must say suspended rather than missing.
-#[test]
-fn laundering_names_suspended_economy_instead_of_missing_books() {
-    let registry = build_registry();
-    let mut fixture = make_laundering_fixture();
-    crate::economy::business_economy_system::validate_suspend_business_economy(
-        &fixture.state,
-        fixture.business,
-    )
-    .expect("suspension should validate")
-    .commit(&mut fixture.state)
-    .expect("suspension should commit");
+fn fund_street_cash(fixture: &mut LaunderingFixture) {
     // Seed street cash so validation reaches the economy gate instead of failing early
     // on an empty source account.
     let reserve = insert_account(
@@ -157,6 +145,77 @@ fn laundering_names_suspended_economy_instead_of_missing_books() {
     .expect("seed transfer should validate")
     .commit(&mut fixture.state)
     .expect("seed transfer should commit");
+}
+
+#[test]
+fn exhausted_laundering_front_agrees_with_its_capacity_query() {
+    use crate::economy::business_economy_system::{
+        decide_business_cycle, validate_business_cycle_plan,
+    };
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+    fund_street_cash(&mut fixture);
+    let duration = registry
+        .get_business(crate::world::BusinessKind::Retail)
+        .economics()
+        .cycle();
+    fixture.state.set_now_for_test(SimTime::from_minutes(
+        u64::MAX - u64::from(duration.as_minutes()) + 1,
+    ));
+    let plan = decide_business_cycle(&registry, &fixture.state, fixture.business, 0).unwrap();
+    validate_business_cycle_plan(&fixture.state, plan)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        remaining_laundering_capacity(
+            &registry,
+            &fixture.state,
+            fixture.organization,
+            fixture.business,
+        ),
+        None
+    );
+    let draft = LaunderingDraft {
+        organization: fixture.organization,
+        street_account: fixture.street,
+        business: fixture.business,
+        accounted_account: fixture.accounted,
+        amount: Money::from_cents(100),
+    };
+    let before = bincode::serialize(&fixture.state).unwrap();
+    let expected = LaunderingError::EconomyRecurrenceExhausted(fixture.business);
+    assert_eq!(
+        validate_launder_funds(&registry, &fixture.state, draft.clone()).err(),
+        Some(expected.clone())
+    );
+    assert_eq!(before, bincode::serialize(&fixture.state).unwrap());
+    fixture.state = crate::core::persistence::restore_save(
+        &registry,
+        crate::core::persistence::build_save(&registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_launder_funds(&registry, &fixture.state, draft).err(),
+        Some(expected)
+    );
+    validate_invariants(&fixture.state);
+}
+
+/// A suspended front names its real state: the books exist but cannot route revenue,
+/// so the rejection must say suspended rather than missing.
+#[test]
+fn laundering_names_suspended_economy_instead_of_missing_books() {
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+    crate::economy::business_economy_system::validate_suspend_business_economy(
+        &fixture.state,
+        fixture.business,
+    )
+    .expect("suspension should validate")
+    .commit(&mut fixture.state)
+    .expect("suspension should commit");
+    fund_street_cash(&mut fixture);
     let error = validate_launder_funds(
         &registry,
         &fixture.state,
@@ -178,6 +237,15 @@ fn laundering_names_suspended_economy_instead_of_missing_books() {
 fn laundering_rejects_non_criminal_organization() {
     let registry = build_registry();
     let fixture = make_laundering_fixture_for_kind(OrganizationKind::Commercial);
+    assert_eq!(
+        remaining_laundering_capacity(
+            &registry,
+            &fixture.state,
+            fixture.organization,
+            fixture.business,
+        ),
+        None
+    );
     let error = validate_launder_funds(
         &registry,
         &fixture.state,

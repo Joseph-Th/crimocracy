@@ -349,8 +349,12 @@ current daily payroll coverage, liquid organization-owned operating funds, and
 withdrawable earned surplus. Portfolio-administration estimates apply the actual
 per-storefront fee rounding. When manual distributions strand earned cash in a
 storefront while wages cannot be funded, the brief explains the withdrawal choice.
-Its realized historical income comparison uses the present payroll obligation,
-not an estimate of past payroll spending.
+Its realized historical income comparison uses settlements from the most recent
+30 elapsed days (excluding the oldest boundary) and the present payroll
+obligation, not an estimate of past payroll spending. Before day 30 the
+average uses the exact elapsed minutes, with a one-day minimum denominator.
+Uninterrupted review counts individual new racket loss streaks, even when
+several rackets settle in the same minute.
 
 Games may use seeded procedural cities through `--generate` or one of the
 original authored test openings. The `--opening` option chooses among `night-trap`,

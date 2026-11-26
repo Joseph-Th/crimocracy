@@ -308,7 +308,15 @@ storefront, that moving wages into an organization-owned operating account does
 not reduce reported payable payroll runway, and that the brief survives save/load.
 The generated-session regression checks the manual-distribution warning when
 storefront earnings are retained during a treasury shortfall, its persistence,
-and its removal when daily distribution is explicitly enabled. The rival campaign
+and its removal when daily distribution is explicitly enabled.
+`brief_income_uses_elapsed_minutes_without_a_midnight_discontinuity` compares
+actual settled player income immediately before and after a day boundary and
+checks save/restore. `uninterrupted_advance_counts_each_new_loss_streak`
+starts two losing rackets with the same settlement minute and verifies both
+appear in the review. `exhausted_laundering_front_agrees_with_its_capacity_query`
+settles the final representable business cycle through the economy owner,
+rejects further laundering without mutation, and repeats the check after restore.
+The rival campaign
 reserve regression tests that organization-owned legitimate operating balances
 protect actual payroll while making existing accounted funds available for civic
 spending, including through save/restore.

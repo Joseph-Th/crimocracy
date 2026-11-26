@@ -93,6 +93,32 @@ fn political_dossier_exposes_title_countdown_without_mutating_or_exposing_rivals
 }
 
 #[test]
+fn brief_income_uses_elapsed_minutes_without_a_midnight_discontinuity() {
+    let registry = crimocracy::build_registry();
+    let mut session =
+        Session::new_generated(&registry, EvaluationSeeds::new(12, 12), CityScale::Small).unwrap();
+    session.execute("advance 7d uninterrupted").unwrap();
+    let before = session.brief();
+    assert!(before.contains("last 7d 0h 0m"), "{before}");
+    assert!(
+        before.contains("legitimate 86667 cents | rackets 75526 cents"),
+        "{before}"
+    );
+    assert!(before.contains("averaged 23170 cents/day"), "{before}");
+    session.execute("advance 1m uninterrupted").unwrap();
+    let after = session.brief();
+    assert!(after.contains("last 7d 0h 1m"), "{after}");
+    assert!(
+        after.contains("legitimate 86667 cents | rackets 75526 cents"),
+        "{after}"
+    );
+    assert!(after.contains("averaged 23168 cents/day"), "{after}");
+    let saved = build_save(&registry, &session.state).unwrap();
+    session.state = restore_save(&registry, saved).unwrap();
+    assert_eq!(session.brief(), after);
+}
+
+#[test]
 fn uninterrupted_advance_runs_real_ticks_and_skips_optional_pauses_only() {
     let registry = crimocracy::build_registry();
     let seeds = EvaluationSeeds::new(12, 12);
