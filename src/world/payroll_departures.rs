@@ -70,6 +70,15 @@ pub(crate) fn apply_payroll_departures(
             let Some(supervisor) = person.supervisor() else {
                 continue;
             };
+            // A completed term belongs to the expiry owner even if custody or
+            // another binding obligation temporarily prevents normal release.
+            if state
+                .world()
+                .active_freelance_contract(member)
+                .is_some_and(|contract| contract.expires_at() <= state.now())
+            {
+                continue;
+            }
             let Some(threshold) = departure_threshold(registry, state, member, supervisor) else {
                 continue;
             };

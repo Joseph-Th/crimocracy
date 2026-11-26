@@ -789,6 +789,128 @@ fn freelance_terms_cannot_be_extended_by_permanent_roles_or_future_bookings() {
 }
 
 #[test]
+fn unpaid_final_contract_day_ends_as_expiry_not_resignation() {
+    use crate::core::simulation::run_tick;
+    use crate::enterprises::enterprise_execution::validate_suspend_enterprise;
+    use crate::finance::finance_system::{insert_account, validate_record_transaction};
+    use crate::finance::{
+        AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+        Money,
+    };
+    use crate::social::RelationshipLevel;
+    use crate::social::relationship_system::validate_set_relationship;
+    use crate::world::freelance_contracts::freelance_contact_available;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(562_365)).unwrap();
+    let freelancer = city
+        .state
+        .world()
+        .characters()
+        .find(|person| {
+            freelance_contact_available(&city.state, city.player, person.id(), city.boss)
+        })
+        .unwrap()
+        .id();
+    validate_hire_freelancer(&city.state, city.player, freelancer, city.boss, 1)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let mut dimensions = city
+        .state
+        .social()
+        .get_relationship(freelancer, city.boss)
+        .unwrap()
+        .dimensions();
+    dimensions.resentment = RelationshipLevel::try_new(100).unwrap();
+    validate_set_relationship(&city.state, freelancer, city.boss, dimensions)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let rackets: Vec<_> = city
+        .state
+        .enterprises()
+        .enterprises_for_organization(city.player)
+        .filter(|racket| racket.status() == crate::enterprises::EnterpriseStatus::Active)
+        .map(|racket| racket.id())
+        .collect();
+    for racket in rackets {
+        validate_suspend_enterprise(&city.state, racket)
+            .unwrap()
+            .commit(&mut city.state)
+            .unwrap();
+    }
+    let mut postings: Vec<_> = city
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(city.player))
+        .filter(|account| account.available_payment_balance() > Money::ZERO)
+        .map(|account| LedgerPosting {
+            account: account.id(),
+            amount: Money::from_cents(-account.available_payment_balance().cents()),
+        })
+        .collect();
+    let total = -postings
+        .iter()
+        .map(|posting| posting.amount.cents())
+        .sum::<i64>();
+    let settlement = insert_account(
+        &mut city.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(city.player),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    postings.push(LedgerPosting {
+        account: settlement,
+        amount: Money::from_cents(total),
+    });
+    validate_record_transaction(
+        &city.state,
+        LedgerTransactionDraft {
+            occurred_at: city.state.now(),
+            memo: "Exhaust remaining payroll liquidity".into(),
+            postings,
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut city.state)
+    .unwrap();
+    let mut replay = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut replay] {
+        state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32 - 1));
+        let tick = run_tick(&registry, state).unwrap();
+        assert!(
+            tick.payrolls
+                .iter()
+                .any(|payroll| payroll.underpaid_members().contains(&freelancer))
+        );
+        assert_eq!(tick.freelance_contract_expirations, vec![freelancer]);
+        assert!(!tick.payroll_departures.contains(&freelancer));
+        assert_eq!(
+            state
+                .world()
+                .get_character(freelancer)
+                .unwrap()
+                .organization(),
+            None
+        );
+        assert!(
+            !state
+                .history()
+                .organization_has_payroll_departures(city.player)
+        );
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &replay).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn midnight_freelance_expiry_does_not_credit_independent_work_during_paid_term() {
     use crate::core::simulation::run_tick;
     use crate::finance::FinancialOwner;

@@ -428,10 +428,10 @@ determinism and client contracts.
     ──► apply_due_personal_owner_dividends  earned private proprietor surplus → personal accounted funds; both distributions share atomic cohort settlement
 21  apply_daily_payroll
     ──► apply_due_character_lives         close civic work, experience and rest after settlements and wages, before midnight membership changes
+    ──► apply_due_freelance_expirations    at midnight only, after final earned payroll and completed workday; expired terms take precedence over resignation
     ──► apply_payroll_departures
           wage-driven departures suspend live rackets before revoking mandates and releasing membership; suspended player rackets remain recoverable by succession; history gates return; assetless final abandonment can end a player campaign
-    ──► apply_due_freelance_expirations    at midnight only, after final earned payroll and completed workday
-    ──► apply_due_political_campaigns     after payroll; decay, funded work, rival spending, tenure, scheduled elections
+    ──► apply_due_political_campaigns     after payroll; decay, funded work, rival spending, tenure
     ──► apply_due_fine_collections
           court fines collect only from convicted defendants' accessible personal funds, including wages
     ──► apply_reputation_phase           decay and current operation/racket consequences
@@ -448,6 +448,7 @@ determinism and client contracts.
     ──► apply_due_autonomous_territory_standstills  negotiated NPC concessions, never automatic player agreement
     ──► apply_due_protection_demands      real commercial exposure before rival planning
     ──► apply_due_rival_operations        daily mandate-backed commercial reconnaissance/strikes, after economic decisions and reputation
+    ──► apply_due_mayoral_elections       exact scheduled boundary; final reputation, roster, properties and racket status
     ──► synthesize_executive_brief        sees every report/decision made this minute, last
     ──► validate_invariants               structural + registry re-derivation
 ```

@@ -1461,8 +1461,8 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
     );
     use crate::politics::SpecialistKind;
     use crate::politics::political_system::{
-        apply_due_political_campaigns, validate_hire_specialist, validate_invest_influence,
-        validate_nominate_mayor,
+        apply_due_mayoral_elections, apply_due_political_campaigns, validate_hire_specialist,
+        validate_invest_influence, validate_nominate_mayor,
     };
     fund(&mut city.state, city.player, 120_000_000);
     for (&district, &manager) in districts.iter().zip(managers.iter()) {
@@ -1571,6 +1571,7 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
             .commit(&mut depleted)
             .unwrap();
             apply_due_political_campaigns(&registry, &mut depleted);
+            apply_due_mayoral_elections(&registry, &mut depleted);
             let result = depleted
                 .politics()
                 .organization(city.player)
@@ -1598,6 +1599,7 @@ fn political_victory_requires_contact_and_citywide_real_estate_then_ends_campaig
             );
         }
         apply_due_political_campaigns(&registry, &mut city.state);
+        apply_due_mayoral_elections(&registry, &mut city.state);
         if day % 7 == 0 {
             for (&district, &manager) in districts.iter().zip(managers.iter()) {
                 if let Ok(order) = crate::politics::political_system::validate_civic_initiative(

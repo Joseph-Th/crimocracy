@@ -30,6 +30,7 @@ mod expenditure;
 pub(super) use daily::affordable_rival_campaign_points;
 pub(crate) use daily::apply_due_political_campaigns;
 pub use daily::daily_campaign_erosion;
+pub(crate) use election::apply_due_mayoral_elections;
 pub use expenditure::ValidatedPoliticalOrder;
 use expenditure::{CampaignAction, valid_campaign_expenditure, validate_spend};
 

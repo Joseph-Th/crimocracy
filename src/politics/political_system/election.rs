@@ -2,7 +2,7 @@
 
 use super::{eligible_candidate, rival_pressure};
 use crate::core::state::AppState;
-use crate::core::time::DAY_MINUTES;
+use crate::core::time::{DAY_MINUTES, is_day_boundary};
 use crate::politics::{
     DistrictCampaign, MUNICIPAL_ELECTION_INTERVAL_DAYS, MayoralElection, OrganizationCampaign,
     WardBallot,
@@ -38,9 +38,12 @@ fn apportion_ward_votes(electorate: u32, scores: [u32; 3]) -> [u32; 3] {
     votes
 }
 
-pub(super) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppState) {
+pub(crate) fn apply_due_mayoral_elections(registry: &Registry, state: &mut AppState) {
+    if !is_day_boundary(state.now()) {
+        return;
+    }
     let day = state.now().as_minutes() / DAY_MINUTES;
-    if day == 0 || !day.is_multiple_of(MUNICIPAL_ELECTION_INTERVAL_DAYS) {
+    if !day.is_multiple_of(MUNICIPAL_ELECTION_INTERVAL_DAYS) {
         return;
     }
     let Some(owner) = state.player_organization() else {

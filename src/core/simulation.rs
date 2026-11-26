@@ -256,17 +256,18 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // independent civilian work credit for the same day they were still employed.
     // Personal condition updates do not invalidate held organizational authority.
     crate::world::character_life::apply_due_character_lives(state);
-    // Departures see actual wages and current resentment before recruitment and expansion
-    // evaluate the roster and delegated authorities.
-    let payroll_departures =
-        crate::world::payroll_departures::apply_payroll_departures(registry, state, &payrolls);
-    // Boundary-aligned terms finish after earned payroll; other terms were already
-    // checked before this minute's work. A still-booked or detained freelancer
-    // remains in the derived expiration schedule until release is lawful.
+    // Boundary-aligned terms finish after earned payroll and the completed workday,
+    // before wage-driven departures can mistake a completed term for a resignation.
+    // Other terms were already checked before this minute's work. A still-booked
+    // or detained freelancer remains scheduled until release is lawful.
     if is_day_boundary(state.now()) {
         freelance_contract_expirations =
             crate::world::freelance_contracts::apply_due_freelance_expirations(state);
     }
+    // Departures see actual wages, current resentment and remaining membership
+    // before recruitment and expansion evaluate the roster and delegated authorities.
+    let payroll_departures =
+        crate::world::payroll_departures::apply_payroll_departures(registry, state, &payrolls);
     // Municipal campaigning spends only funds left after actual payroll.
     // Specialists work, influence decays, and rival organizations challenge
     // local majorities before the day closes; no political progress is free.
@@ -336,6 +337,9 @@ pub fn run_tick(registry: &Registry, state: &mut AppState) -> Result<TickOutcome
     // commercial stakes, lawful staffing, and enforcement risk govern the next day's action.
     let autonomous_operations =
         crate::operations::operation_system::apply_due_rival_operations(registry, state);
+    // Certify ballots against the completed minute: reputation, membership, property
+    // and racket changes must already be reflected in votes and qualifications.
+    crate::politics::political_system::apply_due_mayoral_elections(registry, state);
     // Executive synthesis runs last so a due brief sees every report and decision created by
     // operational, investigative, financial, and delegated personnel work that resolved in the
     // same simulation minute.

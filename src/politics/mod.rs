@@ -1,6 +1,6 @@
 //! Persistent, contested municipal campaigning. Political standing is purchased with
 //! accounted funds, erodes daily, and must be defended against rival organizations.
-//! Municipal elections are certified by the daily political phase; campaign victory is claimed separately.
+//! Municipal elections are certified at the end of the due simulation minute; victory is claimed separately.
 
 use crate::core::id::{CharacterId, FinancialAccountId, NeighborhoodId, OrganizationId};
 use crate::core::time::SimTime;

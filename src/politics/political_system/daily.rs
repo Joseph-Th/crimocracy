@@ -1,6 +1,5 @@
 //! Daily campaign maintenance, expenditure and rival competition.
 
-use super::election::apply_due_mayoral_elections;
 use super::{
     CampaignAction, eligible_manager, reconcile_district_majorities, specialist_output,
     validate_invest_for, validate_spend,
@@ -279,5 +278,4 @@ pub(crate) fn apply_due_political_campaigns(registry: &Registry, state: &mut App
     for district in districts {
         reconcile_district_majorities(state, district);
     }
-    apply_due_mayoral_elections(registry, state);
 }

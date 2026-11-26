@@ -14,8 +14,8 @@ use crate::finance::{
     Money,
 };
 use crate::politics::political_system::{
-    PoliticalError, apply_due_political_campaigns, initiative_available, validate_civic_initiative,
-    validate_nominate_mayor,
+    PoliticalError, apply_due_mayoral_elections, apply_due_political_campaigns,
+    initiative_available, validate_civic_initiative, validate_nominate_mayor,
 };
 use crate::world::{AutonomyLevel, OrganizationKind};
 
@@ -63,6 +63,162 @@ fn day(registry: &crate::Registry, state: &mut crate::AppState) {
     state.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
     crate::opportunities::opportunity_system::apply_opportunity_expiry(registry, state).unwrap();
     apply_due_political_campaigns(registry, state);
+    apply_due_mayoral_elections(registry, state);
+}
+
+#[test]
+fn election_counts_reputation_after_boundary_decay() {
+    use crate::core::simulation::run_tick;
+    use crate::reputation::AudienceKind;
+    use crate::reputation::reputation_system::{apply_reputation_delta, resolve_score};
+    use crate::social::relationship_system::validate_set_relationship;
+    use crate::social::{RelationshipDimensions, RelationshipLevel};
+    use crate::world::world_system::{
+        designate_player_organization, insert_character, insert_neighborhood, insert_organization,
+    };
+    use crate::world::{
+        CapabilityKind, CharacterDraft, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        NeighborhoodInstitutionProfile, NeighborhoodProfile, OrganizationDraft, Rating,
+    };
+
+    let registry = build_registry();
+    let mut state = crate::AppState::new(711);
+    let owner = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Campaign".into(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut state, owner).unwrap();
+    let council = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Council".into(),
+            kind: OrganizationKind::Political,
+        },
+    )
+    .unwrap();
+    let mut person = |name: &str, organization| {
+        insert_character(
+            &mut state,
+            CharacterDraft {
+                name: name.into(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Tight,
+                capabilities: [(CapabilityKind::Negotiation, Rating::try_new(100).unwrap())]
+                    .into_iter()
+                    .collect(),
+                traits: Default::default(),
+                drives: Default::default(),
+            },
+        )
+        .unwrap()
+    };
+    let boss = person("Nominee", owner);
+    let official = person("Council leader", council);
+    let rating = Rating::try_new(50).unwrap();
+    insert_neighborhood(
+        &mut state,
+        NeighborhoodDraft {
+            name: "Ward".into(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating,
+                    commercial_activity: rating,
+                    illicit_demand: rating,
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating,
+                },
+            },
+        },
+    )
+    .unwrap();
+    validate_set_relationship(
+        &state,
+        boss,
+        official,
+        RelationshipDimensions {
+            trust: RelationshipLevel::try_new(80).unwrap(),
+            ..RelationshipDimensions::zero()
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    validate_establish_contact(
+        &state,
+        InstitutionalContactDraft {
+            sponsor: owner,
+            handler: boss,
+            contact: official,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    fund(&mut state, owner, 10_000_000);
+    state.advance_clock(SimDuration::from_minutes((180 * DAY_MINUTES) as u32));
+    validate_nominate_mayor(&state, boss)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let election_day = state
+        .politics()
+        .organization(owner)
+        .unwrap()
+        .candidacy()
+        .unwrap()
+        .election_day;
+    let step = i8::try_from(registry.reputation().daily_decay_step()).unwrap();
+    apply_reputation_delta(
+        &registry,
+        &mut state,
+        owner,
+        AudienceKind::Residents,
+        step + 2,
+    )
+    .unwrap();
+    state.advance_clock(SimDuration::from_minutes(
+        ((election_day - 180) * DAY_MINUTES - 1) as u32,
+    ));
+    let mut fresh = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    apply_reputation_delta(&registry, &mut fresh, owner, AudienceKind::Residents, -step).unwrap();
+    let mut replay = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    for branch in [&mut state, &mut fresh, &mut replay] {
+        run_tick(&registry, branch).unwrap();
+        assert_eq!(
+            resolve_score(
+                &registry,
+                branch.reputation(),
+                owner,
+                AudienceKind::Residents
+            ),
+            registry.reputation().baseline() + 2
+        );
+        validate_invariants(branch);
+    }
+    let ballots = |branch: &crate::AppState| {
+        branch
+            .politics()
+            .organization(owner)
+            .unwrap()
+            .latest_election()
+            .unwrap()
+            .ballots
+            .clone()
+    };
+    assert!(ballots(&state)[0].candidate_votes > 0);
+    assert_eq!(ballots(&state), ballots(&fresh));
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap(),
+        bincode::serialize(&build_save(&registry, &replay).unwrap()).unwrap()
+    );
 }
 
 #[test]
@@ -689,6 +845,7 @@ fn former_nominee_joining_the_council_cannot_face_themself_on_the_ballot() {
             (MUNICIPAL_ELECTION_INTERVAL_DAYS * DAY_MINUTES) as u32,
         ));
         apply_due_political_campaigns(&registry, state);
+        apply_due_mayoral_elections(&registry, state);
         let election = state
             .politics()
             .organization(city.player)
