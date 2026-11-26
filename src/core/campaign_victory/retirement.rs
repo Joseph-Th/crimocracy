@@ -174,31 +174,14 @@ pub(super) fn prepare_retirement_payment(
     owner: OrganizationId,
 ) -> Result<ValidatedRetirementSettlement, VictoryError> {
     let (payees, required) = retirement_members(registry, state, owner)?;
-    let mut remaining = required;
-    let mut postings = Vec::new();
-    for account in state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(owner))
-        .filter(|account| account.kind() == AccountKind::AccountedFunds)
-    {
-        if remaining == Money::ZERO {
-            break;
-        }
-        let debit = account.available_payment_balance().min(remaining);
-        if debit <= Money::ZERO {
-            continue;
-        }
-        postings.push(LedgerPosting {
-            account: account.id(),
-            amount: debit.checked_neg().ok_or(VictoryError::Arithmetic)?,
-        });
-        remaining = remaining
-            .checked_sub(debit)
-            .ok_or(VictoryError::Arithmetic)?;
-    }
-    if remaining != Money::ZERO {
-        return Err(VictoryError::RetirementNotReady);
-    }
+    let mut postings = crate::finance::helpers::payment_debits(
+        state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(owner))
+            .filter(|account| account.kind() == AccountKind::AccountedFunds),
+        required,
+    )
+    .map_err(|_| VictoryError::RetirementNotReady)?;
     let mut missing = Vec::new();
     let mut destinations = Vec::new();
     for &(person, amount) in &payees {

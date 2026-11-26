@@ -55,28 +55,14 @@ pub(super) fn validate_spend(
     spent
         .checked_add(cents)
         .ok_or(PoliticalError::BudgetOverflow)?;
-    let mut remaining = cents;
-    let mut postings = Vec::new();
-    for account in state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(owner))
-        .filter(|account| account.kind() == AccountKind::AccountedFunds)
-    {
-        let contribution = remaining.min(account.available_payment_balance().cents());
-        if contribution > 0 {
-            postings.push(LedgerPosting {
-                account: account.id(),
-                amount: Money::from_cents(-contribution),
-            });
-            remaining -= contribution;
-        }
-        if remaining == 0 {
-            break;
-        }
-    }
-    if remaining > 0 {
-        return Err(PoliticalError::InsufficientFunds);
-    }
+    let mut postings = crate::finance::helpers::payment_debits(
+        state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(owner))
+            .filter(|account| account.kind() == AccountKind::AccountedFunds),
+        Money::from_cents(cents),
+    )
+    .map_err(|_| PoliticalError::InsufficientFunds)?;
     // Campaign expenditure must actually leave the organization's treasury.
     // A same-owner settlement credit would only park money in its own ledger.
     let municipal_institution = state

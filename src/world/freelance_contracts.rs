@@ -285,37 +285,16 @@ pub fn validate_hire_freelancer(
         .get_character(freelancer)
         .expect("qualified freelance character");
     let fee_cents = signing_fee(person, days);
-    // A crew's street cash belongs to the organization, not to whichever
-    // individual racket happened to retain the largest pocket. Assemble the
-    // full fee from spendable accounts, largest first to keep the ledger small.
-    let mut funding: Vec<_> = state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(sponsor))
-        .filter(|account| {
-            account.kind() == AccountKind::StreetCash
-                && account.available_payment_balance() > Money::ZERO
-        })
-        .map(|account| (account.available_payment_balance(), account.id()))
-        .collect();
-    funding.sort_unstable_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-    let mut remaining = fee_cents;
-    let mut postings = Vec::new();
-    for (available, account) in funding {
-        if remaining == 0 {
-            break;
-        }
-        let debit = available.cents().min(remaining);
-        postings.push(LedgerPosting {
-            account,
-            amount: Money::from_cents(-debit),
-        });
-        remaining -= debit;
-    }
-    if remaining != 0 {
-        return Err(FreelanceError::Unfunded {
-            required_cents: fee_cents,
-        });
-    }
+    let mut postings = crate::finance::helpers::payment_debits(
+        state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(sponsor))
+            .filter(|account| account.kind() == AccountKind::StreetCash),
+        Money::from_cents(fee_cents),
+    )
+    .map_err(|_| FreelanceError::Unfunded {
+        required_cents: fee_cents,
+    })?;
     let recipient = state
         .finance()
         .accounts_for(FinancialOwner::Character(freelancer))

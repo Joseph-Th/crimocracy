@@ -1339,6 +1339,52 @@ fn exhausted_account_version_rejects_ledger_transfer_before_any_balance_moves() 
 }
 
 #[test]
+fn payment_planning_excludes_exhausted_accounts_and_reports_exact_shortfall() {
+    let (mut state, _, funding, destination) = make_test_budget();
+    validate_record_transaction(
+        &state,
+        LedgerTransactionDraft {
+            occurred_at: state.now(),
+            memo: "Fund alternate payment account".to_owned(),
+            postings: vec![
+                LedgerPosting {
+                    account: funding,
+                    amount: Money::from_cents(-700),
+                },
+                LedgerPosting {
+                    account: destination,
+                    amount: Money::from_cents(700),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .expect("alternate account funding should validate")
+    .commit(&mut state)
+    .expect("alternate account funding should commit");
+
+    // Synthetic version-capacity boundary: the funding balance still exists,
+    // but the account cannot accept a further ledger posting.
+    state.finance.accounts.get_mut(&funding).unwrap().version = u32::MAX;
+    let sources = [
+        state.finance().get_account(funding).unwrap(),
+        state.finance().get_account(destination).unwrap(),
+    ];
+    let postings = crate::finance::helpers::payment_debits(sources, Money::from_cents(500))
+        .expect("the alternate account covers the payment");
+    assert_eq!(postings.len(), 1);
+    assert_eq!(postings[0].account, destination);
+    assert_eq!(postings[0].amount, Money::from_cents(-500));
+    assert_eq!(
+        crate::finance::helpers::payment_debits(sources, Money::from_cents(800))
+            .expect_err("unpostable balances cannot cover a shortfall"),
+        Money::from_cents(100)
+    );
+    assert_eq!(sources[0].balance(), Money::from_cents(1800));
+    assert_eq!(sources[1].balance(), Money::from_cents(700));
+}
+
+#[test]
 fn planned_account_transaction_opens_and_funds_account_atomically() {
     let registry = build_registry();
     let mut state = AppState::new(32);

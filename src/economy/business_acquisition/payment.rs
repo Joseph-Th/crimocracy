@@ -115,41 +115,16 @@ fn acquisition_payment_draft(
     price: Money,
     business_name: &str,
 ) -> LedgerTransactionDraft {
-    // Spend the largest spendable balance first so one well-funded accounted pocket covers
-    // the price alone instead of draining every low-ID dust account. ID breaks exact-balance
-    // ties. This matches payroll's largest-first funding order; the debit set is otherwise
-    // identical, only the fragmentation differs.
-    let mut ordered: Vec<(FinancialAccountId, Money)> = funding_accounts
-        .iter()
-        .map(|account| {
-            let spendable = state
+    let mut postings = crate::finance::helpers::payment_debits(
+        funding_accounts.iter().map(|account| {
+            state
                 .finance
                 .get_account(*account)
                 .expect("validated acquisition funding account must exist")
-                .available_payment_balance();
-            (*account, spendable)
-        })
-        .filter(|(_, spendable)| *spendable != Money::ZERO)
-        .collect();
-    ordered.sort_by_key(|(account, spendable)| (std::cmp::Reverse(spendable.cents()), *account));
-    let mut postings = Vec::with_capacity(funding_accounts.len() + 1);
-    let mut remaining = price;
-    for (account, spendable) in ordered {
-        if remaining == Money::ZERO {
-            break;
-        }
-        let debit = spendable.min(remaining);
-        postings.push(LedgerPosting {
-            account,
-            amount: debit
-                .checked_neg()
-                .expect("positive acquisition debit must negate"),
-        });
-        remaining = remaining
-            .checked_sub(debit)
-            .expect("acquisition debit cannot exceed remaining price");
-    }
-    debug_assert_eq!(remaining, Money::ZERO);
+        }),
+        price,
+    )
+    .expect("acquisition funding validation proved the exact price is payable");
     postings.push(LedgerPosting {
         account: seller_settlement_account,
         amount: price,

@@ -251,52 +251,29 @@ pub fn validate_negotiate_standstill_with_tribute(
 ) -> Result<ValidatedTerritoryStandstill, TerritoryNegotiationError> {
     validate_standstill_terms(state, initiator, counterparty, district, tribute)?;
     let payment = if tribute > Money::ZERO {
-        // Cash held in multiple street accounts is still one organization's treasury.
-        // Collect a deterministic, spendable allocation without making the choice of which
-        // racket account happened to be funded decide whether a ceasefire is possible.
-        let mut remaining = tribute;
-        let mut sources = Vec::new();
-        for account in state
-            .finance()
-            .accounts_for(FinancialOwner::Organization(initiator))
-        {
-            if account.kind() != AccountKind::StreetCash {
-                continue;
+        // A ceasefire uses the organization's combined street-cash reserves,
+        // not the balance of any particular racket account.
+        let mut postings = crate::finance::helpers::payment_debits(
+            state
+                .finance()
+                .accounts_for(FinancialOwner::Organization(initiator))
+                .filter(|account| account.kind() == AccountKind::StreetCash),
+            tribute,
+        )
+        .map_err(|_| TerritoryNegotiationError::InsufficientTributeFunds)?;
+        let draft = |destination| {
+            postings.push(LedgerPosting {
+                account: destination,
+                amount: tribute,
+            });
+            LedgerTransactionDraft {
+                occurred_at: state.now(),
+                memo: format!(
+                    "Territorial standstill tribute for {district}: {initiator} to {counterparty}"
+                ),
+                postings,
+                authorization: None,
             }
-            let debit = remaining.min(account.available_payment_balance());
-            if debit <= Money::ZERO {
-                continue;
-            }
-            sources.push((account.id(), debit));
-            remaining = remaining
-                .checked_sub(debit)
-                .expect("tribute allocation cannot exceed the promised payment");
-            if remaining == Money::ZERO {
-                break;
-            }
-        }
-        if remaining > Money::ZERO {
-            return Err(TerritoryNegotiationError::InsufficientTributeFunds);
-        }
-        let draft = |destination| LedgerTransactionDraft {
-            occurred_at: state.now(),
-            memo: format!(
-                "Territorial standstill tribute for {district}: {initiator} to {counterparty}"
-            ),
-            postings: sources
-                .iter()
-                .map(|&(account, amount)| LedgerPosting {
-                    account,
-                    amount: amount
-                        .checked_neg()
-                        .expect("positive tribute debit negates"),
-                })
-                .chain(std::iter::once(LedgerPosting {
-                    account: destination,
-                    amount: tribute,
-                }))
-                .collect(),
-            authorization: None,
         };
         let existing = state
             .finance()

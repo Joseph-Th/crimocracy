@@ -125,6 +125,54 @@ fn public_machine_influence_counts_without_property_titles() {
 }
 
 #[test]
+fn political_investment_uses_one_sufficient_clean_pool_before_fragmenting_payment() {
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(3_411)).unwrap();
+    let owner = city.player;
+    // A later, larger clean reserve can cover the entire purchase. Earlier
+    // pockets should not be touched merely because they have lower IDs.
+    fund(&mut city.state, owner, 1_000);
+    fund(&mut city.state, owner, 2_000_000);
+    let accounts: Vec<_> = city
+        .state
+        .finance()
+        .accounts_for(FinancialOwner::Organization(owner))
+        .filter(|account| account.kind() == AccountKind::AccountedFunds)
+        .map(|account| (account.id(), account.balance()))
+        .collect();
+    let largest = accounts
+        .iter()
+        .max_by_key(|(_, balance)| *balance)
+        .unwrap()
+        .0;
+    let price = 500_000;
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
+    for state in [&mut city.state, &mut restored] {
+        validate_invest_influence(state, city.home, price)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        for &(id, balance) in &accounts {
+            let expected = if id == largest {
+                balance.checked_sub(Money::from_cents(price)).unwrap()
+            } else {
+                balance
+            };
+            assert_eq!(state.finance().get_account(id).unwrap().balance(), expected);
+        }
+        let campaign = state.politics().organization(owner).unwrap();
+        assert_eq!(campaign.spent_cents(), price);
+        assert_eq!(campaign.district(city.home).unwrap().influence(), 100);
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&city.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn political_investment_requires_clean_funds_and_loses_influence_without_staff() {
     let registry = build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(3_411)).unwrap();

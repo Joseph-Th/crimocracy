@@ -611,7 +611,6 @@ fn validate_retainer_payment(
         }
     }
 
-    let mut available_cents = 0_i128;
     let mut payers = Vec::with_capacity(draft.payer_accounts.len());
     for account_id in &draft.payer_accounts {
         let payer = state
@@ -625,20 +624,17 @@ fn validate_retainer_payment(
                 sponsor: draft.sponsor,
             });
         }
-        let spendable = payer.spendable_balance();
-        available_cents =
-            (available_cents + i128::from(spendable.cents())).min(i128::from(draft.fee.cents()));
-        if spendable > Money::ZERO {
-            payers.push((payer.kind(), spendable, payer.id()));
-        }
+        payers.push(payer);
     }
-    if available_cents < i128::from(draft.fee.cents()) {
-        return Err(LegalRepresentationError::InsufficientFunds {
-            available_cents: i64::try_from(available_cents)
-                .expect("available retainer funding is bounded by fee"),
-            required_cents: draft.fee.cents(),
-        });
-    }
+    // Use exactly the same spendable liquidity rule as automatic support.
+    // Terminal accounts retain a balance but cannot fund new postings.
+    let mut postings =
+        crate::finance::helpers::payment_debits(payers, draft.fee).map_err(|missing| {
+            LegalRepresentationError::InsufficientFunds {
+                available_cents: draft.fee.cents() - missing.cents(),
+                required_cents: draft.fee.cents(),
+            }
+        })?;
 
     let provider_account = state.finance.get_account(draft.provider_account).ok_or(
         LegalRepresentationError::MissingAccount(draft.provider_account),
@@ -651,28 +647,6 @@ fn validate_retainer_payment(
             provider,
         });
     }
-    // Any-liquid retainer funding follows the finance owner's shared money-state semantics
-    // instead of account creation order. Within one money-state class, consume the largest pool
-    // first to keep the balanced transaction compact; account ID is only the final stable tie.
-    crate::finance::helpers::sort_unrestricted_payment_sources(&mut payers);
-    let mut postings = Vec::with_capacity(draft.payer_accounts.len() + 1);
-    let mut remaining = draft.fee;
-    for (_, spendable, account_id) in payers {
-        if remaining == Money::ZERO {
-            break;
-        }
-        let debit = spendable.min(remaining);
-        postings.push(LedgerPosting {
-            account: account_id,
-            amount: debit
-                .checked_neg()
-                .ok_or(LegalRepresentationError::FeeArithmeticOverflow)?,
-        });
-        remaining = remaining
-            .checked_sub(debit)
-            .ok_or(LegalRepresentationError::FeeArithmeticOverflow)?;
-    }
-    debug_assert_eq!(remaining, Money::ZERO);
     postings.push(LedgerPosting {
         account: draft.provider_account,
         amount: draft.fee,

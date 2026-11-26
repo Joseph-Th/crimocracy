@@ -5,7 +5,10 @@
 use super::{FinanceError, ValidatedLedgerTransaction, validate_record_transaction};
 use crate::core::id::{FinancialAccountId, OrganizationId};
 use crate::core::state::AppState;
-use crate::finance::{AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money};
+use crate::finance::{
+    AccountKind, FinancialAccountRecord, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
+    Money,
+};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +59,7 @@ pub fn validate_capitalize_street_cash(
         draft.organization,
         draft.street_account,
         draft.amount,
-        vec![(source.available_payment_balance(), source.id())],
+        vec![source],
         0,
     )
 }
@@ -74,14 +77,11 @@ pub(crate) fn validate_capitalize_street_cash_from_reserves(
     if amount <= Money::ZERO {
         return Err(StreetCapitalizationError::InvalidAmount);
     }
-    let mut sources: Vec<_> = state
+    let sources = state
         .finance()
         .accounts_for(FinancialOwner::Organization(organization))
         .filter(|account| account.kind() == AccountKind::AccountedFunds)
-        .map(|account| (account.available_payment_balance(), account.id()))
-        .filter(|(available, _)| *available > Money::ZERO)
         .collect();
-    sources.sort_unstable_by_key(|&(available, id)| (std::cmp::Reverse(available), id));
     validate_capitalization(
         state,
         organization,
@@ -97,7 +97,7 @@ fn validate_capitalization(
     organization: OrganizationId,
     street_account: FinancialAccountId,
     amount: Money,
-    sources: Vec<(Money, FinancialAccountId)>,
+    sources: Vec<&FinancialAccountRecord>,
     reserve: i128,
 ) -> Result<ValidatedLedgerTransaction, StreetCapitalizationError> {
     let owner = FinancialOwner::Organization(organization);
@@ -110,7 +110,7 @@ fn validate_capitalization(
     }
     let available = (sources
         .iter()
-        .map(|(balance, _)| i128::from(balance.cents()))
+        .map(|account| i128::from(account.available_payment_balance().cents()))
         .sum::<i128>()
         - reserve.max(0))
     .max(0);
@@ -131,22 +131,8 @@ fn validate_capitalization(
     if !destination.can_receive_liquid_payment(amount) && !fully_clears_deficit {
         return Err(StreetCapitalizationError::DestinationUnavailable);
     }
-    let mut remaining = amount.cents();
-    let mut postings = Vec::new();
-    for (available, account) in sources {
-        let debit = remaining.min(available.cents());
-        if debit > 0 {
-            postings.push(LedgerPosting {
-                account,
-                amount: Money::from_cents(-debit),
-            });
-            remaining -= debit;
-        }
-        if remaining == 0 {
-            break;
-        }
-    }
-    debug_assert_eq!(remaining, 0);
+    let mut postings = crate::finance::helpers::payment_debits(sources, amount)
+        .expect("validated reserve covers the requested capitalization");
     postings.push(LedgerPosting {
         account: street_account,
         amount,

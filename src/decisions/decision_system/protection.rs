@@ -341,33 +341,17 @@ pub(super) fn validate_protection_payment(
     context: ProtectionDemandContext,
 ) -> Result<ValidatedLedgerTransaction, DecisionError> {
     validate_protection_terms(state, defender, context)?;
-    let mut remaining = context.amount().cents();
-    let mut postings = Vec::new();
-    for account in state
-        .finance()
-        .accounts_for(FinancialOwner::Organization(defender))
-    {
-        if account.kind() != AccountKind::AccountedFunds {
-            continue;
-        }
-        let taken = remaining.min(account.available_payment_balance().cents());
-        if taken > 0 {
-            postings.push(LedgerPosting {
-                account: account.id(),
-                amount: Money::from_cents(-taken),
-            });
-            remaining -= taken;
-        }
-        if remaining == 0 {
-            break;
-        }
-    }
-    if remaining > 0 {
-        return Err(DecisionError::InsufficientProtectionFunds {
-            needed: context.amount().cents(),
-            missing: remaining,
-        });
-    }
+    let mut postings = crate::finance::helpers::payment_debits(
+        state
+            .finance()
+            .accounts_for(FinancialOwner::Organization(defender))
+            .filter(|account| account.kind() == AccountKind::AccountedFunds),
+        context.amount(),
+    )
+    .map_err(|missing| DecisionError::InsufficientProtectionFunds {
+        needed: context.amount().cents(),
+        missing: missing.cents(),
+    })?;
     let owner = FinancialOwner::Organization(context.attacker());
     let recipient = state
         .finance()

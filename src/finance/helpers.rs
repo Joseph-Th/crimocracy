@@ -2,7 +2,7 @@
 
 use crate::core::id::FinancialAccountId;
 use crate::core::time::SimTime;
-use crate::finance::{AccountKind, LedgerPosting, Money};
+use crate::finance::{AccountKind, FinancialAccountRecord, LedgerPosting, Money};
 
 /// Canonical deterministic spending order for unrestricted organizational expenses. Consume
 /// dirty street cash, then concealed reserves, then clean money; among equivalent money
@@ -18,6 +18,41 @@ pub(crate) fn sort_unrestricted_payment_sources(
             .then(right.1.cmp(&left.1))
             .then(left.2.cmp(&right.2))
     });
+}
+
+/// Plan an exact payment from accounts already selected by the caller's
+/// ownership and money-kind rules. Ignore balances that cannot fund a new
+/// posting, then use the canonical spending order to minimize fragmentation.
+/// On shortfall return the missing amount, never a partial set of debits.
+pub(crate) fn payment_debits<'a>(
+    accounts: impl IntoIterator<Item = &'a FinancialAccountRecord>,
+    amount: Money,
+) -> Result<Vec<LedgerPosting>, Money> {
+    debug_assert!(amount > Money::ZERO);
+    let mut sources: Vec<_> = accounts
+        .into_iter()
+        .filter_map(|account| {
+            let available = account.available_payment_balance();
+            (available > Money::ZERO).then_some((account.kind(), available, account.id()))
+        })
+        .collect();
+    sort_unrestricted_payment_sources(&mut sources);
+    let mut remaining = amount;
+    let mut postings = Vec::new();
+    for (_, available, account) in sources {
+        let debit = remaining.min(available);
+        postings.push(LedgerPosting {
+            account,
+            amount: debit.checked_neg().expect("positive payment debit negates"),
+        });
+        remaining = remaining
+            .checked_sub(debit)
+            .expect("payment debit cannot exceed the amount remaining");
+        if remaining == Money::ZERO {
+            return Ok(postings);
+        }
+    }
+    Err(remaining)
 }
 
 /// Weighted contribution of a rating point value without overflow.
