@@ -58,28 +58,14 @@ impl Session<'_> {
                     })
             })
             .count();
-        let overhead_basis_points =
-            crimocracy::economy::business_economy_system::portfolio_overhead_basis_points(
+        let availability =
+            crimocracy::economy::business_economy_system::organization_profit_availability(
                 state, player,
-            );
+            )
+            .expect("owned operating books must be valid");
+        let overhead_basis_points = availability.administration_basis_points;
         let (surplus, estimated_owner_surplus) = estimate_owner_distribution(
-            state
-                .world()
-                .businesses_owned_by_organization(player)
-                .filter(|business| {
-                    state
-                        .economy()
-                        .get_business_economy(business.id())
-                        .is_some()
-                })
-                .map(|business| {
-                    crimocracy::economy::business_economy_system::resolve_available_business_profit(
-                        state,
-                        player,
-                        business.id(),
-                    )
-                    .expect("owned operating books must have a valid capital basis")
-                }),
+            availability.gross_by_business.values().copied(),
             overhead_basis_points,
         );
         let distribution = if state.automatic_profit_sweeps() {

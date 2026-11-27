@@ -339,6 +339,12 @@ impl Session<'_> {
                 .unwrap();
             }
             "businesses" => {
+                let availability =
+                    crimocracy::economy::business_economy_system::organization_profit_availability(
+                        state,
+                        self.player,
+                    )
+                    .map_err(|error| error.to_string())?;
                 out.push_str("Owned storefronts:\n");
                 for business in state.world().businesses_owned_by_organization(self.player) {
                     writeln!(
@@ -355,9 +361,7 @@ impl Session<'_> {
                             .finance()
                             .get_account(economy.operating_account())
                             .ok_or("operating books reference a missing account")?;
-                        let withdrawable = crimocracy::economy::business_economy_system::resolve_available_business_profit(
-                            state, self.player, business.id(),
-                        ).map_err(|error| error.to_string())?.cents();
+                        let withdrawable = availability.gross_by_business[&business.id()].cents();
                         let laundering = remaining_laundering_capacity(
                             self.registry,
                             state,

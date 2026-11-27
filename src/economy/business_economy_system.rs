@@ -58,8 +58,8 @@ pub(crate) use market::acquisition_owner_daily_displacement;
 pub(crate) use personal_owner_dividends::apply_due_personal_owner_dividends;
 pub use profit_sweep::{
     BusinessProfitSweepDraft, BusinessProfitSweepError, BusinessProfitSweepOutcome,
-    ValidatedBusinessProfitSweep, resolve_available_business_profit,
-    validate_sweep_business_profits,
+    OrganizationProfitAvailability, ValidatedBusinessProfitSweep, organization_profit_availability,
+    resolve_available_business_profit, validate_sweep_business_profits,
 };
 
 #[cfg(test)]

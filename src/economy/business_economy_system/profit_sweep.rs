@@ -13,6 +13,7 @@ use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money, helpers::format_money_cents,
 };
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Deterministic receiving allocation for both criminal treasuries and private
@@ -361,21 +362,63 @@ pub fn validate_sweep_business_profits(
     })
 }
 
-pub(super) struct BusinessProfitSweepContext {
+pub(super) struct BusinessProfitSweepContext<'a> {
     pub(super) operating_account: FinancialAccountId,
     pub(super) settlement_account: FinancialAccountId,
-    pub(super) operating_balance: Money,
-    pub(super) capital_floor: Money,
-    business_name: String,
-    pub(super) business_version: u32,
-    pub(super) economy_version: u32,
+    operating_balance: Money,
+    capital_floor: Money,
+    business_name: &'a str,
+    business_version: u32,
+    economy_version: u32,
+}
+
+impl BusinessProfitSweepContext<'_> {
+    /// Source-side capacity, before destination-account allocation. A fee must fit
+    /// into the settlement account, and the resulting owner receipt must be positive.
+    pub(super) fn withdrawable_gross(
+        &self,
+        state: &AppState,
+        overhead_rate: u16,
+        limit: Money,
+    ) -> Money {
+        let operating = state
+            .finance()
+            .get_account(self.operating_account)
+            .expect("owner-sweep context proved its operating account");
+        let mut amount =
+            available_business_profit(operating.available_payment_balance(), self.capital_floor)
+                .min(limit);
+        if amount == Money::ZERO {
+            return Money::ZERO;
+        }
+        if overhead_rate > 0 {
+            let settlement = state
+                .finance()
+                .get_account(self.settlement_account)
+                .expect("owner-sweep context proved its settlement account");
+            if settlement.version() == u32::MAX {
+                return Money::ZERO;
+            }
+            let fee_headroom = i128::from(i64::MAX) - i128::from(settlement.balance().cents());
+            // ceil(gross * rate / 10_000) <= headroom exactly at this bound.
+            let gross_capacity = fee_headroom * 10_000 / i128::from(overhead_rate);
+            amount = amount.min(Money::from_cents(
+                gross_capacity.min(i128::from(i64::MAX)) as i64
+            ));
+        }
+        if amount <= portfolio_overhead_charge(amount, overhead_rate) {
+            Money::ZERO
+        } else {
+            amount
+        }
+    }
 }
 
 pub(super) fn resolve_business_profit_sweep_context(
     state: &AppState,
     organization: OrganizationId,
     business: BusinessId,
-) -> Result<BusinessProfitSweepContext, BusinessProfitSweepError> {
+) -> Result<BusinessProfitSweepContext<'_>, BusinessProfitSweepError> {
     if state.world.get_organization(organization).is_none() {
         return Err(BusinessProfitSweepError::MissingOrganization(organization));
     }
@@ -417,23 +460,89 @@ pub(super) fn resolve_business_profit_sweep_context(
         settlement_account: economy.settlement_account(),
         operating_balance: operating.spendable_balance(),
         capital_floor: economy.operating_capital_floor(),
-        business_name: business_record.name().to_owned(),
+        business_name: business_record.name(),
         business_version: business_record.version(),
         economy_version: economy.version(),
     })
 }
 
-/// Read the earned surplus currently eligible for an organization owner's withdrawal.
+/// A title change may temporarily leave operating books on their previous owner's
+/// capital basis. No distribution is eligible until the current basis is established.
+pub(super) fn eligible_profit_source(
+    state: &AppState,
+    organization: OrganizationId,
+    business: BusinessId,
+) -> Result<Option<BusinessProfitSweepContext<'_>>, BusinessProfitSweepError> {
+    match resolve_business_profit_sweep_context(state, organization, business) {
+        Ok(context) => Ok(Some(context)),
+        Err(BusinessProfitSweepError::StaleCapitalBasis { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn available_at_rate(
+    state: &AppState,
+    organization: OrganizationId,
+    business: BusinessId,
+    overhead_rate: u16,
+) -> Result<Money, BusinessProfitSweepError> {
+    Ok(
+        eligible_profit_source(state, organization, business)?.map_or(Money::ZERO, |context| {
+            context.withdrawable_gross(state, overhead_rate, Money::from_cents(i64::MAX))
+        }),
+    )
+}
+
+/// Read the source-side earned surplus currently eligible for withdrawal, before
+/// allocating destination accounts or reserving ledger IDs.
 pub fn resolve_available_business_profit(
     state: &AppState,
     organization: OrganizationId,
     business: BusinessId,
 ) -> Result<Money, BusinessProfitSweepError> {
-    let context = resolve_business_profit_sweep_context(state, organization, business)?;
-    Ok(available_business_profit(
-        context.operating_balance,
-        context.capital_floor,
-    ))
+    available_at_rate(
+        state,
+        organization,
+        business,
+        portfolio_overhead_basis_points(state, organization),
+    )
+}
+
+/// Current portfolio fee and source-side withdrawal capacity of each operating book.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrganizationProfitAvailability {
+    pub administration_basis_points: u16,
+    pub gross_by_business: BTreeMap<BusinessId, Money>,
+}
+
+/// Compute the fee rate once for the entire owned portfolio.
+pub fn organization_profit_availability(
+    state: &AppState,
+    organization: OrganizationId,
+) -> Result<OrganizationProfitAvailability, BusinessProfitSweepError> {
+    if state.world.get_organization(organization).is_none() {
+        return Err(BusinessProfitSweepError::MissingOrganization(organization));
+    }
+    let administration_basis_points = portfolio_overhead_basis_points(state, organization);
+    let gross_by_business = state
+        .world()
+        .businesses_owned_by_organization(organization)
+        .filter(|business| {
+            state
+                .economy()
+                .get_business_economy(business.id())
+                .is_some()
+        })
+        .map(|business| {
+            let id = business.id();
+            available_at_rate(state, organization, id, administration_basis_points)
+                .map(|amount| (id, amount))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(OrganizationProfitAvailability {
+        administration_basis_points,
+        gross_by_business,
+    })
 }
 
 /// Shared ceiling for manual and automatic withdrawals. Negative or unavailable retained

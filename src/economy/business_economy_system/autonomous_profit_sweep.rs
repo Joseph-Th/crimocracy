@@ -5,21 +5,16 @@
 //! capital; player-owned fronts participate only under an explicit standing instruction.
 
 use super::profit_sweep::{
-    BusinessProfitSweepError, ProfitDistribution, available_business_profit,
-    resolve_business_profit_sweep_context, settle_profit_distributions,
+    BusinessProfitSweepError, ProfitDistribution, eligible_profit_source,
+    settle_profit_distributions,
 };
 use super::{portfolio_overhead_basis_points, portfolio_overhead_charge};
 use crate::core::id::{LedgerTransactionId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::is_day_boundary;
 use crate::finance::{FinancialOwner, LedgerPosting, Money};
-use crate::world::{BusinessOwner, OrganizationKind};
-use std::collections::{BTreeMap, BTreeSet};
-
-struct OrganizationProfitPlan {
-    distribution: ProfitDistribution,
-    overhead_rate: u16,
-}
+use crate::world::OrganizationKind;
+use std::collections::BTreeMap;
 
 /// Distributes existing legitimate earnings before the daily payroll debit. Reuse the combined
 /// receiving capacity of existing accounted-funds accounts before opening a new account; no
@@ -39,105 +34,61 @@ pub(crate) fn apply_due_autonomous_profit_sweeps(
         state,
         groups
             .into_iter()
-            .map(|(owner, group)| (FinancialOwner::Organization(owner), group.distribution)),
+            .map(|(owner, group)| (FinancialOwner::Organization(owner), group)),
         "Daily owner profit distribution",
     )
 }
 
 fn plan_available_profit_sources(
     state: &AppState,
-) -> Result<BTreeMap<OrganizationId, OrganizationProfitPlan>, BusinessProfitSweepError> {
-    let eligible_organizations: BTreeSet<_> = state
-        .world
-        .organizations()
-        .filter(|organization| {
-            organization.kind() == OrganizationKind::Criminal
-                && (Some(organization.id()) != state.player_organization()
-                    || state.automatic_profit_sweeps())
-        })
-        .map(|organization| organization.id())
-        .collect();
-    if eligible_organizations.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
+) -> Result<BTreeMap<OrganizationId, ProfitDistribution>, BusinessProfitSweepError> {
     let mut groups = BTreeMap::new();
-    for business in state.world.businesses() {
-        let BusinessOwner::Organization(organization) = business.owner() else {
-            continue;
-        };
-        if !eligible_organizations.contains(&organization)
-            || state.economy.get_business_economy(business.id()).is_none()
-        {
-            continue;
-        }
-        let context = resolve_business_profit_sweep_context(state, organization, business.id())?;
-        let operating = state
-            .finance
-            .get_account(context.operating_account)
-            .expect("owner-sweep context proved its operating account");
-        // At a finite version rail this till cannot be posted again. Preserve its historical
-        // balance and continue to distribute independently withdrawable earnings.
-        if operating.version() == u32::MAX {
-            continue;
-        }
-        let surplus = available_business_profit(context.operating_balance, context.capital_floor);
-        if surplus == Money::ZERO {
-            continue;
-        }
-
-        let group = groups
-            .entry(organization)
-            .or_insert_with(|| OrganizationProfitPlan {
-                distribution: ProfitDistribution::default(),
-                overhead_rate: portfolio_overhead_basis_points(state, organization),
-            });
-        // A destination can hold at most i64::MAX cents. A wealthy owner with several tills
-        // withdraws the first representable portion today and keeps the remainder invested
-        // rather than overflowing the money model or bricking every later daily tick.
-        let remaining_headroom = Money::from_cents(i64::MAX - group.distribution.total.cents());
-        let mut amount = surplus.min(remaining_headroom);
-        // Administration is credited to the source's settlement account. A full or
-        // terminal settlement account must not block otherwise independent withdrawals.
-        if group.overhead_rate > 0 {
-            let settlement = state
-                .finance
-                .get_account(context.settlement_account)
-                .expect("owner-sweep context proved its settlement account");
-            if settlement.version() == u32::MAX {
+    for owner in state.world.organizations().filter(|organization| {
+        organization.kind() == OrganizationKind::Criminal
+            && (Some(organization.id()) != state.player_organization()
+                || state.automatic_profit_sweeps())
+    }) {
+        let organization = owner.id();
+        let overhead_rate = portfolio_overhead_basis_points(state, organization);
+        let mut group = ProfitDistribution::default();
+        for business in state.world().businesses_owned_by_organization(organization) {
+            if state
+                .economy()
+                .get_business_economy(business.id())
+                .is_none()
+            {
                 continue;
             }
-            let fee_headroom = i128::from(i64::MAX) - i128::from(settlement.balance().cents());
-            // ceil(gross * rate / 10_000) <= headroom exactly when gross <= this bound.
-            let gross_capacity = fee_headroom * 10_000 / i128::from(group.overhead_rate);
-            amount = amount.min(Money::from_cents(
-                gross_capacity.min(i128::from(i64::MAX)) as i64
-            ));
-        }
-        if amount == Money::ZERO {
-            continue;
-        }
-        let overhead = portfolio_overhead_charge(amount, group.overhead_rate);
-        let receipt = amount
-            .checked_sub(overhead)
-            .expect("owner fee cannot exceed gross");
-        if receipt == Money::ZERO {
-            continue;
-        }
-        group.distribution.total = group
-            .distribution
-            .total
-            .checked_add(receipt)
-            .expect("owner distribution is capped by representable money");
-        group.distribution.postings.push(LedgerPosting {
-            account: context.operating_account,
-            amount: amount.checked_neg().expect("earned surplus negates"),
-        });
-        if overhead > Money::ZERO {
-            group.distribution.postings.push(LedgerPosting {
-                account: context.settlement_account,
-                amount: overhead,
+            let Some(context) = eligible_profit_source(state, organization, business.id())? else {
+                continue;
+            };
+            // Bound each owner's daily aggregate without overflowing representable money.
+            let remaining_headroom = Money::from_cents(i64::MAX - group.total.cents());
+            let amount = context.withdrawable_gross(state, overhead_rate, remaining_headroom);
+            if amount == Money::ZERO {
+                continue;
+            }
+            let overhead = portfolio_overhead_charge(amount, overhead_rate);
+            let receipt = amount
+                .checked_sub(overhead)
+                .expect("owner fee cannot exceed gross");
+            group.total = group
+                .total
+                .checked_add(receipt)
+                .expect("owner distribution is capped by representable money");
+            group.postings.push(LedgerPosting {
+                account: context.operating_account,
+                amount: amount.checked_neg().expect("earned surplus negates"),
             });
+            if overhead > Money::ZERO {
+                group.postings.push(LedgerPosting {
+                    account: context.settlement_account,
+                    amount: overhead,
+                });
+            }
+        }
+        if group.total > Money::ZERO {
+            groups.insert(organization, group);
         }
     }
     Ok(groups)

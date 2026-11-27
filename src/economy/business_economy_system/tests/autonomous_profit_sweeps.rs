@@ -1097,6 +1097,26 @@ fn saturated_administration_account_does_not_block_other_owner_distributions() {
     let mut restored =
         restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
     for state in [&mut fixture.state, &mut restored] {
+        assert_eq!(
+            resolve_available_business_profit(state, fixture.organization, fixture.business)
+                .unwrap(),
+            Money::ZERO,
+            "profit with no administration-account headroom is not withdrawable"
+        );
+        assert_eq!(
+            resolve_available_business_profit(state, fixture.organization, second_business)
+                .unwrap(),
+            second_profit
+        );
+        let availability = organization_profit_availability(state, fixture.organization).unwrap();
+        assert_eq!(availability.administration_basis_points, 300);
+        assert_eq!(
+            availability.gross_by_business,
+            BTreeMap::from([
+                (fixture.business, Money::ZERO),
+                (second_business, second_profit)
+            ])
+        );
         let sweep = apply_due_autonomous_profit_sweeps(state).unwrap().unwrap();
         let transaction = state.finance().get_transaction(sweep).unwrap();
         assert!(
@@ -1113,6 +1133,111 @@ fn saturated_administration_account_does_not_block_other_owner_distributions() {
                 .unwrap()
                 .balance(),
             first_profit
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(second_operating)
+                .unwrap()
+                .balance(),
+            Money::ZERO
+        );
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
+fn stale_title_capital_basis_does_not_block_independent_distributions() {
+    let registry = build_registry();
+    let mut fixture = make_business_economy_fixture_for_kind(OrganizationKind::Criminal);
+    establish_business_economy(&registry, &mut fixture);
+    let neighborhood = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .unwrap()
+        .neighborhood();
+    let (second_business, second_operating) = add_organized_business(
+        &registry,
+        &mut fixture.state,
+        fixture.organization,
+        neighborhood,
+        "Second Grocery",
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(ONE_DAY));
+    for business in [fixture.business, second_business] {
+        let plan = decide_business_cycle(&registry, &fixture.state, business, 0).unwrap();
+        validate_business_cycle_plan(&fixture.state, plan)
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+    }
+    let retained = fixture
+        .state
+        .finance()
+        .get_account(fixture.operating)
+        .unwrap()
+        .balance();
+    assert!(retained > Money::ZERO);
+    let second_profit = fixture
+        .state
+        .finance()
+        .get_account(second_operating)
+        .unwrap()
+        .balance();
+    assert!(second_profit > Money::ZERO);
+    for owner in [
+        BusinessOwner::Independent,
+        BusinessOwner::Organization(fixture.organization),
+    ] {
+        crate::world::world_system::validate_transfer_business_ownership(
+            &fixture.state,
+            fixture.business,
+            owner,
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    }
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let before = bincode::serialize(state).unwrap();
+        let availability = organization_profit_availability(state, fixture.organization).unwrap();
+        assert_eq!(
+            availability.gross_by_business[&fixture.business],
+            Money::ZERO
+        );
+        assert_eq!(
+            availability.gross_by_business[&second_business],
+            second_profit
+        );
+        assert!(matches!(
+            validate_sweep_business_profits(
+                state,
+                BusinessProfitSweepDraft {
+                    organization: fixture.organization,
+                    business: fixture.business,
+                    amount: Money::from_cents(1),
+                }
+            ),
+            Err(BusinessProfitSweepError::StaleCapitalBasis { .. })
+        ));
+        assert_eq!(bincode::serialize(state).unwrap(), before);
+        assert!(apply_due_autonomous_profit_sweeps(state).unwrap().is_some());
+        assert_eq!(
+            state
+                .finance()
+                .get_account(fixture.operating)
+                .unwrap()
+                .balance(),
+            retained
         );
         assert_eq!(
             state
