@@ -43,7 +43,7 @@ pub(super) fn register_legal(builder: &mut RegistryBuilder) {
             informant_base_flip_chance_percent: 25,
             informant_safety_bonus_percent: 50,
             represented_informant_reduction_percent: 25,
-            automatic_support_retainer: Money::from_cents(5_000),
+            minimum_retainer: Money::from_cents(5_000),
             // Two custody days is long enough for the one-day informant decision and legal
             // support response to matter, but custody cannot become de facto permanent while
             // charging, bail, and trial remain outside the modeled foundation.

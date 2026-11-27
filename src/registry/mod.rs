@@ -58,6 +58,12 @@ impl Registry {
     pub fn legal(&self) -> LegalConfigDefinition {
         self.legal
     }
+    #[cfg(test)]
+    pub(crate) fn with_minimum_retainer_for_test(mut self, minimum: crate::finance::Money) -> Self {
+        assert!(minimum > crate::finance::Money::ZERO);
+        self.legal.minimum_retainer = minimum;
+        self
+    }
     pub fn get_policy(&self, kind: PolicyKind) -> &PolicyDefinition {
         self.policies
             .get(&kind)

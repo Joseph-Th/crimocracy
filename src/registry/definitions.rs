@@ -837,8 +837,8 @@ pub struct LegalConfigSpec {
     pub informant_safety_bonus_percent: u8,
     /// Percentage-point reduction when active legal representation exists for the arrest.
     pub represented_informant_reduction_percent: u8,
-    /// Flat fee paid when Automatic legal-support policy retains counsel.
-    pub automatic_support_retainer: Money,
+    /// Minimum fee for any legal representation; automatic support pays exactly this amount.
+    pub minimum_retainer: Money,
     /// Maximum continuous detention before the modeled arrest-custody window ends.
     /// Charging, bail, and trial are outside the current simulation scope, so custody itself
     /// must have a bounded lifecycle rather than silently becoming permanent confinement.
@@ -855,7 +855,7 @@ pub struct LegalConfigDefinition {
     pub(super) informant_base_flip_chance_percent: u8,
     pub(super) informant_safety_bonus_percent: u8,
     pub(super) represented_informant_reduction_percent: u8,
-    pub(super) automatic_support_retainer: Money,
+    pub(super) minimum_retainer: Money,
     pub(super) maximum_detention: SimDuration,
 }
 impl LegalConfigDefinition {
@@ -886,8 +886,8 @@ impl LegalConfigDefinition {
     pub fn represented_informant_reduction_percent(self) -> u8 {
         self.represented_informant_reduction_percent
     }
-    pub fn automatic_support_retainer(self) -> Money {
-        self.automatic_support_retainer
+    pub fn minimum_retainer(self) -> Money {
+        self.minimum_retainer
     }
     pub fn maximum_detention(self) -> SimDuration {
         self.maximum_detention

@@ -333,7 +333,7 @@ fn direct_retainer_spends_dirty_liquidity_before_clean_reserve() {
         .balance();
     let mut draft = representation_draft(&fx, 5_000, None);
     draft.payer_accounts.insert(street);
-    let representation = validate_retain_legal_representation(&fx.state, draft)
+    let representation = validate_retain_legal_representation(&fx.registry, &fx.state, draft)
         .expect("mixed-money retainer should validate")
         .commit(&mut fx.state)
         .expect("mixed-money retainer should commit");
@@ -930,12 +930,60 @@ fn retain(
     authorization: Option<MandateAuthority>,
 ) -> LegalRepresentationId {
     validate_retain_legal_representation(
+        &fixture.registry,
         &fixture.state,
         representation_draft(fixture, fee_cents, authorization),
     )
     .expect("legal representation should validate")
     .commit(&mut fixture.state)
     .expect("legal representation should commit")
+}
+
+#[test]
+fn direct_legal_retention_requires_the_authored_minimum_fee() {
+    let mut fixture = fixture();
+    let minimum = fixture.registry.legal().minimum_retainer();
+    let before = bincode::serialize(&fixture.state).unwrap();
+    for fee in [-1, 0, 1, minimum.cents() - 1] {
+        assert_eq!(
+            validate_retain_legal_representation(
+                &fixture.registry,
+                &fixture.state,
+                representation_draft(&fixture, fee, None),
+            )
+            .err(),
+            Some(LegalRepresentationError::RetainerBelowMinimum {
+                offered_cents: fee,
+                minimum_cents: minimum.cents(),
+            })
+        );
+        assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    }
+    let representation = retain(&mut fixture, minimum.cents(), None);
+    assert_eq!(
+        fixture
+            .state
+            .legal()
+            .get_legal_representation(representation)
+            .unwrap()
+            .fee(),
+        minimum
+    );
+    let saved = build_save(&fixture.registry, &fixture.state).unwrap();
+    let restored = restore_save(&fixture.registry, saved.clone()).unwrap();
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+
+    // An otherwise valid paid contract cannot be loaded under an authored minimum
+    // above its fee, even with matching content revision and valid ledger artifacts.
+    let higher_minimum = fixture
+        .registry
+        .clone()
+        .with_minimum_retainer_for_test(Money::from_cents(minimum.cents() + 1));
+    assert!(build_save(&higher_minimum, &fixture.state).is_err());
+    assert!(restore_save(&higher_minimum, saved).is_err());
 }
 
 #[test]
@@ -952,6 +1000,7 @@ fn legal_retainer_rejects_contact_whose_current_relationship_basis_collapsed() {
     .expect("relationship collapse should commit");
 
     let error = match validate_retain_legal_representation(
+        &fx.registry,
         &fx.state,
         representation_draft(&fx, 12_000, None),
     ) {
@@ -981,9 +1030,12 @@ fn held_legal_retainer_token_rechecks_current_contact_relationship_before_paymen
         .get_account(fx.payer)
         .expect("payer should persist")
         .balance();
-    let validated =
-        validate_retain_legal_representation(&fx.state, representation_draft(&fx, 12_000, None))
-            .expect("retainer should validate while the contact relationship is live");
+    let validated = validate_retain_legal_representation(
+        &fx.registry,
+        &fx.state,
+        representation_draft(&fx, 12_000, None),
+    )
+    .expect("retainer should validate while the contact relationship is live");
 
     validate_set_relationship(
         &fx.state,
@@ -1432,7 +1484,7 @@ fn leave_exactly_one_automatic_retainer_liquid(fx: &mut Fixture) {
         },
     )
     .expect("parking account should validate");
-    let fee = fx.registry.legal().automatic_support_retainer();
+    let fee = fx.registry.legal().minimum_retainer();
     let payer_balance = fx
         .state
         .finance()
@@ -1482,7 +1534,7 @@ fn automatic_legal_support_closes_finished_matter_when_retention_exceeds_shared_
 
     let mut existing_draft = representation_draft(&fx, 7_500, None);
     existing_draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
-    let existing = validate_retain_legal_representation(&fx.state, existing_draft)
+    let existing = validate_retain_legal_representation(&fx.registry, &fx.state, existing_draft)
         .expect("existing automatic representation should validate")
         .commit(&mut fx.state)
         .expect("existing automatic representation should commit");
@@ -1960,7 +2012,7 @@ fn retain_legal_representation_id_exhaustion_is_atomic_and_typed() {
 
     let validated = {
         let draft = representation_draft(&fixture, 12_000, None);
-        validate_retain_legal_representation(&fixture.state, draft)
+        validate_retain_legal_representation(&fixture.registry, &fixture.state, draft)
             .expect("read-only validation must ignore ID exhaustion")
     };
     let error = validated
@@ -2133,6 +2185,7 @@ fn retained_counsel_is_paid_indexed_reported_and_survives_save() {
     );
 
     let replacement = validate_retain_legal_representation(
+        &fixture.registry,
         &restored,
         LegalRepresentationDraft {
             arrest: fixture.arrest,
@@ -2402,10 +2455,11 @@ fn automatic_policy_concludes_representation_after_release_and_frees_the_contact
     let mut draft = representation_draft(&fixture, 7_500, None);
     // The sweep may only conclude matters its own governance retained.
     draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
-    let representation = validate_retain_legal_representation(&fixture.state, draft)
-        .expect("automatic retention should validate")
-        .commit(&mut fixture.state)
-        .expect("automatic retention should commit");
+    let representation =
+        validate_retain_legal_representation(&fixture.registry, &fixture.state, draft)
+            .expect("automatic retention should validate")
+            .commit(&mut fixture.state)
+            .expect("automatic retention should commit");
     validate_release_arrest(&fixture.state, fixture.arrest)
         .expect("defendant detention should release")
         .commit(&mut fixture.state)
@@ -2487,10 +2541,11 @@ fn automatic_counsel_survives_release_while_prosecution_review_remains_open() {
 
     let mut draft = representation_draft(&fixture, 7_500, None);
     draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
-    let representation = validate_retain_legal_representation(&fixture.state, draft)
-        .expect("automatic defense should validate")
-        .commit(&mut fixture.state)
-        .expect("automatic defense should persist");
+    let representation =
+        validate_retain_legal_representation(&fixture.registry, &fixture.state, draft)
+            .expect("automatic defense should validate")
+            .commit(&mut fixture.state)
+            .expect("automatic defense should persist");
     validate_release_arrest(&fixture.state, fixture.arrest)
         .expect("defendant should be releasable before prosecution disposition")
         .commit(&mut fixture.state)
@@ -2558,10 +2613,11 @@ fn automatic_policy_conclusion_batch_exhaustion_is_terminal_noop_atomically() {
     let mut fixture = fixture();
     let mut first_draft = representation_draft(&fixture, 7_500, None);
     first_draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
-    let first = validate_retain_legal_representation(&fixture.state, first_draft)
-        .expect("first automatic retention should validate")
-        .commit(&mut fixture.state)
-        .expect("first automatic retention should commit");
+    let first =
+        validate_retain_legal_representation(&fixture.registry, &fixture.state, first_draft)
+            .expect("first automatic retention should validate")
+            .commit(&mut fixture.state)
+            .expect("first automatic retention should commit");
 
     let second_defendant = insert_character(
         &mut fixture.state,
@@ -2588,10 +2644,11 @@ fn automatic_policy_conclusion_batch_exhaustion_is_terminal_noop_atomically() {
     let mut second_draft = representation_draft(&fixture, 7_500, None);
     second_draft.arrest = second_arrest;
     second_draft.origin = crate::legal::LegalRepresentationOrigin::AutomaticPolicy;
-    let second = validate_retain_legal_representation(&fixture.state, second_draft)
-        .expect("second automatic retention should validate")
-        .commit(&mut fixture.state)
-        .expect("second automatic retention should commit");
+    let second =
+        validate_retain_legal_representation(&fixture.registry, &fixture.state, second_draft)
+            .expect("second automatic retention should validate")
+            .commit(&mut fixture.state)
+            .expect("second automatic retention should commit");
 
     for arrest in [fixture.arrest, second_arrest] {
         validate_release_arrest(&fixture.state, arrest)
@@ -2655,6 +2712,7 @@ fn custody_sweep_never_ends_an_explicitly_retained_representation() {
 fn stale_retainer_after_contact_termination_is_atomic() {
     let mut fixture = fixture();
     let validated = validate_retain_legal_representation(
+        &fixture.registry,
         &fixture.state,
         representation_draft(&fixture, 9_000, None),
     )
@@ -2726,6 +2784,7 @@ fn delegated_legal_budget_authority_is_persisted_and_enforced() {
         scope: ResponsibilityScope::Function(ResponsibilityFunction::Personnel),
     };
     let error = match validate_retain_legal_representation(
+        &fixture.registry,
         &fixture.state,
         representation_draft(&fixture, 10_000, Some(wrong_scope)),
     ) {
@@ -2750,7 +2809,7 @@ fn delegated_legal_budget_authority_is_persisted_and_enforced() {
     let mut mixed_funding = representation_draft(&fixture, 10_000, Some(authority));
     mixed_funding.payer_accounts.insert(second_payer);
     assert_eq!(
-        validate_retain_legal_representation(&fixture.state, mixed_funding)
+        validate_retain_legal_representation(&fixture.registry, &fixture.state, mixed_funding)
             .err()
             .expect("delegated spending must not escape its designated budget account"),
         LegalRepresentationError::DelegatedFundingAccountMismatch {
@@ -2784,6 +2843,7 @@ fn delegated_legal_budget_authority_is_persisted_and_enforced() {
 fn public_legal_authority_cannot_masquerade_as_private_defense_provider() {
     let fixture = fixture_with_counsel_institution(OrganizationKind::LegalAuthority);
     let error = match validate_retain_legal_representation(
+        &fixture.registry,
         &fixture.state,
         representation_draft(&fixture, 6_000, None),
     ) {

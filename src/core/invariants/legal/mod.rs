@@ -54,6 +54,7 @@ pub(super) fn validate_legal_subsystems_against_registry(
 ) -> Result<(), StateValidationError> {
     enforcement::validate_police_responses_against_registry(registry, state)?;
     custody::validate_arrests_against_registry(registry, state)?;
+    representation::validate_legal_representations_against_registry(registry, state)?;
     prosecution::validate_judgments_against_registry(registry, state)?;
     casework::validate_witness_statements_against_registry(registry, state)?;
     work::validate_investigation_work_against_registry(registry, state)

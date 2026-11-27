@@ -21,6 +21,7 @@ use crate::delegation::{MandateAuthority, ResponsibilityFunction, Responsibility
 use crate::finance::finance_system::{FinanceError, resolve_budget_usage};
 use crate::finance::{FinancialOwner, Money};
 use crate::legal::{ArrestStatus, LegalRepresentationDraft, LegalRepresentationEndReason};
+use crate::registry::Registry;
 use crate::world::{CapabilityKind, OrganizationKind};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -134,10 +135,11 @@ pub(crate) fn apply_automatic_legal_support(
         ending.commit_preflighted(state);
     }
 
-    let fee = registry.legal().automatic_support_retainer();
+    let fee = registry.legal().minimum_retainer();
     let mut retained = Vec::with_capacity(retention_plan.retentions.len());
     for planned in retention_plan.retentions {
         let validated = validate_automatic_counsel_retention(
+            registry,
             state,
             planned.candidate,
             fee,
@@ -183,7 +185,7 @@ fn plan_automatic_legal_support_retentions(
     state: &AppState,
 ) -> Result<AutomaticLegalSupportRetentionPlan, LegalRepresentationError> {
     let candidates = resolve_automatic_legal_support_candidates(registry, state)?;
-    let fee = registry.legal().automatic_support_retainer();
+    let fee = registry.legal().minimum_retainer();
     let mut projection = AutomaticSupportFinanceProjection::default();
     let mut retentions = Vec::new();
     let mut id_budget = Vec::new();
@@ -203,8 +205,14 @@ fn plan_automatic_legal_support_retentions(
         // Validate every non-projected dependency now. The finance projection below then proves
         // the cumulative balance/version/budget effects that single-record validation cannot see
         // while the real state is intentionally still untouched.
-        let validated =
-            validate_automatic_counsel_retention(state, candidate, fee, &payer_accounts, counsel)?;
+        let validated = validate_automatic_counsel_retention(
+            registry,
+            state,
+            candidate,
+            fee,
+            &payer_accounts,
+            counsel,
+        )?;
         projection.plan_retainer(
             state,
             candidate,
@@ -607,6 +615,7 @@ fn resolve_best_usable_automatic_counsel(
 }
 
 fn validate_automatic_counsel_retention(
+    registry: &Registry,
     state: &AppState,
     candidate: AutomaticLegalSupportCandidate,
     fee: Money,
@@ -614,6 +623,7 @@ fn validate_automatic_counsel_retention(
     counsel: AutomaticCounselSelection,
 ) -> Result<ValidatedLegalRepresentation, LegalRepresentationError> {
     validate_retain_legal_representation(
+        registry,
         state,
         LegalRepresentationDraft {
             arrest: candidate.arrest,

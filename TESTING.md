@@ -346,7 +346,7 @@ non-detained staff; unrevealed contact information stays private until canonical
 disclosure. Legal defense targets known custody or learned detention episodes
 of current members. A retainer debits sponsor liquidity and credits the provider's
 real operating account, with active-representation and contact lifecycle
-restrictions enforced by their owners. Automatic legal-support policy acts through
+restrictions enforced by their owners. The minimum-fee regression rejects underpriced direct retention without mutation, accepts the exact authored minimum, and checks registry-relative save validation. The text-play retention regression also rejects a one-cent payment without changing state. Automatic legal-support policy acts through
 the production legal phase on the arrest minute when contact and funds exist.
 The independently employed lawyer in the authored opening does not grant free
 representation. Production saves retain these relationships, cases, and payments

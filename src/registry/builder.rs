@@ -199,8 +199,8 @@ impl RegistryBuilder {
         {
             return Err(RegistryBuildError::InvalidLegalInformantChance);
         }
-        if spec.automatic_support_retainer.cents() <= 0 {
-            return Err(RegistryBuildError::InvalidLegalAutomaticSupportRetainer);
+        if spec.minimum_retainer.cents() <= 0 {
+            return Err(RegistryBuildError::InvalidLegalMinimumRetainer);
         }
         if spec.maximum_detention.as_minutes() == 0
             || spec.maximum_detention <= spec.informant_decision_delay
@@ -217,7 +217,7 @@ impl RegistryBuilder {
             informant_base_flip_chance_percent: spec.informant_base_flip_chance_percent,
             informant_safety_bonus_percent: spec.informant_safety_bonus_percent,
             represented_informant_reduction_percent: spec.represented_informant_reduction_percent,
-            automatic_support_retainer: spec.automatic_support_retainer,
+            minimum_retainer: spec.minimum_retainer,
             maximum_detention: spec.maximum_detention,
         });
         Ok(())

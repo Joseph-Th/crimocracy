@@ -224,8 +224,8 @@ pub(crate) enum RegistryBuildError {
     InvalidLegalArrestEvidenceCount,
     #[error("legal informant chance tuning must remain within a 0..=100 percent range")]
     InvalidLegalInformantChance,
-    #[error("automatic legal-support retainer must be positive")]
-    InvalidLegalAutomaticSupportRetainer,
+    #[error("minimum legal retainer must be positive")]
+    InvalidLegalMinimumRetainer,
     #[error("legal maximum detention must be positive and exceed the informant decision delay")]
     InvalidLegalMaximumDetention,
     #[error("missing upkeep configuration definition")]

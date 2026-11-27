@@ -637,6 +637,7 @@ fn retain_defense(fixture: &mut Fixture) -> crate::core::id::LegalRepresentation
     );
     fund(&mut fixture.state, source, payer, 5000);
     validate_retain_legal_representation(
+        &fixture.registry,
         &fixture.state,
         LegalRepresentationDraft {
             arrest: fixture.arrest,

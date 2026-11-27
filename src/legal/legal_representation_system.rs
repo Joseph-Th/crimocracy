@@ -29,6 +29,7 @@ use crate::legal::{
     ArrestStatus, LegalRepresentationDraft, LegalRepresentationEndReason,
     LegalRepresentationRecord, LegalRepresentationStatus,
 };
+use crate::registry::Registry;
 use crate::reports::report_system::{ReportError, ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use crate::world::{CapabilityKind, OrganizationKind};
@@ -131,8 +132,13 @@ pub enum LegalRepresentationError {
     },
     #[error("arrest {arrest} has neither active custody nor an open prosecution matter")]
     NoActiveLegalMatter { arrest: ArrestId },
-    #[error("legal retainer fee must be greater than zero")]
-    InvalidFee,
+    #[error(
+        "legal retainer fee {offered_cents} cents is below the minimum of {minimum_cents} cents"
+    )]
+    RetainerBelowMinimum {
+        offered_cents: i64,
+        minimum_cents: i64,
+    },
     #[error("financial account {0} does not exist")]
     MissingAccount(FinancialAccountId),
     #[error("payer account {account} is not a liquid account owned by sponsor {sponsor}")]
@@ -361,9 +367,11 @@ impl ValidatedLegalRepresentation {
 }
 
 pub fn validate_retain_legal_representation(
+    registry: &Registry,
     state: &AppState,
     draft: LegalRepresentationDraft,
 ) -> Result<ValidatedLegalRepresentation, LegalRepresentationError> {
+    validate_retainer_fee(registry, draft.fee)?;
     let dependencies = validate_representation_dependencies(state, &draft)?;
     let retained_at = state.now();
     let payment = validate_retainer_payment(state, &draft, dependencies.counsel_institution)?;
@@ -598,14 +606,13 @@ pub fn validate_counsel_channel(
 /// Select an existing provider account without exposing foreign balances to leadership.
 /// The ledger still validates the actual payment, including freshness, at commitment.
 pub fn retainer_provider_account(
+    registry: &Registry,
     state: &AppState,
     sponsor: OrganizationId,
     contact: ContactId,
     fee: Money,
 ) -> Result<FinancialAccountId, LegalRepresentationError> {
-    if fee <= Money::ZERO {
-        return Err(LegalRepresentationError::InvalidFee);
-    }
+    validate_retainer_fee(registry, fee)?;
     let channel = validate_counsel_channel(state, sponsor, contact)?;
     let provider = channel.institution();
     find_retainer_provider_account(state, provider, |account| {
@@ -651,14 +658,22 @@ fn validate_authority(
     Ok(())
 }
 
+fn validate_retainer_fee(registry: &Registry, fee: Money) -> Result<(), LegalRepresentationError> {
+    let minimum = registry.legal().minimum_retainer();
+    if fee < minimum {
+        return Err(LegalRepresentationError::RetainerBelowMinimum {
+            offered_cents: fee.cents(),
+            minimum_cents: minimum.cents(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_retainer_payment(
     state: &AppState,
     draft: &LegalRepresentationDraft,
     provider: OrganizationId,
 ) -> Result<ValidatedLedgerTransaction, LegalRepresentationError> {
-    if draft.fee <= Money::ZERO {
-        return Err(LegalRepresentationError::InvalidFee);
-    }
     if draft.payer_accounts.is_empty() {
         return Err(LegalRepresentationError::NoPayerAccounts);
     }

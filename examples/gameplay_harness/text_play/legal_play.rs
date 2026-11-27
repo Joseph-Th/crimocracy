@@ -142,9 +142,7 @@ impl Session<'_> {
                     } else if representation.is_some() {
                         out.push_str("  Existing counsel retained outside your organization; this engagement is not yours to end.\n");
                     } else if detained || open_review {
-                        out.push_str(
-                            "  No retained counsel. Use 'retain arrest-N contact-N cents'.\n",
-                        );
+                        writeln!(out, "  No retained counsel. Use 'retain arrest-N contact-N cents' (minimum {} cents).", self.registry.legal().minimum_retainer().cents()).unwrap();
                     }
                 }
                 if quiet > 0 {
@@ -211,6 +209,7 @@ impl Session<'_> {
                     .filter(|fee| *fee > 0)
                     .ok_or("retainer must be a positive amount in cents")?;
                 let provider_account = retainer_provider_account(
+                    self.registry,
                     &self.state,
                     self.player,
                     contact,
@@ -234,7 +233,7 @@ impl Session<'_> {
                     authorization: None,
                     origin: LegalRepresentationOrigin::DirectRetention,
                 };
-                let id = validate_retain_legal_representation(&self.state, draft)
+                let id = validate_retain_legal_representation(self.registry, &self.state, draft)
                     .map_err(|error| error.to_string())?
                     .commit(&mut self.state)
                     .map_err(|error| error.to_string())?;

@@ -63,6 +63,7 @@ fn released_defendant_without_a_filed_case_cannot_be_represented() {
     let before = bincode::serialize(&fixture.state).expect("fixture state must serialize");
     assert_eq!(
         validate_retain_legal_representation(
+            &fixture.registry,
             &fixture.state,
             representation_draft(&fixture, 6_000, None)
         )
@@ -352,7 +353,7 @@ fn automatic_policy_retains_counsel_for_released_defendant_with_prosecution_only
         None,
         "representation begun after release is not evidence of current detention"
     );
-    let fee = fixture.registry.legal().automatic_support_retainer();
+    let fee = fixture.registry.legal().minimum_retainer();
     assert_eq!(
         fixture
             .state
@@ -574,7 +575,7 @@ fn automatic_policy_prioritizes_pending_detainee_over_older_released_case() {
         .find(|account| account.kind() == AccountKind::Settlement)
         .expect("fixture includes an organization settlement counterparty")
         .id();
-    let fee = fixture.registry.legal().automatic_support_retainer();
+    let fee = fixture.registry.legal().minimum_retainer();
     let balance = fixture
         .state
         .finance()
@@ -640,6 +641,7 @@ fn prosecution_closure_stales_uncommitted_post_release_retainer_atomically() {
         .expect("release should commit");
     let case = open_prosecution(&mut fixture);
     let held = validate_retain_legal_representation(
+        &fixture.registry,
         &fixture.state,
         representation_draft(&fixture, 7_500, None),
     )

@@ -678,6 +678,21 @@ fn text_play_player_can_retain_and_withdraw_counsel_in_real_custody() {
     );
     restore_save(&registry, build_save(&registry, &session.state).unwrap()).unwrap();
     session.state = restore_save(&registry, opening).unwrap();
+    let before = snapshot(&registry, &session);
+    let minimum = registry.legal().minimum_retainer().cents();
+    let error = session
+        .execute(&format!(
+            "retain arrest-{} contact-{} 1",
+            arrest.raw(),
+            legal_contact.raw()
+        ))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("minimum of {minimum} cents"))
+    );
+    assert_eq!(before, snapshot(&registry, &session));
     let receipt = session
         .execute(&format!(
             "retain arrest-{} contact-{} 5000",
@@ -1026,10 +1041,7 @@ fn text_play_automatic_counsel_policy_acts_before_detained_member_decision() {
         LegalRepresentationOrigin::AutomaticPolicy
     );
     assert_eq!(representation.counsel(), lawyer);
-    assert_eq!(
-        representation.fee(),
-        registry.legal().automatic_support_retainer()
-    );
+    assert_eq!(representation.fee(), registry.legal().minimum_retainer());
     assert_eq!(
         session
             .state

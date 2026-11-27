@@ -20,6 +20,7 @@ use crate::legal::{
     ArrestRecord, LegalRepresentationEndReason, LegalRepresentationRecord,
     LegalRepresentationStatus,
 };
+use crate::registry::Registry;
 use crate::reports::{ReportKind, ReportRecord};
 use crate::world::{CapabilityKind, CharacterRecord, OrganizationKind, OrganizationRecord};
 use std::collections::BTreeSet;
@@ -48,6 +49,18 @@ pub(super) fn validate_legal_representations(state: &AppState) -> Result<(), Sta
     let mut seen = SeenRepresentationArtifacts::default();
     for representation in state.legal.legal_representations() {
         validate_representation(state, representation, &mut seen)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_legal_representations_against_registry(
+    registry: &Registry,
+    state: &AppState,
+) -> Result<(), StateValidationError> {
+    for representation in state.legal.legal_representations() {
+        if representation.fee() < registry.legal().minimum_retainer() {
+            return Err(invalid_representation(representation));
+        }
     }
     Ok(())
 }

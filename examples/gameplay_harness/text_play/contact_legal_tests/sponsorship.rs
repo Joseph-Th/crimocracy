@@ -379,6 +379,7 @@ fn sponsored_retainer_remains_manageable_after_member_defection() {
     run_tick(&registry, &mut session.state).unwrap();
     let foreign_arrest = detain(&mut session.state, "Separate rival custody");
     let foreign_representation = validate_retain_legal_representation(
+        &registry,
         &session.state,
         LegalRepresentationDraft {
             arrest: foreign_arrest,

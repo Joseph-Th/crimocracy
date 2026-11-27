@@ -110,7 +110,7 @@ fn legal_spec() -> LegalConfigSpec {
         informant_base_flip_chance_percent: 25,
         informant_safety_bonus_percent: 50,
         represented_informant_reduction_percent: 25,
-        automatic_support_retainer: Money::from_cents(5_000),
+        minimum_retainer: Money::from_cents(5_000),
         maximum_detention: SimDuration::from_minutes(2_880),
     }
 }
@@ -448,7 +448,7 @@ fn authored_legal_timing_keeps_informant_decision_inside_bounded_custody() {
     assert_eq!(legal.maximum_detention(), SimDuration::from_minutes(2_880));
     assert!(legal.maximum_detention() > legal.informant_decision_delay());
     assert_eq!(legal.minimum_arrest_qualifying_evidence(), 2);
-    assert_eq!(legal.automatic_support_retainer(), Money::from_cents(5_000));
+    assert_eq!(legal.minimum_retainer(), Money::from_cents(5_000));
     assert_eq!(
         legal.witness_testimony().strength_thresholds(),
         [35, 60, 85]
