@@ -14,7 +14,6 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
-use crate::decisions::{DecisionContext, DecisionResponse};
 use crate::delegation::delegation_system::{
     DelegationError, PolicySource, ResolvedPolicy, ensure_mandate_authority_current,
     resolve_mandate_authority, resolve_policy_for_manager,
@@ -287,8 +286,8 @@ struct RecruitmentPlanDependencies {
 
 /// A rejected approval is leadership's refusal to authorize a pitch, not a refused pitch
 /// by the candidate. Resolve all still-current organization/candidate refusal pairs from
-/// durable decision history once, so multiple autonomous managers or a player prospect view
-/// can reuse the same read-only answer without rereading lifetime history for each prospect.
+/// the decision owner's resolution-time index, so managers and player prospect
+/// views only traverse the current cooldown window, not lifetime decision history.
 /// No independent cooldown record is persisted and executive/delegated attempts remain able
 /// to override this approval-only deferral.
 pub fn recent_recruitment_approval_refusals(
@@ -299,22 +298,11 @@ pub fn recent_recruitment_approval_refusals(
     if cooldown == 0 {
         return BTreeSet::new();
     }
+    let since = SimTime::from_minutes(state.now().as_minutes().saturating_sub(cooldown - 1));
     state
         .decisions()
-        .decisions()
-        .filter_map(|decision| {
-            let DecisionContext::RecruitmentApproval(context) = decision.context() else {
-                return None;
-            };
-            let resolution = decision.resolution()?;
-            (resolution.response() == DecisionResponse::Reject
-                && state
-                    .now()
-                    .as_minutes()
-                    .saturating_sub(resolution.resolved_at().as_minutes())
-                    < cooldown)
-                .then_some((context.target_organization(), context.candidate()))
-        })
+        .recruitment_refusals_since(since)
+        .map(|context| (context.target_organization(), context.candidate()))
         .collect()
 }
 

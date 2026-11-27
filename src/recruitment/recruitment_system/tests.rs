@@ -1941,6 +1941,10 @@ fn pending_approval_excludes_only_its_live_recruitment_route() {
         "candidate discovery must agree with the world's pending-reassignment guard"
     );
 
+    // The pending request is older than a full cooldown when leadership
+    // finally refuses it. The window must start at resolution, not request.
+    let cooldown = fixture.registry.recruitment().cooldown();
+    fixture.state.advance_clock(cooldown);
     let before_rejection = fixture.state.recruitment().attempts().count();
     let resolved = validate_resolve_decision(
         &fixture.registry,
@@ -1997,6 +2001,25 @@ fn pending_approval_excludes_only_its_live_recruitment_route() {
         vec![fixture.candidate]
     );
     validate_invariants(&restored);
+    let mut restored = restored;
+    for state in [&mut fixture.state, &mut restored] {
+        state.advance_clock(SimDuration::from_minutes(cooldown.as_minutes() - 1));
+        assert_eq!(
+            recent_recruitment_approval_refusals(&fixture.registry, state),
+            refusals,
+            "refusals remain actionable until the last minute of their cooldown"
+        );
+        state.advance_clock(SimDuration::ONE_MINUTE);
+        assert!(
+            recent_recruitment_approval_refusals(&fixture.registry, state).is_empty(),
+            "a resolved refusal expires at the exact cooldown boundary"
+        );
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
 }
 
 #[test]

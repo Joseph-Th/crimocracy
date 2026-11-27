@@ -21,6 +21,7 @@ use crate::finance::{
 use crate::history::HistoryEventKind;
 use crate::history::history_system::{HistoryError, validate_territory_standstill_event};
 use crate::world::OrganizationKind;
+use crate::world::world_system::sole_available_executive;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -415,7 +416,9 @@ pub(crate) fn standstill_tribute_matches(
 /// Gangs which actually fought, and were left with a live or recently
 /// displaced local claim, may settle the feud on a later daily boundary.
 /// The defeated NPC proposes first, including a real treasury payment if
-/// the victor has overwhelming remaining strength. Player organizations
+/// the victor has overwhelming remaining strength. Both NPC parties require
+/// a sole available executive: a local captain's authority to fight does not
+/// authorize an organization-wide negotiated commitment. Player organizations
 /// never get an agreement signed for them: negotiation is their choice.
 pub(crate) fn apply_due_autonomous_territory_standstills(
     state: &mut AppState,
@@ -474,6 +477,12 @@ pub(crate) fn apply_due_autonomous_territory_standstills(
         let Some((initiator, counterparty)) = parties else {
             continue;
         };
+        if [initiator, counterparty]
+            .into_iter()
+            .any(|party| sole_available_executive(state, party).is_none())
+        {
+            continue;
+        }
         let plan = match validate_negotiate_standstill(state, initiator, counterparty, district) {
             Ok(plan) => Ok(plan),
             Err(TerritoryNegotiationError::TributeRequired { required_cents, .. }) => {

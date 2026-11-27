@@ -313,6 +313,10 @@ pub struct DecisionState {
     pending_by_context: BTreeMap<DecisionPendingKey, DecisionRequestId>,
     #[serde(skip)]
     latest_protection: ProtectionDemandIndex,
+    /// Rejected recruitment approvals in resolution-time order. Requests can
+    /// remain pending indefinitely, so request IDs are not resolution chronology.
+    #[serde(skip)]
+    recruitment_refusals: BTreeSet<(SimTime, DecisionRequestId)>,
 }
 
 /// Each gang's latest demand governs its own cooldown, retaliation and paid coverage.
@@ -352,6 +356,13 @@ enum DecisionPendingKey {
     },
 }
 
+fn recruitment_refusal_key(record: &DecisionRequestRecord) -> Option<(SimTime, DecisionRequestId)> {
+    let resolution = record.resolution()?;
+    (matches!(record.context(), DecisionContext::RecruitmentApproval(_))
+        && resolution.response() == DecisionResponse::Reject)
+        .then_some((resolution.resolved_at(), record.id()))
+}
+
 impl DecisionState {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -362,8 +373,11 @@ impl DecisionState {
         self.pending_by_recipient.clear();
         self.pending_by_context.clear();
         self.latest_protection = ProtectionDemandIndex::default();
+        self.recruitment_refusals.clear();
         for record in self.records.values() {
             self.latest_protection.include(record);
+            self.recruitment_refusals
+                .extend(recruitment_refusal_key(record));
             if let Some(operation) = record.context().operation() {
                 self.by_operation
                     .entry(operation)
@@ -458,6 +472,26 @@ impl DecisionState {
         })
     }
 
+    /// Leadership refusals resolved within an inclusive time window. Only
+    /// actual rejections enter this projection, never cancelled or pending requests.
+    pub(crate) fn recruitment_refusals_since(
+        &self,
+        since: SimTime,
+    ) -> impl Iterator<Item = RecruitmentApprovalContext> + '_ {
+        self.recruitment_refusals
+            .range((since, DecisionRequestId::from_raw(0))..)
+            .map(|(_, id)| {
+                let record = self
+                    .records
+                    .get(id)
+                    .expect("refusal index must reference a decision");
+                let DecisionContext::RecruitmentApproval(context) = record.context() else {
+                    unreachable!("refusal index contains only recruitment approvals");
+                };
+                context
+            })
+    }
+
     pub(crate) fn decisions(&self) -> impl Iterator<Item = &DecisionRequestRecord> {
         self.records.values()
     }
@@ -498,6 +532,8 @@ impl DecisionState {
             );
         }
         self.latest_protection.include(&record);
+        self.recruitment_refusals
+            .extend(recruitment_refusal_key(&record));
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -513,6 +549,8 @@ impl DecisionState {
             .expect("validated decision disappeared before resolution commit");
         record.lifecycle = DecisionLifecycle::Resolved(resolution);
         record.version = advance_version_preflighted(record.version);
+        self.recruitment_refusals
+            .extend(recruitment_refusal_key(record));
     }
 
     fn cancel(&mut self, id: DecisionRequestId, cancellation: DecisionCancellation) {
@@ -554,6 +592,12 @@ impl DecisionState {
             && self.pending_recipient_index_is_consistent()
             && self.pending_context_index_is_consistent()
             && self.protection_index_is_consistent()
+            && self.recruitment_refusals
+                == self
+                    .records
+                    .values()
+                    .filter_map(recruitment_refusal_key)
+                    .collect()
     }
 
     fn protection_index_is_consistent(&self) -> bool {

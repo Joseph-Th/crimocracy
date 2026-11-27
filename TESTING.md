@@ -48,7 +48,7 @@ None of these replaces `.\scripts\verify.cmd` or a focused behavioral proof. Mut
 Territory owner tests cover symmetric standstills, genuine balanced-ledger
 street-cash tribute and insufficient funds, third-party clashes despite an
 unrelated bilateral peace, independent postwar accords for disjoint gangs in
-one district, and persisted history validation after those outcomes. They also cover
+one district, and persisted history validation after those outcomes. The autonomous peace regression also rejects divided executive authority on either side without mutation, then permits the agreement after lawful reporting-line repair across save/restore. They also cover
 a failed assault that shuts down
 the attacking racket, a strong autonomous rival displacing a player holding,
 an actual crisis report, multi-day cooldown and suspension expiry, and
@@ -226,7 +226,7 @@ contact and legal systems. `tests.rs`, `governance_tests.rs`, `openings_tests.rs
 continuation, legal ledger payments, saving, information boundaries,
 authorization, and rejection integrity.
 `run_tick` remains the only way to advance simulation time.
-`prospects_explain_exhausted_manager_pitches_until_relationship_changes` runs real daily recruitment through four distinct refusals, a deferred pass, restored read-only reporting and a changed social relationship. `connections_distinguish_existing_channels_and_dormant_acquaintances` checks existing and potential channel labels, noninstitutional acquaintances, canonical rejection of a zero-basis social link, and restored read-only output. The generated freelance contract regression also verifies that the connection directory never advertises contracted workers as standing institutional handlers.
+`pending_approval_excludes_only_its_live_recruitment_route` proves that a delayed rejection starts its approval cooldown at resolution, not request, and expires at the exact minute on both live and restored branches. `prospects_explain_exhausted_manager_pitches_until_relationship_changes` runs real daily recruitment through four distinct refusals, a deferred pass, restored read-only reporting and a changed social relationship. `connections_distinguish_existing_channels_and_dormant_acquaintances` checks existing and potential channel labels, noninstitutional acquaintances, canonical rejection of a zero-basis social link, and restored read-only output. The generated freelance contract regression also verifies that the connection directory never advertises contracted workers as standing institutional handlers.
 
 Views show public business-directory identities (not ownership), organization-held
 intelligence, its own finances, people, businesses and enterprises, delivered

@@ -1978,6 +1978,55 @@ fn autonomous_gangs_can_negotiate_a_real_postwar_standstill() {
         "peace negotiation cannot take place on the same minute as fighting"
     );
     fixture.state.advance_clock(day);
+    // A district captain can fight without being an executive, but an autonomous
+    // bilateral accord commits the entire organization. Neither side can sign
+    // when its reporting hierarchy has two competing roots.
+    for (organization, executive) in [
+        (fixture.challenger, defender_manager),
+        (fixture.dominant, fixture.manager),
+    ] {
+        let mut contested =
+            restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+        let second_root = insert_character(
+            &mut contested,
+            CharacterDraft {
+                name: "Competing Executive".into(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Broad,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let mut restored =
+            restore_save(&registry, build_save(&registry, &contested).unwrap()).unwrap();
+        let before = bincode::serialize(&contested).unwrap();
+        for state in [&mut contested, &mut restored] {
+            assert!(
+                apply_due_autonomous_territory_standstills(state).is_empty(),
+                "both gangs need unambiguous executive authority before a peace agreement"
+            );
+            assert_eq!(bincode::serialize(state).unwrap(), before);
+            crate::world::world_system::validate_set_character_supervisor(
+                state,
+                second_root,
+                Some(executive),
+            )
+            .unwrap()
+            .commit(state)
+            .unwrap();
+            state.advance_clock(day);
+            assert_eq!(apply_due_autonomous_territory_standstills(state).len(), 1);
+            assert!(active_standstill(state, organization, fixture.neighborhood).is_some());
+            validate_invariants(state);
+        }
+        assert_eq!(
+            bincode::serialize(&contested).unwrap(),
+            bincode::serialize(&restored).unwrap()
+        );
+    }
     let treaties = apply_due_autonomous_territory_standstills(&mut fixture.state);
     assert_eq!(
         treaties.len(),
