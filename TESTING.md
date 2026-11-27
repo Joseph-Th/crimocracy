@@ -370,6 +370,8 @@ gating, and persistence.
 the finance owner's per-account chronology indexes. Transfers touching multiple
 player accounts appear once, and a guessed rival transaction ID is not enough
 to display rival books. The detail view prints only player-owned postings.
+`reconnecting_does_not_redisclose_the_sponsors_existing_knowledge` proves renewed channels omit already disclosed source records, reject repeated disclosures without mutation, and accept new records identically after restoration. Opportunity regressions prove typed legal-status source selection, irrelevant-topic rejection, and rejection of contextual-only conversion through both direct and atomic authorization paths while preserving valid discovery provenance and restored continuation.
+
 `finance_play_tests.rs` proves ownership isolation, same-minute ordering,
 non-mutating rejection, real laundering fees, and save/restore stability.
 `laundering_fragmentation_cannot_reduce_the_authored_fee` compares equal-volume whole and fragmented transfers, checks actual ledger debits and credits and consumed capacity, and continues identically across save/restore. `finance_system/tests/laundering.rs` also verifies that a held transfer rejects a same-minute market capacity reduction caused by establishing a competing business, with the ledger and laundering consumption unchanged.

@@ -1,7 +1,7 @@
 //! Release-safe structural validation for institutional contacts and disclosures.
 
 use crate::contacts::contact_system::{
-    information_source_kind, resolve_contact_kind_for_institution_kind,
+    disclosable_topics, information_source_kind, resolve_contact_kind_for_institution_kind,
 };
 use crate::contacts::{
     ContactDisclosureRecord, ContactRelationshipSnapshot, ContactStatus, InstitutionalContactRecord,
@@ -129,6 +129,7 @@ fn validate_contact_disclosure(
         || disclosed.holder() != KnowledgeHolder::Organization(contact.sponsor())
         || disclosed.source_kind() != information_source_kind(contact.kind())
         || disclosed.source_entity() != Some(EntityRef::Character(contact.contact()))
+        || !disclosable_topics(contact.kind()).contains(&source.topic())
         || disclosed.topic() != source.topic()
         || disclosed.subject() != source.subject()
         || disclosed.observed_at() != source.observed_at()

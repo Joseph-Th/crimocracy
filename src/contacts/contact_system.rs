@@ -120,7 +120,9 @@ pub enum ContactError {
         topic: crate::intelligence::InformationTopic,
         kind: ContactKind,
     },
-    #[error("information {information} was already disclosed through contact {contact}")]
+    #[error(
+        "the sponsor of contact {contact} has already received information {information} through an institutional channel"
+    )]
     DuplicateDisclosure {
         contact: ContactId,
         information: InformationId,
@@ -462,7 +464,7 @@ impl ValidatedContactDisclosure {
             return Err(ContactError::ContactNotActive(self.contact));
         }
         validate_disclosure_source(state, record, self.source)?;
-        ensure_disclosure_not_duplicate(state, self.contact, self.source)?;
+        ensure_disclosure_not_duplicate(state, record, self.source)?;
         let disclosed_information = self
             .information
             .commit(state)
@@ -495,7 +497,7 @@ pub fn validate_contact_disclosure(
         return Err(ContactError::ContactNotActive(contact));
     }
     validate_disclosure_source(state, record, source)?;
-    ensure_disclosure_not_duplicate(state, contact, source)?;
+    ensure_disclosure_not_duplicate(state, record, source)?;
     let information = validate_contact_information_derivation(
         state,
         source,
@@ -717,7 +719,7 @@ pub fn find_pending_disclosure_sources(
         {
             if state
                 .contacts()
-                .disclosure_from_source(contact, information.id())
+                .disclosure_from_source(record.sponsor(), information.id())
                 .is_none()
             {
                 ordered.push((
@@ -744,7 +746,7 @@ pub fn find_pending_disclosure_sources(
 /// FinancialPerformance to a character owner, and recruitment/informant flows carry
 /// Personnel to the characters who live them. Every entry here has a live production
 /// producer behind it.
-fn disclosable_topics(kind: ContactKind) -> &'static [InformationTopic] {
+pub(crate) fn disclosable_topics(kind: ContactKind) -> &'static [InformationTopic] {
     match kind {
         // Law enforcement relays what its own casework puts in the officer's hands.
         ContactKind::Police => &[InformationTopic::LegalActivity],
@@ -774,16 +776,16 @@ fn ensure_no_active_duplicate(
 
 fn ensure_disclosure_not_duplicate(
     state: &AppState,
-    contact: ContactId,
+    contact: &InstitutionalContactRecord,
     source: InformationId,
 ) -> Result<(), ContactError> {
     if state
         .contacts
-        .disclosure_from_source(contact, source)
+        .disclosure_from_source(contact.sponsor(), source)
         .is_some()
     {
         return Err(ContactError::DuplicateDisclosure {
-            contact,
+            contact: contact.id(),
             information: source,
         });
     }

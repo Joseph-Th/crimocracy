@@ -102,7 +102,11 @@ pub(crate) fn source_information_proves_operation_basis(
         | OperationKind::Kidnapping
         | OperationKind::Infiltration
         | OperationKind::Sabotage
-        | OperationKind::Arson => true,
+        | OperationKind::Arson => registry
+            .get_operation(operation_kind)
+            .execution()
+            .relevant_intelligence_topics()
+            .contains(&information.topic()),
     }
 }
 

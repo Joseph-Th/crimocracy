@@ -11,7 +11,9 @@ use crate::operations::operation_basis_knowledge::{
 };
 use crate::operations::operation_scheduling::resolve_operation_earliest_start;
 use crate::operations::operation_system::is_valid_operation_objective;
-use crate::opportunities::opportunity_system::operation_matches_opportunity_basis;
+use crate::opportunities::opportunity_system::{
+    operation_has_discovery_basis, operation_matches_opportunity_basis,
+};
 use crate::opportunities::{OpportunityRecord, OpportunityResolution};
 use crate::registry::Registry;
 use crate::reports::{ReportKind, ReportRecord};
@@ -72,93 +74,94 @@ pub(super) fn validate_opportunities_against_registry(
         let context = opportunity.context();
         let kind = context.operation_kind();
         let definition = registry.get_operation(kind);
-        let has_authored_target = context.targets().iter().any(|target| {
-            let Some(objective) = kind.objective_for_target(*target) else {
-                return false;
-            };
-            if !is_valid_operation_objective(kind, &objective) {
-                return false;
-            }
-            let Some(ownership) = kind.business_target_ownership() else {
-                return true;
-            };
-            let EntityRef::Business(business) = target else {
-                return false;
-            };
-            let Some(record) = state.world.get_business(*business) else {
-                return false;
-            };
-            let Some(requirement) = definition.execution().business_target() else {
-                return false;
-            };
-            if !requirement
-                .required_functions()
-                .iter()
-                .all(|function| record.has_function(*function))
-            {
-                return false;
-            }
-            let (could_be_sponsor_owned, definitely_sponsor_owned) =
-                state.world.business_owner_evidence_at(
-                    *business,
-                    crate::world::BusinessOwner::Organization(opportunity.organization()),
+        let authored_targets: BTreeSet<_> = context
+            .targets()
+            .iter()
+            .copied()
+            .filter(|target| {
+                let Some(objective) = kind.objective_for_target(*target) else {
+                    return false;
+                };
+                if !is_valid_operation_objective(kind, &objective) {
+                    return false;
+                }
+                let Some(ownership) = kind.business_target_ownership() else {
+                    return true;
+                };
+                let EntityRef::Business(business) = target else {
+                    return false;
+                };
+                let Some(record) = state.world.get_business(*business) else {
+                    return false;
+                };
+                let Some(requirement) = definition.execution().business_target() else {
+                    return false;
+                };
+                if !requirement
+                    .required_functions()
+                    .iter()
+                    .all(|function| record.has_function(*function))
+                {
+                    return false;
+                }
+                let (could_be_sponsor_owned, definitely_sponsor_owned) =
+                    state.world.business_owner_evidence_at(
+                        *business,
+                        crate::world::BusinessOwner::Organization(opportunity.organization()),
+                        opportunity.discovered_at(),
+                    );
+                match ownership {
+                    crate::operations::OperationBusinessTargetOwnership::Foreign => {
+                        !definitely_sponsor_owned
+                    }
+                    crate::operations::OperationBusinessTargetOwnership::SponsorOwned => {
+                        could_be_sponsor_owned
+                    }
+                }
+            })
+            .collect();
+        // Check coverage and supported actionability against the same source/target
+        // pair. Scan source records once rather than crossing all targets with all sources.
+        let mut covered_targets = BTreeSet::new();
+        let mut has_supported_action_basis = false;
+        for source in opportunity.source_information() {
+            let information = state
+                .intelligence
+                .get_information(*source)
+                .ok_or_else(|| invalid_opportunity(opportunity))?;
+            let target = information.subject();
+            if spent_by_target
+                .get(&(opportunity.organization(), kind, target))
+                .is_some_and(|at| information.observed_at() <= *at)
+                || !source_information_is_usable_for_operation_basis(
+                    registry,
+                    kind,
+                    information,
                     opportunity.discovered_at(),
-                );
-            match ownership {
-                crate::operations::OperationBusinessTargetOwnership::Foreign => {
-                    !definitely_sponsor_owned
-                }
-                crate::operations::OperationBusinessTargetOwnership::SponsorOwned => {
-                    could_be_sponsor_owned
-                }
+                )
+            {
+                continue;
             }
-        });
-        let every_target_has_usable_source = context.targets().iter().all(|target| {
-            opportunity.source_information().iter().any(|source| {
-                state
-                    .intelligence
-                    .get_information(*source)
-                    .is_some_and(|information| {
-                        information.subject() == *target
-                            && spent_by_target
-                                .get(&(opportunity.organization(), kind, *target))
-                                .is_none_or(|at| information.observed_at() > *at)
-                            && source_information_is_usable_for_operation_basis(
-                                registry,
-                                kind,
-                                information,
-                                opportunity.discovered_at(),
-                            )
-                    })
-            })
-        });
-        let has_supported_action_basis = context.targets().iter().any(|target| {
-            opportunity.source_information().iter().any(|source| {
-                state
-                    .intelligence
-                    .get_information(*source)
-                    .is_some_and(|information| {
-                        information.subject() == *target
-                            && spent_by_target
-                                .get(&(opportunity.organization(), kind, *target))
-                                .is_none_or(|at| information.observed_at() > *at)
-                            && source_information_proves_operation_basis(
-                                registry,
-                                state,
-                                kind,
-                                *target,
-                                information,
-                                opportunity.discovered_at(),
-                            )
-                    })
-            })
-        });
+            covered_targets.insert(target);
+            if !has_supported_action_basis
+                && authored_targets.contains(&target)
+                && source_information_proves_operation_basis(
+                    registry,
+                    state,
+                    kind,
+                    target,
+                    information,
+                    opportunity.discovered_at(),
+                )
+            {
+                has_supported_action_basis = true;
+            }
+        }
         let report = state
             .reports
             .get_report(opportunity.report())
             .ok_or_else(|| invalid_opportunity(opportunity))?;
-        if !has_authored_target
-            || !every_target_has_usable_source
+        if covered_targets != *context.targets()
             || !has_supported_action_basis
             || report.title()
                 != crate::opportunities::opportunity_system::discovery_report_title(
@@ -181,6 +184,31 @@ pub(super) fn validate_opportunities_against_registry(
                     definition.display_name(),
                 )
             {
+                return Err(invalid_opportunity(opportunity));
+            }
+        }
+        if let Some(OpportunityResolution::Converted { operation, .. }) = opportunity.resolution() {
+            let record = state
+                .operations
+                .get_operation(operation)
+                .ok_or_else(|| invalid_opportunity(opportunity))?;
+            let target = record
+                .objective()
+                .referenced_entities()
+                .into_iter()
+                .next()
+                .ok_or_else(|| invalid_opportunity(opportunity))?;
+            let prior_spent_at = spent_by_target
+                .get(&(opportunity.organization(), kind, target))
+                .copied();
+            if !operation_has_discovery_basis(
+                registry,
+                state,
+                opportunity,
+                record,
+                target,
+                prior_spent_at,
+            ) {
                 return Err(invalid_opportunity(opportunity));
             }
         }

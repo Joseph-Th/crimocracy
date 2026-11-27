@@ -125,6 +125,18 @@ fn sensitive_opportunity_cannot_convert_against_a_different_legal_episode() {
     .expect("first witness-status information should validate")
     .commit(&mut fixture.state)
     .expect("first witness-status information should commit");
+    assert_eq!(
+        latest_usable_opportunity_information(
+            &fixture.registry,
+            &fixture.state,
+            fixture.organization,
+            OperationKind::WitnessPressure,
+            EntityRef::Character(witness_character),
+        )
+        .map(|record| record.id()),
+        Some(first_status),
+        "typed witness status is discovery provenance even though it is not an execution modifier"
+    );
     let opportunity = validate_discover_operation_opportunity(
         &fixture.registry,
         &fixture.state,
@@ -208,9 +220,12 @@ fn sensitive_opportunity_cannot_convert_against_a_different_legal_episode() {
     .commit(&mut fixture.state)
     .expect("second-episode pressure operation should commit");
 
-    let error = validate_convert_opportunity(&fixture.state, opportunity, operation)
-        .err()
-        .expect("an opening from the first episode must not convert the second-episode operation");
+    let error =
+        validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
+            .err()
+            .expect(
+                "an opening from the first episode must not convert the second-episode operation",
+            );
     assert_eq!(
         error,
         OpportunityError::OperationBasisMismatch {
@@ -372,7 +387,7 @@ fn witness_opportunity_conversion_cannot_borrow_another_targets_case_knowledge()
     let before = bincode::serialize(&fixture.state).expect("state should serialize");
 
     assert!(matches!(
-        validate_convert_opportunity(&fixture.state, opportunity, operation),
+        validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation),
         Err(OpportunityError::OperationBasisMismatch {
             operation: rejected_operation,
             opportunity: rejected_opportunity
@@ -430,7 +445,7 @@ fn conversion_keeps_discovery_provenance_without_forcing_it_into_execution_intel
     .commit(&mut fixture.state)
     .expect("operation should commit");
 
-    validate_convert_opportunity(&fixture.state, opportunity, operation)
+    validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
         .expect("shape-matched operation should consume the persisted opportunity provenance")
         .commit(&mut fixture.state)
         .expect("conversion should commit");
@@ -564,7 +579,7 @@ fn typed_witness_opening_can_convert_without_treating_legal_status_as_execution_
     .commit(&mut fixture.state)
     .expect("witness-pressure operation should commit");
 
-    validate_convert_opportunity(&fixture.state, opportunity, operation)
+    validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
         .expect("known-witness opening should convert to the matching authorized operation")
         .commit(&mut fixture.state)
         .expect("known-witness conversion should commit");
@@ -752,6 +767,26 @@ fn opportunity_draft(
     }
 }
 
+fn robbery_source(fixture: &mut OpportunityFixture) -> InformationId {
+    validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Schedule,
+            source_entity: None,
+            subject: EntityRef::Business(fixture.business),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::General,
+            summary: "The jewelry shop's cash collection follows a known schedule.".to_owned(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap()
+}
+
 fn operation_draft(fixture: &OpportunityFixture, objective: OperationObjective) -> OperationDraft {
     OperationDraft {
         title: "Bellmore Jewelry burglary".to_owned(),
@@ -880,7 +915,7 @@ fn opportunity_authorization_preflights_both_records_and_restores_exactly() {
         .unwrap()
         .commit(&mut separate)
         .unwrap();
-    validate_convert_opportunity(&separate, lead, separate_id)
+    validate_convert_opportunity(&fixture.registry, &separate, lead, separate_id)
         .unwrap()
         .commit(&mut separate)
         .unwrap();
@@ -933,6 +968,178 @@ fn mid_quality_information_keeps_planning_value_until_the_authored_age_limit() {
     .commit(&mut fixture.state)
     .expect("near-expiry discovery should commit");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn unrelated_intelligence_cannot_support_a_burglary_opening() {
+    let mut fixture = make_fixture();
+    let target = EntityRef::Business(fixture.business);
+    let unrelated = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: target,
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The business is named in a civil case.".to_owned(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let draft = opportunity_draft(&fixture, SimTime::from_minutes(120));
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        latest_usable_opportunity_information(
+            &fixture.registry,
+            &fixture.state,
+            fixture.organization,
+            OperationKind::Burglary,
+            target,
+        )
+        .map(|record| record.id()),
+        Some(fixture.source)
+    );
+    assert_eq!(
+        validate_discover_operation_opportunity(
+            &fixture.registry,
+            &fixture.state,
+            OperationOpportunityDraft {
+                source_information: BTreeSet::from([unrelated]),
+                ..draft.clone()
+            },
+        )
+        .err(),
+        Some(OpportunityError::NoActionableTarget(
+            OperationKind::Burglary
+        ))
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        validate_discover_operation_opportunity(&fixture.registry, state, draft.clone())
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        validate_state_against_registry(&fixture.registry, state).unwrap();
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
+fn contextual_business_cannot_consume_an_opening_without_its_own_action_basis() {
+    let mut fixture = make_fixture();
+    let neighborhood = fixture
+        .state
+        .world()
+        .get_business(fixture.business)
+        .unwrap()
+        .neighborhood();
+    let contextual = insert_business(
+        &fixture.registry,
+        &mut fixture.state,
+        BusinessDraft {
+            name: "Contextual shop".to_owned(),
+            kind: BusinessKind::Retail,
+            functions: BTreeSet::new(),
+            neighborhood,
+            owner: BusinessOwner::Independent,
+        },
+    )
+    .unwrap();
+    let contextual_target = EntityRef::Business(contextual);
+    let context_source = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Organization(fixture.organization),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: contextual_target,
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "A neighboring shop is named in a case.".to_owned(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let lead = validate_discover_operation_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        OperationOpportunityDraft {
+            targets: BTreeSet::from([EntityRef::Business(fixture.business), contextual_target]),
+            source_information: BTreeSet::from([fixture.source, context_source]),
+            ..opportunity_draft(&fixture, SimTime::from_minutes(120))
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+
+    let mut wrong = operation_draft(
+        &fixture,
+        OperationObjective::AcquireProperty {
+            target: contextual_target,
+        },
+    );
+    wrong.intelligence.clear();
+    let correct = operation_draft(
+        &fixture,
+        OperationObjective::AcquireProperty {
+            target: EntityRef::Business(fixture.business),
+        },
+    );
+    let mut replay = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut replay] {
+        let before = bincode::serialize(state).unwrap();
+        assert!(matches!(
+            validate_authorize_from_opportunity(&fixture.registry, state, lead, wrong.clone()),
+            Err(OpportunityError::OperationBasisMismatch { opportunity, .. }) if opportunity == lead
+        ));
+        assert_eq!(bincode::serialize(state).unwrap(), before);
+        let mut separate = state.clone();
+        let wrong_id = validate_authorize_operation(&fixture.registry, &separate, wrong.clone())
+            .unwrap()
+            .commit(&mut separate)
+            .unwrap();
+        let before = bincode::serialize(&separate).unwrap();
+        assert_eq!(
+            validate_convert_opportunity(&fixture.registry, &separate, lead, wrong_id).err(),
+            Some(OpportunityError::OperationBasisMismatch {
+                operation: wrong_id,
+                opportunity: lead,
+            })
+        );
+        assert_eq!(bincode::serialize(&separate).unwrap(), before);
+        validate_authorize_from_opportunity(&fixture.registry, state, lead, correct.clone())
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        validate_state_against_registry(&fixture.registry, state).unwrap();
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
 }
 
 #[test]
@@ -1500,7 +1707,7 @@ fn discovery_commit_rechecks_that_an_actionable_gambling_venue_is_still_controll
         InformationDraft {
             holder: KnowledgeHolder::Organization(fixture.organization),
             source_kind: InformationSourceKind::DirectObservation,
-            topic: InformationTopic::TargetSecurity,
+            topic: InformationTopic::MarketAccess,
             source_entity: None,
             subject: EntityRef::Business(venue),
             observed_at: fixture.state.now(),
@@ -1555,7 +1762,12 @@ fn conversion_rejects_operation_whose_schedule_already_passed() {
     let operation = authorize_matching_operation(&mut fixture);
     fixture.state.advance_clock(SimDuration::from_minutes(11));
 
-    let error = match validate_convert_opportunity(&fixture.state, opportunity, operation) {
+    let error = match validate_convert_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity,
+        operation,
+    ) {
         Ok(_) => panic!("an overdue authorized job cannot consume a still-open opportunity"),
         Err(error) => error,
     };
@@ -1616,7 +1828,12 @@ fn conversion_rejects_same_minute_plan_that_first_starts_at_expiry() {
     .commit(&mut fixture.state)
     .expect("same-minute plan should commit");
 
-    let error = match validate_convert_opportunity(&fixture.state, opportunity, operation) {
+    let error = match validate_convert_opportunity(
+        &fixture.registry,
+        &fixture.state,
+        opportunity,
+        operation,
+    ) {
         Ok(_) => panic!("a job that first starts on expiry cannot consume the opportunity"),
         Err(error) => error,
     };
@@ -1718,7 +1935,7 @@ fn spent_openings_require_new_observations_even_after_restore() {
                 .unwrap();
         if convert {
             let operation = authorize_matching_operation(&mut fixture);
-            validate_convert_opportunity(&fixture.state, opportunity, operation)
+            validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
                 .unwrap()
                 .commit(&mut fixture.state)
                 .unwrap();
@@ -2117,6 +2334,7 @@ fn restore_rejects_overlapping_open_opportunities_that_canonical_discovery_canno
     .expect("second target information should validate")
     .commit(&mut fixture.state)
     .expect("second target information should commit");
+    let robbery = robbery_source(&mut fixture);
     let second = validate_discover_operation_opportunity(
         &fixture.registry,
         &fixture.state,
@@ -2126,7 +2344,7 @@ fn restore_rejects_overlapping_open_opportunities_that_canonical_discovery_canno
                 EntityRef::Business(fixture.business),
                 EntityRef::Character(fixture.leader),
             ]),
-            source_information: BTreeSet::from([fixture.source, owner_intel]),
+            source_information: BTreeSet::from([fixture.source, owner_intel, robbery]),
             ..opportunity_draft(&fixture, SimTime::from_minutes(120))
         },
     )
@@ -2201,7 +2419,7 @@ fn multi_target_discovery_converts_against_one_of_its_targets() {
 
     // The operation acts against only one of the discovered targets.
     let operation = authorize_matching_operation(&mut fixture);
-    validate_convert_opportunity(&fixture.state, opportunity, operation)
+    validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
         .expect("operation targeting one discovered target should convert the opportunity")
         .commit(&mut fixture.state)
         .expect("validated conversion should commit");
@@ -2230,7 +2448,7 @@ fn conversion_requires_exact_authorized_operation_and_survives_save_round_trip()
     .expect("opportunity should commit");
     let operation = authorize_matching_operation(&mut fixture);
 
-    validate_convert_opportunity(&fixture.state, opportunity, operation)
+    validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
         .expect("matching authorized operation should convert the opportunity")
         .commit(&mut fixture.state)
         .expect("validated opportunity conversion should commit");
@@ -2286,7 +2504,7 @@ fn converted_operation_cannot_begin_after_its_opportunity_window_expires() {
     .commit(&mut fixture.state)
     .expect("bounded opportunity should commit");
     let operation = authorize_matching_operation(&mut fixture);
-    validate_convert_opportunity(&fixture.state, opportunity, operation)
+    validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
         .expect("in-window operation should convert the opportunity")
         .commit(&mut fixture.state)
         .expect("opportunity conversion should commit");
@@ -2334,7 +2552,7 @@ fn tick_aborts_delayed_converted_operation_when_opportunity_window_expires() {
     .commit(&mut fixture.state)
     .expect("bounded opportunity should commit");
     let operation = authorize_matching_operation(&mut fixture);
-    validate_convert_opportunity(&fixture.state, opportunity, operation)
+    validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
         .expect("in-window operation should convert the opportunity")
         .commit(&mut fixture.state)
         .expect("opportunity conversion should commit");
@@ -2401,7 +2619,7 @@ fn restore_rejects_conversion_recorded_before_operation_authorization() {
     .expect("opportunity should commit");
     fixture.state.advance_clock(SimDuration::from_minutes(5));
     let operation = authorize_matching_operation(&mut fixture);
-    validate_convert_opportunity(&fixture.state, opportunity, operation)
+    validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
         .expect("matching operation should convert after authorization")
         .commit(&mut fixture.state)
         .expect("conversion should commit");
@@ -2630,6 +2848,7 @@ fn deferred_expiry_does_not_resurface_stale_discoveries_in_an_executive_brief() 
     .expect("first opening should commit");
     let mut second_draft = opportunity_draft(&fixture, SimTime::from_minutes(2));
     second_draft.operation_kind = OperationKind::Robbery;
+    second_draft.source_information = BTreeSet::from([robbery_source(&mut fixture)]);
     // Exercise the inclusive deadline boundary alongside one older expired discovery.
     second_draft.valid_until = Some(SimTime::from_minutes(1_440));
     second_draft.summary = "A second short-lived opening has also gone stale.".to_owned();
@@ -2800,6 +3019,7 @@ fn expiry_batch_report_exhaustion_is_terminal_noop_and_leaves_every_due_opportun
     .expect("first expiring opportunity should commit");
     let mut second_draft = opportunity_draft(&fixture, SimTime::from_minutes(2));
     second_draft.operation_kind = OperationKind::Robbery;
+    second_draft.source_information = BTreeSet::from([robbery_source(&mut fixture)]);
     second_draft.summary =
         "Bellmore Jewelry may also be vulnerable to a direct robbery.".to_owned();
     let second =
@@ -2910,6 +3130,7 @@ fn partial_report_budget_defers_the_whole_expiry_cohort_without_invalid_state() 
     .expect("first opportunity should commit");
     let mut second_draft = opportunity_draft(&fixture, SimTime::from_minutes(2));
     second_draft.operation_kind = OperationKind::Robbery;
+    second_draft.source_information = BTreeSet::from([robbery_source(&mut fixture)]);
     second_draft.summary = "A second deadline shares the same report allocation rail.".to_owned();
     validate_discover_operation_opportunity(&fixture.registry, &fixture.state, second_draft)
         .expect("second opportunity should validate")
@@ -3009,8 +3230,9 @@ fn conversion_token_rejects_operation_lifecycle_change_without_mutating_opportun
     .commit(&mut fixture.state)
     .expect("opportunity should commit");
     let operation = authorize_matching_operation(&mut fixture);
-    let conversion = validate_convert_opportunity(&fixture.state, opportunity, operation)
-        .expect("fresh conversion should validate");
+    let conversion =
+        validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
+            .expect("fresh conversion should validate");
     fixture.state.advance_clock(SimDuration::from_minutes(10));
     apply_transition(
         &fixture.registry,
@@ -3154,7 +3376,7 @@ fn conversion_rejects_mismatched_operation_kind_without_consuming_opportunity() 
     .expect("mismatched operation fixture should commit");
 
     assert_eq!(
-        validate_convert_opportunity(&fixture.state, opportunity, operation)
+        validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
             .err()
             .expect("wrong operation kind must not consume opportunity"),
         OpportunityError::OperationKindMismatch {
@@ -3286,7 +3508,7 @@ fn converted_opportunity_discovery_is_not_resurfaced_in_later_executive_brief() 
     .commit(&mut fixture.state)
     .expect("player opportunity should commit");
     let operation = authorize_matching_operation(&mut fixture);
-    validate_convert_opportunity(&fixture.state, opportunity, operation)
+    validate_convert_opportunity(&fixture.registry, &fixture.state, opportunity, operation)
         .expect("matching operation should convert the opportunity")
         .commit(&mut fixture.state)
         .expect("opportunity conversion should commit");

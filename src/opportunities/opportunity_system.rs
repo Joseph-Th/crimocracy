@@ -150,7 +150,7 @@ pub enum OpportunityError {
     #[error("operation {operation} must target exactly one entity covered by the opportunity")]
     OperationTargetsMismatch { operation: OperationId },
     #[error(
-        "operation {operation} does not act on the same learned legal episode that created opportunity {opportunity}"
+        "operation {operation} lacks a qualifying discovery basis for its target in opportunity {opportunity}"
     )]
     OperationBasisMismatch {
         operation: OperationId,
@@ -223,21 +223,18 @@ pub fn latest_usable_opportunity_information<'state>(
     kind: OperationKind,
     target: EntityRef,
 ) -> Option<&'state crate::intelligence::InformationRecord> {
-    let definition = registry.get_operation(kind);
-    let relevant = definition.execution().relevant_intelligence_topics();
     state
         .intelligence
         .information_for_holder_subject(KnowledgeHolder::Organization(organization), target)
         .filter(|information| {
-            relevant.contains(&information.topic())
-                && source_information_proves_operation_basis(
-                    registry,
-                    state,
-                    kind,
-                    target,
-                    information,
-                    state.now(),
-                )
+            source_information_proves_operation_basis(
+                registry,
+                state,
+                kind,
+                target,
+                information,
+                state.now(),
+            )
         })
         .max_by_key(|information| (information.observed_at(), information.id()))
 }
@@ -341,6 +338,7 @@ fn validate_discovery_state(
         .collect();
     let mut covered_targets = BTreeSet::new();
     let mut fresh_targets = BTreeSet::new();
+    let mut usable_sources = Vec::new();
     for source in &draft.source_information {
         let information = state
             .intelligence
@@ -365,6 +363,7 @@ fn validate_discovery_state(
             discovered_at,
         ) {
             covered_targets.insert(information.subject());
+            usable_sources.push(information);
             if spent_by_target
                 .get(&information.subject())
                 .is_none_or(|at| information.observed_at() > *at)
@@ -383,43 +382,45 @@ fn validate_discovery_state(
     if fresh_targets != draft.targets {
         return Err(OpportunityError::SpentOpportunityBasis);
     }
-    // Contextual entities need fresh organization-held coverage, but only the actual action
-    // target must prove a sensitive legal basis. Hidden world state confirms whether a target is
-    // actionable; typed information confirms that the organization legitimately knows why.
+    // Contextual entities need fresh organization-held coverage, but an actual action
+    // target must also have relevant or typed episode-specific discovery provenance.
+    // Resolve live actionability once per target, then inspect only usable source records.
+    let actionable_targets: BTreeSet<_> = draft
+        .targets
+        .iter()
+        .copied()
+        .filter(|target| {
+            is_actionable_opportunity_target(
+                registry,
+                state,
+                draft.organization,
+                draft.operation_kind,
+                *target,
+            )
+        })
+        .collect();
     let mut has_supported_actionable_target = false;
     let mut has_fresh_actionable_target = false;
-    for target in &draft.targets {
-        if !is_actionable_opportunity_target(
-            registry,
-            state,
-            draft.organization,
-            draft.operation_kind,
-            *target,
-        ) {
-            continue;
-        }
-        let spent_at = spent_by_target.get(target);
-        for source in &draft.source_information {
-            if let Some(information) =
-                state
-                    .intelligence
-                    .get_information(*source)
-                    .filter(|information| {
-                        information.subject() == *target
-                            && source_information_proves_actionable_basis(
-                                registry,
-                                state,
-                                draft.organization,
-                                draft.operation_kind,
-                                *target,
-                                information,
-                                discovered_at,
-                            )
-                    })
+    for information in usable_sources {
+        let target = information.subject();
+        if actionable_targets.contains(&target)
+            && source_information_proves_actionable_basis(
+                registry,
+                state,
+                draft.organization,
+                draft.operation_kind,
+                target,
+                information,
+                discovered_at,
+            )
+        {
+            has_supported_actionable_target = true;
+            if spent_by_target
+                .get(&target)
+                .is_none_or(|at| information.observed_at() > *at)
             {
-                has_supported_actionable_target = true;
-                has_fresh_actionable_target |=
-                    spent_at.is_none_or(|at| information.observed_at() > *at);
+                has_fresh_actionable_target = true;
+                break;
             }
         }
     }
@@ -594,6 +595,7 @@ pub struct ValidatedOpportunityAuthorization<'registry> {
     opportunity: OpportunityId,
     expected_opportunity_version: u32,
     operation: ValidatedOperation<'registry>,
+    registry: &'registry Registry,
 }
 
 impl ValidatedOpportunityAuthorization<'_> {
@@ -607,7 +609,7 @@ impl ValidatedOpportunityAuthorization<'_> {
             });
         }
         let prepared = self.operation.prepare(state)?;
-        validate_conversion_match(state, opportunity, prepared.record())?;
+        validate_conversion_match(self.registry, state, opportunity, prepared.record())?;
         let operation = prepared.commit_preflighted(state);
         state
             .opportunities
@@ -624,24 +626,26 @@ pub fn validate_authorize_from_opportunity<'registry>(
 ) -> Result<ValidatedOpportunityAuthorization<'registry>, OpportunityError> {
     let record = validate_convertible_opportunity(state, opportunity)?;
     let operation = validate_authorize_operation(registry, state, draft)?;
-    validate_conversion_match(state, record, &operation.preview_record(state)?)?;
+    validate_conversion_match(registry, state, record, &operation.preview_record(state)?)?;
     Ok(ValidatedOpportunityAuthorization {
         opportunity,
         expected_opportunity_version: record.version(),
         operation,
+        registry,
     })
 }
 
 /// Link an already authorized operation to an opportunity. New orders should
 /// instead use validate_authorize_from_opportunity so the two changes are atomic.
-pub struct ValidatedOpportunityConversion {
+pub struct ValidatedOpportunityConversion<'registry> {
+    registry: &'registry Registry,
     opportunity: OpportunityId,
     expected_opportunity_version: u32,
     operation: OperationId,
     expected_operation_version: u32,
 }
 
-impl ValidatedOpportunityConversion {
+impl ValidatedOpportunityConversion<'_> {
     pub fn commit(self, state: &mut AppState) -> Result<(), OpportunityError> {
         let opportunity = validate_open_opportunity(state, self.opportunity)?;
         if opportunity.version() != self.expected_opportunity_version {
@@ -664,7 +668,7 @@ impl ValidatedOpportunityConversion {
                 found: operation.version(),
             });
         }
-        validate_conversion_match(state, opportunity, operation)?;
+        validate_conversion_match(self.registry, state, opportunity, operation)?;
         state
             .opportunities
             .convert(self.opportunity, self.operation, state.now());
@@ -672,18 +676,20 @@ impl ValidatedOpportunityConversion {
     }
 }
 
-pub fn validate_convert_opportunity(
+pub fn validate_convert_opportunity<'registry>(
+    registry: &'registry Registry,
     state: &AppState,
     opportunity: OpportunityId,
     operation: OperationId,
-) -> Result<ValidatedOpportunityConversion, OpportunityError> {
+) -> Result<ValidatedOpportunityConversion<'registry>, OpportunityError> {
     let opportunity_record = validate_convertible_opportunity(state, opportunity)?;
     let operation_record = state
         .operations
         .get_operation(operation)
         .ok_or(OpportunityError::MissingOperation(operation))?;
-    validate_conversion_match(state, opportunity_record, operation_record)?;
+    validate_conversion_match(registry, state, opportunity_record, operation_record)?;
     Ok(ValidatedOpportunityConversion {
+        registry,
         opportunity,
         expected_opportunity_version: opportunity_record.version(),
         operation,
@@ -734,6 +740,7 @@ fn validate_not_expired(
 }
 
 fn validate_conversion_match(
+    registry: &Registry,
     state: &AppState,
     opportunity: &OpportunityRecord,
     operation: &crate::operations::OperationRecord,
@@ -741,12 +748,6 @@ fn validate_conversion_match(
     if operation.status() != OperationStatus::Authorized {
         return Err(OpportunityError::OperationNotAuthorized {
             operation: operation.id(),
-        });
-    }
-    if !operation_matches_opportunity_basis(state, opportunity, operation) {
-        return Err(OpportunityError::OperationBasisMismatch {
-            operation: operation.id(),
-            opportunity: opportunity.id(),
         });
     }
     if state.now() > operation.scheduled_for() {
@@ -800,6 +801,25 @@ fn validate_conversion_match(
             operation: operation.id(),
         });
     }
+    let target = *operation_targets.first().expect("one target was validated");
+    let prior_spent_at = state.opportunities.spent_at_for_target(
+        opportunity.organization(),
+        operation.kind(),
+        target,
+    );
+    if !operation_has_discovery_basis(
+        registry,
+        state,
+        opportunity,
+        operation,
+        target,
+        prior_spent_at,
+    ) {
+        return Err(OpportunityError::OperationBasisMismatch {
+            operation: operation.id(),
+            opportunity: opportunity.id(),
+        });
+    }
     // Discovery provenance remains owned by the opportunity record. Operation intelligence is a
     // different concern: it contains only facts the authored operation kind can use to improve
     // execution. Requiring those sets to overlap would strand legitimate openings whose basis is
@@ -823,67 +843,52 @@ fn validate_conversion_match(
     Ok(())
 }
 
-/// Sensitive legal openings are episode-specific. Discovery provenance remains separate from
-/// execution intelligence, but conversion must not repurpose knowledge of one arrest or witness
-/// registration into an operation against a later unrelated episode involving the same person.
+/// Structural episode matching remains independent of the registry. Registry-aware
+/// conversion additionally proves freshness and relevant topic for the same source.
 pub(crate) fn operation_matches_opportunity_basis(
     state: &AppState,
     opportunity: &OpportunityRecord,
     operation: &crate::operations::OperationRecord,
 ) -> bool {
-    match operation.kind() {
-        OperationKind::Extraction => {
-            let Some(arrest) = operation.extraction_arrest() else {
-                return false;
-            };
-            opportunity.source_information().iter().any(|information| {
-                state
-                    .intelligence
-                    .get_information(*information)
-                    .is_some_and(|record| {
-                        matches!(
-                            record.signal(),
-                            Some(InformationSignal::LegalPersonStatus(
-                                LegalPersonStatusSignal::Detained {
-                                    arrest: learned_arrest
-                                }
-                            )) if *learned_arrest == arrest
-                        )
-                    })
+    opportunity.source_information().iter().any(|source| {
+        state
+            .intelligence
+            .get_information(*source)
+            .is_some_and(|information| {
+                source_matches_operation_episode(state, operation, information)
             })
-        }
+    })
+}
+
+fn source_matches_operation_episode(
+    state: &AppState,
+    operation: &crate::operations::OperationRecord,
+    information: &crate::intelligence::InformationRecord,
+) -> bool {
+    match operation.kind() {
+        OperationKind::Extraction => matches!(
+            information.signal(),
+            Some(InformationSignal::LegalPersonStatus(
+                LegalPersonStatusSignal::Detained { arrest }
+            )) if Some(*arrest) == operation.extraction_arrest()
+        ),
         OperationKind::WitnessPressure => {
-            // A multi-target opening can include contextual witnesses whose information is not
-            // an actionable legal-status fact. A case match on another target must not make
-            // that contextual witness's separately authorized operation eligible for conversion.
             let Some(character) = operation.objective().character_target() else {
                 return false;
             };
-            let pinned_investigations: BTreeSet<_> = operation
-                .witness_pressure_cases()
-                .iter()
-                .filter_map(|case_witness| {
-                    state
-                        .legal
-                        .get_case_witness(*case_witness)
-                        .map(|witness| witness.investigation())
-                })
-                .collect();
-            !pinned_investigations.is_empty()
-                && opportunity.source_information().iter().any(|information| {
-                    state
-                        .intelligence
-                        .get_information(*information)
-                        .is_some_and(|record| {
-                            record.subject() == EntityRef::Character(character)
-                                && matches!(
-                                    record.signal(),
-                                    Some(InformationSignal::LegalPersonStatus(
-                                        LegalPersonStatusSignal::CaseWitness { investigation }
-                                    )) if pinned_investigations.contains(investigation)
-                                )
-                        })
-                })
+            let Some(InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+                investigation,
+            })) = information.signal()
+            else {
+                return false;
+            };
+            information.subject() == EntityRef::Character(character)
+                && state
+                    .legal
+                    .case_witness_for(*investigation, character)
+                    .is_some_and(|witness| {
+                        operation.witness_pressure_cases().contains(&witness.id())
+                    })
         }
         OperationKind::Burglary
         | OperationKind::Robbery
@@ -898,6 +903,37 @@ pub(crate) fn operation_matches_opportunity_basis(
         | OperationKind::Sabotage
         | OperationKind::Arson => true,
     }
+}
+
+/// The chosen action target must have its own qualifying observation at discovery,
+/// not merely contextual coverage or an old spent opening. Legal episode matching
+/// must succeed for that same observation. Discovery-time knowledge is historical;
+/// conversion does not require the observation to still modify execution.
+pub(crate) fn operation_has_discovery_basis(
+    registry: &Registry,
+    state: &AppState,
+    opportunity: &OpportunityRecord,
+    operation: &crate::operations::OperationRecord,
+    target: EntityRef,
+    prior_spent_at: Option<SimTime>,
+) -> bool {
+    opportunity.source_information().iter().any(|source| {
+        state
+            .intelligence
+            .get_information(*source)
+            .is_some_and(|information| {
+                prior_spent_at.is_none_or(|at| information.observed_at() > at)
+                    && source_information_proves_operation_basis(
+                        registry,
+                        state,
+                        operation.kind(),
+                        target,
+                        information,
+                        opportunity.discovered_at(),
+                    )
+                    && source_matches_operation_episode(state, operation, information)
+            })
+    })
 }
 
 struct ValidatedOpportunityExpiry {

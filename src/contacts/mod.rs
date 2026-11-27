@@ -173,7 +173,7 @@ struct ContactIndexes {
     active_by_sponsor_contact: BTreeMap<(OrganizationId, CharacterId), ContactId>,
     active_by_handler: BTreeMap<CharacterId, BTreeSet<ContactId>>,
     active_by_contact: BTreeMap<CharacterId, BTreeSet<ContactId>>,
-    disclosure_by_source: BTreeMap<(ContactId, InformationId), ContactDisclosureId>,
+    disclosure_by_sponsor_source: BTreeMap<(OrganizationId, InformationId), ContactDisclosureId>,
     disclosure_by_information: BTreeMap<InformationId, ContactDisclosureId>,
 }
 
@@ -216,9 +216,12 @@ impl ContactState {
             }
         }
         for record in self.disclosures.values() {
-            self.indexes
-                .disclosure_by_source
-                .insert((record.contact(), record.source_information()), record.id());
+            if let Some(contact) = self.contacts.get(&record.contact()) {
+                self.indexes.disclosure_by_sponsor_source.insert(
+                    (contact.sponsor(), record.source_information()),
+                    record.id(),
+                );
+            }
             self.indexes
                 .disclosure_by_information
                 .insert(record.disclosed_information(), record.id());
@@ -403,10 +406,15 @@ impl ContactState {
 
     fn insert_disclosure(&mut self, record: ContactDisclosureRecord) {
         let id = record.id();
+        let sponsor = self
+            .contacts
+            .get(&record.contact())
+            .expect("validated disclosure contact must exist")
+            .sponsor();
         let previous_source = self
             .indexes
-            .disclosure_by_source
-            .insert((record.contact(), record.source_information()), id);
+            .disclosure_by_sponsor_source
+            .insert((sponsor, record.source_information()), id);
         debug_assert!(previous_source.is_none());
         let previous_information = self
             .indexes
@@ -417,14 +425,15 @@ impl ContactState {
         debug_assert!(previous.is_none(), "duplicate contact disclosure ID");
     }
 
+    /// A sponsor remembers the disclosure even if its original channel ends.
     pub(crate) fn disclosure_from_source(
         &self,
-        contact: ContactId,
+        sponsor: OrganizationId,
         source: InformationId,
     ) -> Option<&ContactDisclosureRecord> {
         self.indexes
-            .disclosure_by_source
-            .get(&(contact, source))
+            .disclosure_by_sponsor_source
+            .get(&(sponsor, source))
             .map(|id| {
                 self.disclosures
                     .get(id)
@@ -489,18 +498,20 @@ impl ContactState {
         true
     }
 
-    /// Every disclosure must point to a live contact and occupy both reverse lookup indexes.
+    /// Every disclosure must point to an existing contact and occupy both reverse lookup indexes.
     fn disclosure_records_have_consistent_indexes(&self) -> bool {
         for (stored_id, disclosure) in &self.disclosures {
             if *stored_id != disclosure.id() {
                 return false;
             }
-            if !self.contacts.contains_key(&disclosure.contact())
-                || self
-                    .indexes
-                    .disclosure_by_source
-                    .get(&(disclosure.contact(), disclosure.source_information()))
-                    != Some(&disclosure.id())
+            let Some(contact) = self.contacts.get(&disclosure.contact()) else {
+                return false;
+            };
+            if self
+                .indexes
+                .disclosure_by_sponsor_source
+                .get(&(contact.sponsor(), disclosure.source_information()))
+                != Some(&disclosure.id())
                 || self
                     .indexes
                     .disclosure_by_information
@@ -583,14 +594,14 @@ impl ContactState {
         true
     }
 
-    /// Each contact/source-information pair maps back to the matching disclosure.
+    /// Each sponsor/source-information pair maps back to the matching disclosure.
     fn disclosure_source_index_is_consistent(&self) -> bool {
-        for (key, disclosure) in &self.indexes.disclosure_by_source {
-            if !self
-                .disclosures
-                .get(disclosure)
-                .is_some_and(|record| (record.contact(), record.source_information()) == *key)
-            {
+        for (key, disclosure) in &self.indexes.disclosure_by_sponsor_source {
+            if !self.disclosures.get(disclosure).is_some_and(|record| {
+                self.contacts
+                    .get(&record.contact())
+                    .is_some_and(|contact| (contact.sponsor(), record.source_information()) == *key)
+            }) {
                 return false;
             }
         }

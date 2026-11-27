@@ -1158,6 +1158,118 @@ fn disclosure_token_rejects_contact_termination_and_duplicate_source() {
 }
 
 #[test]
+fn reconnecting_does_not_redisclose_the_sponsors_existing_knowledge() {
+    let mut fixture = make_fixture(OrganizationKind::LawEnforcement);
+    let original = establish(&mut fixture);
+    let source_character = fixture.source;
+    let first = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(source_character),
+        InformationTopic::LegalActivity,
+    );
+    validate_contact_disclosure(&fixture.state, original, first)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    validate_terminate_contact(&fixture.state, original)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let renewed = establish(&mut fixture);
+    assert_ne!(original, renewed);
+
+    // Knowledge belongs to the sponsor, not the source's entire audience.
+    // A genuinely separate sponsor may receive the original observation.
+    let other_sponsor = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Separate contact sponsor".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let other_handler = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Separate contact handler".to_owned(),
+            organization: Some(other_sponsor),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_set_relationship(
+        &fixture.state,
+        other_handler,
+        source_character,
+        relationship(70, 45),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let other = validate_establish_contact(
+        &fixture.state,
+        InstitutionalContactDraft {
+            sponsor: other_sponsor,
+            handler: other_handler,
+            contact: source_character,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    assert_eq!(
+        find_pending_disclosure_sources(&fixture.state, other),
+        vec![first]
+    );
+    validate_contact_disclosure(&fixture.state, other, first)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let second = record_source_information_with_topic(
+        &mut fixture,
+        KnowledgeHolder::Character(source_character),
+        InformationTopic::LegalActivity,
+    );
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let before = bincode::serialize(state).unwrap();
+        assert_eq!(
+            find_pending_disclosure_sources(state, renewed),
+            vec![second]
+        );
+        assert_eq!(
+            validate_contact_disclosure(state, renewed, first).err(),
+            Some(ContactError::DuplicateDisclosure {
+                contact: renewed,
+                information: first,
+            })
+        );
+        assert_eq!(bincode::serialize(state).unwrap(), before);
+        validate_contact_disclosure(state, renewed, second)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        assert!(find_pending_disclosure_sources(state, renewed).is_empty());
+        assert_eq!(state.contacts().disclosures().count(), 3);
+        assert_eq!(find_pending_disclosure_sources(state, other), vec![second]);
+        validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn institution_without_modeled_contact_channel_is_rejected() {
     let fixture = make_fixture(OrganizationKind::Criminal);
     let error = validate_establish_contact(
