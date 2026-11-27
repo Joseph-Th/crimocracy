@@ -398,6 +398,15 @@ checks atomic rejection under information-ID exhaustion, and verifies the
 lead's new personal witness observation can be disclosed exactly once through
 a standing police contact and survives restoration.
 
+`initial_eyewitness_testimony_and_interview_do_not_independently_justify_custody`
+resolves an identified operation incident and an actual detective interview,
+rejects custody based on one repeated eyewitness through direct and autonomous
+admission, then accepts genuinely independent evidence after restoration.
+`attributed_incident_testimony_preserves_only_the_explicit_witness_source`
+checks rejection of invalid attribution indices, mismatched subject/origin and
+backdated testimony without mutation, distinguishes attributed testimony from
+other independent evidence, and rejects corrupted or removed links at restore.
+
 `finance_play_tests.rs` proves ownership isolation, same-minute ordering,
 non-mutating rejection, real laundering fees, and save/restore stability.
 `laundering_fragmentation_cannot_reduce_the_authored_fee` compares equal-volume whole and fragmented transfers, checks actual ledger debits and credits and consumed capacity, and continues identically across save/restore. `finance_system/tests/laundering.rs` also verifies that a held transfer rejects a same-minute market capacity reduction caused by establishing a competing business, with the ledger and laundering consumption unchanged.

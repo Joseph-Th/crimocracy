@@ -144,7 +144,7 @@ impl ValidatedCaseWitnessRegistration {
             (IdKind::Information, u32::from(knowledge.is_some())),
         ])?;
         Ok(commit_case_witness_registration_preflighted(
-            state, self.draft, knowledge,
+            state, self.draft, None, knowledge,
         ))
     }
 }
@@ -155,6 +155,7 @@ impl ValidatedCaseWitnessRegistration {
 pub(in crate::legal) fn commit_case_witness_registration_preflighted(
     state: &mut AppState,
     draft: CaseWitnessDraft,
+    initial_testimony: Option<EvidenceId>,
     knowledge: Option<crate::intelligence::intelligence_system::ValidatedInformation>,
 ) -> CaseWitnessId {
     let id = state
@@ -168,6 +169,7 @@ pub(in crate::legal) fn commit_case_witness_registration_preflighted(
             investigation: draft.investigation,
             witness: draft.witness,
             subject: draft.subject,
+            initial_testimony,
             cooperation: draft.cooperation,
             registered_at,
             statements: Default::default(),

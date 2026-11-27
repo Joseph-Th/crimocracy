@@ -322,6 +322,9 @@ pub struct CaseWitnessRecord {
     /// prevents a later interview from choosing a different suspect merely because stronger
     /// evidence entered the case after registration.
     pub(in crate::legal) subject: EntityRef,
+    /// Initial testimony explicitly attributed to this eyewitness at incident intake.
+    /// A later interview can develop the account but cannot create an independent source.
+    pub(in crate::legal) initial_testimony: Option<EvidenceId>,
     pub(in crate::legal) cooperation: WitnessCooperation,
     pub(in crate::legal) registered_at: SimTime,
     pub(in crate::legal) statements: BTreeSet<WitnessStatementId>,
@@ -346,6 +349,10 @@ impl CaseWitnessRecord {
 
     pub fn subject(&self) -> EntityRef {
         self.subject
+    }
+
+    pub fn initial_testimony(&self) -> Option<EvidenceId> {
+        self.initial_testimony
     }
 
     pub fn cooperation(&self) -> WitnessCooperation {
@@ -816,6 +823,9 @@ pub struct IncidentWitnessDraft {
     pub character: CharacterId,
     /// Subject this named witness actually observed in the incident.
     pub subject: EntityRef,
+    /// Index of testimony in this intake's evidence vector supplied by this witness.
+    /// None means the intake evidence was independently obtained.
+    pub initial_testimony_index: Option<usize>,
     pub cooperation: WitnessCooperation,
 }
 

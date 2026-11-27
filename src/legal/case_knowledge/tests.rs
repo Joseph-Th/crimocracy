@@ -376,6 +376,7 @@ fn continued_staffed_incident_delivers_witness_knowledge_through_contact() {
             Some(IncidentWitnessDraft {
                 character: witness,
                 subject: EntityRef::Character(suspect),
+                initial_testimony_index: None,
                 cooperation: WitnessCooperation::Cooperative,
             }),
         )

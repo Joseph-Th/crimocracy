@@ -534,6 +534,16 @@ Later staffing of an unstaffed case uses the same observation draft, validated
 against the existing witness. The typed witness fact becomes organization
 knowledge only through a permitted information transfer or contact disclosure.
 
+Incident intake explicitly binds an initial testimony exhibit to the named
+eyewitness who supplied it. The witness record retains the evidence ID, and the
+exhibit's source retains the character identity. Later interviews may develop
+that account but cannot manufacture independent corroboration: custody and
+judicial proof use their existing shared named-source rule. Other primary
+evidence, including genuinely anonymous testimony and independently collected
+physical evidence, remains independent. Restore checks the initial exhibit's
+case, subject, source, kind, chronology, and unique provenance ownership
+alongside ordinary witness statements.
+
 ## Source map — one owner per field
 
 The operation objective owner, `operations::operation_objective`, resolves

@@ -573,6 +573,7 @@ pub(crate) fn validate_developed_review_evidence(
 pub(super) fn validate_case_witnesses(
     state: &AppState,
     completed_interviews_by_witness: &BTreeMap<CaseWitnessId, u32>,
+    named_witness_evidence: &mut BTreeSet<EvidenceId>,
 ) -> Result<(), StateValidationError> {
     for witness in state.legal.case_witnesses() {
         let investigation = state
@@ -581,6 +582,26 @@ pub(super) fn validate_case_witnesses(
             .ok_or(StateValidationError::InvalidCaseWitness {
                 witness: witness.id(),
             })?;
+        if let Some(initial) = witness.initial_testimony() {
+            let valid = state.legal.get_evidence(initial).is_some_and(|evidence| {
+                evidence.investigation() == witness.investigation()
+                    && evidence.custodian() == investigation.owner()
+                    && evidence.subject() == witness.subject()
+                    && evidence.kind() == EvidenceKind::WitnessTestimony
+                    && evidence.source() == Some(EntityRef::Character(witness.witness()))
+                    && evidence.discovered_at() == witness.registered_at()
+                    && evidence.derived_from().is_empty()
+                    && evidence.origin().is_none_or(|origin| {
+                        matches!(origin, EntityRef::Operation(_) | EntityRef::Enterprise(_))
+                            && investigation.declared_subjects().contains(&origin)
+                    })
+            });
+            if !valid || !named_witness_evidence.insert(initial) {
+                return Err(StateValidationError::InvalidCaseWitness {
+                    witness: witness.id(),
+                });
+            }
+        }
         let completed_interviews = completed_interviews_by_witness
             .get(&witness.id())
             .copied()
@@ -635,6 +656,7 @@ fn case_witness_subject_was_relevant_at_registration(
     witness: &crate::legal::CaseWitnessRecord,
 ) -> bool {
     investigation.origin() == Some(witness.subject())
+        || witness.initial_testimony().is_some()
         || investigation
             .declared_subjects()
             .contains(&witness.subject())
@@ -653,8 +675,8 @@ fn case_witness_subject_was_relevant_at_registration(
 
 pub(super) fn validate_witness_statements(
     state: &AppState,
-) -> Result<BTreeSet<EvidenceId>, StateValidationError> {
-    let mut named_witness_evidence = BTreeSet::new();
+    named_witness_evidence: &mut BTreeSet<EvidenceId>,
+) -> Result<(), StateValidationError> {
     for statement in state.legal.witness_statements() {
         let case_witness = state
             .legal
@@ -709,7 +731,7 @@ pub(super) fn validate_witness_statements(
         }
     }
 
-    Ok(named_witness_evidence)
+    Ok(())
 }
 
 pub(crate) fn validate_witness_statements_against_registry(

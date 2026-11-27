@@ -12,8 +12,9 @@ use crate::core::time::{SimTime, ensure_time_current};
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance_by};
 use crate::intelligence::intelligence_system::ValidatedInformation;
 use crate::legal::{
-    CaseWitnessDraft, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceRecord,
-    IncidentIntakeDraft, InvestigationDraft, InvestigationRecord, InvestigationStatus,
+    CaseWitnessDraft, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
+    EvidenceRecord, IncidentIntakeDraft, InvestigationDraft, InvestigationRecord,
+    InvestigationStatus,
 };
 use std::cmp::Reverse;
 
@@ -222,6 +223,24 @@ impl ValidatedIncidentIntake {
                 investigation
             }
         };
+        // Allocate the preflighted evidence IDs before registering the witness so the
+        // registration can retain the exact initial testimony identity, not a later lookup.
+        let evidence_ids: Vec<_> = self
+            .draft
+            .evidence
+            .iter()
+            .map(|_| {
+                state
+                    .ids
+                    .next_evidence()
+                    .expect("incident evidence IDs were preflighted before mutation")
+            })
+            .collect();
+        let attributed_testimony = self.draft.witness.as_ref().and_then(|witness| {
+            witness
+                .initial_testimony_index
+                .map(|index| (index, witness.character))
+        });
         let case_witness = if let Some(witness) = self.draft.witness {
             Some(
                 crate::legal::witness_system::commit_case_witness_registration_preflighted(
@@ -232,18 +251,21 @@ impl ValidatedIncidentIntake {
                         subject: witness.subject,
                         cooperation: witness.cooperation,
                     },
+                    witness
+                        .initial_testimony_index
+                        .map(|index| evidence_ids[index]),
                     self.witness_knowledge,
                 ),
             )
         } else {
             None
         };
-        let mut evidence_ids = Vec::with_capacity(self.draft.evidence.len());
-        for evidence in self.draft.evidence {
-            let id = state
-                .ids
-                .next_evidence()
-                .expect("incident evidence IDs were preflighted before mutation");
+        for (index, (id, evidence)) in evidence_ids
+            .iter()
+            .copied()
+            .zip(self.draft.evidence)
+            .enumerate()
+        {
             state.legal.insert_evidence(
                 EvidenceRecord {
                     identity: EvidenceIdentity {
@@ -254,7 +276,9 @@ impl ValidatedIncidentIntake {
                     connection: EvidenceConnection {
                         subject: evidence.subject,
                         origin: evidence.origin,
-                        source: None,
+                        source: attributed_testimony
+                            .filter(|(testimony_index, _)| *testimony_index == index)
+                            .map(|(_, character)| EntityRef::Character(character)),
                         derived_from: Default::default(),
                     },
                     assessment: EvidenceAssessment {
@@ -267,7 +291,6 @@ impl ValidatedIncidentIntake {
                 },
                 self.validated_at,
             );
-            evidence_ids.push(id);
         }
         Ok(IncidentIntakeOutcome {
             investigation,
@@ -481,10 +504,27 @@ fn validate_incident_intake_dependencies(
                 subject: witness.subject,
             });
         }
+        if let Some(index) = witness.initial_testimony_index
+            && draft.evidence.get(index).is_none_or(|evidence| {
+                evidence.kind != EvidenceKind::WitnessTestimony
+                    || evidence.subject != witness.subject
+                    || evidence.origin != draft.origin
+                    || evidence.discovered_at != state.now()
+                    || evidence
+                        .origin
+                        .is_some_and(|origin| !draft.subjects.contains(&origin))
+            })
+        {
+            return Err(InvestigationError::InvalidIncidentWitnessTestimony {
+                character: witness.character,
+                index,
+            });
+        }
     }
     for evidence in &draft.evidence {
-        // Incident intake inserts evidence with `source: None`; work-derived kinds and
-        // informant statements may only exist through their canonical production paths.
+        // Intake may attribute one initial testimony to its registered witness; all other
+        // primary evidence is independent. Work-derived kinds and informant statements
+        // may only exist through their canonical production paths.
         validate_evidence_kind_allowed(evidence.kind)?;
         if let Some(enterprise) =
             super::enterprise_observation_origin(evidence.kind, evidence.subject, evidence.origin)

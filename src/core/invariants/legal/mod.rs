@@ -35,8 +35,13 @@ pub(super) fn validate_legal_subsystems(state: &AppState) -> Result<(), StateVal
         &mut derived_evidence_from_work,
         &mut completed_interviews_by_witness,
     )?;
-    casework::validate_case_witnesses(state, &completed_interviews_by_witness)?;
-    let named_witness_evidence = casework::validate_witness_statements(state)?;
+    let mut named_witness_evidence = BTreeSet::new();
+    casework::validate_case_witnesses(
+        state,
+        &completed_interviews_by_witness,
+        &mut named_witness_evidence,
+    )?;
+    casework::validate_witness_statements(state, &mut named_witness_evidence)?;
     custody::validate_informants(state)?;
     let informant_evidence = custody::validate_informant_disclosures(state)?;
     casework::validate_evidence_records(

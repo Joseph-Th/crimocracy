@@ -136,6 +136,7 @@ struct CaseWitnessRecordWire {
     investigation: InvestigationId,
     witness: CharacterId,
     subject: EntityRef,
+    initial_testimony: Option<EvidenceId>,
     cooperation: WitnessCooperation,
     registered_at: SimTime,
     statements: BTreeSet<crate::core::id::WitnessStatementId>,
@@ -301,6 +302,7 @@ fn case_witness_wire(record: &CaseWitnessRecord) -> CaseWitnessRecordWire {
         investigation: record.investigation(),
         witness: record.witness(),
         subject: record.subject(),
+        initial_testimony: record.initial_testimony(),
         cooperation: record.cooperation(),
         registered_at: record.registered_at(),
         statements: record.statements().clone(),
@@ -323,7 +325,6 @@ fn replace_serialized_case_witness(
     );
     let replacement_bytes =
         bincode::serialize(replacement).expect("replacement case witness should serialize");
-    assert_eq!(replacement_bytes.len(), original_bytes.len());
     let mut envelope_bytes = bincode::serialize(&envelope).expect("save envelope should serialize");
     let matches: Vec<_> = envelope_bytes
         .windows(original_bytes.len())
@@ -336,9 +337,11 @@ fn replace_serialized_case_witness(
         "serialized case witness must occur exactly once"
     );
     let start = matches[0];
-    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
-    bincode::deserialize(&envelope_bytes)
-        .expect("same-layout case witness corruption must remain decodable")
+    envelope_bytes.splice(start..start + original_bytes.len(), replacement_bytes);
+    let decoded: SaveEnvelope = bincode::deserialize(&envelope_bytes)
+        .expect("case witness corruption must remain decodable");
+    assert_eq!(bincode::serialize(&decoded).unwrap(), envelope_bytes);
+    decoded
 }
 
 fn rating(value: u8) -> Rating {
@@ -1468,6 +1471,127 @@ fn suspended_case_preserves_testimony_but_rejects_new_witness_activity() {
     );
     validate_state(&restored).expect("historical testimony should survive suspension");
     validate_invariants(&restored);
+}
+
+#[test]
+fn attributed_incident_testimony_preserves_only_the_explicit_witness_source() {
+    use crate::core::invariants::StateValidationError;
+    use crate::core::persistence::LoadError;
+    use crate::legal::investigation_system::validate_incident_intake;
+    use crate::legal::{IncidentEvidenceDraft, IncidentIntakeDraft, IncidentWitnessDraft};
+
+    let registry = build_registry();
+    let mut fixture = make_fixture();
+    fixture.state.advance_clock(SimDuration::ONE_MINUTE);
+    let subject = EntityRef::Character(fixture.subject);
+    let evidence = |kind| IncidentEvidenceDraft {
+        subject,
+        origin: None,
+        kind,
+        strength: EvidenceStrength::Strong,
+        reliability: EvidenceReliability::Credible,
+        admissibility: Admissibility::Unknown,
+        discovered_at: fixture.state.now(),
+    };
+    let draft = IncidentIntakeDraft {
+        owner: fixture.police,
+        title: "Identified eyewitness with independent evidence".to_owned(),
+        subjects: BTreeSet::from([subject]),
+        evidence: vec![
+            evidence(EvidenceKind::Document),
+            evidence(EvidenceKind::WitnessTestimony),
+            evidence(EvidenceKind::WitnessTestimony),
+        ],
+        origin: None,
+        witness: Some(IncidentWitnessDraft {
+            character: fixture.witness,
+            subject,
+            initial_testimony_index: Some(1),
+            cooperation: WitnessCooperation::Cooperative,
+        }),
+    };
+    let before = bincode::serialize(&fixture.state).unwrap();
+    for index in [0, 3] {
+        let mut invalid = draft.clone();
+        invalid.witness.as_mut().unwrap().initial_testimony_index = Some(index);
+        assert_eq!(
+            validate_incident_intake(&fixture.state, invalid).err(),
+            Some(InvestigationError::InvalidIncidentWitnessTestimony {
+                character: fixture.witness,
+                index,
+            })
+        );
+    }
+    let mut wrong_subject = draft.clone();
+    wrong_subject.evidence[1].subject = EntityRef::Organization(fixture.criminal);
+    let mut wrong_origin = draft.clone();
+    wrong_origin.evidence[1].origin = Some(EntityRef::Organization(fixture.criminal));
+    let mut backdated = draft.clone();
+    backdated.evidence[1].discovered_at = SimTime::ZERO;
+    for invalid in [wrong_subject, wrong_origin, backdated] {
+        assert_eq!(
+            validate_incident_intake(&fixture.state, invalid).err(),
+            Some(InvestigationError::InvalidIncidentWitnessTestimony {
+                character: fixture.witness,
+                index: 1,
+            })
+        );
+    }
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    let outcome = validate_incident_intake(&fixture.state, draft)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let witness = fixture
+        .state
+        .legal()
+        .get_case_witness(outcome.case_witness.unwrap())
+        .unwrap();
+    let initial = outcome.evidence[1];
+    assert_eq!(witness.initial_testimony(), Some(initial));
+    assert!(
+        witness.statements().is_empty(),
+        "an initial identification is not a completed interview"
+    );
+    for (index, id) in outcome.evidence.iter().enumerate() {
+        assert_eq!(
+            fixture.state.legal().get_evidence(*id).unwrap().source(),
+            (index == 1).then_some(EntityRef::Character(fixture.witness)),
+        );
+    }
+    let envelope = build_save(&registry, &fixture.state).unwrap();
+    let restored = restore_save(&registry, envelope.clone()).unwrap();
+    assert_eq!(
+        restored
+            .legal()
+            .get_case_witness(witness.id())
+            .unwrap()
+            .initial_testimony(),
+        Some(initial)
+    );
+    // Redirecting the link to physical or anonymous testimony, or to a missing exhibit, is invalid.
+    for wrong in [
+        outcome.evidence[0],
+        outcome.evidence[2],
+        EvidenceId::from_raw(u32::MAX),
+    ] {
+        let mut wire = case_witness_wire(witness);
+        wire.initial_testimony = Some(wrong);
+        let corrupted = replace_serialized_case_witness(envelope.clone(), witness, &wire);
+        assert!(
+            matches!(restore_save(&registry, corrupted), Err(LoadError::InvalidState(
+            StateValidationError::InvalidCaseWitness { witness: invalid }
+        )) if invalid == witness.id())
+        );
+    }
+    let mut wire = case_witness_wire(witness);
+    wire.initial_testimony = None;
+    let corrupted = replace_serialized_case_witness(envelope, witness, &wire);
+    assert!(
+        matches!(restore_save(&registry, corrupted), Err(LoadError::InvalidState(
+        StateValidationError::InvalidEvidenceProvenance { evidence }
+    )) if evidence == initial)
+    );
 }
 
 #[test]

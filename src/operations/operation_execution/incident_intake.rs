@@ -79,6 +79,9 @@ pub(super) fn resolve_incident_witness(
             .identified_character
             .map(EntityRef::Character)
             .unwrap_or(EntityRef::Operation(operation.id())),
+        initial_testimony_index: (execution.exposure_evidence_kind()
+            == crate::legal::EvidenceKind::WitnessTestimony)
+            .then_some(0),
         cooperation,
     })
 }

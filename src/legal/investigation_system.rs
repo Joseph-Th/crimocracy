@@ -180,6 +180,13 @@ pub enum InvestigationError {
         subject: EntityRef,
     },
     #[error(
+        "incident witness {character} cannot be the source of testimony at evidence index {index}"
+    )]
+    InvalidIncidentWitnessTestimony {
+        character: CharacterId,
+        index: usize,
+    },
+    #[error(
         "character {witness} is already registered as case witness {existing} for investigation {investigation}"
     )]
     DuplicateIncidentWitness {

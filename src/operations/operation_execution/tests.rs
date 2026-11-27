@@ -221,6 +221,208 @@ fn held_disruption_resolution_rejects_changed_victim_notification() {
 }
 
 #[test]
+fn initial_eyewitness_testimony_and_interview_do_not_independently_justify_custody() {
+    use crate::legal::arrest_system::{
+        ArrestError, apply_autonomous_evidence_arrests, validate_arrest,
+    };
+    use crate::legal::investigation_system::validate_assign_investigator;
+    use crate::legal::investigation_work_execution::{
+        InvestigationWorkRandomness, decide_investigation_work_resolution,
+        validate_investigation_work_resolution_plan, validate_schedule_investigation_work,
+    };
+    use crate::legal::{
+        InvestigationWorkDraft, InvestigationWorkFocus, InvestigationWorkKind,
+        InvestigationWorkOutcome,
+    };
+    let (registry, mut state, _, _, operation) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, true, Vec::new());
+    let business = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .objective()
+        .business_target()
+        .unwrap();
+    let owner = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Identifying Shopkeeper".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_transfer_business_ownership(&state, business, BusinessOwner::Character(owner))
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    let due = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .resolution_due_at()
+        .unwrap();
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due.as_minutes() - state.now().as_minutes()).unwrap(),
+    ));
+    let randomness = OperationResolutionRandomness::new(
+        0,
+        i8::try_from(
+            registry
+                .get_operation(OperationKind::Intimidation)
+                .execution()
+                .exposure_variance_limit(),
+        )
+        .unwrap(),
+    );
+    let plan = decide_operation_resolution(&registry, &state, operation, randomness).unwrap();
+    assert_eq!(
+        plan.outcome.exposure.level(),
+        OperationExposureLevel::Identifying
+    );
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let exposure = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .resolution()
+        .unwrap()
+        .exposure();
+    let suspect = exposure.identified_character().unwrap();
+    let case = exposure.investigation().unwrap();
+    let initial = *exposure.evidence().first().unwrap();
+    let registration = state.legal().case_witness_for(case, owner).unwrap();
+    assert_eq!(registration.initial_testimony(), Some(initial));
+    assert!(registration.statements().is_empty());
+    let witness = registration.id();
+    let police = state.legal().get_investigation(case).unwrap().owner();
+    let detective = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Interview Detective".to_owned(),
+            organization: Some(police),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(
+                CapabilityKind::Investigation,
+                Rating::try_new(100).unwrap(),
+            )]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_assign_investigator(&state, case, detective)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let kind = InvestigationWorkKind::WitnessInterview;
+    let work = validate_schedule_investigation_work(
+        &registry,
+        &state,
+        InvestigationWorkDraft {
+            investigation: case,
+            investigator: detective,
+            kind,
+            focus: InvestigationWorkFocus::witness(witness),
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let definition = registry.get_investigation_work(kind);
+    state.advance_clock(definition.duration());
+    let plan = decide_investigation_work_resolution(
+        &registry,
+        &state,
+        work,
+        InvestigationWorkRandomness::new(i8::try_from(definition.variance_limit()).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(plan.outcome(), InvestigationWorkOutcome::Connected);
+    validate_investigation_work_resolution_plan(&registry, &state, plan)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let interview = state
+        .legal()
+        .get_investigation_work(work)
+        .unwrap()
+        .resolution()
+        .unwrap()
+        .derived_evidence()
+        .unwrap();
+    let interview_record = state.legal().get_evidence(interview).unwrap();
+    assert!(crate::legal::arrest_system::evidence_qualifies_for_custody(
+        interview_record
+    ));
+    let draft = ArrestDraft {
+        character: suspect,
+        investigation: case,
+        evidence: BTreeSet::from([initial, interview]),
+    };
+    let before = bincode::serialize(&state).unwrap();
+    assert_eq!(
+        validate_arrest(&registry, &state, draft).err(),
+        Some(ArrestError::InsufficientIndependentEvidence {
+            found: 1,
+            required: 2
+        }),
+        "repeating one eyewitness's identification cannot create a second independent source"
+    );
+    assert_eq!(
+        state.legal().get_evidence(initial).unwrap().source(),
+        Some(EntityRef::Character(owner))
+    );
+    assert_eq!(
+        state.legal().get_evidence(interview).unwrap().source(),
+        Some(EntityRef::Character(owner))
+    );
+    assert!(
+        apply_autonomous_evidence_arrests(&registry, &mut state)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(bincode::serialize(&state).unwrap(), before);
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    let police = restored.legal().get_investigation(case).unwrap().owner();
+    let independent = validate_add_evidence(
+        &restored,
+        EvidenceDraft {
+            investigation: case,
+            custodian: police,
+            subject: EntityRef::Character(suspect),
+            origin: Some(EntityRef::Operation(operation)),
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+            discovered_at: restored.now(),
+        },
+    )
+    .unwrap()
+    .commit(&mut restored)
+    .unwrap();
+    let arrests = apply_autonomous_evidence_arrests(&registry, &mut restored).unwrap();
+    assert_eq!(arrests.len(), 1);
+    let arrest = restored.legal().get_arrest(arrests[0]).unwrap();
+    assert_eq!(arrest.character(), suspect);
+    assert!(arrest.evidence().contains(&independent));
+    restore_save(&registry, build_save(&registry, &restored).unwrap()).unwrap();
+}
+
+#[test]
 fn achieved_surveillance_after_action_leads_with_findings_not_missing_recon_boilerplate() {
     let factors = OperationResolutionFactors {
         role_capability_average: Rating::try_new(90).expect("fixture rating should be valid"),
@@ -5073,10 +5275,9 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
     assert_eq!(witnesses, vec![owner]);
     record_known_witness_status(&mut state, crew, owner, investigation);
 
-    // Witness pressure against that same witness is now authorizable while the crew's
-    // exposed leader is still free: authorizing it before testimony lands also books
-    // him, which legally blocks the institution from arresting mid-operation.
-    let _pressure = validate_authorize_operation(
+    // Witness pressure against that same witness is authorizable while the crew's
+    // exposed leader is still free, before the interview has been completed.
+    let pressure = validate_authorize_operation(
         &registry,
         &state,
         OperationDraft {
@@ -5099,30 +5300,56 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
     .commit(&mut state)
     .expect("pressure operation should commit");
 
-    // Drive the pipeline: staffing schedules the interview whose success records real
-    // testimony through the witness-statement path; the pressure operation resolves and
-    // degrades cooperation one step; once the leader's crew work is terminal and his
-    // case holds corroborated testimony, the precinct arrests him through the canonical
-    // validated path.
+    // Drive staffing, pressure and interviewing through the real tick pipeline.
+    // Initial testimony and the interview share one source; neither can provide
+    // the missing independent corroboration, even after both operations terminate.
     let suspect = suspect.expect("an identifying shakedown must expose a specific participant");
-    let arrested_at = loop {
+    loop {
         let outcome = run_tick(&registry, &mut state);
         let has_statement = state
             .legal()
             .case_witness_for(investigation, owner)
             .is_some_and(|witness| !witness.statements().is_empty());
-        if let Some(arrest) = state.legal().active_arrest_for_character(suspect) {
-            assert!(
-                has_statement,
-                "custody must not precede the corroborating witness statement"
-            );
-            break arrest.id();
+        assert!(
+            state.legal().active_arrest_for_character(suspect).is_none(),
+            "an eyewitness's repeated testimony cannot justify custody by itself"
+        );
+        if has_statement
+            && state.operations().get_operation(pressure).unwrap().status()
+                == OperationStatus::Completed
+        {
+            break;
         }
         assert!(
             outcome.now.as_minutes() < 20_000,
-            "the pipeline should reach custody well before this bound"
+            "the pipeline should complete the interview and pressure well before this bound"
         );
-    };
+    }
+    // Supply a separately collected documentary exhibit through the canonical
+    // evidence owner. Only now does the autonomous custody gate have two sources.
+    let independent = validate_add_evidence(
+        &state,
+        EvidenceDraft {
+            investigation,
+            custodian: police,
+            subject: EntityRef::Character(suspect),
+            origin: Some(EntityRef::Operation(operation)),
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Corroborating,
+            reliability: EvidenceReliability::Credible,
+            admissibility: Admissibility::Admissible,
+            discovered_at: state.now(),
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    run_tick(&registry, &mut state);
+    let arrested_at = state
+        .legal()
+        .active_arrest_for_character(suspect)
+        .expect("independent corroboration now supports custody")
+        .id();
     let pressured = state
         .legal()
         .case_witness_for(investigation, owner)
@@ -5139,6 +5366,7 @@ fn witnessed_exposure_registers_owner_witness_whose_interview_becomes_case_testi
         .expect("arrest persists");
     assert_eq!(arrest_record.character(), suspect);
     assert_eq!(arrest_record.authority(), police);
+    assert!(arrest_record.evidence().contains(&independent));
     assert!(
         arrest_record.evidence().len() >= 2,
         "custody requires corroboration beyond a single item"

@@ -587,6 +587,7 @@ fn resumed_incident_rejects_duplicate_witness_registration_before_mutation() {
             witness: Some(crate::legal::IncidentWitnessDraft {
                 character: witness,
                 subject: EntityRef::Operation(origin),
+                initial_testimony_index: None,
                 cooperation: crate::legal::WitnessCooperation::Reluctant,
             }),
         },
@@ -632,6 +633,7 @@ fn resumed_incident_rejects_duplicate_witness_registration_before_mutation() {
             witness: Some(crate::legal::IncidentWitnessDraft {
                 character: witness,
                 subject: EntityRef::Operation(origin),
+                initial_testimony_index: None,
                 cooperation: crate::legal::WitnessCooperation::Cooperative,
             }),
         },
@@ -728,6 +730,7 @@ fn unrelated_incident_with_existing_shelf_witness_opens_separate_case() {
                 witness: Some(crate::legal::IncidentWitnessDraft {
                     character: witness,
                     subject: EntityRef::Character(suspect),
+                    initial_testimony_index: None,
                     cooperation: crate::legal::WitnessCooperation::Reluctant,
                 }),
             },
@@ -871,6 +874,7 @@ fn resumed_incident_rejects_witness_already_tracked_as_subject_on_the_shelf() {
             witness: Some(crate::legal::IncidentWitnessDraft {
                 character: conflicted,
                 subject: EntityRef::Operation(origin),
+                initial_testimony_index: None,
                 cooperation: crate::legal::WitnessCooperation::Cooperative,
             }),
         },
