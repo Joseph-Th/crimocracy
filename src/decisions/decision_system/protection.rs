@@ -79,7 +79,7 @@ pub(crate) fn rival_pressure_blocked(
 ) -> bool {
     state
         .decisions()
-        .latest_protection_demand(district, Some(attacker))
+        .latest_protection_demand(district, attacker)
         .is_some_and(|record| {
             (record.status() == DecisionStatus::Pending
                 && within_days(
@@ -108,7 +108,7 @@ pub(crate) fn recently_refused_protection(
 ) -> bool {
     state
         .decisions()
-        .latest_protection_demand(district, Some(attacker))
+        .latest_protection_demand(district, attacker)
         .is_some_and(|record| {
             record.resolution().is_some_and(|resolution| {
                 resolution.response() == DecisionResponse::Reject
@@ -233,18 +233,6 @@ pub(crate) fn apply_due_protection_demands(
         {
             continue;
         }
-        if let Some(previous) = state.decisions().latest_protection_demand(district, None) {
-            let (since, interval) = match previous.resolution() {
-                Some(resolution) if resolution.response() == DecisionResponse::Approve => {
-                    (resolution.resolved_at().as_minutes(), PROTECTION_DAYS)
-                }
-                Some(resolution) => (resolution.resolved_at().as_minutes(), REFUSAL_COOLDOWN_DAYS),
-                None => (previous.requested_at().as_minutes(), OFFER_VALIDITY_DAYS),
-            };
-            if within_days(state.now().as_minutes(), since, interval) {
-                continue;
-            }
-        }
         let defense = defenses.get(&district).copied().unwrap_or_default().total();
         let amount = Money::from_cents(offer_cents(registry, state, &holdings));
         let Some(business) = holdings.first().copied() else {
@@ -253,6 +241,23 @@ pub(crate) fn apply_due_protection_demands(
         for rival in state.world().organizations() {
             if rival.id() == defender || rival.kind() != OrganizationKind::Criminal {
                 continue;
+            }
+            if let Some(previous) = state
+                .decisions()
+                .latest_protection_demand(district, rival.id())
+            {
+                let (since, interval) = match previous.resolution() {
+                    Some(resolution) if resolution.response() == DecisionResponse::Approve => {
+                        (resolution.resolved_at().as_minutes(), PROTECTION_DAYS)
+                    }
+                    Some(resolution) => {
+                        (resolution.resolved_at().as_minutes(), REFUSAL_COOLDOWN_DAYS)
+                    }
+                    None => (previous.requested_at().as_minutes(), OFFER_VALIDITY_DAYS),
+                };
+                if within_days(state.now().as_minutes(), since, interval) {
+                    continue;
+                }
             }
             if let Some((requester, force)) =
                 coercive_requester(state, rival.id(), defender, district, defense)

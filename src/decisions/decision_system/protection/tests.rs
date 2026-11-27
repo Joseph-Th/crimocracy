@@ -752,6 +752,11 @@ fn rival_demands_actual_money_and_respects_paid_30_day_protection_after_restore(
 
 #[test]
 fn latest_protection_history_preserves_each_gangs_terms_across_renewal_and_restore() {
+    independent_protection_terms(DecisionResponse::Reject);
+    independent_protection_terms(DecisionResponse::Approve);
+}
+
+fn independent_protection_terms(first_response: DecisionResponse) {
     use crate::delegation::delegation_system::validate_assign_mandate;
     use crate::delegation::{MandateAuthority, MandateDraft, ResponsibilityScope};
     use crate::enterprises::enterprise_execution::{
@@ -779,19 +784,23 @@ fn latest_protection_history_preserves_each_gangs_terms_across_renewal_and_resto
     };
     assert_eq!(terms.district(), district);
     let first_gang = terms.attacker();
+    let first_paid = first_response == DecisionResponse::Approve;
+    if first_paid {
+        fund_protection_payment(&mut city, terms.amount().cents());
+    }
     super::super::validate_resolve_decision(
         &registry,
         &city.state,
         first,
         city.player,
-        DecisionResponse::Reject,
+        first_response,
     )
     .unwrap()
     .commit(&mut city.state)
     .unwrap();
 
     // Replace the local coercive footprint through ordinary enterprise operations.
-    // The old gang's refusal remains meaningful even after a different gang demands money.
+    // The old gang's terms remain meaningful even after a different gang demands money.
     let local: Vec<_> = city
         .state
         .enterprises()
@@ -884,9 +893,9 @@ fn latest_protection_history_preserves_each_gangs_terms_across_renewal_and_resto
     .unwrap()
     .commit(&mut city.state)
     .unwrap();
-    city.state.advance_clock(SimDuration::from_minutes(
-        (REFUSAL_COOLDOWN_DAYS * DAY_MINUTES) as u32,
-    ));
+    // The unrelated gang must not inherit the first gang's cooldown.
+    city.state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
     crate::opportunities::opportunity_system::apply_opportunity_expiry(&registry, &mut city.state)
         .unwrap();
     let new_offer = apply_due_protection_demands(&registry, &mut city.state);
@@ -913,15 +922,16 @@ fn latest_protection_history_preserves_each_gangs_terms_across_renewal_and_resto
             .latest_protection_demand(district, attacker)
             .map(|record| record.id())
     };
-    assert_eq!(latest(&city.state, None), Some(second));
-    assert_eq!(latest(&city.state, Some(first_gang)), Some(first));
-    assert_eq!(latest(&city.state, Some(second_gang)), Some(second));
-    assert!(recently_refused_protection(
-        &city.state,
-        first_gang,
-        district
-    ));
-    assert!(!rival_pressure_blocked(&city.state, first_gang, district));
+    assert_eq!(latest(&city.state, first_gang), Some(first));
+    assert_eq!(latest(&city.state, second_gang), Some(second));
+    assert_eq!(
+        recently_refused_protection(&city.state, first_gang, district),
+        !first_paid
+    );
+    assert_eq!(
+        rival_pressure_blocked(&city.state, first_gang, district),
+        first_paid
+    );
     assert!(rival_pressure_blocked(&city.state, second_gang, district));
 
     fund_protection_payment(&mut city, second_terms.amount().cents());
@@ -936,12 +946,17 @@ fn latest_protection_history_preserves_each_gangs_terms_across_renewal_and_resto
     .commit(&mut city.state)
     .unwrap();
     let restored = restore_save(&registry, build_save(&registry, &city.state).unwrap()).unwrap();
-    assert_eq!(latest(&restored, None), Some(second));
-    assert_eq!(latest(&restored, Some(first_gang)), Some(first));
-    assert_eq!(latest(&restored, Some(second_gang)), Some(second));
-    assert!(recently_refused_protection(&restored, first_gang, district));
+    assert_eq!(latest(&restored, first_gang), Some(first));
+    assert_eq!(latest(&restored, second_gang), Some(second));
+    assert_eq!(
+        recently_refused_protection(&restored, first_gang, district),
+        !first_paid
+    );
     assert!(rival_pressure_blocked(&restored, second_gang, district));
-    assert!(!rival_pressure_blocked(&restored, first_gang, district));
+    assert_eq!(
+        rival_pressure_blocked(&restored, first_gang, district),
+        first_paid
+    );
     assert_eq!(
         bincode::serialize(&city.state).unwrap(),
         bincode::serialize(&restored).unwrap()

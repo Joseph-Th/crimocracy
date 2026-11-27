@@ -315,13 +315,12 @@ pub struct DecisionState {
     latest_protection: ProtectionDemandIndex,
 }
 
-/// The latest ward demand governs the ward-wide cooldown; the latest demand
-/// from each gang independently governs its retaliation and paid coverage.
+/// Each gang's latest demand governs its own cooldown, retaliation and paid coverage.
 /// Only immutable request chronology is indexed, so resolving a request
-/// changes its terms without changing either index.
+/// changes its terms without changing the index.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ProtectionDemandIndex {
-    latest: BTreeMap<(NeighborhoodId, Option<OrganizationId>), (SimTime, DecisionRequestId)>,
+    latest: BTreeMap<(NeighborhoodId, OrganizationId), (SimTime, DecisionRequestId)>,
 }
 
 impl ProtectionDemandIndex {
@@ -330,19 +329,13 @@ impl ProtectionDemandIndex {
             return;
         };
         let candidate = (record.requested_at(), record.id());
-        for attacker in [None, Some(context.attacker())] {
-            self.latest
-                .entry((context.district(), attacker))
-                .and_modify(|latest| *latest = (*latest).max(candidate))
-                .or_insert(candidate);
-        }
+        self.latest
+            .entry((context.district(), context.attacker()))
+            .and_modify(|latest| *latest = (*latest).max(candidate))
+            .or_insert(candidate);
     }
 
-    fn get(
-        &self,
-        district: NeighborhoodId,
-        attacker: Option<OrganizationId>,
-    ) -> Option<DecisionRequestId> {
+    fn get(&self, district: NeighborhoodId, attacker: OrganizationId) -> Option<DecisionRequestId> {
         self.latest.get(&(district, attacker)).map(|(_, id)| *id)
     }
 }
@@ -451,12 +444,12 @@ impl DecisionState {
             .copied()
     }
 
-    /// Most recent protection demand in a ward, optionally restricted to one gang.
+    /// Most recent protection demand from a specific gang in a ward.
     /// Pending and terminal decisions both retain their original request ordering.
     pub(crate) fn latest_protection_demand(
         &self,
         district: NeighborhoodId,
-        attacker: Option<OrganizationId>,
+        attacker: OrganizationId,
     ) -> Option<&DecisionRequestRecord> {
         self.latest_protection.get(district, attacker).map(|id| {
             self.records
