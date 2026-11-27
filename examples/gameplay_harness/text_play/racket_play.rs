@@ -10,13 +10,19 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
         outlook.baseline_net_cash.cents()
     )
     .unwrap();
-    match outlook.nonpositive_at_cases {
-        Some(0) => writeln!(out, "  Expected net is nonpositive even without case pressure.").unwrap(),
-        Some(cases) => writeln!(out, "  Expected net becomes nonpositive with {cases} own-operation case equivalent(s). District heat adds at most one {}-cent operating surcharge.", outlook.heat_surcharge_per_case.cents()).unwrap(),
-        None => writeln!(out, "  Expected net remains positive even with the maximum one-case district heat surcharge ({} cents).", outlook.heat_surcharge_per_case.cents()).unwrap(),
+    if outlook.baseline_net_cash <= Money::ZERO {
+        writeln!(
+            out,
+            "  Expected net is nonpositive even without case pressure."
+        )
+        .unwrap();
+    } else if outlook.heated_net_cash <= Money::ZERO {
+        writeln!(out, "  Expected net becomes nonpositive when district heat adds its {}-cent operating surcharge.", outlook.maximum_heat_surcharge.cents()).unwrap();
+    } else {
+        writeln!(out, "  Expected net remains positive even with the maximum district heat surcharge ({} cents).", outlook.maximum_heat_surcharge.cents()).unwrap();
     }
     match outlook.observed_pressure {
-        Some((at, heat)) => writeln!(out, "  Last observed own-operation pressure in district: {} at {}", if heat == 0 { "no surcharge" } else { "one or more attributable cases" }, time_label(at.as_minutes())).unwrap(),
+        Some((at, heat)) => writeln!(out, "  Last observed own-operation pressure in district: {} at {}", if heat { "one or more attributable cases" } else { "no surcharge" }, time_label(at.as_minutes())).unwrap(),
         None => writeln!(out, "  Own-operation pressure unknown: no recent owned racket settlement; estimate assumes no surcharge").unwrap(),
     }
     let baseline_risk = outlook.inquiry_risk_no_cases_basis_points;
@@ -42,13 +48,11 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
     .unwrap();
     // Case pressure saturates the daily operating surcharge at one case.
     // Additional cases still carry investigation and arrest consequences.
-    let surcharge = i128::from(outlook.heat_surcharge_per_case.cents());
-    if surcharge > 0 {
-        let conditional_net = i128::from(outlook.baseline_net_cash.cents());
+    if outlook.maximum_heat_surcharge > Money::ZERO {
         writeln!(
             out,
             "  Net with one or more own-operation cases: {} cents (before variance); additional open cases do not multiply this overhead",
-            conditional_net - surcharge,
+            outlook.heated_net_cash.cents(),
         )
         .unwrap();
     }

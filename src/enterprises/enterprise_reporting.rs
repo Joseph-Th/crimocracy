@@ -54,15 +54,13 @@ pub enum EnterpriseReportingError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnterpriseOutlook {
     pub baseline_net_cash: Money,
-    pub heat_surcharge_per_case: Money,
-    /// First case count that would make expected net nonpositive under the
-    /// current one-surcharge district-heat ceiling. None means profitability
-    /// survives even the maximum current district heat.
-    pub nonpositive_at_cases: Option<u64>,
+    /// Maximum operating surcharge, independent of the actual number of cases.
+    pub maximum_heat_surcharge: Money,
+    pub heated_net_cash: Money,
     pub estimated_operating_cost: Money,
     pub estimated_net_cash: Money,
-    /// Latest observed own-operation surcharge equivalent (zero or one), not a case count.
-    pub observed_pressure: Option<(SimTime, u32)>,
+    /// Latest observed own-operation surcharge presence, not a case count.
+    pub observed_pressure: Option<(SimTime, bool)>,
     /// Projected fresh inquiry risk with no current district cases, including the
     /// visible commercial footprint and the planned operating racket roster.
     pub inquiry_risk_no_cases_basis_points: u32,
@@ -166,14 +164,14 @@ fn resolve_configuration_outlook(
     let observation =
         resolve_owned_district_pressure(registry, state, configuration.organization, district)
             .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))?;
-    let project = |case_count| {
+    let project = |surcharge_applies| {
         resolve_enterprise_financial_projection(
             registry,
             state,
             configuration.kind,
             configuration.location,
             configuration.support_count,
-            case_count,
+            surcharge_applies,
             EnterpriseProjectionStaffing {
                 management: manager.capability(CapabilityKind::Management),
                 associates: configuration.associates,
@@ -181,17 +179,18 @@ fn resolve_configuration_outlook(
         )
         .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))
     };
-    let (baseline_cost, baseline_net_cash) = project(0)?;
-    let (estimated_operating_cost, estimated_net_cash) = match observation {
-        Some(observation) if observation.case_count != 0 => project(observation.case_count)?,
-        _ => (baseline_cost, baseline_net_cash),
-    };
-    let heat_surcharge_per_case = registry
+    let baseline = project(false)?;
+    let heated = project(true)?;
+    let (estimated_operating_cost, estimated_net_cash) =
+        if observation.is_some_and(|value| value.surcharge_applied) {
+            heated
+        } else {
+            baseline
+        };
+    let maximum_heat_surcharge = registry
         .get_enterprise(configuration.kind)
         .economics()
         .heat_surcharge_per_active_case();
-    let nonpositive_at_cases =
-        nonpositive_case_threshold(baseline_net_cash, heat_surcharge_per_case);
     let per_source = registry
         .get_enterprise(configuration.kind)
         .economics()
@@ -211,31 +210,19 @@ fn resolve_configuration_outlook(
         )
     };
     Ok(EnterpriseOutlook {
-        baseline_net_cash,
-        heat_surcharge_per_case,
-        nonpositive_at_cases,
+        baseline_net_cash: baseline.1,
+        maximum_heat_surcharge,
+        heated_net_cash: heated.1,
         estimated_operating_cost,
         estimated_net_cash,
-        observed_pressure: observation.map(|value| (value.observed_at, value.case_count)),
+        observed_pressure: observation.map(|value| (value.observed_at, value.surcharge_applied)),
         inquiry_risk_no_cases_basis_points: inquiry_risk(0),
         inquiry_risk_max_cases_basis_points: inquiry_risk(u32::MAX),
         inquiry_risk_observed_min_basis_points: observation
-            .map(|value| inquiry_risk(value.case_count)),
+            .map(|value| inquiry_risk(u32::from(value.surcharge_applied))),
         shared_cash_balance: account.balance(),
         shared_spendable_cash: account.spendable_balance(),
     })
-}
-
-fn nonpositive_case_threshold(net: Money, surcharge: Money) -> Option<u64> {
-    let net = net.cents();
-    let surcharge = surcharge.cents();
-    if net <= 0 {
-        Some(0)
-    } else if surcharge > 0 && net <= surcharge {
-        Some(1)
-    } else {
-        None
-    }
 }
 
 pub fn resolve_organization_enterprise_financial_summary(
@@ -388,21 +375,6 @@ mod tests {
 
     fn rating(value: u8) -> Rating {
         Rating::try_new(value).expect("fixture rating must be valid")
-    }
-
-    #[test]
-    fn pressure_threshold_handles_exact_break_even_and_zero_surcharge() {
-        let threshold = |net, surcharge| {
-            nonpositive_case_threshold(Money::from_cents(net), Money::from_cents(surcharge))
-        };
-        assert_eq!(threshold(24_000, 12_000), None);
-        assert_eq!(threshold(24_001, 12_000), None);
-        assert_eq!(threshold(12_000, 12_000), Some(1));
-        assert_eq!(threshold(11_999, 12_000), Some(1));
-        assert_eq!(threshold(0, 0), Some(0));
-        assert_eq!(threshold(-1, 12_000), Some(0));
-        assert_eq!(threshold(1, 0), None);
-        assert_eq!(threshold(i64::MAX, 1), None);
     }
 
     #[test]

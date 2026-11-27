@@ -199,7 +199,7 @@ pub(super) fn operating_reserve(
             racket.kind(),
             racket.location(),
             racket.supporting_businesses().len(),
-            u32::MAX,
+            true,
             EnterpriseProjectionStaffing {
                 management: manager.capability(CapabilityKind::Management),
                 associates: racket.associates(),

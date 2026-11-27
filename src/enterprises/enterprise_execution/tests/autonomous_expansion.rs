@@ -19,6 +19,128 @@ fn designate_player(registry: &Registry, state: &mut AppState) -> OrganizationId
     player
 }
 
+#[test]
+fn institutional_district_mandate_does_not_enter_criminal_expansion() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture_for_kind(OrganizationKind::Commercial);
+    fund_enterprise_fixture_cash(&mut fixture, 100_000);
+    designate_player(&registry, &mut fixture.state);
+    let district = fixture
+        .location
+        .neighborhood(fixture.state.world())
+        .unwrap();
+    let rival = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Eligible rival".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let manager = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Eligible rival manager".to_owned(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(80))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: rival,
+            manager,
+            scopes: BTreeSet::from([ResponsibilityScope::Neighborhood(district)]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let cash = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(rival),
+            kind: AccountKind::StreetCash,
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(rival),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    validate_record_transaction(
+        &fixture.state,
+        LedgerTransactionDraft {
+            occurred_at: fixture.state.now(),
+            memo: "Rival operating capital".into(),
+            postings: vec![
+                LedgerPosting {
+                    account: settlement,
+                    amount: Money::from_cents(-100_000),
+                },
+                LedgerPosting {
+                    account: cash,
+                    amount: Money::from_cents(100_000),
+                },
+            ],
+            authorization: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_439));
+    let mut replay =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    let original_tick = crate::core::simulation::run_test_tick(&registry, &mut fixture.state);
+    let replay_tick = crate::core::simulation::run_test_tick(&registry, &mut replay);
+    assert_eq!(original_tick, replay_tick);
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .enterprises_for_organization(fixture.organization)
+            .count(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .state
+            .enterprises()
+            .active_for_organization(rival)
+            .count(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .state
+            .delegation()
+            .get_mandate(fixture.authority.mandate)
+            .unwrap()
+            .status(),
+        crate::delegation::MandateStatus::Active
+    );
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
+    restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+}
+
 fn add_second_expansion_mandate(fixture: &mut EnterpriseFixture) {
     let original_neighborhood = match fixture.location {
         EnterpriseLocation::Neighborhood(id) => id,
@@ -647,7 +769,7 @@ fn autonomous_lifecycle_resumes_with_exact_required_working_capital() {
         record.kind(),
         record.location(),
         record.supporting_businesses().len(),
-        0,
+        false,
         EnterpriseProjectionStaffing {
             management,
             associates: record.associates(),
@@ -956,7 +1078,7 @@ fn autonomous_expansion_requires_one_current_cycle_of_working_capital() {
         EnterpriseKind::Protection,
         fixture.location,
         0,
-        0,
+        false,
         EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("fixture enterprise operating cost should fit");
@@ -991,7 +1113,7 @@ fn autonomous_expansion_does_not_oracle_unobserved_district_case_pressure() {
         EnterpriseKind::Protection,
         fixture.location,
         0,
-        0,
+        false,
         EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("base protection runway should fit");
@@ -1001,7 +1123,7 @@ fn autonomous_expansion_does_not_oracle_unobserved_district_case_pressure() {
         EnterpriseKind::Protection,
         fixture.location,
         0,
-        1,
+        true,
         EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("heated protection runway should fit");
@@ -1104,7 +1226,7 @@ fn autonomous_expansion_discards_stale_observed_district_pressure() {
         EnterpriseKind::Protection,
         fixture.location,
         0,
-        0,
+        false,
         EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("base protection runway should fit");
@@ -1114,7 +1236,7 @@ fn autonomous_expansion_discards_stale_observed_district_pressure() {
         EnterpriseKind::Protection,
         fixture.location,
         0,
-        1,
+        true,
         EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("heated protection runway should fit");
@@ -1253,7 +1375,7 @@ fn autonomous_expansion_skips_unaffordable_candidate_for_best_affordable_kind() 
         EnterpriseKind::Protection,
         fixture.location,
         0,
-        0,
+        false,
         EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("existing protection runway should fit");
@@ -1595,7 +1717,7 @@ fn autonomous_expansion_allocates_scarce_runway_to_stronger_same_day_mandate() {
         EnterpriseKind::Protection,
         fixture.location,
         0,
-        0,
+        false,
         EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("protection runway should fit");
@@ -1623,7 +1745,7 @@ fn autonomous_expansion_allocates_scarce_runway_to_stronger_same_day_mandate() {
         EnterpriseKind::Protection,
         EnterpriseLocation::Neighborhood(second_neighborhood),
         0,
-        0,
+        false,
         EnterpriseKind::Protection.baseline_associates(),
     )
     .expect("second protection runway should fit");

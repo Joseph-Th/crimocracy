@@ -350,7 +350,12 @@ fn resolve_eligible_expansion_mandates(
             continue;
         }
         let organization = mandate.organization();
-        if Some(organization) == player_organization {
+        if Some(organization) == player_organization
+            || state
+                .world()
+                .get_organization(organization)
+                .is_none_or(|record| record.kind() != OrganizationKind::Criminal)
+        {
             continue;
         }
         let police_fear = crate::reputation::reputation_system::resolve_score(

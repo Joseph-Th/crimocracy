@@ -13,7 +13,7 @@ use crate::delegation::MandateStatus;
 use crate::delegation::delegation_system::DelegationError;
 use crate::enterprises::autonomous_planning::{
     AutonomousEnterpriseError, available_working_capital, reserve_working_capital,
-    resolve_committed_working_capital, resolve_observed_district_case_count,
+    resolve_committed_working_capital, resolve_observed_district_heat,
     resolve_observed_district_pressure,
 };
 use crate::enterprises::enterprise_execution::{
@@ -146,7 +146,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
             continue;
         }
 
-        let observed_active_cases = resolve_observed_district_case_count(
+        let observed_heat = resolve_observed_district_heat(
             state,
             &observed_district_pressure,
             organization,
@@ -159,7 +159,7 @@ pub(crate) fn apply_due_autonomous_enterprise_lifecycle(
                 enterprise.kind(),
                 enterprise.location(),
                 enterprise.supporting_businesses().len(),
-                observed_active_cases,
+                observed_heat,
                 EnterpriseProjectionStaffing {
                     management: manager_record.capability(CapabilityKind::Management),
                     associates: enterprise.associates(),

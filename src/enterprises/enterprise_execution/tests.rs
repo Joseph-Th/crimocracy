@@ -2911,16 +2911,16 @@ fn enterprise_heat_decoder_rejects_charges_beyond_current_district_cap() {
     assert!(per_case > Money::ZERO);
 
     assert_eq!(
-        decode_enterprise_investigation_case_count(economics, Money::ZERO),
-        Some(0)
+        decode_enterprise_heat_surcharge(economics, Money::ZERO),
+        Some(false)
     );
     assert_eq!(
-        decode_enterprise_investigation_case_count(economics, per_case),
-        Some(1)
+        decode_enterprise_heat_surcharge(economics, per_case),
+        Some(true)
     );
     let impossible_heat = per_case.checked_mul(2).unwrap();
     assert_eq!(
-        decode_enterprise_investigation_case_count(economics, impossible_heat),
+        decode_enterprise_heat_surcharge(economics, impossible_heat),
         None,
         "current-version settlements cannot charge more than one district surcharge"
     );
@@ -3063,6 +3063,24 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
         enterprise,
     )
     .unwrap();
+    assert_eq!(
+        quiet_outlook.baseline_net_cash,
+        quiet_outlook.estimated_net_cash
+    );
+    assert_eq!(hot_outlook.heated_net_cash, hot_outlook.estimated_net_cash);
+    assert_eq!(hot_outlook.maximum_heat_surcharge, local_heat);
+    assert_eq!(hot_outlook.estimated_operating_cost, local_cost);
+    assert_eq!(
+        hot_outlook.baseline_net_cash,
+        quiet_outlook.baseline_net_cash
+    );
+    assert_eq!(
+        hot_outlook.heated_net_cash,
+        hot_outlook
+            .baseline_net_cash
+            .checked_sub(local_heat)
+            .unwrap()
+    );
     let lower = hot_outlook.inquiry_risk_observed_min_basis_points.unwrap();
     assert!(lower > hot_outlook.inquiry_risk_no_cases_basis_points);
     assert!(lower < hot_outlook.inquiry_risk_max_cases_basis_points);
@@ -3075,7 +3093,7 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
     let observation = all_observations[&(fixture.organization, local_neighborhood)];
     assert_eq!(
         hot_outlook.observed_pressure,
-        Some((observation.observed_at, observation.case_count))
+        Some((observation.observed_at, observation.surcharge_applied))
     );
     let hot_cycle = fixture
         .state

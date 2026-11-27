@@ -104,7 +104,7 @@ pub fn decide_enterprise_cycle(
         economics,
         neighborhood,
         record.supporting_businesses().len(),
-        direct_cases,
+        direct_cases != 0,
         enterprise,
     )?;
     let operating_cost = cost

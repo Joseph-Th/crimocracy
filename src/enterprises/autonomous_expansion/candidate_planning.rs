@@ -8,7 +8,7 @@ use super::{AutonomousExpansionPlan, ExpansionEconomicsContext, NeighborhoodExpa
 use crate::core::id::BusinessId;
 use crate::delegation::ResponsibilityScope;
 use crate::enterprises::autonomous_planning::{
-    AutonomousEnterpriseError, resolve_observed_district_case_count,
+    AutonomousEnterpriseError, resolve_observed_district_heat,
 };
 use crate::enterprises::enterprise_execution::{
     EnterpriseProjectionStaffing, can_authority_cover_location, ensure_manager_capacity,
@@ -222,7 +222,7 @@ fn build_ranked_candidate(
     {
         return Ok(None);
     }
-    let observed_active_cases = resolve_observed_district_case_count(
+    let observed_heat = resolve_observed_district_heat(
         economics.state,
         economics.observed_district_pressure,
         economics.organization,
@@ -234,7 +234,7 @@ fn build_ranked_candidate(
         kind,
         location,
         supporting_businesses.len(),
-        observed_active_cases,
+        observed_heat,
         EnterpriseProjectionStaffing {
             management: economics.management,
             associates: kind.baseline_associates(),

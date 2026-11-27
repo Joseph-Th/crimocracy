@@ -26,7 +26,7 @@ pub(crate) use cycle_planning::enterprise_heat_change_is_reportable;
 
 pub use economics::ASSOCIATE_ADDITIONAL_DAILY_WAGE;
 pub(crate) use economics::{
-    EnterpriseProjectionStaffing, decode_enterprise_investigation_case_count,
+    EnterpriseProjectionStaffing, decode_enterprise_heat_surcharge,
     enterprise_economics_fit_production_arithmetic, resolve_enterprise_financial_projection,
     resolve_enterprise_operating_cost_projection, resolve_historical_enterprise_cycle_financials,
 };

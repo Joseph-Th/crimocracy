@@ -13,13 +13,6 @@ use crate::world::{CapabilityKind, NeighborhoodProfile, Rating};
 /// associates earn $15 per cycle and generate demand-dependent additional gross.
 pub const ASSOCIATE_ADDITIONAL_DAILY_WAGE: Money = Money::from_cents(1_500);
 
-/// One hot district carries one police-pressure operating surcharge, regardless
-/// of how many cases the authorities open there. Investigations still each
-/// generate evidence, detention risks, and further inquiry opportunities. A
-/// single surveillance lead must not compound into an unbounded daily cash tax
-/// on every racket in the same neighborhood.
-const MAX_HEAT_CASE_EQUIVALENTS: u32 = 1;
-
 pub(crate) fn additional_associate_economics(
     kind: EnterpriseKind,
     profile: NeighborhoodProfile,
@@ -73,14 +66,8 @@ pub(crate) fn enterprise_economics_fit_production_arithmetic(
     // Supporting businesses have persistent u32 IDs. This conservative count
     // bounds their cost, while the production heat rule charges only once.
     maximum_gross.is_some()
-        && resolve_projected_operating_cost(
-            economics,
-            profile,
-            u32::MAX as usize,
-            u32::MAX,
-            labor_cost,
-        )
-        .is_some()
+        && resolve_projected_operating_cost(economics, profile, u32::MAX as usize, true, labor_cost)
+            .is_some()
 }
 
 pub(super) fn resolve_gross_before_variance(
@@ -136,32 +123,36 @@ pub(super) struct OperatingCostBreakdown {
     pub(super) investigation_heat: Money,
 }
 
-/// Decodes the persisted street-heat charge into a zero-or-one surcharge equivalent.
-/// Positive heat establishes a lower bound, not the number of active investigations.
-pub(crate) fn decode_enterprise_investigation_case_count(
+/// Decode a persisted charge as surcharge presence, never a count of cases.
+/// A zero-rate racket cannot observe pressure through its charge; observation
+/// callers must exclude those kinds. Only the two authored amounts are valid.
+pub(crate) fn decode_enterprise_heat_surcharge(
     economics: &EnterpriseEconomicsDefinition,
     investigation_heat: Money,
-) -> Option<u32> {
-    let per_case = economics.heat_surcharge_per_active_case().cents();
-    let heat = investigation_heat.cents();
-    if per_case < 0 || heat < 0 {
+) -> Option<bool> {
+    let surcharge = economics.heat_surcharge_per_active_case();
+    if surcharge < Money::ZERO {
         return None;
     }
-    if per_case == 0 {
-        return (heat == 0).then_some(0);
+    if investigation_heat == Money::ZERO {
+        Some(false)
+    } else if investigation_heat == surcharge {
+        Some(true)
+    } else {
+        None
     }
-    if heat % per_case != 0 {
-        return None;
-    }
-    let count = u32::try_from(heat / per_case).ok()?;
-    (count <= MAX_HEAT_CASE_EQUIVALENTS).then_some(count)
 }
 
-fn resolve_district_heat(economics: &EnterpriseEconomicsDefinition, active_cases: u32) -> Money {
-    if active_cases == 0 {
-        Money::ZERO
-    } else {
+/// One attributable case or many carry the same operating surcharge. Actual
+/// investigation counts remain separate inputs to enforcement and evidence.
+fn resolve_district_heat(
+    economics: &EnterpriseEconomicsDefinition,
+    surcharge_applies: bool,
+) -> Money {
+    if surcharge_applies {
         economics.heat_surcharge_per_active_case()
+    } else {
+        Money::ZERO
     }
 }
 
@@ -169,10 +160,10 @@ pub(super) fn resolve_operating_cost(
     economics: &EnterpriseEconomicsDefinition,
     profile: NeighborhoodProfile,
     supporting_business_count: usize,
-    active_district_cases: u32,
+    surcharge_applies: bool,
     enterprise: EnterpriseId,
 ) -> Result<OperatingCostBreakdown, EnterpriseError> {
-    let heat = resolve_district_heat(economics, active_district_cases);
+    let heat = resolve_district_heat(economics, surcharge_applies);
     resolve_operating_cost_with_heat(
         economics,
         profile,
@@ -202,16 +193,16 @@ fn resolve_operating_cost_with_heat(
 }
 
 /// One-cycle operating runway for a proposed enterprise configuration, before any gross is
-/// earned. `observed_active_cases` is an explicit decision input owned by the caller so planning
+/// earned. `surcharge_applies` is an explicit decision input owned by the caller so planning
 /// cannot silently acquire omniscient access to the live legal graph. The arithmetic remains the
-/// same composition used by production settlement once its actual case count is known.
+/// same composition used by production settlement once attributable pressure is known.
 pub(crate) fn resolve_enterprise_operating_cost_projection(
     registry: &Registry,
     state: &AppState,
     kind: EnterpriseKind,
     location: EnterpriseLocation,
     supporting_business_count: usize,
-    observed_active_cases: u32,
+    surcharge_applies: bool,
     associates: u16,
 ) -> Result<Money, EnterpriseError> {
     let profile = resolve_location_profile(state, location)?;
@@ -223,7 +214,7 @@ pub(crate) fn resolve_enterprise_operating_cost_projection(
         economics,
         profile,
         supporting_business_count,
-        observed_active_cases,
+        surcharge_applies,
         labor_cost,
     )
     .ok_or_else(projection_overflow)
@@ -233,12 +224,12 @@ fn resolve_projected_operating_cost(
     economics: &EnterpriseEconomicsDefinition,
     profile: NeighborhoodProfile,
     supporting_business_count: usize,
-    observed_active_cases: u32,
+    surcharge_applies: bool,
     labor_cost: Money,
 ) -> Option<Money> {
     let predictable =
         resolve_predictable_operating_cost(economics, profile, supporting_business_count)?;
-    let heat = resolve_district_heat(economics, observed_active_cases);
+    let heat = resolve_district_heat(economics, surcharge_applies);
     predictable.checked_add(heat)?.checked_add(labor_cost)
 }
 
@@ -258,7 +249,7 @@ pub(crate) fn resolve_enterprise_financial_projection(
     kind: EnterpriseKind,
     location: EnterpriseLocation,
     supporting_business_count: usize,
-    observed_active_cases: u32,
+    surcharge_applies: bool,
     staffing: EnterpriseProjectionStaffing,
 ) -> Result<(Money, Money), EnterpriseError> {
     let profile = resolve_location_profile(state, location)?;
@@ -274,7 +265,7 @@ pub(crate) fn resolve_enterprise_financial_projection(
         economics,
         profile,
         supporting_business_count,
-        observed_active_cases,
+        surcharge_applies,
         labor_cost,
     )
     .ok_or_else(projection_overflow)?;
@@ -346,7 +337,7 @@ pub(crate) fn resolve_historical_enterprise_cycle_financials(
     .ok_or(EnterpriseError::ArithmeticOverflow(record.id()))?;
     let gross_revenue = resolve_basis_point_variance(record.id(), gross_before_variance, variance)?;
     let heat = cycle.investigation_heat();
-    if decode_enterprise_investigation_case_count(economics, heat).is_none() {
+    if decode_enterprise_heat_surcharge(economics, heat).is_none() {
         return Err(EnterpriseError::ArithmeticOverflow(record.id()));
     }
     let operating_cost = resolve_operating_cost_with_heat(

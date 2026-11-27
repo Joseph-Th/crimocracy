@@ -9,7 +9,7 @@ use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::delegation::delegation_system::DelegationError;
 use crate::enterprises::enterprise_execution::{
-    EnterpriseError, decode_enterprise_investigation_case_count,
+    EnterpriseError, decode_enterprise_heat_surcharge,
     resolve_enterprise_operating_cost_projection, resolve_location_neighborhood,
 };
 use crate::enterprises::{EnterpriseCycleRecord, EnterpriseLocation};
@@ -34,7 +34,7 @@ pub(crate) enum AutonomousEnterpriseError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DistrictPressureObservation {
     pub(crate) observed_at: SimTime,
-    pub(crate) case_count: u32,
+    pub(crate) surcharge_applied: bool,
 }
 
 pub(crate) type ObservedDistrictPressure =
@@ -47,7 +47,7 @@ pub(crate) fn resolve_committed_working_capital(
 ) -> Result<BTreeMap<FinancialAccountId, Money>, AutonomousEnterpriseError> {
     let mut reservations = BTreeMap::new();
     for enterprise in state.enterprises().active_enterprises() {
-        let observed_active_cases = resolve_observed_district_case_count(
+        let observed_heat = resolve_observed_district_heat(
             state,
             observed_district_pressure,
             enterprise.organization(),
@@ -59,7 +59,7 @@ pub(crate) fn resolve_committed_working_capital(
             enterprise.kind(),
             enterprise.location(),
             enterprise.supporting_businesses().len(),
-            observed_active_cases,
+            observed_heat,
             enterprise.associates(),
         )?;
         reserve_working_capital(&mut reservations, enterprise.cash_account(), required);
@@ -67,7 +67,7 @@ pub(crate) fn resolve_committed_working_capital(
     Ok(reservations)
 }
 
-/// Most recent district-heat surcharge equivalent inferred from the organization's own rackets.
+/// Most recent district-heat surcharge presence inferred from the organization's own rackets.
 /// Live investigations are intentionally excluded: only the organization's bounded recent
 /// operating history can feed autonomous planning.
 pub(crate) fn resolve_observed_district_pressure(
@@ -110,15 +110,14 @@ fn observe_cycle_pressure(
     if economics.heat_surcharge_per_active_case() <= Money::ZERO {
         return Ok(None);
     }
-    let case_count =
-        decode_enterprise_investigation_case_count(economics, cycle.investigation_heat())
-            .expect("validated enterprise heat must encode zero or one surcharge equivalent");
+    let surcharge_applied = decode_enterprise_heat_surcharge(economics, cycle.investigation_heat())
+        .expect("validated enterprise heat must be either zero or the authored surcharge");
     let district = resolve_location_neighborhood(state, enterprise.location())?;
     Ok(Some((
         (enterprise.organization(), district),
         DistrictPressureObservation {
             observed_at: cycle.occurred_at(),
-            case_count,
+            surcharge_applied,
         },
     )))
 }
@@ -150,16 +149,16 @@ pub(crate) fn resolve_owned_district_pressure(
     Ok(None)
 }
 
-pub(crate) fn resolve_observed_district_case_count(
+pub(crate) fn resolve_observed_district_heat(
     state: &AppState,
     observed_district_pressure: &ObservedDistrictPressure,
     organization: OrganizationId,
     location: EnterpriseLocation,
-) -> Result<u32, AutonomousEnterpriseError> {
+) -> Result<bool, AutonomousEnterpriseError> {
     let neighborhood = resolve_location_neighborhood(state, location)?;
     Ok(observed_district_pressure
         .get(&(organization, neighborhood))
-        .map_or(0, |observation| observation.case_count))
+        .is_some_and(|observation| observation.surcharge_applied))
 }
 
 pub(crate) fn reserve_working_capital(
