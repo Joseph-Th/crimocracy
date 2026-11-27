@@ -8,11 +8,11 @@ use crate::core::id::{FinancialAccountId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::delegation::delegation_system::DelegationError;
-use crate::enterprises::EnterpriseLocation;
 use crate::enterprises::enterprise_execution::{
     EnterpriseError, decode_enterprise_investigation_case_count,
     resolve_enterprise_operating_cost_projection, resolve_location_neighborhood,
 };
+use crate::enterprises::{EnterpriseCycleRecord, EnterpriseLocation};
 use crate::finance::finance_system::FinanceError;
 use crate::finance::{FinancialAccountRecord, Money};
 use crate::registry::Registry;
@@ -67,7 +67,7 @@ pub(crate) fn resolve_committed_working_capital(
     Ok(reservations)
 }
 
-/// Most recent district-pressure count the organization can infer from its own settled rackets.
+/// Most recent district-heat surcharge equivalent inferred from the organization's own rackets.
 /// Live investigations are intentionally excluded: only the organization's bounded recent
 /// operating history can feed autonomous planning.
 pub(crate) fn resolve_observed_district_pressure(
@@ -75,48 +75,79 @@ pub(crate) fn resolve_observed_district_pressure(
     state: &AppState,
 ) -> Result<ObservedDistrictPressure, AutonomousEnterpriseError> {
     let mut latest_observations = BTreeMap::new();
-    let maximum_age = u64::from(registry.legal().cold_case_window().as_minutes());
-    let lower_bound = state
-        .now()
-        .as_minutes()
-        .checked_sub(maximum_age)
-        .map(crate::core::time::SimTime::from_minutes);
     for cycle in state
         .enterprises()
-        .cycles_after_through(lower_bound, state.now())
+        .cycles_after_through(pressure_lower_bound(registry, state), state.now())
     {
-        let enterprise = state
-            .enterprises()
-            .get_enterprise(cycle.enterprise())
-            .expect("enterprise cycle must reference its persisted enterprise");
-        let economics = registry.get_enterprise(enterprise.kind()).economics();
-        if economics.heat_surcharge_per_active_case() <= Money::ZERO {
-            continue;
-        }
-        let inferred =
-            decode_enterprise_investigation_case_count(economics, cycle.investigation_heat())
-                .expect("validated enterprise heat must encode a representable active-case count");
-        let key = (cycle.occurred_at(), cycle.id());
-        let neighborhood = resolve_location_neighborhood(state, enterprise.location())?;
-        let observation = latest_observations
-            .entry((enterprise.organization(), neighborhood))
-            .or_insert((key, inferred));
-        if key > observation.0 {
-            *observation = (key, inferred);
+        if let Some((key, observation)) = observe_cycle_pressure(registry, state, cycle)? {
+            // Cycles arrive in increasing settlement minute and cycle ID order.
+            latest_observations.insert(key, observation);
         }
     }
-    Ok(latest_observations
-        .into_iter()
-        .map(|(district, ((observed_at, _), case_count))| {
-            (
-                district,
-                DistrictPressureObservation {
-                    observed_at,
-                    case_count,
-                },
-            )
-        })
-        .collect())
+    Ok(latest_observations)
+}
+
+fn pressure_lower_bound(registry: &Registry, state: &AppState) -> Option<SimTime> {
+    state
+        .now()
+        .as_minutes()
+        .checked_sub(u64::from(registry.legal().cold_case_window().as_minutes()))
+        .map(SimTime::from_minutes)
+}
+
+type DistrictPressureKey = (OrganizationId, NeighborhoodId);
+
+fn observe_cycle_pressure(
+    registry: &Registry,
+    state: &AppState,
+    cycle: &EnterpriseCycleRecord,
+) -> Result<Option<(DistrictPressureKey, DistrictPressureObservation)>, AutonomousEnterpriseError> {
+    let enterprise = state
+        .enterprises()
+        .get_enterprise(cycle.enterprise())
+        .expect("enterprise cycle must reference its persisted enterprise");
+    let economics = registry.get_enterprise(enterprise.kind()).economics();
+    if economics.heat_surcharge_per_active_case() <= Money::ZERO {
+        return Ok(None);
+    }
+    let case_count =
+        decode_enterprise_investigation_case_count(economics, cycle.investigation_heat())
+            .expect("validated enterprise heat must encode zero or one surcharge equivalent");
+    let district = resolve_location_neighborhood(state, enterprise.location())?;
+    Ok(Some((
+        (enterprise.organization(), district),
+        DistrictPressureObservation {
+            observed_at: cycle.occurred_at(),
+            case_count,
+        },
+    )))
+}
+
+/// A single owner/district outlook needs only its newest applicable settlement.
+pub(crate) fn resolve_owned_district_pressure(
+    registry: &Registry,
+    state: &AppState,
+    organization: OrganizationId,
+    district: NeighborhoodId,
+) -> Result<Option<DistrictPressureObservation>, AutonomousEnterpriseError> {
+    let lower_bound = pressure_lower_bound(registry, state);
+    for cycle in state
+        .enterprises()
+        .cycles_for_organization_from_through(
+            organization,
+            lower_bound.unwrap_or(SimTime::from_minutes(0)),
+            state.now(),
+        )
+        .rev()
+        .take_while(|cycle| lower_bound.is_none_or(|at| cycle.occurred_at() > at))
+    {
+        if let Some((key, observation)) = observe_cycle_pressure(registry, state, cycle)?
+            && key == (organization, district)
+        {
+            return Ok(Some(observation));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn resolve_observed_district_case_count(

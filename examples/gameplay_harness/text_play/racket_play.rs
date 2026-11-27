@@ -16,19 +16,21 @@ fn write_enterprise_outlook(out: &mut String, outlook: EnterpriseOutlook) {
         None => writeln!(out, "  Expected net remains positive even with the maximum one-case district heat surcharge ({} cents).", outlook.heat_surcharge_per_case.cents()).unwrap(),
     }
     match outlook.observed_pressure {
-        Some((at, cases)) => writeln!(out, "  Last observed own-operation pressure in district: {cases} case equivalent(s) at {}", time_label(at.as_minutes())).unwrap(),
+        Some((at, heat)) => writeln!(out, "  Last observed own-operation pressure in district: {} at {}", if heat == 0 { "no surcharge" } else { "one or more attributable cases" }, time_label(at.as_minutes())).unwrap(),
         None => writeln!(out, "  Own-operation pressure unknown: no recent owned racket settlement; estimate assumes no surcharge").unwrap(),
     }
     let baseline_risk = outlook.inquiry_risk_no_cases_basis_points;
     writeln!(out, "  New police inquiry risk per operating cycle (unless this racket already has an active inquiry): {}.{:02}% with no district cases (includes public prominence and operating racket footprint)", baseline_risk / 100, baseline_risk % 100).unwrap();
-    if let Some((_, observed_cases)) = outlook.observed_pressure {
-        let conditional_risk = baseline_risk
-            .saturating_add(
-                u32::from(outlook.inquiry_risk_basis_points_per_source)
-                    .saturating_mul(observed_cases.min(2)),
-            )
-            .min(10_000);
-        writeln!(out, "  At last observed case pressure: {}.{:02}% per cycle, if still current (not a live police forecast)", conditional_risk / 100, conditional_risk % 100).unwrap();
+    let max_risk = outlook.inquiry_risk_max_cases_basis_points;
+    writeln!(
+        out,
+        "  Possible risk with district casework: up to {}.{:02}% per cycle",
+        max_risk / 100,
+        max_risk % 100
+    )
+    .unwrap();
+    if let Some(min_risk) = outlook.inquiry_risk_observed_min_basis_points {
+        writeln!(out, "  If the last own-operation pressure remains current: {}.{:02}% to {}.{:02}% per cycle (other cases and the exact case count are unknown)", min_risk / 100, min_risk % 100, max_risk / 100, max_risk % 100).unwrap();
     }
     out.push_str("  Suspending stops new racket-generated inquiry rolls; active police files and past evidence remain.\n");
     writeln!(

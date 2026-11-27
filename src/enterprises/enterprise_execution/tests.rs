@@ -2902,7 +2902,7 @@ fn registry_validation_rejects_internally_balanced_unauthored_enterprise_financi
 }
 
 #[test]
-fn enterprise_heat_decoder_rejects_case_counts_beyond_persistent_id_space() {
+fn enterprise_heat_decoder_rejects_charges_beyond_current_district_cap() {
     let registry = build_registry();
     let economics = registry
         .get_enterprise(EnterpriseKind::Protection)
@@ -2910,21 +2910,19 @@ fn enterprise_heat_decoder_rejects_case_counts_beyond_persistent_id_space() {
     let per_case = economics.heat_surcharge_per_active_case();
     assert!(per_case > Money::ZERO);
 
-    let maximum_case_count = u32::MAX - 1;
-    let maximum_heat = per_case
-        .checked_mul(i64::from(maximum_case_count))
-        .expect("registry arithmetic contract must support the maximum case count");
     assert_eq!(
-        decode_enterprise_investigation_case_count(economics, maximum_heat),
-        Some(maximum_case_count)
+        decode_enterprise_investigation_case_count(economics, Money::ZERO),
+        Some(0)
     );
-    let impossible_heat = maximum_heat
-        .checked_add(per_case)
-        .expect("one-beyond-bound heat remains representable in this authored fixture");
+    assert_eq!(
+        decode_enterprise_investigation_case_count(economics, per_case),
+        Some(1)
+    );
+    let impossible_heat = per_case.checked_mul(2).unwrap();
     assert_eq!(
         decode_enterprise_investigation_case_count(economics, impossible_heat),
         None,
-        "persisted heat cannot imply more active cases than the u32-backed case identity space"
+        "current-version settlements cannot charge more than one district surcharge"
     );
 }
 
@@ -3018,6 +3016,21 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
     let (baseline_cost, baseline_heat, baseline_attention) = due_cycle(&mut fixture);
     assert_eq!(baseline_heat, Money::ZERO);
     assert_eq!(baseline_attention, AttentionClass::Routine);
+    let quiet_outlook = crate::enterprises::enterprise_reporting::resolve_enterprise_outlook(
+        &registry,
+        &fixture.state,
+        fixture.organization,
+        enterprise,
+    )
+    .unwrap();
+    assert_eq!(
+        quiet_outlook.inquiry_risk_observed_min_basis_points,
+        Some(quiet_outlook.inquiry_risk_no_cases_basis_points)
+    );
+    assert!(
+        quiet_outlook.inquiry_risk_max_cases_basis_points
+            > quiet_outlook.inquiry_risk_no_cases_basis_points
+    );
     // A case targeting another district of the same authority must not tax this racket.
     open_heat_case(
         &mut fixture,
@@ -3043,6 +3056,27 @@ fn district_heat_surcharge_scopes_to_the_enterprise_neighborhood() {
     );
     assert_eq!(local_heat, Money::from_cents(12_000));
     assert_eq!(local_attention, AttentionClass::Notable);
+    let hot_outlook = crate::enterprises::enterprise_reporting::resolve_enterprise_outlook(
+        &registry,
+        &fixture.state,
+        fixture.organization,
+        enterprise,
+    )
+    .unwrap();
+    let lower = hot_outlook.inquiry_risk_observed_min_basis_points.unwrap();
+    assert!(lower > hot_outlook.inquiry_risk_no_cases_basis_points);
+    assert!(lower < hot_outlook.inquiry_risk_max_cases_basis_points);
+    let all_observations =
+        crate::enterprises::autonomous_planning::resolve_observed_district_pressure(
+            &registry,
+            &fixture.state,
+        )
+        .unwrap();
+    let observation = all_observations[&(fixture.organization, local_neighborhood)];
+    assert_eq!(
+        hot_outlook.observed_pressure,
+        Some((observation.observed_at, observation.case_count))
+    );
     let hot_cycle = fixture
         .state
         .enterprises()

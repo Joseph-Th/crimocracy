@@ -17,9 +17,8 @@ pub const ASSOCIATE_ADDITIONAL_DAILY_WAGE: Money = Money::from_cents(1_500);
 /// of how many cases the authorities open there. Investigations still each
 /// generate evidence, detention risks, and further inquiry opportunities. A
 /// single surveillance lead must not compound into an unbounded daily cash tax
-/// on every racket in the same neighborhood. Old cycles retain their recorded
-/// case counts for historical re-derivation.
-pub(crate) const MAX_CURRENT_HEAT_CASE_EQUIVALENTS: u32 = 1;
+/// on every racket in the same neighborhood.
+const MAX_HEAT_CASE_EQUIVALENTS: u32 = 1;
 
 pub(crate) fn additional_associate_economics(
     kind: EnterpriseKind,
@@ -90,9 +89,8 @@ pub(super) struct OperatingCostBreakdown {
     pub(super) investigation_heat: Money,
 }
 
-/// Decodes the persisted street-heat charge back to the number of active district cases that
-/// could have produced it. Persistent IDs reserve zero and require allocator headroom above the
-/// highest stored ID, so at most u32::MAX - 1 investigation records can exist.
+/// Decodes the persisted street-heat charge into a zero-or-one surcharge equivalent.
+/// Positive heat establishes a lower bound, not the number of active investigations.
 pub(crate) fn decode_enterprise_investigation_case_count(
     economics: &EnterpriseEconomicsDefinition,
     investigation_heat: Money,
@@ -109,7 +107,15 @@ pub(crate) fn decode_enterprise_investigation_case_count(
         return None;
     }
     let count = u32::try_from(heat / per_case).ok()?;
-    (count < u32::MAX).then_some(count)
+    (count <= MAX_HEAT_CASE_EQUIVALENTS).then_some(count)
+}
+
+fn resolve_district_heat(economics: &EnterpriseEconomicsDefinition, active_cases: u32) -> Money {
+    if active_cases == 0 {
+        Money::ZERO
+    } else {
+        economics.heat_surcharge_per_active_case()
+    }
 }
 
 pub(super) fn resolve_operating_cost(
@@ -119,12 +125,7 @@ pub(super) fn resolve_operating_cost(
     active_district_cases: u32,
     enterprise: EnterpriseId,
 ) -> Result<OperatingCostBreakdown, EnterpriseError> {
-    let heat = economics
-        .heat_surcharge_per_active_case()
-        .checked_mul(i64::from(
-            active_district_cases.min(MAX_CURRENT_HEAT_CASE_EQUIVALENTS),
-        ))
-        .ok_or(EnterpriseError::ArithmeticOverflow(enterprise))?;
+    let heat = resolve_district_heat(economics, active_district_cases);
     resolve_operating_cost_with_heat(
         economics,
         profile,
@@ -190,11 +191,7 @@ fn resolve_projected_operating_cost(
 ) -> Option<Money> {
     let predictable =
         resolve_predictable_operating_cost(economics, profile, supporting_business_count)?;
-    let heat = economics
-        .heat_surcharge_per_active_case()
-        .checked_mul(i64::from(
-            observed_active_cases.min(MAX_CURRENT_HEAT_CASE_EQUIVALENTS),
-        ))?;
+    let heat = resolve_district_heat(economics, observed_active_cases);
     predictable.checked_add(heat)?.checked_add(labor_cost)
 }
 

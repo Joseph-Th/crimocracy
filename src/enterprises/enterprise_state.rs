@@ -147,7 +147,7 @@ impl EnterpriseState {
         organization: OrganizationId,
         start: SimTime,
         end: SimTime,
-    ) -> impl Iterator<Item = &EnterpriseCycleRecord> {
+    ) -> impl DoubleEndedIterator<Item = &EnterpriseCycleRecord> {
         self.cycles_by_organization_time
             .range((organization, start)..=(organization, end))
             .flat_map(|(_, ids)| ids.iter())

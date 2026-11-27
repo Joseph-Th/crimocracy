@@ -4,7 +4,7 @@ use crate::core::attention::AttentionClass;
 use crate::core::id::{CharacterId, EnterpriseId, FinancialAccountId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
-use crate::enterprises::autonomous_planning::resolve_observed_district_pressure;
+use crate::enterprises::autonomous_planning::resolve_owned_district_pressure;
 use crate::enterprises::enterprise_execution::{
     EnterpriseError, EnterpriseProjectionStaffing, resolve_enterprise_financial_projection,
     resolve_location_neighborhood, validate_establish_enterprise,
@@ -61,12 +61,16 @@ pub struct EnterpriseOutlook {
     pub nonpositive_at_cases: Option<u64>,
     pub estimated_operating_cost: Money,
     pub estimated_net_cash: Money,
+    /// Latest observed own-operation surcharge equivalent (zero or one), not a case count.
     pub observed_pressure: Option<(SimTime, u32)>,
-    /// Authored chance contributed by each exposure source.
-    pub inquiry_risk_basis_points_per_source: u16,
     /// Projected fresh inquiry risk with no current district cases, including the
     /// visible commercial footprint and the planned operating racket roster.
     pub inquiry_risk_no_cases_basis_points: u32,
+    /// Maximum fresh inquiry risk attributable to possible district casework.
+    pub inquiry_risk_max_cases_basis_points: u32,
+    /// Conditional lower bound if the last own-operation heat observation remains current.
+    /// Foreign casework can raise risk without increasing the organization's surcharge.
+    pub inquiry_risk_observed_min_basis_points: Option<u32>,
     pub shared_cash_balance: Money,
     pub shared_spendable_cash: Money,
 }
@@ -159,9 +163,9 @@ fn resolve_configuration_outlook(
         EnterpriseOutlookError::MissingCashAccount(configuration.cash),
     )?;
     let district = resolve_location_neighborhood(state, configuration.location)?;
-    let observed = resolve_observed_district_pressure(registry, state)
-        .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))?;
-    let observation = observed.get(&(configuration.organization, district));
+    let observation =
+        resolve_owned_district_pressure(registry, state, configuration.organization, district)
+            .map_err(|error| EnterpriseOutlookError::Projection(error.to_string()))?;
     let project = |case_count| {
         resolve_enterprise_financial_projection(
             registry,
@@ -197,6 +201,15 @@ fn resolve_configuration_outlook(
         .active_for_organization(configuration.organization)
         .count()
         .saturating_add(usize::from(configuration.additional_active_racket));
+    let inquiry_risk = |district_cases| {
+        vice_inquiry_chance_basis_points(
+            state,
+            configuration.organization,
+            active_rackets,
+            district_cases,
+            per_source,
+        )
+    };
     Ok(EnterpriseOutlook {
         baseline_net_cash,
         heat_surcharge_per_case,
@@ -204,14 +217,10 @@ fn resolve_configuration_outlook(
         estimated_operating_cost,
         estimated_net_cash,
         observed_pressure: observation.map(|value| (value.observed_at, value.case_count)),
-        inquiry_risk_basis_points_per_source: per_source,
-        inquiry_risk_no_cases_basis_points: vice_inquiry_chance_basis_points(
-            state,
-            configuration.organization,
-            active_rackets,
-            0,
-            per_source,
-        ),
+        inquiry_risk_no_cases_basis_points: inquiry_risk(0),
+        inquiry_risk_max_cases_basis_points: inquiry_risk(u32::MAX),
+        inquiry_risk_observed_min_basis_points: observation
+            .map(|value| inquiry_risk(value.case_count)),
         shared_cash_balance: account.balance(),
         shared_spendable_cash: account.spendable_balance(),
     })
