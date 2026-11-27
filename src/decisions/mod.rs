@@ -5,8 +5,8 @@ pub mod decision_system;
 use crate::core::attention::AttentionClass;
 use crate::core::id::IdKeyedBounds;
 use crate::core::id::{
-    BusinessId, CharacterId, DecisionRequestId, MandateId, NeighborhoodId, OperationId,
-    OrganizationId, PoliceResponseId,
+    BusinessId, CharacterId, DecisionRequestId, HistoryEventId, MandateId, NeighborhoodId,
+    OperationId, OrganizationId, PoliceResponseId,
 };
 use crate::core::time::SimTime;
 use crate::core::version::advance_version_preflighted;
@@ -196,6 +196,8 @@ pub enum DecisionCancellationReason {
     RecruitmentOrganizationPolicyChanged(OrganizationId),
     /// An unpaid protection offer reached the end of its acceptance window.
     ProtectionOfferExpired,
+    /// The two parties signed a standstill covering the offer's remaining validity.
+    ProtectionSupersededByStandstill(HistoryEventId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

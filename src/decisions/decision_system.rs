@@ -4,8 +4,10 @@ mod protection;
 mod recruitment_approval;
 
 pub(crate) use protection::{
-    apply_due_protection_demands, protection_offer_expired, recently_refused_protection,
-    rival_pressure_blocked,
+    ValidatedProtectionStandstillCancellation, apply_due_protection_demands,
+    pending_protection_superseded_by_active_standstill, protection_offer_expired,
+    protection_standstill_cancellation_matches, recently_refused_protection,
+    rival_pressure_blocked, validate_cancel_protection_for_standstill,
 };
 
 use recruitment_approval::validate_recruitment_approval_authority_snapshot;

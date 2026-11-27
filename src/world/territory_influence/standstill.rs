@@ -9,6 +9,10 @@ use crate::core::id::{
 };
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, is_day_boundary};
+use crate::core::version::VersionCapacityError;
+use crate::decisions::decision_system::{
+    ValidatedProtectionStandstillCancellation, validate_cancel_protection_for_standstill,
+};
 use crate::enterprises::EnterpriseStatus;
 use crate::finance::finance_system::{
     FinanceError, ValidatedLedgerTransaction, validate_open_accounts, validate_record_transaction,
@@ -28,6 +32,13 @@ use thiserror::Error;
 /// An agreed district standstill preserves existing rackets but bars both sides
 /// from new rackets and offensive business operations here for thirty days.
 pub const STANDSTILL_DAYS: u64 = 30;
+
+pub(crate) fn standstill_expiry_at(signed_at: SimTime) -> Option<SimTime> {
+    signed_at
+        .as_minutes()
+        .checked_add(STANDSTILL_DAYS * DAY_MINUTES)
+        .map(SimTime::from_minutes)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerritoryStandstill {
@@ -58,11 +69,8 @@ pub fn active_standstill(
     else {
         unreachable!("territory standstill index contains only agreements");
     };
-    let end = event
-        .occurred_at()
-        .as_minutes()
-        .checked_add(STANDSTILL_DAYS * DAY_MINUTES)?;
-    (state.now().as_minutes() < end).then_some(TerritoryStandstill {
+    let end = standstill_expiry_at(event.occurred_at())?;
+    (state.now() < end).then_some(TerritoryStandstill {
         history: event.id(),
         district,
         counterparty: if initiator == organization {
@@ -70,7 +78,7 @@ pub fn active_standstill(
         } else {
             initiator
         },
-        expires_at: SimTime::from_minutes(end),
+        expires_at: end,
         initiator,
         tribute,
         settlement,
@@ -106,6 +114,10 @@ pub enum TerritoryNegotiationError {
     TimeExhausted,
     #[error("negotiation was validated for {expected:?}, but the clock now reads {found:?}")]
     StaleTime { expected: SimTime, found: SimTime },
+    #[error("the pending protection offer in district {0} changed after negotiation")]
+    ProtectionDemandChanged(NeighborhoodId),
+    #[error(transparent)]
+    VersionCapacity(#[from] VersionCapacityError),
     #[error(transparent)]
     History(#[from] HistoryError),
     #[error(transparent)]
@@ -142,11 +154,7 @@ fn validate_standstill_terms(
     {
         return Err(TerritoryNegotiationError::ExistingStandstill);
     }
-    state
-        .now()
-        .as_minutes()
-        .checked_add(STANDSTILL_DAYS * DAY_MINUTES)
-        .ok_or(TerritoryNegotiationError::TimeExhausted)?;
+    standstill_expiry_at(state.now()).ok_or(TerritoryNegotiationError::TimeExhausted)?;
     let summary = resolve_neighborhood_influence(state, district)
         .map_err(|_| TerritoryNegotiationError::MissingDistrict(district))?;
     let count = |organization| {
@@ -207,6 +215,7 @@ pub struct ValidatedTerritoryStandstill {
     validated_at: SimTime,
     tribute: Money,
     payment: Option<ValidatedLedgerTransaction>,
+    protection_cancellation: ValidatedProtectionStandstillCancellation,
 }
 
 impl ValidatedTerritoryStandstill {
@@ -224,6 +233,11 @@ impl ValidatedTerritoryStandstill {
             self.district,
             self.tribute,
         )?;
+        if !self.protection_cancellation.is_current(state) {
+            return Err(TerritoryNegotiationError::ProtectionDemandChanged(
+                self.district,
+            ));
+        }
         if let Some(payment) = &self.payment {
             payment.ensure_current(state)?;
         }
@@ -250,9 +264,12 @@ impl ValidatedTerritoryStandstill {
             .payment
             .map(|payment| payment.commit_preflighted(state));
         debug_assert_eq!(paid, settlement);
-        Ok(history
+        let history = history
             .commit(state)
-            .expect("preflighted standstill history must commit"))
+            .expect("preflighted standstill history must commit");
+        self.protection_cancellation
+            .commit_preflighted(state, history);
+        Ok(history)
     }
 }
 
@@ -282,6 +299,8 @@ pub fn validate_negotiate_standstill_with_tribute(
     tribute: Money,
 ) -> Result<ValidatedTerritoryStandstill, TerritoryNegotiationError> {
     validate_standstill_terms(state, initiator, counterparty, district, tribute)?;
+    let protection_cancellation =
+        validate_cancel_protection_for_standstill(state, initiator, counterparty, district)?;
     let payment = if tribute > Money::ZERO {
         // A ceasefire uses the organization's combined street-cash reserves,
         // not the balance of any particular racket account.
@@ -358,6 +377,7 @@ pub fn validate_negotiate_standstill_with_tribute(
         validated_at: state.now(),
         tribute,
         payment,
+        protection_cancellation,
     })
 }
 

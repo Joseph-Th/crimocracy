@@ -17,7 +17,7 @@ pub use standstill::{
     active_standstill, validate_negotiate_standstill, validate_negotiate_standstill_with_tribute,
 };
 pub(crate) use standstill::{
-    apply_due_autonomous_territory_standstills, standstill_tribute_matches,
+    apply_due_autonomous_territory_standstills, standstill_expiry_at, standstill_tribute_matches,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]

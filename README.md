@@ -248,7 +248,9 @@ cash into the other gang's treasury, which can finance its future expansion.
 An accepted standstill protects existing rackets, including a suspended
 racket's right to resume after a clash, but stops both parties from opening
 additional local rackets or authorizing offensive business operations until
-expiry. Reconnaissance and legitimate acquisitions remain possible. These are
+expiry. Reconnaissance and legitimate acquisitions remain possible. Signing
+with the gang that issued an unpaid protection demand cancels that superseded
+decision without a protection payment or refusal; any negotiated tribute is separate. These are
 non-lethal workforce confrontations and negotiated expansion restrictions, not
 a simulation of street-level shootouts, permanent land transfer or elections.
 The ceasefire bars clashes between the two signatories, not clashes with an

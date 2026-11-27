@@ -130,7 +130,12 @@ balanced, preflighted inter-organization ledger payment drawn from the paying
 gang's combined spendable street-cash pockets, never invented cash.
 The history owner commits a typed `TerritoryStandstill` or `TerritoryClash`
 event. A standstill stores the actual negotiated tribute and optional ledger receipt,
-bound at commit after checking current accounts and allocator capacity. Save/load
+bound at commit after checking current accounts and allocator capacity. The decision
+owner preflights the matching pending protection demand; a treaty covering its
+remaining offer lifetime cancels that request atomically with the signed history
+and any tribute. Held negotiations recheck the affected decision before mutation.
+Cancellation links the exact treaty event; restoration checks its parties, ward,
+minute and remaining offer window. Save/load
 validation checks the exact payment minute, parties, street-cash postings and amount,
 and prohibits receipt reuse; free agreements must have no receipt. The player's turf
 view shows paid or received tribute and its receipt while the agreement is active.

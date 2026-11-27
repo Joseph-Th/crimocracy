@@ -65,6 +65,7 @@ use crate::world::{
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod commercial_agreements;
 mod extraction;
 mod financial_reporting;
 mod persistence_timing;

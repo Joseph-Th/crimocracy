@@ -89,10 +89,33 @@ fn validate_protection_demand_decision(
     {
         return Err(invalid());
     }
-    use crate::decisions::decision_system::protection_offer_expired;
-    if let Some(cancellation) = decision.cancellation()
-        && (cancellation.reason() != DecisionCancellationReason::ProtectionOfferExpired
-            || !protection_offer_expired(decision.requested_at(), cancellation.cancelled_at()))
+    use crate::decisions::decision_system::{
+        pending_protection_superseded_by_active_standstill, protection_offer_expired,
+        protection_standstill_cancellation_matches,
+    };
+    if let Some(cancellation) = decision.cancellation() {
+        let valid = match cancellation.reason() {
+            DecisionCancellationReason::ProtectionOfferExpired => {
+                protection_offer_expired(decision.requested_at(), cancellation.cancelled_at())
+            }
+            DecisionCancellationReason::ProtectionSupersededByStandstill(treaty) => {
+                protection_standstill_cancellation_matches(
+                    state,
+                    decision,
+                    treaty,
+                    cancellation.cancelled_at(),
+                )
+            }
+            DecisionCancellationReason::OperationParticipantDetained(_)
+            | DecisionCancellationReason::RecruitmentAuthorityChanged(_)
+            | DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(_) => false,
+        };
+        if !valid {
+            return Err(invalid());
+        }
+    }
+    if decision.status() == DecisionStatus::Pending
+        && pending_protection_superseded_by_active_standstill(state, decision, context)
     {
         return Err(invalid());
     }
@@ -487,7 +510,8 @@ fn validate_cancelled_operation_decision(
         DecisionCancellationReason::OperationParticipantDetained(character) => character,
         DecisionCancellationReason::RecruitmentAuthorityChanged(_)
         | DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(_)
-        | DecisionCancellationReason::ProtectionOfferExpired => {
+        | DecisionCancellationReason::ProtectionOfferExpired
+        | DecisionCancellationReason::ProtectionSupersededByStandstill(_) => {
             return Err(invalid_decision_context(decision));
         }
     };
@@ -669,7 +693,8 @@ fn validate_cancelled_recruitment_approval(
                 )
         }
         DecisionCancellationReason::OperationParticipantDetained(_)
-        | DecisionCancellationReason::ProtectionOfferExpired => {
+        | DecisionCancellationReason::ProtectionOfferExpired
+        | DecisionCancellationReason::ProtectionSupersededByStandstill(_) => {
             return Err(invalid_decision_context(decision));
         }
     };

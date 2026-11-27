@@ -187,14 +187,9 @@ pub(super) fn validate_history(state: &AppState) -> Result<(), StateValidationEr
         } = event.kind()
         {
             let invalid = || StateValidationError::InvalidTerritoryStandstill { event: event.id() };
-            let end = event
-                .occurred_at()
-                .as_minutes()
-                .checked_add(
-                    crate::world::territory_influence::STANDSTILL_DAYS
-                        * crate::core::time::DAY_MINUTES,
-                )
-                .ok_or_else(invalid)?;
+            let end = crate::world::territory_influence::standstill_expiry_at(event.occurred_at())
+                .ok_or_else(invalid)?
+                .as_minutes();
             let criminal = |organization| {
                 state
                     .world()

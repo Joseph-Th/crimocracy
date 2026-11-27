@@ -15,6 +15,8 @@ use crate::world::{
     Rating,
 };
 
+mod standstill;
+
 fn exposed_city() -> (Registry, GeneratedCity, NeighborhoodId) {
     let registry = crate::build_registry();
     let mut city = generate_city(&registry, CityScale::Small.config(82_734_113)).unwrap();

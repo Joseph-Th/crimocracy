@@ -79,6 +79,15 @@ pub(crate) fn resolve_objective_blocker(
     state: &AppState,
     operation: &OperationRecord,
 ) -> Option<OperationObjectiveBlocker> {
+    // Intrinsic ownership eligibility takes precedence over district agreements. The
+    // historical ownership timeline can prove this blocker even after a treaty expires;
+    // an agreement must not disguise an operation against the sponsor's own property.
+    if operation.kind().business_target_ownership().is_some()
+        && let Some(business) = operation.objective().business_target()
+        && business_target_ownership_mismatch(state, operation, business)
+    {
+        return Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch);
+    }
     if let Some(blocker) = commercial_agreement_blocker(
         state,
         operation.responsible_organization(),
@@ -93,12 +102,6 @@ pub(crate) fn resolve_objective_blocker(
                 OperationObjectiveBlocker::TerritorialStandstill
             }
         });
-    }
-    if operation.kind().business_target_ownership().is_some()
-        && let Some(business) = operation.objective().business_target()
-        && business_target_ownership_mismatch(state, operation, business)
-    {
-        return Some(OperationObjectiveBlocker::TargetBusinessOwnershipMismatch);
     }
     match operation.objective() {
         OperationObjective::AcquireProperty {
@@ -162,10 +165,10 @@ pub(crate) fn blocker_clause(
 ) -> &'static str {
     match blocker {
         OperationObjectiveBlocker::ProtectionAgreement => {
-            "The crew's gang has an unresolved protection demand or a paid protection agreement in this district. The attack was cancelled while its own coercion was suspended."
+            "The gang's protection negotiation grace period or paid agreement suspended its coercion in this district, preventing the planned objective."
         }
         OperationObjectiveBlocker::TerritorialStandstill => {
-            "A binding territorial standstill was signed before the crew began this hostile business operation. Leadership cancelled the attack rather than breaching the agreement."
+            "A binding territorial standstill governed the district when the crew reached its objective, preventing the hostile business operation from taking effect."
         }
         OperationObjectiveBlocker::TargetBusinessOwnershipMismatch
             if kind == OperationKind::GamblingEvent =>

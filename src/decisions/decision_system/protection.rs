@@ -8,13 +8,15 @@
 use super::{DecisionError, DecisionRequestOutcome, insert_pending_decision_request};
 use crate::core::attention::AttentionClass;
 use crate::core::id::{
-    BusinessId, CharacterId, DecisionRequestId, EnterpriseId, NeighborhoodId, OrganizationId,
+    BusinessId, CharacterId, DecisionRequestId, EnterpriseId, HistoryEventId, NeighborhoodId,
+    OrganizationId,
 };
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, is_day_boundary};
+use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::decisions::{
-    DecisionCancellationReason, DecisionContext, DecisionRequestDraft, DecisionResponse,
-    DecisionStatus, ProtectionDemandContext, build_cancellation,
+    DecisionCancellationReason, DecisionContext, DecisionRequestDraft, DecisionRequestRecord,
+    DecisionResponse, DecisionStatus, ProtectionDemandContext, build_cancellation,
 };
 use crate::economy::business_economy_system::resolve_business_gross_potential;
 use crate::enterprises::EnterpriseRecord;
@@ -27,9 +29,10 @@ use crate::finance::{
     AccountKind, FinancialAccountDraft, FinancialOwner, LedgerPosting, LedgerTransactionDraft,
     Money,
 };
+use crate::history::HistoryEventKind;
 use crate::registry::Registry;
 use crate::world::territory_conflict::{DEFENSIVE_ADVANTAGE, local_defensive_forces};
-use crate::world::territory_influence::active_standstill;
+use crate::world::territory_influence::{active_standstill, standstill_expiry_at};
 use crate::world::{BusinessOwner, OrganizationKind};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,6 +52,131 @@ pub(crate) fn protection_offer_expired(requested_at: SimTime, now: SimTime) -> b
         requested_at.as_minutes(),
         OFFER_VALIDITY_DAYS,
     )
+}
+
+/// A signed agreement only supersedes a matching unpaid offer if its restriction
+/// covers the entire remaining acceptance window. Neither an unrelated treaty nor
+/// a temporary decline in the gang's force permanently replaces that offer.
+fn standstill_supersedes_offer(
+    decision: &DecisionRequestRecord,
+    district: NeighborhoodId,
+    initiator: OrganizationId,
+    counterparty: OrganizationId,
+    signed_at: SimTime,
+) -> bool {
+    let DecisionContext::ProtectionDemand(context) = decision.context() else {
+        return false;
+    };
+    context.district() == district
+        && ((decision.recipient() == initiator && context.attacker() == counterparty)
+            || (decision.recipient() == counterparty && context.attacker() == initiator))
+        && decision.requested_at() <= signed_at
+        && standstill_expiry_at(signed_at)
+            .is_some_and(|expires_at| protection_offer_expired(decision.requested_at(), expires_at))
+}
+
+fn superseded_pending_offer(
+    state: &AppState,
+    initiator: OrganizationId,
+    counterparty: OrganizationId,
+    district: NeighborhoodId,
+) -> Option<(DecisionRequestId, u32)> {
+    let id = state.decisions().pending_protection_demand(district)?;
+    let decision = state
+        .decisions()
+        .get_decision(id)
+        .expect("pending protection index must reference a decision");
+    standstill_supersedes_offer(decision, district, initiator, counterparty, state.now())
+        .then_some((id, decision.version()))
+}
+
+/// Freeze the exact pending decision affected by a proposed territorial agreement.
+/// The treaty owner composes this cancellation with its history and tribute commit.
+pub(crate) struct ValidatedProtectionStandstillCancellation {
+    initiator: OrganizationId,
+    counterparty: OrganizationId,
+    district: NeighborhoodId,
+    pending: Option<(DecisionRequestId, u32)>,
+}
+
+impl ValidatedProtectionStandstillCancellation {
+    pub(crate) fn is_current(&self, state: &AppState) -> bool {
+        superseded_pending_offer(state, self.initiator, self.counterparty, self.district)
+            == self.pending
+    }
+
+    pub(crate) fn commit_preflighted(self, state: &mut AppState, treaty: HistoryEventId) {
+        if let Some((id, _)) = self.pending {
+            let cancellation = build_cancellation(
+                state.now(),
+                DecisionCancellationReason::ProtectionSupersededByStandstill(treaty),
+            );
+            state.decisions.cancel(id, cancellation);
+        }
+    }
+}
+
+pub(crate) fn validate_cancel_protection_for_standstill(
+    state: &AppState,
+    initiator: OrganizationId,
+    counterparty: OrganizationId,
+    district: NeighborhoodId,
+) -> Result<ValidatedProtectionStandstillCancellation, VersionCapacityError> {
+    let pending = superseded_pending_offer(state, initiator, counterparty, district);
+    if let Some((_, version)) = pending {
+        ensure_version_can_advance(version, "decision request")?;
+    }
+    Ok(ValidatedProtectionStandstillCancellation {
+        initiator,
+        counterparty,
+        district,
+        pending,
+    })
+}
+
+/// Validate the cancellation from its actual signed agreement, rather than trusting
+/// a display message or the latest (possibly different) treaty in the ward.
+pub(crate) fn protection_standstill_cancellation_matches(
+    state: &AppState,
+    decision: &DecisionRequestRecord,
+    treaty: HistoryEventId,
+    cancelled_at: SimTime,
+) -> bool {
+    let Some(event) = state.history().get_event(treaty) else {
+        return false;
+    };
+    let HistoryEventKind::TerritoryStandstill {
+        district,
+        initiator,
+        counterparty,
+        ..
+    } = event.kind()
+    else {
+        return false;
+    };
+    event.occurred_at() == cancelled_at
+        && standstill_supersedes_offer(decision, district, initiator, counterparty, cancelled_at)
+}
+
+pub(crate) fn pending_protection_superseded_by_active_standstill(
+    state: &AppState,
+    decision: &DecisionRequestRecord,
+    context: ProtectionDemandContext,
+) -> bool {
+    active_standstill(state, context.attacker(), context.district()).is_some_and(|treaty| {
+        state
+            .history()
+            .get_event(treaty.history)
+            .is_some_and(|event| {
+                standstill_supersedes_offer(
+                    decision,
+                    treaty.district,
+                    context.attacker(),
+                    treaty.counterparty,
+                    event.occurred_at(),
+                )
+            })
+    })
 }
 
 fn expire_unanswered_offers(state: &mut AppState, defender: OrganizationId) {
