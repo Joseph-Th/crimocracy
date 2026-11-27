@@ -11,6 +11,7 @@ It creates and cleans up its own isolated headless Chrome profile.
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.request import urlopen
 
@@ -29,7 +31,6 @@ except ImportError as error:
 
 PROJECT = Path(__file__).resolve().parent.parent
 PREVIEW = PROJECT / "target" / "agent-output" / "city_preview"
-PROFILE = PREVIEW / "smoke-chrome-profile"
 SCREENSHOT = PREVIEW / "smoke-selected.png"
 NARROW_SCREENSHOT = PREVIEW / "smoke-narrow.png"
 OVERVIEW_SCREENSHOT = PREVIEW / "smoke-overview.png"
@@ -99,8 +100,8 @@ class DevTools:
         self.evaluate("new Promise(resolve => requestAnimationFrame(() => resolve(true)))")
 
 
-def connect(process: subprocess.Popen) -> DevTools:
-    endpoint = PROFILE / "DevToolsActivePort"
+def connect(process: subprocess.Popen, profile: Path) -> DevTools:
+    endpoint = profile / "DevToolsActivePort"
     for _ in range(100):
         if endpoint.is_file():
             lines = endpoint.read_text().splitlines()
@@ -125,6 +126,41 @@ def connect(process: subprocess.Popen) -> DevTools:
 def check(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+@contextmanager
+def headless_browser(html: Path):
+    """Own one browser, connection and unique profile for the entire check."""
+    browser = find_browser()
+    with tempfile.TemporaryDirectory(prefix="smoke-chrome-", dir=PREVIEW) as directory:
+        profile = Path(directory)
+        process = subprocess.Popen([
+            browser, "--headless=new", "--no-sandbox", "--disable-gpu-sandbox",
+            "--enable-unsafe-swiftshader", "--use-angle=swiftshader", "--no-first-run",
+            "--no-default-browser-check", "--remote-allow-origins=http://localhost",
+            "--remote-debugging-port=0", "--window-size=1600,950",
+            f"--user-data-dir={profile}", html.resolve().as_uri(),
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            cdp = connect(process, profile)
+            try:
+                yield cdp
+            finally:
+                try:
+                    cdp.call("Browser.close")
+                except (OSError, RuntimeError, websocket.WebSocketException):
+                    pass
+                cdp.connection.close()
+        finally:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
 
 
 def verify_export_disclosure(html: str) -> None:
@@ -377,6 +413,29 @@ def run_checks(cdp: DevTools) -> None:
         "orbiting the camera must preserve the selected dossier",
     )
 
+    # Keyboard pan follows the current camera, not the unrotated world axes.
+    # Track an actual property projection after orbiting. A horizontal pan
+    # must translate it horizontally without moving it up/down the screen.
+    for key, code, virtual_key, axis, direction in [
+        ("ArrowRight", "ArrowRight", 39, 0, -1),
+        ("ArrowUp", "ArrowUp", 38, 1, 1),
+    ]:
+        before = cdp.evaluate(f"crimocracyCityPreview.projectProperty({picked_id})")
+        cdp.call("Input.dispatchKeyEvent", {
+            "type": "keyDown", "key": key, "code": code,
+            "windowsVirtualKeyCode": virtual_key,
+        })
+        cdp.call("Input.dispatchKeyEvent", {
+            "type": "keyUp", "key": key, "code": code,
+            "windowsVirtualKeyCode": virtual_key,
+        })
+        cdp.next_frame()
+        after = cdp.evaluate(f"crimocracyCityPreview.projectProperty({picked_id})")
+        check(direction * (after[axis] - before[axis]) > 10,
+              f"{key} must pan in its screen direction")
+        check(abs(after[1 - axis] - before[1 - axis]) < 0.01,
+              f"{key} must not pan diagonally after orbiting")
+
     image = cdp.call("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})
     SCREENSHOT.write_bytes(base64.b64decode(image["data"]))
 
@@ -441,7 +500,7 @@ def run_checks(cdp: DevTools) -> None:
         f"PASS: WebGL2 rendered {initial['buildings']} buildings in "
         f"{initial['drawCalls']} draw calls; directory filtering, ward navigation, "
         f"bounded GPU cache, eviction/re-upload, whole-city overview, GPU picking of business {picked_id}, dossier, cursor-anchored zoom, "
-        f"orbit, label decluttering, responsive resize, dismissal, and camera reset work"
+        f"orbit, screen-relative keyboard pan, label decluttering, responsive resize, dismissal, and camera reset work"
     )
     print(f"Captured interacting GUI screenshot: {SCREENSHOT.relative_to(PROJECT)}")
     print(f"Captured narrow GUI screenshot: {NARROW_SCREENSHOT.relative_to(PROJECT)}")
@@ -453,45 +512,8 @@ def main() -> None:
     if not html.is_file():
         raise RuntimeError("Run cargo run --locked --example city_gui_preview first")
     verify_export_disclosure(html.read_text(encoding="utf-8"))
-    shutil.rmtree(PROFILE, ignore_errors=True)
-    browser = find_browser()
-    args = [
-        browser,
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu-sandbox",
-        "--enable-unsafe-swiftshader",
-        "--use-angle=swiftshader",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--remote-allow-origins=http://localhost",
-        "--remote-debugging-port=0",
-        "--window-size=1600,950",
-        f"--user-data-dir={PROFILE}",
-        html.resolve().as_uri(),
-    ]
-    process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        cdp = connect(process)
-        try:
-            run_checks(cdp)
-        finally:
-            try:
-                cdp.call("Browser.close")
-            except (OSError, RuntimeError, websocket.WebSocketException):
-                pass
-            cdp.connection.close()
-    finally:
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        shutil.rmtree(PROFILE, ignore_errors=True)
+    with headless_browser(html) as cdp:
+        run_checks(cdp)
 
 
 if __name__ == "__main__":

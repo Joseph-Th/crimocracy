@@ -13,8 +13,6 @@ from __future__ import annotations
 import base64
 import json
 import re
-import shutil
-import subprocess
 import sys
 import time
 
@@ -95,38 +93,13 @@ def check_browser(cdp: base.DevTools, scene: dict) -> None:
 
 def main() -> None:
     scene = read_public_scene()
-    shutil.rmtree(base.PROFILE, ignore_errors=True)
-    browser = base.find_browser()
-    process = subprocess.Popen([
-        browser, "--headless=new", "--no-sandbox", "--disable-gpu-sandbox",
-        "--enable-unsafe-swiftshader", "--use-angle=swiftshader", "--no-first-run",
-        "--no-default-browser-check", "--remote-allow-origins=http://localhost",
-        "--remote-debugging-port=0", "--window-size=1600,950",
-        f"--user-data-dir={base.PROFILE}",
-        (base.PREVIEW / "index.html").resolve().as_uri(),
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        cdp = base.connect(process)
-        try:
-            check_browser(cdp, scene)
-        finally:
-            try:
-                cdp.call("Browser.close")
-            except Exception:
-                pass
-            cdp.connection.close()
-    finally:
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            process.wait(timeout=5)
-        shutil.rmtree(base.PROFILE, ignore_errors=True)
+    with base.headless_browser(base.PREVIEW / "index.html") as cdp:
+        check_browser(cdp, scene)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, AssertionError, RuntimeError, ValueError) as error:
+    except (OSError, AssertionError, RuntimeError, ValueError, base.websocket.WebSocketException) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         raise SystemExit(1) from error

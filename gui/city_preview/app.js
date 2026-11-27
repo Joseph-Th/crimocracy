@@ -424,6 +424,13 @@
     const z = (axes.right[0] * sy - axes.up[0] * sx) / determinant;
     return [camera.x + x, camera.z + z];
   }
+  function panScreen(dx, dy) {
+    const axes = basis();
+    const origin = groundFromScreen(canvas.clientWidth / 2, canvas.clientHeight / 2, axes);
+    const target = groundFromScreen(canvas.clientWidth / 2 + dx, canvas.clientHeight / 2 + dy, axes);
+    camera.x += target[0] - origin[0];
+    camera.z += target[1] - origin[1];
+  }
   function visibleInView(bounds, axes) {
     // Test the rectangle directly in camera space. A world-axis AABB of the
     // rotated viewport admits many wholly invisible districts and defeats
@@ -821,11 +828,7 @@
         camera.yaw += dx * 0.008;
         camera.elevation = Math.max(0.35, Math.min(1.30, camera.elevation - dy * 0.005));
       } else {
-        const axes = basis();
-        const before = groundFromScreen(event.clientX - canvas.getBoundingClientRect().left, event.clientY - canvas.getBoundingClientRect().top, axes);
-        const after = groundFromScreen(event.clientX - dx - canvas.getBoundingClientRect().left, event.clientY - dy - canvas.getBoundingClientRect().top, axes);
-        camera.x += after[0] - before[0];
-        camera.z += after[1] - before[1];
+        panScreen(-dx, -dy);
       }
       requestDraw();
     }
@@ -867,15 +870,15 @@
       return;
     }
     if (event.target instanceof HTMLInputElement) return;
-    const step = camera.zoom * 0.12;
+    const step = canvas.clientHeight * 0.06;
     if (event.key === "q" || event.key === "Q") camera.yaw -= 0.16;
     else if (event.key === "e" || event.key === "E") camera.yaw += 0.16;
     else if (event.key === "+" || event.key === "=") camera.zoom *= 0.82;
     else if (event.key === "-") camera.zoom *= 1.22;
-    else if (event.key === "ArrowLeft" || event.key === "a") camera.x -= step;
-    else if (event.key === "ArrowRight" || event.key === "d") camera.x += step;
-    else if (event.key === "ArrowUp" || event.key === "w") camera.z -= step;
-    else if (event.key === "ArrowDown" || event.key === "s") camera.z += step;
+    else if (event.key === "ArrowLeft" || event.key === "a") panScreen(-step, 0);
+    else if (event.key === "ArrowRight" || event.key === "d") panScreen(step, 0);
+    else if (event.key === "ArrowUp" || event.key === "w") panScreen(0, -step);
+    else if (event.key === "ArrowDown" || event.key === "s") panScreen(0, step);
     else return;
     camera.zoom = Math.max(55, Math.min(6000, camera.zoom));
     event.preventDefault();

@@ -107,7 +107,8 @@ Picking draws only buildings and does not overwrite normal-render statistics.
 Rendering is demand-driven rather than redrawing continuously while idle.
 
 The camera supports left-drag panning, right-drag or Shift-drag orbit, scroll
-zoom anchored to the pointer, Q/E rotation, arrow-key panning, +/- zoom,
+zoom anchored to the pointer, Q/E rotation, screen-relative arrow-key/WASD
+panning at the current camera orientation, +/- zoom,
 and a whole-city overview framed around the currently available map area.
 Click a registered building, a map label, or an entry in the searchable
 directory to select a property. The property dossier presents the information
