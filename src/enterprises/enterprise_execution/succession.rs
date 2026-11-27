@@ -61,7 +61,7 @@ pub fn validate_reassign_enterprise(
 }
 
 impl ValidatedEnterpriseReassignment {
-    pub fn commit(self, state: &mut AppState) -> Result<(), EnterpriseError> {
+    pub(super) fn ensure_current(&self, state: &AppState) -> Result<(), EnterpriseError> {
         if state.now() != self.at {
             return Err(EnterpriseError::StaleCycleTime {
                 expected: self.at,
@@ -81,9 +81,18 @@ impl ValidatedEnterpriseReassignment {
         }
         ensure_mandate_authority_current(state, self.authority)?;
         validate_reassign_enterprise(state, self.enterprise, self.authority.authority())?;
+        Ok(())
+    }
+
+    pub(super) fn commit_preflighted(self, state: &mut AppState) {
         state
             .enterprises
             .reassign_authority(self.enterprise, self.authority.authority(), self.at);
+    }
+
+    pub fn commit(self, state: &mut AppState) -> Result<(), EnterpriseError> {
+        self.ensure_current(state)?;
+        self.commit_preflighted(state);
         Ok(())
     }
 }

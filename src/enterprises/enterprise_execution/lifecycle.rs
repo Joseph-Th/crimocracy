@@ -20,6 +20,7 @@ pub struct ValidatedEnterpriseStatusChange {
     change: EnterpriseStatusChange,
     cycle_duration: Option<SimDuration>,
     authority: Option<ResolvedMandateAuthority>,
+    reassignment: Option<ValidatedEnterpriseReassignment>,
     supporting_business_versions: BTreeMap<BusinessId, u32>,
     /// Venue version pinned at validation for a resumption at a business location. A token
     /// held across a venue sale or refit must stale exactly like the cycle path's host pin:
@@ -96,11 +97,8 @@ impl ValidatedEnterpriseStatusChange {
 
     fn ensure_current(&self, state: &AppState) -> Result<Option<SimTime>, EnterpriseError> {
         debug_assert_ne!(self.change, EnterpriseStatusChange::Suspend);
-        // Version pins are the only staleness guard this token needs: unlike disruption
-        // tokens, which freeze a validate-time horizon and must reject a held-across-tick
-        // commit, every time-derived value here (next cycle, loss anchor, change instant)
-        // is anchored at the commit instant, so a clock advance with unchanged content
-        // commits correctly rather than spuriously rejecting.
+        // An ordinary status change anchors its next cycle and loss window at commit.
+        // A composed handoff also pins the reassignment instant and dependencies.
         let record = state
             .enterprises
             .get_enterprise(self.enterprise)
@@ -113,6 +111,10 @@ impl ValidatedEnterpriseStatusChange {
             });
         }
         ensure_version_can_advance(record.version(), "enterprise")?;
+        if let Some(reassignment) = &self.reassignment {
+            reassignment.ensure_current(state)?;
+            ensure_version_can_advance(record.version() + 1, "enterprise")?;
+        }
         if let Some(authority) = self.authority {
             if let Some(until) =
                 crate::world::territory_conflict::suppression_ends_at(state, self.enterprise)
@@ -126,7 +128,7 @@ impl ValidatedEnterpriseStatusChange {
             ensure_manager_capacity(
                 state,
                 record.organization(),
-                record.manager(),
+                authority.authority().manager,
                 ManagedJob {
                     kind: record.kind(),
                     location: record.location(),
@@ -138,7 +140,7 @@ impl ValidatedEnterpriseStatusChange {
             validate_enterprise_environment(
                 state,
                 record.organization(),
-                record.authority(),
+                authority.authority(),
                 record.location(),
                 record.supporting_businesses(),
             )?;
@@ -188,6 +190,9 @@ impl ValidatedEnterpriseStatusChange {
     }
 
     fn commit_status_preflighted(self, state: &mut AppState, next_cycle_at: Option<SimTime>) {
+        if let Some(reassignment) = self.reassignment {
+            reassignment.commit_preflighted(state);
+        }
         let next_status = match self.change {
             EnterpriseStatusChange::Suspend => EnterpriseStatus::Suspended,
             EnterpriseStatusChange::Resume => EnterpriseStatus::Active,
@@ -244,7 +249,11 @@ fn ensure_resumption_cohort_capacity(
                 .expect("preflighted resumption owns its enterprise");
             ProjectedCommandJob {
                 organization: record.organization(),
-                captain: record.manager(),
+                captain: plan
+                    .authority
+                    .expect("resumption retains authority")
+                    .authority()
+                    .manager,
                 kind: record.kind(),
                 location: record.location(),
                 associates: record.associates(),
@@ -266,6 +275,27 @@ pub fn validate_resume_enterprises(
     let plans = enterprises
         .iter()
         .map(|id| validate_resume_enterprise(registry, state, *id))
+        .collect::<Result<Vec<_>, _>>()?;
+    ensure_resumption_cohort_capacity(state, &plans)?;
+    Ok(ValidatedEnterpriseResumptions { plans })
+}
+
+/// Transfer the selected suspended rackets to explicitly nominated authorities
+/// and reopen them as one enterprise-owned order. All validation, including the
+/// combined command workload, precedes both the handoff and lifecycle mutations.
+pub fn validate_cover_enterprises(
+    registry: &Registry,
+    state: &AppState,
+    authorities: &BTreeMap<EnterpriseId, MandateAuthority>,
+) -> Result<ValidatedEnterpriseResumptions, EnterpriseError> {
+    if authorities.is_empty() {
+        return Err(EnterpriseError::EmptyResumptionSelection);
+    }
+    let plans = authorities
+        .iter()
+        .map(|(&id, &authority)| {
+            validate_resume_with_authority(registry, state, id, Some(authority))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     ensure_resumption_cohort_capacity(state, &plans)?;
     Ok(ValidatedEnterpriseResumptions { plans })
@@ -293,6 +323,7 @@ pub fn validate_suspend_enterprise(
         change: EnterpriseStatusChange::Suspend,
         cycle_duration: None,
         authority: None,
+        reassignment: None,
         supporting_business_versions: BTreeMap::new(),
         host_business_version: None,
     })
@@ -302,6 +333,15 @@ pub fn validate_resume_enterprise(
     registry: &Registry,
     state: &AppState,
     enterprise: EnterpriseId,
+) -> Result<ValidatedEnterpriseStatusChange, EnterpriseError> {
+    validate_resume_with_authority(registry, state, enterprise, None)
+}
+
+fn validate_resume_with_authority(
+    registry: &Registry,
+    state: &AppState,
+    enterprise: EnterpriseId,
+    replacement: Option<MandateAuthority>,
 ) -> Result<ValidatedEnterpriseStatusChange, EnterpriseError> {
     let record = state
         .enterprises
@@ -315,14 +355,22 @@ pub fn validate_resume_enterprise(
         EnterpriseStatus::Retired => return Err(EnterpriseError::EnterpriseRetired(enterprise)),
     }
     ensure_version_can_advance(record.version(), "enterprise")?;
+    let proposed = replacement.unwrap_or_else(|| record.authority());
+    let reassignment = if proposed != record.authority() {
+        let handoff = validate_reassign_enterprise(state, enterprise, proposed)?;
+        ensure_version_can_advance(record.version() + 1, "enterprise")?;
+        Some(handoff)
+    } else {
+        None
+    };
     if let Some(until) = crate::world::territory_conflict::suppression_ends_at(state, enterprise) {
         return Err(EnterpriseError::TerritorySuppressed { enterprise, until });
     }
-    let authority = resolve_mandate_authority(state, record.authority())?;
+    let authority = resolve_mandate_authority(state, proposed)?;
     ensure_manager_capacity(
         state,
         record.organization(),
-        record.manager(),
+        proposed.manager,
         ManagedJob {
             kind: record.kind(),
             location: record.location(),
@@ -334,7 +382,7 @@ pub fn validate_resume_enterprise(
     validate_enterprise_environment(
         state,
         record.organization(),
-        record.authority(),
+        proposed,
         record.location(),
         record.supporting_businesses(),
     )?;
@@ -356,7 +404,8 @@ pub fn validate_resume_enterprise(
     validate_enterprise_account_posting_headroom(state, record.cash_account())?;
     validate_enterprise_account_posting_headroom(state, record.settlement_account())?;
     let cycle_duration = definition.economics().cycle();
-    let cycle_duration = (record.version() < u32::MAX - 1).then_some(cycle_duration);
+    let resume_version = record.version() + u32::from(reassignment.is_some());
+    let cycle_duration = (resume_version < u32::MAX - 1).then_some(cycle_duration);
     if let Some(cycle_duration) = cycle_duration {
         state
             .now()
@@ -381,6 +430,7 @@ pub fn validate_resume_enterprise(
         change: EnterpriseStatusChange::Resume,
         cycle_duration,
         authority: Some(authority),
+        reassignment,
         supporting_business_versions,
         host_business_version,
     })
@@ -412,6 +462,7 @@ pub fn validate_retire_enterprise(
         change: EnterpriseStatusChange::Retire,
         cycle_duration: None,
         authority: None,
+        reassignment: None,
         supporting_business_versions: BTreeMap::new(),
         host_business_version: None,
     })

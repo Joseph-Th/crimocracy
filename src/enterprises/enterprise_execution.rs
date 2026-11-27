@@ -35,8 +35,9 @@ use establishment::enterprise_location_is_occupied;
 pub(crate) use establishment::validate_establish_enterprise_with_openings;
 pub use establishment::{ValidatedEnterpriseEstablishment, validate_establish_enterprise};
 pub use lifecycle::{
-    ValidatedEnterpriseResumptions, ValidatedEnterpriseStatusChange, validate_resume_enterprise,
-    validate_resume_enterprises, validate_retire_enterprise, validate_suspend_enterprise,
+    ValidatedEnterpriseResumptions, ValidatedEnterpriseStatusChange, validate_cover_enterprises,
+    validate_resume_enterprise, validate_resume_enterprises, validate_retire_enterprise,
+    validate_suspend_enterprise,
 };
 pub(crate) use staffing::ManagedJob;
 pub use staffing::{

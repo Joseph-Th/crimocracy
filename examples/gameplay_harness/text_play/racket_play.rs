@@ -489,51 +489,44 @@ impl Session<'_> {
                 }
             }
             "cover-rackets" => {
-                // One explicit player order covers a nominated set of suspended rackets with
-                // one named manager. Execute canonical reassignment and resumption validators
-                // against a projected state. All failures discard that projection, so neither
-                // a manager-capacity block nor an invalid second racket leaves a partial handoff.
+                // Select the player's nominated authority for each racket. The
+                // enterprise owner validates and commits the entire recovery order.
                 let manager = self.requested_member(words[1])?;
                 let selected = self.selected_owned_rackets(&words[2..])?;
-                let mut projected = self.state.clone();
+                let mut authorities = BTreeMap::new();
                 for id in &selected {
-                    let racket = projected
+                    let racket = self
+                        .state
                         .enterprises()
                         .get_enterprise(*id)
                         .expect("selected enterprise must exist");
                     // Keep an already-current mandate. A replacement scope or mandate
                     // may require a handoff even when the named captain did not change.
-                    if racket.manager() != manager
+                    let authority = if racket.manager() != manager
                         || crimocracy::delegation::delegation_system::resolve_mandate_authority(
-                            &projected,
+                            &self.state,
                             racket.authority(),
                         )
                         .is_err()
                     {
-                        let authority = self.enterprise_authority(
+                        self.enterprise_authority(
                             racket.location(),
                             racket.supporting_businesses(),
                             Some(manager),
-                        )?;
-                        crimocracy::enterprises::enterprise_execution::validate_reassign_enterprise(
-                            &projected,
-                            *id,
-                            authority,
-                        )
-                        .map_err(|error| format!("enterprise-{}: {error}", id.raw()))?
-                        .commit(&mut projected)
-                        .map_err(|error| format!("enterprise-{}: {error}", id.raw()))?;
-                    }
+                        )?
+                    } else {
+                        racket.authority()
+                    };
+                    authorities.insert(*id, authority);
                 }
-                crimocracy::enterprises::enterprise_execution::validate_resume_enterprises(
+                crimocracy::enterprises::enterprise_execution::validate_cover_enterprises(
                     self.registry,
-                    &projected,
-                    &selected,
+                    &self.state,
+                    &authorities,
                 )
                 .map_err(|error| error.to_string())?
-                .commit(&mut projected)
+                .commit(&mut self.state)
                 .map_err(|error| error.to_string())?;
-                self.state = projected;
                 writeln!(
                     out,
                     "Assigned char-{} and resumed {} racket(s): {}. All changes committed together.",

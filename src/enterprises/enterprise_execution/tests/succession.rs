@@ -2,6 +2,10 @@
 use super::*;
 
 fn replacement(fixture: &mut EnterpriseFixture) -> MandateAuthority {
+    replacement_with_skill(fixture, 92)
+}
+
+fn replacement_with_skill(fixture: &mut EnterpriseFixture, skill: u8) -> MandateAuthority {
     let manager = insert_character(
         &mut fixture.state,
         CharacterDraft {
@@ -9,7 +13,7 @@ fn replacement(fixture: &mut EnterpriseFixture) -> MandateAuthority {
             organization: Some(fixture.organization),
             supervisor: Some(fixture.authority.manager),
             autonomy: AutonomyLevel::Delegated,
-            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(92))]),
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(skill))]),
             traits: BTreeSet::new(),
             drives: BTreeMap::new(),
         },
@@ -341,4 +345,128 @@ fn reassignment_does_not_retroactively_transfer_due_cycle_or_accept_ineligible_a
         validate_reassign_enterprise(&fixture.state, enterprise, successor).unwrap_err(),
         EnterpriseError::EnterpriseReassignmentCycleDue(enterprise)
     );
+}
+
+#[test]
+fn cover_enterprises_preflights_handoffs_and_combined_workload() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let successor = replacement(&mut fixture);
+    let limited = replacement_with_skill(&mut fixture, 20);
+    let first = establish_protection(&registry, &mut fixture);
+    let second_district = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Second Ward".into(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(60),
+                    commercial_activity: rating(70),
+                    illicit_demand: rating(50),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(40),
+                },
+            },
+        },
+    )
+    .unwrap();
+    let settlement = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::Settlement,
+        },
+    )
+    .unwrap();
+    let second = validate_establish_enterprise(
+        &registry,
+        &fixture.state,
+        EnterpriseDraft {
+            kind: EnterpriseKind::Protection,
+            organization: fixture.organization,
+            authority: successor,
+            location: EnterpriseLocation::Neighborhood(second_district),
+            supporting_businesses: BTreeSet::new(),
+            cash_account: fixture.cash,
+            settlement_account: settlement,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    for id in [first, second] {
+        validate_suspend_enterprise(&fixture.state, id)
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+    }
+    // Individually feasible jobs must not bypass the replacement's aggregate capacity.
+    for id in [first, second] {
+        validate_cover_enterprises(&registry, &fixture.state, &BTreeMap::from([(id, limited)]))
+            .unwrap();
+    }
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert!(matches!(
+        validate_cover_enterprises(
+            &registry,
+            &fixture.state,
+            &BTreeMap::from([(first, limited), (second, limited)]),
+        ),
+        Err(EnterpriseError::ManagerWorkloadExceeded { manager, .. }) if manager == limited.manager
+    ));
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+
+    let assignments = BTreeMap::from([(first, successor), (second, successor)]);
+    let held = validate_cover_enterprises(&registry, &fixture.state, &assignments).unwrap();
+    let mut changed = fixture.state.clone();
+    validate_reassign_enterprise(&changed, second, limited)
+        .unwrap()
+        .commit(&mut changed)
+        .unwrap();
+    let before = bincode::serialize(&changed).unwrap();
+    assert!(matches!(
+        held.commit(&mut changed),
+        Err(EnterpriseError::StaleEnterprise { enterprise, .. }) if enterprise == second
+    ));
+    assert_eq!(bincode::serialize(&changed).unwrap(), before);
+
+    let held = validate_cover_enterprises(&registry, &fixture.state, &assignments).unwrap();
+    let mut changed = fixture.state.clone();
+    validate_revoke_mandate(&changed, successor.mandate)
+        .unwrap()
+        .commit(&mut changed)
+        .unwrap();
+    let before = bincode::serialize(&changed).unwrap();
+    assert!(matches!(
+        held.commit(&mut changed),
+        Err(EnterpriseError::Delegation(_))
+    ));
+    assert_eq!(bincode::serialize(&changed).unwrap(), before);
+
+    // Preserve exact constituent effects, including the unchanged second assignment.
+    let mut sequential = fixture.state.clone();
+    validate_reassign_enterprise(&sequential, first, successor)
+        .unwrap()
+        .commit(&mut sequential)
+        .unwrap();
+    validate_resume_enterprises(&registry, &sequential, &BTreeSet::from([first, second]))
+        .unwrap()
+        .commit(&mut sequential)
+        .unwrap();
+    validate_cover_enterprises(&registry, &fixture.state, &assignments)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&sequential).unwrap()
+    );
+    validate_state_against_registry(&registry, &fixture.state).unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    validate_invariants(&restored);
 }
