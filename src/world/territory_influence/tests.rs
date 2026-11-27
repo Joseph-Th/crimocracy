@@ -438,6 +438,120 @@ fn strict_higher_enterprise_count_replaces_earlier_leader() {
 }
 
 #[test]
+fn named_local_defense_can_repel_a_territory_clash() {
+    use crate::core::persistence::{build_save, restore_save};
+    use crate::core::time::{DAY_MINUTES, SimDuration};
+    use crate::world::territory_conflict::{
+        TerritoryConflictError, apply_due_autonomous_territory_clashes, local_defensive_forces,
+        validate_territory_clash,
+    };
+
+    let registry = build_registry();
+    let mut fixture = make_influence_fixture();
+    let (manager, mandate) = assign_district_authority(
+        &mut fixture.state,
+        fixture.challenger,
+        fixture.neighborhood,
+        "Defending Lieutenant",
+    );
+    let mut attacker_rackets = Vec::new();
+    for name in ["Attacking Hall", "Attacking Annex"] {
+        let venue = insert_venue(
+            &registry,
+            &mut fixture.state,
+            name,
+            fixture.neighborhood,
+            BusinessOwner::Organization(fixture.dominant),
+            hospitality_functions(),
+        );
+        attacker_rackets.push(establish_gambling_at_venue(
+            &registry,
+            &mut fixture.state,
+            fixture.dominant,
+            fixture.mandate,
+            fixture.manager,
+            venue,
+        ));
+    }
+    let venue = insert_venue(
+        &registry,
+        &mut fixture.state,
+        "Defending Hall",
+        fixture.neighborhood,
+        BusinessOwner::Organization(fixture.challenger),
+        hospitality_functions(),
+    );
+    let target = establish_gambling_at_venue(
+        &registry,
+        &mut fixture.state,
+        fixture.challenger,
+        mandate,
+        manager,
+        venue,
+    );
+    let held = validate_territory_clash(&fixture.state, fixture.dominant, target).unwrap();
+    let mut unguarded = fixture.state.clone();
+    assert!(
+        validate_territory_clash(&unguarded, fixture.dominant, target)
+            .unwrap()
+            .commit(&mut unguarded)
+            .unwrap()
+            .attacker_won
+    );
+
+    for index in 0..3 {
+        insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: format!("Local Guard {index}"),
+                organization: Some(fixture.challenger),
+                supervisor: Some(manager),
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::from([(CapabilityKind::Violence, rating(90))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    }
+    let defense = local_defensive_forces(&fixture.state, fixture.challenger);
+    assert_eq!(defense[&fixture.neighborhood].named_enforcers, 3);
+    let before = bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap();
+    assert_eq!(
+        held.commit(&mut fixture.state),
+        Err(TerritoryConflictError::ClashTermsChanged),
+        "changed defenders must invalidate the prepared outcome"
+    );
+    assert_eq!(
+        bincode::serialize(&build_save(&registry, &fixture.state).unwrap()).unwrap(),
+        before,
+        "rejecting a stale confrontation must not mutate the campaign"
+    );
+    let mut autonomous = fixture.state.clone();
+    autonomous.advance_clock(SimDuration::from_minutes(DAY_MINUTES as u32));
+    let clashes = apply_due_autonomous_territory_clashes(&mut autonomous);
+    assert_eq!(clashes.len(), 1);
+    assert!(!clashes[0].attacker_won);
+    assert!(attacker_rackets.contains(&clashes[0].suspended_racket));
+    validate_invariants(&autonomous);
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let outcome = validate_territory_clash(state, fixture.dominant, target)
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        assert!(!outcome.attacker_won);
+        assert!(attacker_rackets.contains(&outcome.suspended_racket));
+        assert_eq!(
+            state.enterprises().get_enterprise(target).unwrap().status(),
+            EnterpriseStatus::Active,
+        );
+        validate_invariants(state);
+    }
+}
+
+#[test]
 fn autonomous_raids_prefer_a_safer_rival_over_an_earlier_created_target() {
     use crate::core::persistence::{build_save, restore_save};
     use crate::core::time::{DAY_MINUTES, SimDuration};

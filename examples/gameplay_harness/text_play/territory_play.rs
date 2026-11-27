@@ -159,7 +159,7 @@ impl Session<'_> {
                 let prepared = validate_territory_clash(state, self.player, target)
                     .map_err(|error| error.to_string())?;
                 if words[0] == "preview-contest" {
-                    writeln!(out, "Challenge enterprise-{number} in district-{} | active associates: {own_force}. Defenders have a positional advantage; their current force is unverified. Defeat suspends your leading racket for seven days. No action committed.", district.raw()).unwrap();
+                    writeln!(out, "Challenge enterprise-{number} in district-{} | active associates: {own_force}. Defenders count their local associates and allocated named enforcers, plus a positional advantage; their current force is unverified. Defeat suspends your leading racket for seven days. No action committed.", district.raw()).unwrap();
                 } else {
                     let result = prepared
                         .commit(&mut self.state)

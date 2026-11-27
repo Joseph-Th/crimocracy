@@ -222,8 +222,9 @@ Unknown rival holdings and exact staff numbers remain private; reconnaissance
 provides the necessary location evidence. `preview-contest enterprise-N` inspects the legal opening and your
 available manpower without revealing the opponent's current strength.
 `contest enterprise-N` then challenges that rival with your actual local
-associates. The defender receives a two-associate positional advantage. The
-loser has one racket suspended for seven days and cannot reopen it early, even
+associates. The defender counts local associates plus the named enforcers
+allocated to that district by `turf`, with a two-associate positional advantage.
+The loser has one racket suspended for seven days and cannot reopen it early, even
 by retiring it and establishing a replacement of the same kind at the same
 location;
 the attacker must also wait seven days before another district challenge.
@@ -231,7 +232,7 @@ Stronger rivals autonomously contest overlapping territory and can shut down
 player holdings, triggering an actionable crisis report. The resulting lost
 enterprise income and district influence are real.
 NPC challengers estimate opponents' baseline crews rather than reading their
-secret extra hires. When several raids are viable, they prioritize the largest
+secret extra hires or allocated named defenders. When several raids are viable, they prioritize the largest
 estimated staffing advantage, then the target with the larger baseline crew;
 creation order only breaks equal strategic ties. Reinforcements can reverse the
 outcome, and a repelled NPC avoids repeating the same district attack for

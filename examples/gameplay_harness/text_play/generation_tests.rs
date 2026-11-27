@@ -505,8 +505,8 @@ fn generated_rival_clash_then_postwar_negotiation_uses_actual_player_orders() {
         .unwrap()
         .id();
     session
-        .execute(&format!("staff-racket {} 8", own_racket.raw()))
-        .expect("pay for a superior rank-and-file complement");
+        .execute(&format!("staff-racket {} 12", own_racket.raw()))
+        .expect("field enough associates to overcome local guards and the positional advantage");
     let planned = snapshot(&registry, &session);
     assert!(
         session

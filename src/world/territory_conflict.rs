@@ -1,8 +1,8 @@
 //! Territorial confrontation through canonical enterprise suspension and typed history.
 //!
 //! A clash is a district-level attempt to displace a rival's active racket.
-//! Rank-and-file employees are the actual committed force, including the staffing
-//! paid for by enterprise settlements. A defender has a small positional edge.
+//! Attacking force comes from local rank-and-file employees paid through enterprise
+//! settlements. Defenders also receive their allocated named enforcers and a positional edge.
 //! Losing a clash closes one racket for seven days, making fighting costly even
 //! for an attacker that misjudges the opposition. No extra combat currency or
 //! invisible territory ownership is maintained.
@@ -241,6 +241,8 @@ pub enum TerritoryConflictError {
     TimeExhausted,
     #[error("a prepared clash is stale; time changed from {expected:?} to {found:?}")]
     StaleTime { expected: SimTime, found: SimTime },
+    #[error("the prepared territorial clash outcome changed; prepare the challenge again")]
+    ClashTermsChanged,
     #[error(transparent)]
     Enterprise(#[from] EnterpriseError),
     #[error(transparent)]
@@ -251,14 +253,19 @@ pub enum TerritoryConflictError {
     IdExhaustion(#[from] IdExhaustionError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClashTerms {
+    defender: OrganizationId,
+    district: NeighborhoodId,
+    assault: EnterpriseId,
+    loser: EnterpriseId,
+}
+
 pub struct ValidatedTerritoryClash {
     at: SimTime,
     attacker: OrganizationId,
-    defender: OrganizationId,
-    district: NeighborhoodId,
     target: EnterpriseId,
-    assault: EnterpriseId,
-    loser: EnterpriseId,
+    terms: ClashTerms,
     suspension: ValidatedEnterpriseStatusChange,
     history: ValidatedHistoryEvent,
     reports: Vec<ValidatedReport>,
@@ -286,12 +293,8 @@ impl ValidatedTerritoryClash {
         // A held plan cannot ignore a new treaty, new workers, a departed
         // manager, a different winner, or another attack in the same district.
         let fresh = validate_clash_terms(state, self.attacker, self.target)?;
-        if fresh.0 != self.district
-            || fresh.1 != self.defender
-            || fresh.2 != self.assault
-            || fresh.3 != self.loser
-        {
-            return Err(TerritoryConflictError::RacketNotActive);
+        if fresh != self.terms {
+            return Err(TerritoryConflictError::ClashTermsChanged);
         }
         self.suspension.ensure_suspension_current(state)?;
         state.ids.reserve_many(&[
@@ -313,19 +316,19 @@ impl ValidatedTerritoryClash {
         }
         Ok(TerritoryClashOutcome {
             history,
-            attacker_won: self.loser == self.target,
-            suspended_racket: self.loser,
-            district: self.district,
+            attacker_won: self.terms.loser == self.target,
+            suspended_racket: self.terms.loser,
+            district: self.terms.district,
         })
     }
 }
 
-/// Returns (district, defender, assault, loser) without changing state.
+/// Resolves the live confrontation outcome without changing state.
 fn validate_clash_terms(
     state: &AppState,
     attacker: OrganizationId,
     target: EnterpriseId,
-) -> Result<(NeighborhoodId, OrganizationId, EnterpriseId, EnterpriseId), TerritoryConflictError> {
+) -> Result<ClashTerms, TerritoryConflictError> {
     let enemy = state
         .enterprises()
         .get_enterprise(target)
@@ -377,13 +380,22 @@ fn validate_clash_terms(
         .map(|record| record.id())
         .ok_or(TerritoryConflictError::NoLocalFootprint)?;
     let own_force = active_district_force(state, attacker, district);
-    let enemy_force = active_district_force(state, defender, district);
+    let enemy_force = local_defensive_forces(state, defender)
+        .get(&district)
+        .copied()
+        .unwrap_or_default()
+        .total();
     let loser = if own_force > enemy_force.saturating_add(DEFENSIVE_ADVANTAGE) {
         target
     } else {
         assault
     };
-    Ok((district, defender, assault, loser))
+    Ok(ClashTerms {
+        district,
+        defender,
+        assault,
+        loser,
+    })
 }
 
 /// The same decision for players and autonomous gangs; reports contain only
@@ -393,7 +405,13 @@ pub fn validate_territory_clash(
     attacker: OrganizationId,
     target: EnterpriseId,
 ) -> Result<ValidatedTerritoryClash, TerritoryConflictError> {
-    let (district, defender, assault, loser) = validate_clash_terms(state, attacker, target)?;
+    let terms = validate_clash_terms(state, attacker, target)?;
+    let ClashTerms {
+        district,
+        defender,
+        assault,
+        loser,
+    } = terms;
     let suspension = validate_suspend_enterprise(state, loser)?;
     let history = validate_territory_clash_event(
         state, district, attacker, defender, assault, target, loser,
@@ -404,26 +422,25 @@ pub fn validate_territory_clash(
         .expect("valid rival racket must occupy a district")
         .name();
     let mut reports = Vec::new();
-    for (organization, role) in [(attacker, "Attacker"), (defender, "Defender")] {
+    for organization in [attacker, defender] {
         // A defender sees the raid on its own people, even without having
         // discovered the enemy's confidential network of rackets.
         if state.player_organization() != Some(organization) {
             continue;
         }
-        let message = match (role, loser == target) {
-            ("Attacker", true) => format!(
+        let message = match (organization == attacker, loser == target) {
+            (true, true) => format!(
                 "Your enforcers displaced a rival racket in {district_name}. Its operations are disrupted for seven days."
             ),
-            ("Attacker", false) => format!(
+            (true, false) => format!(
                 "Your challenge in {district_name} was repelled. Your front {loser} is suspended for seven days."
             ),
-            ("Defender", true) => format!(
+            (false, true) => format!(
                 "Rival enforcers overwhelmed your racket {loser} in {district_name}. It cannot reopen for seven days."
             ),
-            ("Defender", false) => format!(
+            (false, false) => format!(
                 "Your people repelled a territorial challenge in {district_name}; the attacking gang lost a front."
             ),
-            _ => unreachable!(),
         };
         reports.push(validate_record_report(
             state,
@@ -458,11 +475,8 @@ pub fn validate_territory_clash(
     Ok(ValidatedTerritoryClash {
         at: state.now(),
         attacker,
-        defender,
-        district,
         target,
-        assault,
-        loser,
+        terms,
         suspension,
         history,
         reports,
@@ -499,7 +513,7 @@ pub(crate) fn apply_due_autonomous_territory_clashes(
         return Vec::new();
     }
     // Attacker-specific real staff and defender-specific visible baseline are distinct:
-    // secret defender hires may still turn a seemingly safe raid into a real defeat.
+    // secret defender hires and allocated guards may turn a seemingly safe raid into defeat.
     let mut districts =
         BTreeMap::<NeighborhoodId, BTreeMap<OrganizationId, DistrictRackets>>::new();
     for racket in state.enterprises().active_enterprises() {

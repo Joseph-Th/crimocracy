@@ -103,9 +103,11 @@ Every 180-day municipal boundary is a scheduled public election, provided the ba
 Territorial influence is a read-only economic projection in
 `world::territory_influence`: active hosted and district-hosted rackets establish
 district presence; ties have no leader. `world::territory_conflict` owns direct
-confrontations between gangs already operating in the same district. Their
-current rank-and-file staffing sets local strength, with a two-associate defender
-advantage. The attacker's strongest local active racket risks suspension if the
+confrontations between gangs already operating in the same district. The
+attacker commits its local rank-and-file staffing; the defender uses the shared
+`local_defensive_forces` projection (including allocated named enforcers), plus
+a two-associate positional advantage. NPC planning estimates baseline rival
+staffing without inspecting hidden guards or extra hires. The attacker's strongest local active racket risks suspension if the
 challenge fails; a successful challenge suspends the identified rival racket.
 The defeated racket cannot reopen for seven days through either manual or NPC
 enterprise lifecycle paths. Retirement does not erase this deadline: the

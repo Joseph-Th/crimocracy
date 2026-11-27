@@ -37,10 +37,13 @@ impl std::fmt::Debug for CustodyEnterpriseSuspensions {
 }
 
 fn managed_enterprises(state: &AppState, manager: CharacterId) -> BTreeSet<EnterpriseId> {
+    // An active enterprise must belong to its manager's unique active mandate.
+    // Traverse that mandate's indexed enterprises rather than every city racket.
     state
-        .enterprises
-        .active_enterprises()
-        .filter(|enterprise| enterprise.manager() == manager)
+        .delegation()
+        .active_for_manager(manager)
+        .into_iter()
+        .flat_map(|mandate| state.enterprises().active_for_mandate(mandate.id()))
         .map(|enterprise| enterprise.id())
         .collect()
 }

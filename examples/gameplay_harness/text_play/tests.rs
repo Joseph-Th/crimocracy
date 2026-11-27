@@ -320,7 +320,46 @@ fn territorial_recovery_explains_the_exact_calendar_reopening_deadline() {
         .unwrap()
         .id();
     session.execute("treasury daily").unwrap();
-    let advanced = session.execute("advance 2d uninterrupted").unwrap().0;
+    session.execute("advance 1d uninterrupted").unwrap();
+    // Give the rival a genuinely superior force after its opening expansion,
+    // rather than depending on the player's named defenders being ignored.
+    let district = session
+        .state
+        .enterprises()
+        .get_enterprise(racket)
+        .unwrap()
+        .location()
+        .neighborhood(session.state.world())
+        .unwrap();
+    let enterprises = session.state.enterprises();
+    let (rival_racket, maximum) = enterprises
+        .enterprises_at(EnterpriseLocation::Neighborhood(district))
+        .chain(
+            session
+                .state
+                .world()
+                .public_business_directory()
+                .filter(|(_, _, _, ward)| *ward == district)
+                .flat_map(|(business, _, _, _)| {
+                    enterprises.enterprises_at(EnterpriseLocation::Business(business))
+                }),
+        )
+        .filter(|enterprise| {
+            enterprise.organization() != session.player
+                && enterprise.status() == EnterpriseStatus::Active
+        })
+        .max_by_key(|enterprise| enterprise.associates())
+        .map(|enterprise| (enterprise.id(), enterprise.kind().max_associates()))
+        .expect("a rival has established a racket on the first day");
+    crimocracy::enterprises::enterprise_execution::validate_staff_enterprise(
+        &session.state,
+        rival_racket,
+        maximum,
+    )
+    .unwrap()
+    .commit(&mut session.state)
+    .unwrap();
+    let advanced = session.execute("advance 1d uninterrupted").unwrap().0;
     assert!(
         advanced.contains("leadership decision pending"),
         "{advanced}"
