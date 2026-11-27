@@ -10,38 +10,16 @@ use crate::intelligence::{
     downgraded_reliability_for_contact_derivation, downgraded_specificity_for_contact_derivation,
 };
 use crate::operations::OperationKind;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub(super) fn validate_intelligence(state: &AppState) -> Result<(), StateValidationError> {
     let system_owners = collect_system_information_owners(state);
     let mut previous_recorded_at = None;
-    let mut internal_roots = BTreeMap::new();
-    let mut received_roots = BTreeSet::new();
+    // The preceding intelligence index validation proves internal roots and unique
+    // recipients against the original edges. Here prove the observation semantics,
+    // direct parent provenance, and chronology without building that projection again.
     for information in state.intelligence.information() {
         validate_information(state, information, &system_owners)?;
-        let root = if information.source_kind() == InformationSourceKind::InternalReport {
-            let source = *information
-                .derived_from()
-                .iter()
-                .next()
-                .expect("validated internal report has exactly one source");
-            let root = *internal_roots
-                .get(&source)
-                .ok_or_else(|| invalid_provenance(information, source))?;
-            let original = state
-                .intelligence
-                .get_information(root)
-                .expect("earlier validated root must exist");
-            if original.holder() == information.holder()
-                || !received_roots.insert((root, information.holder()))
-            {
-                return Err(invalid_provenance(information, source));
-            }
-            root
-        } else {
-            information.id()
-        };
-        internal_roots.insert(information.id(), root);
         if previous_recorded_at.is_some_and(|at| information.recorded_at() < at) {
             return Err(StateValidationError::InvalidInformationChronology {
                 information: information.id(),

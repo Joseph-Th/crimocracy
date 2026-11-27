@@ -48,6 +48,100 @@ struct PersistenceFixture {
     second: CharacterId,
 }
 
+#[test]
+fn restore_rejects_malformed_internal_lineage_edges_and_duplicate_recipients() {
+    use crate::intelligence::InformationTransferDraft;
+    use crate::intelligence::intelligence_system::validate_information_transfer;
+
+    let mut fixture = fixture();
+    let original = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(fixture.first),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Organization(fixture.organization),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::GenerallyReliable,
+            specificity: Specificity::Specific,
+            summary: "Internal lineage persistence fixture".to_owned(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let first_hop = validate_information_transfer(
+        &fixture.state,
+        InformationTransferDraft {
+            source: original,
+            recipient: KnowledgeHolder::Character(fixture.second),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let second_hop = validate_information_transfer(
+        &fixture.state,
+        InformationTransferDraft {
+            source: first_hop,
+            recipient: KnowledgeHolder::Organization(fixture.organization),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let envelope = build_save(&fixture.registry, &fixture.state).unwrap();
+    let restored = restore_save(&fixture.registry, envelope.clone()).unwrap();
+    assert_eq!(
+        restored.intelligence().internal_report_root(second_hop),
+        Some(original)
+    );
+
+    let reject = |replacement: IntelligenceStateWire| {
+        assert_eq!(
+            restore_save(
+                &fixture.registry,
+                replace_serialized_substate(
+                    envelope.clone(),
+                    fixture.state.intelligence(),
+                    &replacement,
+                ),
+            )
+            .expect_err("malformed lineage must fail before any indexed consumer can use it"),
+            LoadError::InvalidState(StateValidationError::IndexInconsistency {
+                subsystem: "intelligence",
+            })
+        );
+    };
+    for parents in [
+        BTreeSet::new(),
+        BTreeSet::from([first_hop]),
+        BTreeSet::from([second_hop]),
+        BTreeSet::from([InformationId::from_raw(u32::MAX)]),
+        BTreeSet::from([original, second_hop]),
+    ] {
+        let mut replacement = intelligence_state_wire(fixture.state.intelligence());
+        replacement
+            .records
+            .get_mut(&first_hop)
+            .unwrap()
+            .assessment
+            .derived_from = parents;
+        reject(replacement);
+    }
+    for repeated_holder in [fixture.first, fixture.second] {
+        let mut replacement = intelligence_state_wire(fixture.state.intelligence());
+        replacement
+            .records
+            .get_mut(&second_hop)
+            .unwrap()
+            .source
+            .holder = KnowledgeHolder::Character(repeated_holder);
+        reject(replacement);
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 enum DecisionLifecycleWire {
     Pending,
@@ -187,11 +281,6 @@ fn replace_serialized_substate<T: Serialize, U: Serialize>(
     let original_bytes = bincode::serialize(original).expect("substate should serialize");
     let replacement_bytes =
         bincode::serialize(replacement).expect("replacement substate should serialize");
-    assert_eq!(
-        replacement_bytes.len(),
-        original_bytes.len(),
-        "same-layout corruption must retain the serialized substate length"
-    );
     let mut envelope_bytes = bincode::serialize(&envelope).expect("save should serialize");
     let matches: Vec<_> = envelope_bytes
         .windows(original_bytes.len())
@@ -204,9 +293,16 @@ fn replace_serialized_substate<T: Serialize, U: Serialize>(
         "serialized substate must appear exactly once in the save envelope"
     );
     let start = matches[0];
-    envelope_bytes[start..start + replacement_bytes.len()].copy_from_slice(&replacement_bytes);
-    bincode::deserialize(&envelope_bytes)
-        .expect("same-length substate corruption must remain decodable")
+    // Variable-length collections may be corrupted without changing the wire layout.
+    envelope_bytes.splice(start..start + original_bytes.len(), replacement_bytes);
+    let decoded = bincode::deserialize(&envelope_bytes)
+        .expect("same-layout substate corruption must remain decodable");
+    assert_eq!(
+        bincode::serialize(&decoded).expect("decoded corruption should serialize"),
+        envelope_bytes,
+        "corruption must preserve the complete wire layout"
+    );
+    decoded
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]

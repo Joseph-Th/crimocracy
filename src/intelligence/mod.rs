@@ -338,6 +338,9 @@ pub struct IntelligenceState {
     by_subject: BTreeMap<EntityRef, BTreeSet<InformationId>>,
     #[serde(skip)]
     derived_by_source: BTreeMap<InformationId, BTreeSet<InformationId>>,
+    /// Only internal copies need a cached root; all other observations root at themselves.
+    #[serde(skip)]
+    internal_root_by_information: BTreeMap<InformationId, InformationId>,
     #[serde(skip)]
     internal_transfer_by_root_recipient: BTreeMap<(InformationId, KnowledgeHolder), InformationId>,
 }
@@ -352,6 +355,7 @@ impl IntelligenceState {
         self.by_holder_subject.clear();
         self.by_subject.clear();
         self.derived_by_source.clear();
+        self.internal_root_by_information.clear();
         self.internal_transfer_by_root_recipient.clear();
         for record in self.records.values() {
             let id = record.id();
@@ -377,18 +381,12 @@ impl IntelligenceState {
                     .or_default()
                     .insert(id);
             }
-            if record.source_kind() == InformationSourceKind::InternalReport
-                && record.derived_from().len() == 1
-            {
-                let source = *record
-                    .derived_from()
-                    .iter()
-                    .next()
-                    .expect("single-source internal report must have one source");
-                if let Some(root) = self.internal_report_root(source) {
-                    self.internal_transfer_by_root_recipient
-                        .insert((root, record.holder()), id);
-                }
+            // Records are in ID order. Derive each internal root from its earlier parent,
+            // never replay the entire chain; invalid parents leave no root to propagate.
+            if let Some(root) = self.derive_internal_copy_root(record) {
+                self.internal_root_by_information.insert(id, root);
+                self.internal_transfer_by_root_recipient
+                    .insert((root, record.holder()), id);
             }
         }
     }
@@ -441,20 +439,27 @@ impl IntelligenceState {
     /// A repeated internal handoff carries the original observation, not a new fact. Follow
     /// internal reports only; independently acquired facts and contact disclosures start their
     /// own lineage even when they concern the same subject.
-    pub(crate) fn internal_report_root(&self, mut source: InformationId) -> Option<InformationId> {
-        loop {
-            let record = self.records.get(&source)?;
-            if record.source_kind() != InformationSourceKind::InternalReport {
-                return Some(source);
-            }
-            let parent = *record.derived_from().iter().next()?;
-            // Restore rebuilds indexes before provenance validation. A malformed cycle or
-            // forward reference must fail closed, not loop indefinitely during index rebuild.
-            if parent >= source {
-                return None;
-            }
-            source = parent;
+    pub(crate) fn internal_report_root(&self, source: InformationId) -> Option<InformationId> {
+        let record = self.records.get(&source)?;
+        if record.source_kind() == InformationSourceKind::InternalReport {
+            self.internal_root_by_information.get(&source).copied()
+        } else {
+            Some(source)
         }
+    }
+
+    fn derive_internal_copy_root(&self, record: &InformationRecord) -> Option<InformationId> {
+        if record.source_kind() != InformationSourceKind::InternalReport
+            || record.derived_from().len() != 1
+        {
+            return None;
+        }
+        let parent = *record.derived_from().first()?;
+        // Strictly earlier IDs rule out cycles and forward references, including on restore.
+        if parent >= record.id() {
+            return None;
+        }
+        self.internal_report_root(parent)
     }
 
     pub(crate) fn already_holds_internal_lineage(
@@ -520,19 +525,17 @@ impl IntelligenceState {
                 .insert(id);
         }
         if record.source_kind() == InformationSourceKind::InternalReport {
-            debug_assert_eq!(record.derived_from().len(), 1);
-            if let Some(source) = record.derived_from().iter().next().copied() {
-                let root = self
-                    .internal_report_root(source)
-                    .expect("internal report source must exist before its derivation");
-                let previous = self
-                    .internal_transfer_by_root_recipient
-                    .insert((root, record.holder()), id);
-                debug_assert!(
-                    previous.is_none(),
-                    "duplicate internal information lineage delivered to one holder"
-                );
-            }
+            let root = self
+                .derive_internal_copy_root(&record)
+                .expect("internal report source must exist before its derivation");
+            self.internal_root_by_information.insert(id, root);
+            let previous = self
+                .internal_transfer_by_root_recipient
+                .insert((root, record.holder()), id);
+            debug_assert!(
+                previous.is_none(),
+                "duplicate internal information lineage delivered to one holder"
+            );
         }
         let previous = self.records.insert(id, record);
         debug_assert!(
@@ -553,6 +556,7 @@ impl IntelligenceState {
         }
         self.partition_index_counts_match(expected)
             && self.derived_source_index_is_consistent(expected.source_entries)
+            && self.internal_root_by_information.len() == expected.internal_transfers
             && self.internal_transfer_by_root_recipient.len() == expected.internal_transfers
     }
 
@@ -597,21 +601,16 @@ impl IntelligenceState {
         expected.subject_entries += 1;
         expected.source_entries += record.derived_from().len();
         if record.source_kind() == InformationSourceKind::InternalReport {
-            if record.derived_from().len() != 1 {
-                return false;
-            }
-            let source = *record
-                .derived_from()
-                .iter()
-                .next()
-                .expect("single-source internal report must have one source");
-            let Some(root) = self.internal_report_root(source) else {
+            // In primary-key order every earlier parent's root has already been checked.
+            // Equality with that parent's root proves the cached lineage inductively.
+            let Some(root) = self.derive_internal_copy_root(record) else {
                 return false;
             };
-            if self
-                .records
-                .get(&root)
-                .is_some_and(|original| original.holder() == record.holder())
+            if self.internal_root_by_information.get(&stored_id) != Some(&root)
+                || self
+                    .records
+                    .get(&root)
+                    .is_none_or(|original| original.holder() == record.holder())
                 || self
                     .internal_transfer_by_root_recipient
                     .get(&(root, record.holder()))

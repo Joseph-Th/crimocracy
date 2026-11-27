@@ -510,6 +510,13 @@ validation and the autonomous same-minute cohort deduplicate by the internal inf
 root before issuing evidence. Independent direct observations remain separate and may both
 be disclosed. Case-scoped indexed reads avoid scanning unrelated historical disclosures;
 restore validation rejects duplicate case/root evidence provenance.
+The intelligence owner indexes the original root of each internal copy when it is
+recorded, and reconstructs those roots in ascending information-ID order on restore.
+Non-internal observations (including contact disclosures) retain their own roots.
+Index validation proves each copy against its earlier parent and checks unique
+root/recipient delivery; structural validation separately checks the original
+observation, source entity and chronology. The root projection is not serialized
+and neither restore nor repeated legal reads traverse the entire internal chain.
 
 ## Source map — one owner per field
 

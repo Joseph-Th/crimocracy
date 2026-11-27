@@ -58,6 +58,63 @@ fn make_transfer_fixture() -> (
 }
 
 #[test]
+fn deep_internal_lineage_preserves_duplicate_rejection_and_restored_continuation() {
+    let (registry, mut state, organization, origin) = make_transfer_fixture();
+    let fact = record_character_information(&mut state, origin, organization);
+    let recipients: Vec<_> = (0..1024)
+        .map(|index| add_information_courier(&mut state, organization, &format!("Courier {index}")))
+        .collect();
+    let mut copies = Vec::with_capacity(recipients.len());
+    let mut source = fact;
+    for &recipient in &recipients {
+        source = transfer_internal_fact(&mut state, source, KnowledgeHolder::Character(recipient));
+        copies.push(source);
+    }
+    let saved = build_save(&registry, &state).unwrap();
+    let mut restored = restore_save(&registry, saved).unwrap();
+    for branch in [&mut state, &mut restored] {
+        let before = bincode::serialize(branch).unwrap();
+        for (&recipient, &existing) in recipients.iter().zip(&copies).step_by(127) {
+            assert_eq!(
+                validate_information_transfer(
+                    branch,
+                    InformationTransferDraft {
+                        source,
+                        recipient: KnowledgeHolder::Character(recipient),
+                    },
+                )
+                .err(),
+                Some(IntelligenceError::DuplicateTransfer {
+                    source_information: source,
+                    recipient: KnowledgeHolder::Character(recipient),
+                    existing,
+                })
+            );
+        }
+        assert_eq!(bincode::serialize(branch).unwrap(), before);
+        let delivered =
+            transfer_internal_fact(branch, source, KnowledgeHolder::Organization(organization));
+        assert_eq!(
+            branch.intelligence().internal_report_root(delivered),
+            Some(fact)
+        );
+        assert_eq!(
+            branch
+                .intelligence()
+                .get_information(delivered)
+                .unwrap()
+                .derived_from(),
+            &BTreeSet::from([source])
+        );
+        validate_state(branch).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn typed_signal_compatibility_requires_every_semantic_axis() {
     let organization = OrganizationId::from_raw(1);
     let character = CharacterId::from_raw(2);

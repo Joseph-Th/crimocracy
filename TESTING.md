@@ -375,6 +375,14 @@ player accounts appear once, and a guessed rival transaction ID is not enough
 to display rival books. The detail view prints only player-owned postings.
 `reconnecting_does_not_redisclose_the_sponsors_existing_knowledge` proves renewed channels omit already disclosed source records, reject repeated disclosures without mutation, and accept new records identically after restoration. Opportunity regressions prove typed legal-status source selection, irrelevant-topic rejection, and rejection of contextual-only conversion through both direct and atomic authorization paths while preserving valid discovery provenance and restored continuation.
 
+`deep_internal_lineage_preserves_duplicate_rejection_and_restored_continuation`
+exercises a 1,024-hop chain built through canonical information transfers,
+rejects repeated deliveries without mutation, and checks root and direct-edge
+identity plus byte-identical continued delivery after restore.
+`restore_rejects_malformed_internal_lineage_edges_and_duplicate_recipients`
+checks the real load boundary against missing, multiple, cyclic and forward
+parents and duplicate root recipients.
+
 `finance_play_tests.rs` proves ownership isolation, same-minute ordering,
 non-mutating rejection, real laundering fees, and save/restore stability.
 `laundering_fragmentation_cannot_reduce_the_authored_fee` compares equal-volume whole and fragmented transfers, checks actual ledger debits and credits and consumed capacity, and continues identically across save/restore. `finance_system/tests/laundering.rs` also verifies that a held transfer rejects a same-minute market capacity reduction caused by establishing a competing business, with the ledger and laundering consumption unchanged.
