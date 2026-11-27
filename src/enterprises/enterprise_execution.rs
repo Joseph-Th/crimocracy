@@ -138,6 +138,8 @@ pub enum EnterpriseError {
     },
     #[error("enterprise location {0:?} does not exist")]
     InvalidLocation(EnterpriseLocation),
+    #[error("enterprise at {0:?} requires a physical host with authored functions")]
+    PhysicalHostRequired(EnterpriseLocation),
     #[error("business {business} lacks required enterprise function {function:?}")]
     MissingBusinessFunction {
         business: BusinessId,

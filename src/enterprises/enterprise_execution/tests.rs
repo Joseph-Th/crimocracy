@@ -3454,6 +3454,19 @@ fn settlement_account_is_exclusive_to_one_enterprise_history() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
     let first = establish_protection(&registry, &mut fixture);
+    let organization = fixture.organization;
+    let venue = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Settlement account reuse venue",
+        BusinessKind::Hospitality,
+        BTreeSet::from([
+            BusinessFunction::CashIntensive,
+            BusinessFunction::MeetingSpace,
+            BusinessFunction::CustomerAccess,
+        ]),
+        BusinessOwner::Organization(organization),
+    );
 
     let error = match validate_establish_enterprise(
         &registry,
@@ -3462,7 +3475,7 @@ fn settlement_account_is_exclusive_to_one_enterprise_history() {
             kind: EnterpriseKind::Gambling,
             organization: fixture.organization,
             authority: fixture.authority,
-            location: fixture.location,
+            location: EnterpriseLocation::Business(venue),
             supporting_businesses: BTreeSet::new(),
             cash_account: fixture.cash,
             settlement_account: fixture.settlement,

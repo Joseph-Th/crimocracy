@@ -360,7 +360,10 @@ The economy client also exposes manual storefront suspension/resumption and
 district-wide enterprises backed by zero or more actual owned support businesses.
 A racket with required host functions cannot be started at a district-only
 location; all account, delegation, infrastructure and settlement checks remain
-canonical. Suspended business books keep their laundering-window history, and
+canonical. `business_hosted_gambling_requires_concrete_venue_functions`
+proves that the production owner itself rejects a missing host without
+mutation, not merely the text adapter; preview and establishment commands
+exercise the same rejection. Suspended business books keep their laundering-window history, and
 active hosted or supporting rackets lock their own storefront dependencies.
 `economy_play_tests.rs` covers multi-support establishments, duplicate
 rejection, genuine daily settlement alongside business-hosted rackets, lifecycle

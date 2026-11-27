@@ -1012,6 +1012,26 @@ fn repeal_pivot_rackets_establish_through_distinct_production_networks() {
 fn business_hosted_gambling_requires_concrete_venue_functions() {
     let registry = build_registry();
     let mut fixture = make_test_enterprise_fixture();
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_eq!(
+        validate_establish_enterprise(
+            &registry,
+            &fixture.state,
+            EnterpriseDraft {
+                kind: EnterpriseKind::Gambling,
+                organization: fixture.organization,
+                authority: fixture.authority,
+                location: fixture.location,
+                supporting_businesses: BTreeSet::new(),
+                cash_account: fixture.cash,
+                settlement_account: fixture.settlement,
+            },
+        )
+        .err(),
+        Some(EnterpriseError::PhysicalHostRequired(fixture.location)),
+        "the canonical owner must reject gambling without a physical host"
+    );
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
     let neighborhood = match fixture.location {
         EnterpriseLocation::Neighborhood(id) => id,
         EnterpriseLocation::Business(_) => panic!("fixture should use neighborhood location"),

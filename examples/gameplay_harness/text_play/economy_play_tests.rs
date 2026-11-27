@@ -1258,13 +1258,17 @@ fn text_play_district_racket_settles_and_restores_with_original_business_racket(
     assert_eq!(before, snapshot(&registry, &session));
     for command in [
         format!("start-racket gambling district-1 {cash} {settlement}"),
+        format!("preview-racket gambling district-1 {cash} {settlement}"),
         format!("start-racket protection district-99 {cash} {settlement}"),
         format!("start-racket protection district-1 {cash} account-10"),
         format!("start-racket protection district-1 {cash} {settlement} business-1"),
         format!("start-racket protection 1 {cash} {settlement}"),
         format!("start-racket protection district-1 {cash} {settlement} 3 3"),
     ] {
-        assert!(session.execute(&command).is_err(), "{command} must reject");
+        let error = session.execute(&command).unwrap_err();
+        if command.contains("gambling district-1") {
+            assert!(error.contains("requires a physical host"), "{error}");
+        }
         assert_eq!(
             before,
             snapshot(&registry, &session),

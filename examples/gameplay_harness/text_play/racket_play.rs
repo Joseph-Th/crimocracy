@@ -362,16 +362,6 @@ impl Session<'_> {
             "start-racket" | "preview-racket" => {
                 let kind = parse_enterprise_kind(words[1])?;
                 let location = if words[2].starts_with("district-") {
-                    if !self
-                        .registry
-                        .get_enterprise(kind)
-                        .required_business_functions()
-                        .is_empty()
-                    {
-                        return Err(format!(
-                            "{kind:?} requires a physical host with authored functions; use business-N"
-                        ));
-                    }
                     let raw = parse_number(words[2], "district")?;
                     let district = state
                         .world()

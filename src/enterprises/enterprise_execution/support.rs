@@ -116,7 +116,11 @@ fn validate_business_location_requirements(
     location: EnterpriseLocation,
 ) -> Result<(), EnterpriseError> {
     let EnterpriseLocation::Business(business_id) = location else {
-        return Ok(());
+        return if definition.required_business_functions().is_empty() {
+            Ok(())
+        } else {
+            Err(EnterpriseError::PhysicalHostRequired(location))
+        };
     };
     let business = state
         .world
