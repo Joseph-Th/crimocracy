@@ -299,9 +299,32 @@ fn choose_plan<'r>(
         }
     }
 
+    // Reconnaissance is preparation for this gang's commercial strike, not
+    // a separate autonomous objective. Do not repeatedly commission watches
+    // while no available coordinator and entry specialist can use the result.
+    // Cache the feasible strike rosters for the target-selection pass below.
+    let mut crews = BTreeMap::new();
+    for &manager in managers {
+        crews.insert(
+            (OperationKind::Sabotage, manager),
+            crew(
+                registry,
+                state,
+                organization,
+                manager,
+                OperationKind::Sabotage,
+                scheduled_for,
+            ),
+        );
+    }
+    if !crews.values().any(Option::is_some) {
+        return None;
+    }
+    // The observation must remain usable by the operation that consumes it,
+    // regardless of the intelligence lifetime authored for the scouting kind.
     let age_limit = u64::from(
         registry
-            .get_operation(OperationKind::Surveillance)
+            .get_operation(OperationKind::Sabotage)
             .execution()
             .max_intelligence_age()
             .as_minutes(),
@@ -451,7 +474,6 @@ fn choose_plan<'r>(
     // Crew feasibility depends on the operation kind and manager, not the target.
     // The whole selection is read-only, so even a failed booking check can be
     // reused while considering alternate storefronts.
-    let mut crews = BTreeMap::new();
     for (_, _, _, id, name, kind) in candidates {
         let target = EntityRef::Business(id);
         let objective = if kind == OperationKind::Surveillance {

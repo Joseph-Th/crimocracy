@@ -1244,6 +1244,82 @@ fn rival_without_operational_authority_cannot_launch_pressure() {
 }
 
 #[test]
+fn rival_does_not_scout_a_market_it_cannot_strike() {
+    let Fixture {
+        registry,
+        mut state,
+        rival,
+        competitor,
+        manager,
+        ..
+    } = fixture();
+    let former_specialist = state
+        .world()
+        .characters_in_organization(rival)
+        .find(|person| person.id() != manager)
+        .unwrap()
+        .id();
+    crate::world::world_system::validate_reassign_character(&state, former_specialist, None, None)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Watch-only investigator".into(),
+            organization: Some(rival),
+            supervisor: Some(manager),
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::Surveillance, rating(100))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+
+    let mut replay = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    for state in [&mut state, &mut replay] {
+        assert!(
+            next_day(&registry, state).autonomous_operations.is_empty(),
+            "a watch without any available entry specialist cannot advance a sabotage campaign"
+        );
+        assert!(
+            state
+                .operations()
+                .operations_for_organization(rival)
+                .next()
+                .is_none()
+        );
+        insert_character(
+            state,
+            CharacterDraft {
+                name: "New entry specialist".into(),
+                organization: Some(rival),
+                supervisor: Some(manager),
+                autonomy: AutonomyLevel::Broad,
+                capabilities: BTreeMap::from([(CapabilityKind::Burglary, rating(100))]),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let tick = next_day(&registry, state);
+        assert_eq!(tick.autonomous_operations.len(), 1);
+        let watch = state
+            .operations()
+            .get_operation(tick.autonomous_operations[0])
+            .unwrap();
+        assert_eq!(watch.kind(), OperationKind::Surveillance);
+        assert_eq!(watch.objective().business_target(), Some(competitor));
+        crate::core::invariants::validate_invariants(state);
+    }
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
+}
+
+#[test]
 fn rival_planner_rejects_untrained_scout() {
     let Fixture {
         registry,

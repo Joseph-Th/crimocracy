@@ -7,7 +7,9 @@
 
 use super::{DecisionError, DecisionRequestOutcome, insert_pending_decision_request};
 use crate::core::attention::AttentionClass;
-use crate::core::id::{BusinessId, DecisionRequestId, NeighborhoodId, OrganizationId};
+use crate::core::id::{
+    BusinessId, CharacterId, DecisionRequestId, EnterpriseId, NeighborhoodId, OrganizationId,
+};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimTime, is_day_boundary};
 use crate::decisions::{
@@ -15,6 +17,7 @@ use crate::decisions::{
     DecisionStatus, ProtectionDemandContext, build_cancellation,
 };
 use crate::economy::business_economy_system::resolve_business_gross_potential;
+use crate::enterprises::EnterpriseRecord;
 use crate::finance::finance_system::{
     ValidatedLedgerTransaction, validate_open_accounts, validate_record_transaction,
     validate_record_transaction_with_openings,
@@ -25,11 +28,10 @@ use crate::finance::{
     Money,
 };
 use crate::registry::Registry;
-use crate::world::territory_conflict::{
-    DEFENSIVE_ADVANTAGE, active_district_force, local_defensive_forces,
-};
+use crate::world::territory_conflict::{DEFENSIVE_ADVANTAGE, local_defensive_forces};
 use crate::world::territory_influence::active_standstill;
 use crate::world::{BusinessOwner, OrganizationKind};
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const PROTECTION_DAYS: u64 = 30;
@@ -158,46 +160,68 @@ fn offer_cents(registry: &Registry, state: &AppState, shops: &[BusinessId]) -> i
     i64::try_from(monthly.clamp(5_000, 1_500_000)).expect("bounded demand")
 }
 
-/// Share the live coercive basis between offer creation and acceptance.
-/// An old request cannot authorize a payment after the rival loses local force,
-/// the defender becomes strong enough, or the parties agree to a standstill.
+/// Aggregate actual local force and the strongest available named requester
+/// together. Both new offers and held-payment validation use this live projection.
+#[derive(Default)]
+struct CoercivePresence {
+    force: u32,
+    requester: Option<(u16, Reverse<EnterpriseId>, CharacterId)>,
+}
+
+impl CoercivePresence {
+    fn record(&mut self, state: &AppState, racket: &EnterpriseRecord) {
+        self.force = self.force.saturating_add(u32::from(racket.associates()));
+        if state
+            .legal()
+            .active_arrest_for_character(racket.manager())
+            .is_none()
+        {
+            let candidate = (racket.associates(), Reverse(racket.id()), racket.manager());
+            self.requester = self.requester.max(Some(candidate));
+        }
+    }
+
+    fn eligible_requester(
+        &self,
+        state: &AppState,
+        attacker: OrganizationId,
+        defender: OrganizationId,
+        district: NeighborhoodId,
+        defense: u32,
+    ) -> Option<CharacterId> {
+        if self.force <= defense.saturating_add(DEFENSIVE_ADVANTAGE)
+            || active_standstill(state, attacker, district)
+                .is_some_and(|treaty| treaty.counterparty == defender)
+        {
+            return None;
+        }
+        self.requester.map(|(_, _, manager)| manager)
+    }
+}
+
 fn coercive_requester(
     state: &AppState,
     attacker: OrganizationId,
     defender: OrganizationId,
     district: NeighborhoodId,
     defense: u32,
-) -> Option<(crate::core::id::CharacterId, u32)> {
-    if active_standstill(state, attacker, district)
-        .is_some_and(|treaty| treaty.counterparty == defender)
-    {
-        return None;
-    }
-    let force = active_district_force(state, attacker, district);
-    if force <= defense.saturating_add(DEFENSIVE_ADVANTAGE) {
-        return None;
-    }
-    let requester = state
+) -> Option<CharacterId> {
+    let mut presence = CoercivePresence::default();
+    for racket in state
         .enterprises()
         .active_for_organization(attacker)
         .filter(|racket| racket.location().neighborhood(state.world()) == Some(district))
-        .filter(|racket| {
-            state
-                .legal()
-                .active_arrest_for_character(racket.manager())
-                .is_none()
-        })
-        .max_by_key(|racket| (racket.associates(), std::cmp::Reverse(racket.id())))
-        .map(|racket| racket.manager())?;
-    Some((requester, force))
+    {
+        presence.record(state, racket);
+    }
+    presence.eligible_requester(state, attacker, defender, district, defense)
 }
 
 struct Candidate {
     district: NeighborhoodId,
     attacker: OrganizationId,
-    requester: crate::core::id::CharacterId,
+    requester: CharacterId,
     business: BusinessId,
-    amount: Money,
     force: u32,
     defense: u32,
 }
@@ -216,35 +240,57 @@ pub(crate) fn apply_due_protection_demands(
         return Vec::new();
     };
     expire_unanswered_offers(state, defender);
-    let shops = active_shops(state, defender);
+    let mut shops = active_shops(state, defender);
+    shops.retain(|district, _| {
+        state
+            .decisions()
+            .pending_protection_demand(*district)
+            .is_none()
+    });
     if shops.is_empty() {
         return Vec::new();
+    }
+    // Group only operating rival rackets in eligible commercial wards, rather
+    // than scanning each gang's entire active footprint again for every ward.
+    let mut local_presence =
+        BTreeMap::<NeighborhoodId, BTreeMap<OrganizationId, CoercivePresence>>::new();
+    for racket in state.enterprises().active_enterprises() {
+        let attacker = racket.organization();
+        if attacker == defender
+            || state
+                .world()
+                .get_organization(attacker)
+                .is_none_or(|organization| organization.kind() != OrganizationKind::Criminal)
+        {
+            continue;
+        }
+        let Some(district) = racket.location().neighborhood(state.world()) else {
+            continue;
+        };
+        if shops.contains_key(&district) {
+            local_presence
+                .entry(district)
+                .or_default()
+                .entry(attacker)
+                .or_default()
+                .record(state, racket);
+        }
     }
     let defenses = local_defensive_forces(state, defender);
     // Even the original two storefronts become vulnerable if their criminal
     // workforce leaves and a rival actually takes a stronger local position.
     // Legitimate ownership alone is never proof of defensible territory.
     let mut candidates = Vec::new();
-    for (district, holdings) in shops {
-        if state
-            .decisions()
-            .pending_protection_demand(district)
-            .is_some()
-        {
-            continue;
-        }
+    for (district, rivals) in local_presence {
+        let holdings = &shops[&district];
         let defense = defenses.get(&district).copied().unwrap_or_default().total();
-        let amount = Money::from_cents(offer_cents(registry, state, &holdings));
         let Some(business) = holdings.first().copied() else {
             continue;
         };
-        for rival in state.world().organizations() {
-            if rival.id() == defender || rival.kind() != OrganizationKind::Criminal {
-                continue;
-            }
+        for (attacker, presence) in rivals {
             if let Some(previous) = state
                 .decisions()
-                .latest_protection_demand(district, rival.id())
+                .latest_protection_demand(district, attacker)
             {
                 let (since, interval) = match previous.resolution() {
                     Some(resolution) if resolution.response() == DecisionResponse::Approve => {
@@ -259,16 +305,15 @@ pub(crate) fn apply_due_protection_demands(
                     continue;
                 }
             }
-            if let Some((requester, force)) =
-                coercive_requester(state, rival.id(), defender, district, defense)
+            if let Some(requester) =
+                presence.eligible_requester(state, attacker, defender, district, defense)
             {
                 candidates.push(Candidate {
                     district,
-                    attacker: rival.id(),
+                    attacker,
                     requester,
                     business,
-                    amount,
-                    force,
+                    force: presence.force,
                     defense,
                 });
             }
@@ -276,16 +321,13 @@ pub(crate) fn apply_due_protection_demands(
     }
     // One demand citywide per day avoids turning an exposed commercial portfolio
     // into a simultaneous screenful of unrelated modal choices.
-    candidates.sort_unstable_by_key(|offer| {
-        (
-            std::cmp::Reverse(offer.force),
-            offer.district,
-            offer.attacker,
-        )
-    });
-    let Some(offer) = candidates.into_iter().next() else {
+    let Some(offer) = candidates
+        .into_iter()
+        .min_by_key(|offer| (Reverse(offer.force), offer.district, offer.attacker))
+    else {
         return Vec::new();
     };
+    let amount = Money::from_cents(offer_cents(registry, state, &shops[&offer.district]));
     let rival = state
         .world()
         .get_organization(offer.attacker)
@@ -300,13 +342,13 @@ pub(crate) fn apply_due_protection_demands(
             offer.attacker,
             offer.district,
             offer.business,
-            offer.amount,
+            amount,
         )),
         attention: AttentionClass::Exception,
         summary: format!(
             "{} has established a local street presence and demands {} for 30 days of protection over your businesses in {}. You can currently muster {} local defenders across rackets and available muscle. Approve to pay from accounted funds, or reject and face attempts to displace your commercial foothold. The rival waits one day; the unpaid offer expires after 30 days.",
             rival.name(),
-            format_money_cents(offer.amount.cents()),
+            format_money_cents(amount.cents()),
             ward.name(),
             offer.defense,
         ),
