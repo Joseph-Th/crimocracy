@@ -525,6 +525,46 @@ fn an_unskilled_captain_cannot_grow_their_capacity_by_hiring_more_workers() {
     let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
     assert_eq!(manager_workload(&restored, captain), Some(captain_load));
     validate_state_against_registry(&registry, &restored).unwrap();
+
+    // Tightening control of the captain overloads the executive without
+    // changing the captain's own work. Leadership must still be able to
+    // release workers and reduce daily costs while resolving the command issue.
+    crate::world::world_system::validate_set_character_autonomy(
+        &fixture.state,
+        fixture.organization,
+        captain,
+        AutonomyLevel::Guided,
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let overloaded = manager_workload(&fixture.state, boss).unwrap();
+    assert_eq!((overloaded.required, overloaded.available), (2, 1));
+    let mut replay =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&mut fixture.state, &mut replay] {
+        let before = bincode::serialize(state).unwrap();
+        assert_eq!(
+            validate_staff_enterprise(state, racket, 10).err(),
+            Some(EnterpriseError::ManagerWorkloadExceeded {
+                manager: boss,
+                required: 2,
+                available: 1,
+            })
+        );
+        assert_eq!(bincode::serialize(state).unwrap(), before);
+        validate_staff_enterprise(state, racket, 8)
+            .expect("releasing workers must not require spare command capacity")
+            .commit(state)
+            .unwrap();
+        assert_eq!(manager_workload(state, boss), Some(overloaded));
+        assert_eq!(manager_workload(state, captain).unwrap().required, 9);
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
 }
 
 #[test]

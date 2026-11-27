@@ -69,8 +69,7 @@ fn resolve_management_workload(
     state: &AppState,
     organization: OrganizationId,
     manager: crate::core::id::CharacterId,
-    proposal: Option<ManagedJob>,
-    proposing_captain: Option<crate::core::id::CharacterId>,
+    proposal: Option<(crate::core::id::CharacterId, ManagedJob)>,
     excluding: Option<EnterpriseId>,
     projected: &[ProjectedCommandJob],
 ) -> Result<ManagerWorkload, EnterpriseError> {
@@ -107,56 +106,43 @@ fn resolve_management_workload(
         associates = associates.saturating_add(workers);
         Ok(())
     };
-    for active in state
-        .enterprises()
-        .active_for_organization(organization)
-        .filter(|record| record.manager() == manager && Some(record.id()) != excluding)
-    {
-        visit(ManagedJob {
-            kind: active.kind(),
-            location: active.location(),
-            associates: active.associates(),
-            supporting_businesses: active.supporting_businesses().len(),
-        })?;
-    }
-    if let Some(job) = proposal {
-        visit(job)?;
-    }
-    for candidate in projected
-        .iter()
-        .filter(|candidate| candidate.organization == organization && candidate.captain == manager)
-    {
-        visit(ManagedJob {
-            kind: candidate.kind,
-            location: candidate.location,
-            associates: candidate.associates,
-            supporting_businesses: candidate.supporting_businesses,
-        })?;
-    }
-    // The superior commands only their direct *operating* branches, not every
-    // associate several levels down. An idle hire is not a criminal command
-    // obligation. Granting less autonomy requires twice as many supervisory
-    // decisions, making genuine delegation and intermediate leadership useful.
-    let mut reporting_branches = BTreeSet::new();
-    for active in state
+    let active_jobs = state
         .enterprises()
         .active_for_organization(organization)
         .filter(|record| Some(record.id()) != excluding)
-    {
-        if let Some(branch) = commanding_branch(state, manager, active.manager()) {
-            reporting_branches.insert(branch);
-        }
-    }
-    if let Some(captain) = proposing_captain
-        && let Some(branch) = commanding_branch(state, manager, captain)
-    {
-        reporting_branches.insert(branch);
-    }
-    for candidate in projected
+        .map(|record| {
+            (
+                record.manager(),
+                ManagedJob {
+                    kind: record.kind(),
+                    location: record.location(),
+                    associates: record.associates(),
+                    supporting_businesses: record.supporting_businesses().len(),
+                },
+            )
+        });
+    let projected_jobs = projected
         .iter()
         .filter(|candidate| candidate.organization == organization)
-    {
-        if let Some(branch) = commanding_branch(state, manager, candidate.captain) {
+        .map(|candidate| {
+            (
+                candidate.captain,
+                ManagedJob {
+                    kind: candidate.kind,
+                    location: candidate.location,
+                    associates: candidate.associates,
+                    supporting_businesses: candidate.supporting_businesses,
+                },
+            )
+        });
+    // Count direct work and operating reporting branches in one pass over
+    // current and proposed jobs. Idle hires create no command obligation.
+    // Tight or guided branches require more handholding than delegated ones.
+    let mut reporting_branches = BTreeSet::new();
+    for (captain, job) in active_jobs.chain(proposal).chain(projected_jobs) {
+        if captain == manager {
+            visit(job)?;
+        } else if let Some(branch) = commanding_branch(state, manager, captain) {
             reporting_branches.insert(branch);
         }
     }
@@ -209,7 +195,7 @@ pub fn manager_workload(
     manager: crate::core::id::CharacterId,
 ) -> Option<ManagerWorkload> {
     let organization = state.world().get_character(manager)?.organization()?;
-    resolve_management_workload(state, organization, manager, None, None, None, &[]).ok()
+    resolve_management_workload(state, organization, manager, None, None, &[]).ok()
 }
 
 /// Verify a complete same-minute expansion cohort against every real manager
@@ -238,8 +224,7 @@ pub(super) fn ensure_projected_command_jobs_fit(
         }
     }
     for (organization, manager) in impacted {
-        let load =
-            resolve_management_workload(state, organization, manager, None, None, None, jobs)?;
+        let load = resolve_management_workload(state, organization, manager, None, None, jobs)?;
         ensure_workload_fits(manager, load)?;
     }
     Ok(())
@@ -270,8 +255,7 @@ pub(crate) fn ensure_manager_capacity(
         state,
         organization,
         manager,
-        Some(job),
-        Some(manager),
+        Some((manager, job)),
         excluding,
         &[],
     )?;
@@ -290,8 +274,7 @@ pub(crate) fn ensure_manager_capacity(
             state,
             organization,
             supervisor,
-            None,
-            Some(manager),
+            Some((manager, job)),
             excluding,
             &[],
         )?;
@@ -380,26 +363,20 @@ fn select_overstretched_racket(
     manager: crate::core::id::CharacterId,
     workload: ManagerWorkload,
 ) -> Option<EnterpriseId> {
-    let own = state
-        .enterprises()
-        .enterprises()
-        .filter(|racket| racket.status() == EnterpriseStatus::Active && racket.manager() == manager)
-        .map(|racket| racket.id())
-        .max();
+    let organization = state.world().get_character(manager)?.organization()?;
+    let mut own = None;
+    let mut branches = BTreeMap::<crate::core::id::CharacterId, Vec<EnterpriseId>>::new();
+    for racket in state.enterprises().active_for_organization(organization) {
+        if racket.manager() == manager {
+            own = own.max(Some(racket.id()));
+        } else if let Some(branch) = commanding_branch(state, manager, racket.manager()) {
+            branches.entry(branch).or_default().push(racket.id());
+        }
+    }
     if workload.required.saturating_sub(workload.reporting_duties) > workload.available
         && own.is_some()
     {
         return own;
-    }
-    let mut branches = BTreeMap::<crate::core::id::CharacterId, Vec<EnterpriseId>>::new();
-    for racket in state
-        .enterprises()
-        .enterprises()
-        .filter(|racket| racket.status() == EnterpriseStatus::Active)
-    {
-        if let Some(branch) = commanding_branch(state, manager, racket.manager()) {
-            branches.entry(branch).or_default().push(racket.id());
-        }
     }
     let smallest_branch = branches.values().min_by_key(|rackets| {
         (
@@ -448,18 +425,23 @@ pub fn validate_staff_enterprise(
         if record.next_cycle_at().is_some_and(|due| due <= state.now()) {
             return Err(EnterpriseError::EnterpriseStaffingCycleDue(enterprise));
         }
-        ensure_manager_capacity(
-            state,
-            record.organization(),
-            record.manager(),
-            ManagedJob {
-                kind: record.kind(),
-                location: record.location(),
-                associates,
-                supporting_businesses: record.supporting_businesses().len(),
-            },
-            Some(enterprise),
-        )?;
+        // Releasing workers reduces the captain's own duties and leaves every
+        // superior's operating reporting lines unchanged. It must remain possible
+        // while repairing an already overloaded command chain.
+        if associates > record.associates() {
+            ensure_manager_capacity(
+                state,
+                record.organization(),
+                record.manager(),
+                ManagedJob {
+                    kind: record.kind(),
+                    location: record.location(),
+                    associates,
+                    supporting_businesses: record.supporting_businesses().len(),
+                },
+                Some(enterprise),
+            )?;
+        }
     }
     Ok(ValidatedEnterpriseStaffing {
         enterprise,
