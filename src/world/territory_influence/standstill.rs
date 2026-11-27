@@ -83,6 +83,8 @@ pub enum TerritoryNegotiationError {
     MissingDistrict(NeighborhoodId),
     #[error("both sides must be different criminal organizations")]
     InvalidParties,
+    #[error("both gangs require a sole available executive to negotiate a standstill")]
+    ExecutiveUnavailable,
     #[error(
         "both gangs need an active or recently displaced racket in the disputed district to negotiate"
     )]
@@ -176,6 +178,15 @@ fn validate_standstill_terms(
     let rival = count(counterparty);
     if own == 0 || rival == 0 {
         return Err(TerritoryNegotiationError::NoContestedPresence);
+    }
+    // A local captain can fight, but only unified, available executive
+    // authority can bind an entire organization. All negotiation routes
+    // (including held player orders) must satisfy the same rule.
+    if [initiator, counterparty]
+        .into_iter()
+        .any(|party| sole_available_executive(state, party).is_none())
+    {
+        return Err(TerritoryNegotiationError::ExecutiveUnavailable);
     }
     // Equal rivals and rivals facing stronger encroachment can settle.
     // A dominant rival will not freeze an overwhelming advantage for free.
@@ -416,9 +427,8 @@ pub(crate) fn standstill_tribute_matches(
 /// Gangs which actually fought, and were left with a live or recently
 /// displaced local claim, may settle the feud on a later daily boundary.
 /// The defeated NPC proposes first, including a real treasury payment if
-/// the victor has overwhelming remaining strength. Both NPC parties require
-/// a sole available executive: a local captain's authority to fight does not
-/// authorize an organization-wide negotiated commitment. Player organizations
+/// the victor has overwhelming remaining strength. The canonical negotiation
+/// validator checks both parties' executive authority. Player organizations
 /// never get an agreement signed for them: negotiation is their choice.
 pub(crate) fn apply_due_autonomous_territory_standstills(
     state: &mut AppState,
@@ -477,12 +487,6 @@ pub(crate) fn apply_due_autonomous_territory_standstills(
         let Some((initiator, counterparty)) = parties else {
             continue;
         };
-        if [initiator, counterparty]
-            .into_iter()
-            .any(|party| sole_available_executive(state, party).is_none())
-        {
-            continue;
-        }
         let plan = match validate_negotiate_standstill(state, initiator, counterparty, district) {
             Ok(plan) => Ok(plan),
             Err(TerritoryNegotiationError::TributeRequired { required_cents, .. }) => {

@@ -120,7 +120,9 @@ One outcome suspends one racket through the canonical enterprise owner.
 
 The private `world::territory_influence::standstill` owner validates bilateral 30-day standstills and owns their history-backed lifecycle, separate from the read-only economic influence resolver. Competing
 active rackets or a racket displaced by a recent territorial clash establish
-standing to negotiate. A stronger counterparty may require street-cash tribute,
+standing to negotiate. Both organizations require a sole undetained executive
+at validation and commit, regardless of whether the player or an autonomous gang
+initiates the agreement. A stronger counterparty may require street-cash tribute,
 graduated by its local racket advantage; any offered tribute is one
 balanced, preflighted inter-organization ledger payment drawn from the paying
 gang's combined spendable street-cash pockets, never invented cash.

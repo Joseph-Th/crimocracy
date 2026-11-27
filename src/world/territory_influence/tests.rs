@@ -778,6 +778,58 @@ fn negotiated_standstill_is_symmetric_durable_and_expires_without_changing_exist
     ));
     assert!(active_standstill(&fixture.state, fixture.dominant, fixture.neighborhood).is_none());
 
+    // A held player-facing treaty must not bind a rival whose command splits
+    // before signature. The same authority rule applies to either party.
+    for (organization, executive) in [
+        (fixture.dominant, fixture.manager),
+        (fixture.challenger, rival_manager),
+    ] {
+        let held = validate_negotiate_standstill(
+            &fixture.state,
+            fixture.dominant,
+            fixture.challenger,
+            fixture.neighborhood,
+        )
+        .unwrap();
+        let competing_root = insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: "Competing executive".to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Broad,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let before = bincode::serialize(&fixture.state).unwrap();
+        assert_eq!(
+            validate_negotiate_standstill(
+                &fixture.state,
+                fixture.dominant,
+                fixture.challenger,
+                fixture.neighborhood,
+            )
+            .err(),
+            Some(TerritoryNegotiationError::ExecutiveUnavailable),
+        );
+        assert_eq!(
+            held.commit(&mut fixture.state),
+            Err(TerritoryNegotiationError::ExecutiveUnavailable),
+        );
+        assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+        crate::world::world_system::validate_set_character_supervisor(
+            &fixture.state,
+            competing_root,
+            Some(executive),
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    }
+
     let agreed = validate_negotiate_standstill(
         &fixture.state,
         fixture.dominant,
