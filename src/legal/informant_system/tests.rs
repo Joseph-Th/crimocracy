@@ -387,6 +387,179 @@ fn autonomous_informants_disclose_one_case_evidence_per_observation_root() {
     validate_invariants(&restored);
 }
 
+#[test]
+fn contact_channels_do_not_create_independent_informant_observations() {
+    use crate::contacts::contact_system::{
+        InstitutionalContactDraft, validate_contact_disclosure, validate_establish_contact,
+    };
+    use crate::social::relationship_system::validate_set_relationship;
+    use crate::social::{RelationshipDimensions, RelationshipLevel};
+
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let rival = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Rival crew".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    let institution = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Commercial institution".to_owned(),
+            kind: OrganizationKind::Commercial,
+        },
+    )
+    .unwrap();
+    let mut character = |name: &str, organization| {
+        insert_character(
+            &mut fixture.state,
+            CharacterDraft {
+                name: name.to_owned(),
+                organization: Some(organization),
+                supervisor: None,
+                autonomy: AutonomyLevel::Guided,
+                capabilities: BTreeMap::new(),
+                traits: BTreeSet::new(),
+                drives: BTreeMap::new(),
+            },
+        )
+        .unwrap()
+    };
+    let second = character("Second handler", rival);
+    let witness = character("Institutional observer", institution);
+    let original = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(witness),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::Personnel,
+            source_entity: None,
+            subject: EntityRef::Organization(fixture.criminal),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "Observed the crew's personnel directly.".to_owned(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let mut copies = Vec::new();
+    for (sponsor, member) in [(fixture.criminal, fixture.member), (rival, second)] {
+        let relationship = RelationshipDimensions {
+            trust: RelationshipLevel::try_new(70).unwrap(),
+            ..RelationshipDimensions::zero()
+        };
+        validate_set_relationship(&fixture.state, member, witness, relationship)
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+        let contact = validate_establish_contact(
+            &fixture.state,
+            InstitutionalContactDraft {
+                sponsor,
+                handler: member,
+                contact: witness,
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        let disclosure = validate_contact_disclosure(&fixture.state, contact, original)
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap();
+        let reported = fixture
+            .state
+            .contacts()
+            .get_disclosure(disclosure)
+            .unwrap()
+            .disclosed_information();
+        let copy = validate_information_transfer(
+            &fixture.state,
+            InformationTransferDraft {
+                source: reported,
+                recipient: KnowledgeHolder::Character(member),
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        let informant = validate_establish_informant(
+            &fixture.state,
+            InformantDraft {
+                character: member,
+                handler: fixture.police,
+            },
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+        copies.push((informant, copy));
+    }
+    let original_informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: witness,
+            handler: fixture.police,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    let disclosures = apply_informant_disclosures(&mut fixture.state).unwrap();
+    assert_eq!(
+        disclosures.len(),
+        1,
+        "contact copies of the same fact are not corroboration"
+    );
+    assert_eq!(
+        apply_informant_disclosures(&mut restored).unwrap(),
+        disclosures
+    );
+    let disclosure = fixture
+        .state
+        .legal()
+        .informant_disclosures()
+        .next()
+        .unwrap();
+    assert_eq!(
+        disclosure.source_information(),
+        original,
+        "prefer the first-hand report"
+    );
+    assert_eq!(disclosure.informant(), original_informant);
+    let before = bincode::serialize(&fixture.state).unwrap();
+    for (informant, information) in copies {
+        assert_eq!(
+            validate_record_informant_disclosure(
+                &fixture.state,
+                InformantDisclosureDraft {
+                    informant,
+                    investigation: fixture.investigation,
+                    source_information: information,
+                }
+            )
+            .unwrap_err(),
+            InformantError::DuplicateDisclosure {
+                investigation: fixture.investigation,
+                information,
+                disclosure: disclosures[0],
+            }
+        );
+    }
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    assert_eq!(bincode::serialize(&restored).unwrap(), before);
+    validate_invariants(&fixture.state);
+}
+
 fn arrest_high_safety_detainee(
     registry: &crate::registry::Registry,
     fixture: &mut Fixture,
@@ -619,6 +792,213 @@ fn disclosure_requires_personal_knowledge_and_creates_provenance_evidence() {
     ));
     validate_state(&fixture.state).expect("canonical disclosure state should validate");
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn procedural_knowledge_cannot_supply_missing_custody_corroboration() {
+    use crate::intelligence::intelligence_system::validate_record_information_with_signal;
+    use crate::intelligence::{InformationSignal, LegalPersonStatusSignal};
+    use crate::legal::witness_system::validate_register_case_witness;
+    use crate::legal::{CaseWitnessDraft, WitnessCooperation};
+
+    let registry = build_registry();
+    let mut fixture = fixture();
+    let suspect = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Witness in an unrelated inquiry".to_owned(),
+            organization: Some(fixture.criminal),
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_register_case_witness(
+        &fixture.state,
+        CaseWitnessDraft {
+            investigation: fixture.investigation,
+            witness: suspect,
+            subject: EntityRef::Organization(fixture.criminal),
+            cooperation: WitnessCooperation::Cooperative,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let inquiry = validate_open_investigation(
+        &fixture.state,
+        InvestigationDraft {
+            owner: fixture.police,
+            title: "Separate inquiry into a named person".to_owned(),
+            subjects: BTreeSet::from([EntityRef::Character(suspect)]),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    validate_add_evidence(
+        &fixture.state,
+        EvidenceDraft {
+            investigation: inquiry,
+            custodian: fixture.police,
+            subject: EntityRef::Character(suspect),
+            origin: None,
+            kind: EvidenceKind::Document,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Admissible,
+            discovered_at: fixture.state.now(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let informant = validate_establish_informant(
+        &fixture.state,
+        InformantDraft {
+            character: fixture.member,
+            handler: fixture.police,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let information = validate_record_information_with_signal(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(fixture.member),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(suspect),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The person is registered as a witness in a separate inquiry.".to_owned(),
+        },
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+            investigation: fixture.investigation,
+        }),
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+
+    // Unstructured legal news must not evade the topic gate either.
+    let legal_news = validate_record_information(
+        &fixture.state,
+        InformationDraft {
+            holder: KnowledgeHolder::Character(fixture.member),
+            source_kind: InformationSourceKind::DirectObservation,
+            topic: InformationTopic::LegalActivity,
+            source_entity: None,
+            subject: EntityRef::Character(suspect),
+            observed_at: fixture.state.now(),
+            reliability: Reliability::DirectAccess,
+            specificity: Specificity::Precise,
+            summary: "The person has spoken to counsel.".to_owned(),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+
+    let mut restored =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let first = run_tick(&registry, state);
+        let second = run_tick(&registry, state);
+        assert!(
+            first.evidence_arrests.is_empty() && second.evidence_arrests.is_empty(),
+            "a witness-registration fact is not evidence of the witness committing a crime"
+        );
+        assert!(state.legal().active_arrest_for_character(suspect).is_none());
+        assert!(
+            state
+                .legal()
+                .informant_disclosures_for_investigation(inquiry)
+                .next()
+                .is_none()
+        );
+        let before = bincode::serialize(state).unwrap();
+        for source_information in [information, legal_news] {
+            assert_eq!(
+                validate_record_informant_disclosure(
+                    state,
+                    InformantDisclosureDraft {
+                        informant,
+                        investigation: inquiry,
+                        source_information,
+                    }
+                )
+                .unwrap_err(),
+                InformantError::ProceduralInformation(source_information),
+            );
+        }
+        assert_eq!(before, bincode::serialize(state).unwrap());
+
+        // A distinct observation of the suspect's criminal work is still actionable.
+        let conduct = validate_record_information(
+            state,
+            InformationDraft {
+                holder: KnowledgeHolder::Character(fixture.member),
+                source_kind: InformationSourceKind::DirectObservation,
+                topic: InformationTopic::Personnel,
+                source_entity: None,
+                subject: EntityRef::Character(suspect),
+                observed_at: state.now(),
+                reliability: Reliability::DirectAccess,
+                specificity: Specificity::Precise,
+                summary:
+                    "The source personally observed the suspect doing the crew's criminal work."
+                        .to_owned(),
+            },
+        )
+        .unwrap()
+        .commit(state)
+        .unwrap();
+        run_tick(&registry, state);
+        let disclosure = state
+            .legal()
+            .informant_disclosures_for_investigation(inquiry)
+            .next()
+            .unwrap();
+        assert_eq!(disclosure.source_information(), conduct);
+
+        // A same-layout save substitution cannot convert a true procedural fact into evidence.
+        let mut forged = disclosure.clone();
+        forged.source_information = information;
+        let original_bytes = bincode::serialize(disclosure).unwrap();
+        let replacement = bincode::serialize(&forged).unwrap();
+        let mut save_bytes = bincode::serialize(&build_save(&registry, state).unwrap()).unwrap();
+        let matches: Vec<_> = save_bytes
+            .windows(original_bytes.len())
+            .enumerate()
+            .filter_map(|(index, window)| (window == original_bytes).then_some(index))
+            .collect();
+        assert_eq!(matches.len(), 1);
+        let start = matches[0];
+        save_bytes[start..start + replacement.len()].copy_from_slice(&replacement);
+        let corrupted = bincode::deserialize(&save_bytes).unwrap();
+        assert!(matches!(
+            restore_save(&registry, corrupted),
+            Err(crate::core::persistence::LoadError::InvalidState(
+                crate::core::invariants::StateValidationError::InvalidInformantDisclosure { .. }
+            ))
+        ));
+
+        let tick = run_tick(&registry, state);
+        assert_eq!(tick.evidence_arrests.len(), 1);
+        assert!(state.legal().active_arrest_for_character(suspect).is_some());
+        build_save(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
 }
 
 #[test]

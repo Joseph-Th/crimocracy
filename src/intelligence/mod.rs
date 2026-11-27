@@ -338,11 +338,14 @@ pub struct IntelligenceState {
     by_subject: BTreeMap<EntityRef, BTreeSet<InformationId>>,
     #[serde(skip)]
     derived_by_source: BTreeMap<InformationId, BTreeSet<InformationId>>,
-    /// Only internal copies need a cached root; all other observations root at themselves.
+    /// Transfer deduplication treats a contact disclosure as a distinct delivery.
     #[serde(skip)]
     internal_root_by_information: BTreeMap<InformationId, InformationId>,
     #[serde(skip)]
     internal_transfer_by_root_recipient: BTreeMap<(InformationId, KnowledgeHolder), InformationId>,
+    /// Evidence provenance follows contact deliveries back to the underlying observation.
+    #[serde(skip)]
+    contact_observation_roots: BTreeMap<InformationId, InformationId>,
 }
 
 impl IntelligenceState {
@@ -357,6 +360,7 @@ impl IntelligenceState {
         self.derived_by_source.clear();
         self.internal_root_by_information.clear();
         self.internal_transfer_by_root_recipient.clear();
+        self.contact_observation_roots.clear();
         for record in self.records.values() {
             let id = record.id();
             self.by_holder
@@ -387,6 +391,9 @@ impl IntelligenceState {
                 self.internal_root_by_information.insert(id, root);
                 self.internal_transfer_by_root_recipient
                     .insert((root, record.holder()), id);
+            }
+            if let Some(root) = self.derive_contact_observation_root(record) {
+                self.contact_observation_roots.insert(id, root);
             }
         }
     }
@@ -446,6 +453,33 @@ impl IntelligenceState {
         } else {
             Some(source)
         }
+    }
+
+    /// Original factual observation, across both internal transfers and institutional contacts.
+    /// The two cached projections avoid replaying long derivation chains during evidence checks.
+    pub(crate) fn observation_root(&self, source: InformationId) -> Option<InformationId> {
+        let root = self.internal_report_root(source)?;
+        if self
+            .records
+            .get(&root)?
+            .source_kind()
+            .is_contact_derivation()
+        {
+            self.contact_observation_roots.get(&root).copied()
+        } else {
+            Some(root)
+        }
+    }
+
+    fn derive_contact_observation_root(&self, record: &InformationRecord) -> Option<InformationId> {
+        if !record.source_kind().is_contact_derivation() || record.derived_from().len() != 1 {
+            return None;
+        }
+        let parent = *record.derived_from().first()?;
+        if parent >= record.id() {
+            return None;
+        }
+        self.observation_root(parent)
     }
 
     fn derive_internal_copy_root(&self, record: &InformationRecord) -> Option<InformationId> {
@@ -537,6 +571,12 @@ impl IntelligenceState {
                 "duplicate internal information lineage delivered to one holder"
             );
         }
+        if record.source_kind().is_contact_derivation() {
+            let root = self
+                .derive_contact_observation_root(&record)
+                .expect("contact disclosure must derive from an existing observation");
+            self.contact_observation_roots.insert(id, root);
+        }
         let previous = self.records.insert(id, record);
         debug_assert!(
             previous.is_none(),
@@ -558,6 +598,7 @@ impl IntelligenceState {
             && self.derived_source_index_is_consistent(expected.source_entries)
             && self.internal_root_by_information.len() == expected.internal_transfers
             && self.internal_transfer_by_root_recipient.len() == expected.internal_transfers
+            && self.contact_observation_roots.len() == expected.contact_derivations
     }
 
     fn record_indexes_are_consistent(
@@ -620,6 +661,15 @@ impl IntelligenceState {
             }
             expected.internal_transfers += 1;
         }
+        if record.source_kind().is_contact_derivation() {
+            // Missing or malformed authoritative provenance is diagnosed by information
+            // validation; an absent derived entry for it is not itself index corruption.
+            let root = self.derive_contact_observation_root(record);
+            if self.contact_observation_roots.get(&stored_id).copied() != root {
+                return false;
+            }
+            expected.contact_derivations += usize::from(root.is_some());
+        }
         true
     }
 
@@ -680,6 +730,7 @@ struct IntelligenceIndexCounts {
     subject_entries: usize,
     source_entries: usize,
     internal_transfers: usize,
+    contact_derivations: usize,
 }
 
 pub struct InformationDraft {

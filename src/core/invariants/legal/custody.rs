@@ -9,7 +9,8 @@ use crate::legal::arrest_system::{
     arrest_evidence_meets_threshold, custody_release_at, has_fresh_independent_custody_evidence,
 };
 use crate::legal::informant_system::{
-    informant_reliability, informant_strength, information_is_relevant_to_investigation,
+    informant_reliability, informant_strength, information_can_supply_case_evidence,
+    information_is_relevant_to_investigation,
 };
 use crate::legal::{
     Admissibility, ArrestStatus, EvidenceKind, InvestigationStatus, InvestigationWorkStatus,
@@ -257,12 +258,13 @@ pub(super) fn validate_informant_disclosures(
         )?;
         let root = state
             .intelligence
-            .internal_report_root(disclosure.source_information())
+            .observation_root(disclosure.source_information())
             .ok_or(StateValidationError::InvalidInformantDisclosure {
                 disclosure: disclosure.id(),
             })?;
         if investigation.owner() != informant.handler()
             || information.holder() != KnowledgeHolder::Character(informant.character())
+            || !information_can_supply_case_evidence(information)
             || !information_is_relevant_to_investigation(information, investigation)
             || information.recorded_at() > disclosure.disclosed_at()
             || disclosure.disclosed_at() < informant.established_at()

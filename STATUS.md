@@ -124,7 +124,7 @@ mismatched saves are rejected. Keep them in sync with the owners.
 
 The current authored content revision is 68.
 
-The current in-memory state schema version is 130.
+The current in-memory state schema version is 131.
 
 Compiled character capabilities, traits, and drives are limited to values consumed by current gameplay systems; design-document examples without a live mechanic are not persisted as inert character attributes. The compiled operation vocabulary likewise contains only objectives, constraints, and contingencies with corresponding execution inputs and outcomes. Legal-support policy has only the two executable states: case-by-case/manual handling and automatic retention. Independent recruitment can require approval, delegate without a cap, or delegate up to a total named roster target (zero pauses independent activity). The effective personnel mandate order can override the organization setting. Daily cohort planning counts actual accepted admissions against remaining room; held delegated tokens recheck the live roster at commit. Executive recruitment remains an explicit override, and changing a limit does not dismiss current members. The bounded policy and historical authority persist in the current schema. Unsupported tactical, governance, or policy axes are not represented as inert plan fields.
 

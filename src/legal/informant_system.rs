@@ -8,7 +8,9 @@ use crate::core::id::{
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::VersionCapacityError;
-use crate::intelligence::{KnowledgeHolder, Reliability, Specificity};
+use crate::intelligence::{
+    InformationRecord, InformationTopic, KnowledgeHolder, Reliability, Specificity,
+};
 use crate::legal::{
     Admissibility, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceKind,
     EvidenceRecord, EvidenceReliability, EvidenceStrength, InformantDisclosureDraft,
@@ -63,6 +65,8 @@ pub enum InformantError {
         information: InformationId,
         character: CharacterId,
     },
+    #[error("information {0} describes legal procedure, not evidence of criminal conduct")]
+    ProceduralInformation(InformationId),
     #[error(
         "information {information} about {subject:?} is unrelated to investigation {investigation}"
     )]
@@ -395,6 +399,9 @@ fn validate_disclosure_dependencies(
             character: informant.character(),
         });
     }
+    if !information_can_supply_case_evidence(information) {
+        return Err(InformantError::ProceduralInformation(information.id()));
+    }
     if !information_is_relevant_to_investigation(information, investigation) {
         return Err(InformantError::InformationCaseMismatch {
             information: draft.source_information,
@@ -414,7 +421,7 @@ fn validate_disclosure_dependencies(
     Ok(())
 }
 
-/// Different informants can hold internal-report copies of the very same observation.
+/// Different informants can hold internal or contact-derived copies of the same observation.
 /// A case may record that originating observation only once, regardless of who forwards it;
 /// separate first-hand observations remain separate information roots.
 fn find_disclosure_of_same_observation(
@@ -422,16 +429,24 @@ fn find_disclosure_of_same_observation(
     investigation: InvestigationId,
     information: InformationId,
 ) -> Option<&InformantDisclosureRecord> {
-    let root = state.intelligence.internal_report_root(information)?;
+    let root = state.intelligence.observation_root(information)?;
     state
         .legal
         .informant_disclosures_for_investigation(investigation)
         .find(|disclosure| {
             state
                 .intelligence
-                .internal_report_root(disclosure.source_information())
+                .observation_root(disclosure.source_information())
                 == Some(root)
         })
+}
+
+/// LegalActivity records describe the legal process (including witness registration,
+/// custody, counsel and case status), not conduct. Precise, reliable procedural knowledge
+/// must not become an independent incriminating statement just because it names a subject.
+/// Other topics retain their existing modeled evidentiary relevance and quality rules.
+pub(crate) fn information_can_supply_case_evidence(information: &InformationRecord) -> bool {
+    information.topic() != InformationTopic::LegalActivity
 }
 
 /// A confidential source may contribute only facts that actually belong in the target case.
@@ -440,7 +455,7 @@ fn find_disclosure_of_same_observation(
 /// predicate shared by validation, automation, and restore prevents unrelated personal knowledge
 /// from being converted into case evidence merely because the same institution owns both facts.
 pub(crate) fn information_is_relevant_to_investigation(
-    information: &crate::intelligence::InformationRecord,
+    information: &InformationRecord,
     investigation: &crate::legal::InvestigationRecord,
 ) -> bool {
     investigation.origin() == Some(information.subject())
@@ -593,10 +608,11 @@ fn resolve_informant_flip_chance(
     }
 }
 
-/// Informants disclose personally held information relevant to their handler's active
-/// cases. Relevance uses the same subject/origin predicate as the canonical disclosure validator,
+/// Informants disclose personally held evidentiary information relevant to their handler's
+/// active cases. Procedural intelligence is excluded before building the evidence cohort.
+/// Relevance uses the same subject/origin predicate as the canonical disclosure validator,
 /// so institution-authored cases and enterprise-origin vice inquiries are not arbitrarily excluded.
-/// Each case receives an originating observation at most once, even across internal reports.
+/// Each case receives an originating observation at most once, even across contact and internal reports.
 pub(crate) fn apply_informant_disclosures(
     state: &mut AppState,
 ) -> Result<Vec<InformantDisclosureId>, InformantError> {
@@ -606,7 +622,7 @@ pub(crate) fn apply_informant_disclosures(
     if !state.legal.has_informants() {
         return Ok(Vec::new());
     }
-    let mut candidates: Vec<(InformantId, InformationId, InvestigationId)> = Vec::new();
+    let mut candidates = BTreeMap::new();
     let mut disclosed_roots_by_case = BTreeMap::new();
     let handlers: Vec<OrganizationId> = state.legal.informant_handlers().collect();
     for handler in handlers {
@@ -646,7 +662,7 @@ pub(crate) fn apply_informant_disclosures(
                             &mut candidates,
                             &mut disclosed_roots_by_case,
                             informant.id(),
-                            information.id(),
+                            information,
                             investigations,
                         );
                     }
@@ -661,26 +677,22 @@ pub(crate) fn apply_informant_disclosures(
                         &mut candidates,
                         &mut disclosed_roots_by_case,
                         informant.id(),
-                        information.id(),
+                        information,
                         investigations,
                     );
                 }
             }
         }
     }
-    // Stable commit order is informant id, then information id, then case id. IDs order equal
-    // facts only; they no longer decide whether another matching case receives the fact at all.
+    // One strongest available account per case and observation. Commit in stable ID order
+    // after selection, independent of the order in which the subject/fact join encountered it.
+    let mut candidates: Vec<_> = candidates
+        .into_iter()
+        .map(|((investigation, _), candidate)| {
+            (candidate.informant, candidate.information, investigation)
+        })
+        .collect();
     candidates.sort_unstable();
-    // Distinct informants' internal copies may share an original observation. Reserve just one
-    // disclosure per case/root before the shared cohort's ID and version budgets are calculated.
-    let mut selected_observations = BTreeSet::new();
-    candidates.retain(|(_, information, investigation)| {
-        let root = state
-            .intelligence
-            .internal_report_root(*information)
-            .expect("candidate disclosure must reference a valid information lineage");
-        selected_observations.insert((*investigation, root))
-    });
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -803,17 +815,52 @@ pub(crate) fn apply_informant_disclosures(
     Ok(disclosures)
 }
 
-fn append_pending_disclosures(
-    state: &AppState,
-    candidates: &mut Vec<(InformantId, InformationId, InvestigationId)>,
-    disclosed_roots_by_case: &mut BTreeMap<InvestigationId, BTreeSet<InformationId>>,
+#[derive(Clone, Copy)]
+struct DisclosureCandidate {
     informant: InformantId,
     information: InformationId,
+    strength: EvidenceStrength,
+    reliability: EvidenceReliability,
+}
+
+impl DisclosureCandidate {
+    fn priority(
+        self,
+    ) -> (
+        EvidenceStrength,
+        EvidenceReliability,
+        std::cmp::Reverse<InformantId>,
+        std::cmp::Reverse<InformationId>,
+    ) {
+        (
+            self.strength,
+            self.reliability,
+            std::cmp::Reverse(self.informant),
+            std::cmp::Reverse(self.information),
+        )
+    }
+}
+
+fn append_pending_disclosures(
+    state: &AppState,
+    candidates: &mut BTreeMap<(InvestigationId, InformationId), DisclosureCandidate>,
+    disclosed_roots_by_case: &mut BTreeMap<InvestigationId, BTreeSet<InformationId>>,
+    informant: InformantId,
+    information: &InformationRecord,
     investigations: &BTreeSet<InvestigationId>,
 ) {
+    if !information_can_supply_case_evidence(information) {
+        return;
+    }
+    let candidate = DisclosureCandidate {
+        informant,
+        information: information.id(),
+        strength: informant_strength(information.specificity()),
+        reliability: informant_reliability(information.reliability()),
+    };
     let root = state
         .intelligence
-        .internal_report_root(information)
+        .observation_root(candidate.information)
         .expect("held information must have a valid lineage");
     for investigation in investigations.iter().copied() {
         // Build each relevant case's history once for the immutable planning pass.
@@ -827,13 +874,20 @@ fn append_pending_disclosures(
                     .map(|disclosure| {
                         state
                             .intelligence
-                            .internal_report_root(disclosure.source_information())
+                            .observation_root(disclosure.source_information())
                             .expect("persisted disclosure must have a valid lineage")
                     })
                     .collect()
             });
         if !disclosed_roots.contains(&root) {
-            candidates.push((informant, information, investigation));
+            candidates
+                .entry((investigation, root))
+                .and_modify(|existing| {
+                    if candidate.priority() > existing.priority() {
+                        *existing = candidate;
+                    }
+                })
+                .or_insert(candidate);
         }
     }
 }
