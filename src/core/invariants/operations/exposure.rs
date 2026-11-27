@@ -4,7 +4,9 @@ use crate::core::entity::EntityRef;
 use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::legal::{EvidenceReliability, EvidenceStrength};
-use crate::operations::operation_execution::{resolve_exposure_level, resolve_exposure_score};
+use crate::operations::operation_execution::{
+    resolve_exposure_level, resolve_exposure_score, resolve_stealth_average,
+};
 use crate::operations::{
     OperationExposureLevel, OperationExposureRecord, OperationRecord, OperationResolutionRecord,
 };
@@ -48,7 +50,10 @@ pub(super) fn validate_authored_operation_exposure(
             / 100;
     let expected_exposure_score = resolve_exposure_score(execution, exposure_factors);
     let expected_exposure_level = resolve_exposure_level(execution, expected_exposure_score);
-    if exposure_factors.variance().unsigned_abs() > execution.exposure_variance_limit()
+    if exposure_factors.stealth_average() != resolve_stealth_average(state, operation)
+        || exposure_factors.target_police_presence()
+            != resolution.factors().target_police_presence()
+        || exposure_factors.variance().unsigned_abs() > execution.exposure_variance_limit()
         || exposure_factors.approach_adjustment()
             != execution
                 .exposure_approach_adjustment(operation.approach())

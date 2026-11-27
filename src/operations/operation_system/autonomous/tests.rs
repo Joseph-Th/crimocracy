@@ -39,10 +39,14 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_scout_rating(scout_rating: u8) -> Fixture {
-    fixture_with_competitors(scout_rating, None)
+    fixture_with_ratings_and_competitors(100, scout_rating, None)
 }
 
-fn fixture_with_competitors(scout_rating: u8, second_competitor: Option<BusinessKind>) -> Fixture {
+fn fixture_with_ratings_and_competitors(
+    manager_rating: u8,
+    scout_rating: u8,
+    second_competitor: Option<BusinessKind>,
+) -> Fixture {
     let registry = crate::build_registry();
     let mut state = AppState::new(0x95AC);
     let mut organization = |name: &str| {
@@ -153,7 +157,7 @@ fn fixture_with_competitors(scout_rating: u8, second_competitor: Option<Business
     let manager = member(
         rival,
         "Harbor Leader",
-        BTreeMap::from([(CapabilityKind::Management, rating(100))]),
+        BTreeMap::from([(CapabilityKind::Management, rating(manager_rating))]),
     );
     member(
         rival,
@@ -218,6 +222,223 @@ fn finish_operation(registry: &Registry, state: &mut AppState, id: crate::core::
         }
     }
     panic!("operation {id} did not terminate");
+}
+
+fn corrupt_saved_factors<T: serde::Serialize>(
+    envelope: &[u8],
+    original: T,
+    replacement: T,
+) -> crate::core::persistence::SaveEnvelope {
+    let original = bincode::serialize(&original).unwrap();
+    let replacement = bincode::serialize(&replacement).unwrap();
+    assert_eq!(replacement.len(), original.len());
+    let offsets: Vec<_> = envelope
+        .windows(original.len())
+        .enumerate()
+        .filter_map(|(offset, bytes)| (bytes == original).then_some(offset))
+        .collect();
+    assert_eq!(offsets.len(), 1);
+    let offset = offsets[0];
+    let mut bytes = envelope.to_vec();
+    bytes[offset..offset + original.len()].copy_from_slice(&replacement);
+    bincode::deserialize(&bytes).unwrap()
+}
+
+#[test]
+fn restore_rejects_false_crew_capabilities_even_with_unchanged_margin() {
+    use crate::core::invariants::StateValidationError;
+    use crate::core::persistence::LoadError;
+    use crate::operations::operation_execution::resolve_execution_margin;
+
+    let Fixture {
+        registry,
+        mut state,
+        ..
+    } = fixture_with_scout_rating(80);
+    let operation = next_day(&registry, &mut state).autonomous_operations[0];
+    finish_operation(&registry, &mut state, operation);
+    let record = state.operations().get_operation(operation).unwrap();
+    let resolution = record.resolution().unwrap();
+    let execution = registry.get_operation(record.kind()).execution();
+    let factors = resolution.factors();
+    assert_eq!(factors.role_capability_average(), rating(80));
+    assert_eq!(factors.leader_capability(), Some(rating(80)));
+    let envelope = bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap();
+
+    for replacement in [
+        crate::operations::OperationResolutionFactors {
+            role_capability_average: rating(81),
+            ..factors
+        },
+        crate::operations::OperationResolutionFactors {
+            leader_capability: Some(rating(81)),
+            ..factors
+        },
+    ] {
+        assert_eq!(
+            resolve_execution_margin(execution, replacement),
+            resolution.execution_margin()
+        );
+        let corrupted = corrupt_saved_factors(&envelope, factors, replacement);
+        assert_eq!(
+            restore_save(&registry, corrupted).err(),
+            Some(LoadError::InvalidState(
+                StateValidationError::InvalidOperationDefinition { operation }
+            ))
+        );
+    }
+}
+
+#[test]
+fn restore_rejects_false_exposure_factors_even_with_unchanged_score() {
+    use crate::core::invariants::StateValidationError;
+    use crate::core::persistence::LoadError;
+    use crate::operations::operation_execution::resolve_exposure_score;
+
+    let Fixture {
+        registry,
+        mut state,
+        ..
+    } = fixture_with_scout_rating(80);
+    let operation = next_day(&registry, &mut state).autonomous_operations[0];
+    finish_operation(&registry, &mut state, operation);
+    let record = state.operations().get_operation(operation).unwrap();
+    let exposure = record.resolution().unwrap().exposure();
+    let execution = registry.get_operation(record.kind()).execution();
+    let factors = exposure.factors();
+    assert_eq!(factors.stealth_average(), rating(100));
+    assert_eq!(factors.target_police_presence(), Some(rating(0)));
+    let envelope = bincode::serialize(&build_save(&registry, &state).unwrap()).unwrap();
+    let mut false_stealth = crate::operations::OperationExposureFactors {
+        stealth_average: rating(99),
+        ..factors
+    };
+    let score_delta = resolve_exposure_score(execution, false_stealth) - exposure.score();
+    false_stealth.variance -= i8::try_from(score_delta).unwrap();
+    for replacement in [
+        false_stealth,
+        crate::operations::OperationExposureFactors {
+            target_police_presence: Some(rating(1)),
+            ..factors
+        },
+    ] {
+        assert_eq!(
+            resolve_exposure_score(execution, replacement),
+            exposure.score()
+        );
+        let corrupted = corrupt_saved_factors(&envelope, factors, replacement);
+        assert_eq!(
+            restore_save(&registry, corrupted).err(),
+            Some(LoadError::InvalidState(
+                StateValidationError::InvalidOperationExposure { operation }
+            ))
+        );
+    }
+}
+
+#[test]
+fn rival_selects_strongest_authorized_crew_instead_of_oldest_manager() {
+    let Fixture {
+        registry,
+        mut state,
+        rival,
+        competitor,
+        manager,
+        ..
+    } = fixture_with_ratings_and_competitors(1, 100, None);
+    let superior = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Capable operations captain".into(),
+            organization: Some(rival),
+            supervisor: Some(manager),
+            autonomy: AutonomyLevel::Broad,
+            capabilities: BTreeMap::from([(CapabilityKind::Management, rating(100))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let mandate = validate_assign_mandate(
+        &state,
+        MandateDraft {
+            organization: rival,
+            manager: superior,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Operations,
+            )]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut state)
+    .unwrap();
+    let first = next_day(&registry, &mut state).autonomous_operations;
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        state.operations().get_operation(first[0]).unwrap().kind(),
+        OperationKind::Surveillance
+    );
+    finish_operation(&registry, &mut state, first[0]);
+
+    let mut weaker_only = state.clone();
+    crate::delegation::delegation_system::validate_revoke_mandate(&weaker_only, mandate)
+        .unwrap()
+        .commit(&mut weaker_only)
+        .unwrap();
+    let weak_strike = next_day(&registry, &mut weaker_only).autonomous_operations;
+    assert_eq!(weak_strike.len(), 1);
+    assert_eq!(
+        weaker_only
+            .operations()
+            .get_operation(weak_strike[0])
+            .unwrap()
+            .leader(),
+        manager
+    );
+    let mut restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    let strikes = next_day(&registry, &mut state).autonomous_operations;
+    assert_eq!(strikes.len(), 1);
+    let strike = state.operations().get_operation(strikes[0]).unwrap();
+    assert_eq!(strike.kind(), OperationKind::Sabotage);
+    assert_eq!(strike.objective().business_target(), Some(competitor));
+    assert_eq!(
+        strike.leader(),
+        superior,
+        "a superior qualified manager must not lose to creation order"
+    );
+    assert_eq!(
+        next_day(&registry, &mut restored).autonomous_operations,
+        strikes
+    );
+    assert_eq!(
+        bincode::serialize(&state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    finish_operation(&registry, &mut state, strikes[0]);
+    finish_operation(&registry, &mut weaker_only, weak_strike[0]);
+    let strong = state
+        .operations()
+        .get_operation(strikes[0])
+        .unwrap()
+        .resolution()
+        .unwrap();
+    let weak = weaker_only
+        .operations()
+        .get_operation(weak_strike[0])
+        .unwrap()
+        .resolution()
+        .unwrap();
+    assert!(strong.execution_margin() > weak.execution_margin());
+    assert!(
+        state
+            .economy()
+            .get_business_economy(competitor)
+            .unwrap()
+            .is_disrupted(state.now())
+    );
+    restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
 }
 
 #[test]
@@ -879,7 +1100,7 @@ fn rival_reassesses_market_after_a_concerted_campaign() {
         rival,
         competitor,
         ..
-    } = fixture_with_competitors(100, Some(BusinessKind::Pharmacy));
+    } = fixture_with_ratings_and_competitors(100, 100, Some(BusinessKind::Pharmacy));
     let second = state
         .world()
         .public_business_directory()
@@ -933,7 +1154,7 @@ fn rival_extends_profitable_strikes_against_a_prominent_public_owner() {
         player,
         competitor,
         ..
-    } = fixture_with_competitors(100, Some(BusinessKind::Pharmacy));
+    } = fixture_with_ratings_and_competitors(100, 100, Some(BusinessKind::Pharmacy));
     let elsewhere = state
         .world()
         .neighborhoods()

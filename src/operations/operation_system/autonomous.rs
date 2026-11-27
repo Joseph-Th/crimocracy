@@ -21,6 +21,7 @@ use crate::economy::business_economy_system::{
     forecast_competitor_disruption_gain, resolve_business_gross_potential,
 };
 use crate::intelligence::{InformationSourceKind, InformationTopic, KnowledgeHolder};
+use crate::operations::operation_execution::{resolve_crew_capabilities, weighted_ability};
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::{
     ACTIVE_ASSIGNMENT_STATUSES, OperationApproach, OperationDraft, OperationKind,
@@ -83,6 +84,12 @@ fn eligible_managers(state: &AppState) -> BTreeMap<OrganizationId, Vec<Character
     by_org
 }
 
+struct RivalCrew {
+    leader: CharacterId,
+    roles: BTreeMap<RoleKind, CharacterId>,
+    ability: i16,
+}
+
 /// Pick a trained roster, allowing the responsible manager to coordinate the strike and the
 /// scout to lead the watch. Use the same booking predicate and final validator as player plans.
 /// The two supported kinds have disjoint required skill mappings.
@@ -93,7 +100,7 @@ fn crew(
     manager: CharacterId,
     kind: OperationKind,
     scheduled_for: SimTime,
-) -> Option<(CharacterId, BTreeMap<RoleKind, CharacterId>)> {
+) -> Option<RivalCrew> {
     let definition = registry.get_operation(kind);
     let execution = definition.execution();
     if !participant_available_for_plan(registry, state, manager, kind, scheduled_for, &[]) {
@@ -132,7 +139,32 @@ fn crew(
     } else {
         manager
     };
-    Some((leader, roles))
+    let (role_average, leader_capability) =
+        resolve_crew_capabilities(execution, state, leader, &roles);
+    Some(RivalCrew {
+        leader,
+        roles,
+        ability: weighted_ability(execution, role_average, leader_capability),
+    })
+}
+
+/// Rank feasible crews once per operation kind by their actual authored execution ability.
+/// Multiple managers may commission the same watch; do not retry identical scout rosters.
+fn ranked_crews(
+    registry: &Registry,
+    state: &AppState,
+    organization: OrganizationId,
+    managers: &[CharacterId],
+    kind: OperationKind,
+    scheduled_for: SimTime,
+) -> Vec<RivalCrew> {
+    let mut crews: Vec<_> = managers
+        .iter()
+        .filter_map(|&manager| crew(registry, state, organization, manager, kind, scheduled_for))
+        .collect();
+    crews.sort_by_key(|crew| (Reverse(crew.ability), crew.leader));
+    crews.dedup_by(|left, right| left.leader == right.leader && left.roles == right.roles);
+    crews
 }
 
 /// Criminal storefront owners cannot shed every local racket and retain its protection for
@@ -303,23 +335,18 @@ fn choose_plan<'r>(
     // a separate autonomous objective. Do not repeatedly commission watches
     // while no available coordinator and entry specialist can use the result.
     // Cache the feasible strike rosters for the target-selection pass below.
-    let mut crews = BTreeMap::new();
-    for &manager in managers {
-        crews.insert(
-            (OperationKind::Sabotage, manager),
-            crew(
-                registry,
-                state,
-                organization,
-                manager,
-                OperationKind::Sabotage,
-                scheduled_for,
-            ),
-        );
-    }
-    if !crews.values().any(Option::is_some) {
+    let strike_crews = ranked_crews(
+        registry,
+        state,
+        organization,
+        managers,
+        OperationKind::Sabotage,
+        scheduled_for,
+    );
+    if strike_crews.is_empty() {
         return None;
     }
+    let mut crews = BTreeMap::from([(OperationKind::Sabotage, strike_crews)]);
     // The observation must remain usable by the operation that consumes it,
     // regardless of the intelligence lifetime authored for the scouting kind.
     let age_limit = u64::from(
@@ -483,16 +510,9 @@ fn choose_plan<'r>(
             OperationObjective::DisruptBusiness { target }
         };
         let mut intelligence = None;
-        for manager in managers {
-            let Some((leader, roles)) = crews
-                .entry((kind, *manager))
-                .or_insert_with(|| {
-                    crew(registry, state, organization, *manager, kind, scheduled_for)
-                })
-                .as_ref()
-            else {
-                continue;
-            };
+        for crew in crews.entry(kind).or_insert_with(|| {
+            ranked_crews(registry, state, organization, managers, kind, scheduled_for)
+        }) {
             let intelligence = intelligence.get_or_insert_with(|| {
                 planning_information(
                     registry,
@@ -510,10 +530,10 @@ fn choose_plan<'r>(
                 title: format!("{}: {name}", registry.get_operation(kind).display_name()),
                 kind,
                 responsible_organization: organization,
-                leader: *leader,
+                leader: crew.leader,
                 objective: objective.clone(),
                 approach: OperationApproach::Covert,
-                roles: roles.clone(),
+                roles: crew.roles.clone(),
                 intelligence: intelligence.clone(),
                 constraints: Vec::new(),
                 // NPCs must not create unresolved player-style leadership decisions.

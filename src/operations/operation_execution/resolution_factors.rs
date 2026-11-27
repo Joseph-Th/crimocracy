@@ -14,7 +14,7 @@ use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::pressureable_witness_targets_for_cases;
 use crate::operations::{
     OperationExposureFactors, OperationExposureLevel, OperationKind, OperationObjective,
-    OperationObjectiveOutcome, OperationRecord, OperationResolutionFactors,
+    OperationObjectiveOutcome, OperationRecord, OperationResolutionFactors, RoleKind,
 };
 use crate::registry::{OperationExecutionDefinition, Registry};
 use crate::reputation::AudienceKind;
@@ -22,36 +22,38 @@ use crate::reputation::reputation_system::resolve_score;
 use crate::world::{CapabilityKind, Rating};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) fn resolve_role_capability_average(
-    registry: &Registry,
+/// The same crew factors apply to a proposed roster and a persisted operation.
+/// Only the actual participants' authored capabilities enter this calculation.
+pub(crate) fn resolve_crew_capabilities(
+    execution: &OperationExecutionDefinition,
     state: &AppState,
-    operation: OperationId,
-) -> Rating {
-    let record = state
-        .operations
-        .get_operation(operation)
-        .expect("operation resolution must reference an existing operation");
-    let execution = registry.get_operation(record.kind()).execution();
-    let (total, count) =
-        record
-            .roles()
-            .iter()
-            .fold((0_u32, 0_u32), |(total, count), (role, character)| {
-                let capability = execution
-                    .capability_for_role(*role)
-                    .expect("assigned operation role must have an authored capability mapping");
-                let value = state
-                    .world
-                    .get_character(*character)
-                    .expect("operation role must reference a persisted participant")
-                    .capability(capability)
-                    .map(|rating| u32::from(rating.value()))
-                    .unwrap_or(0);
-                (total + value, count + 1)
-            });
+    leader: CharacterId,
+    roles: &BTreeMap<RoleKind, CharacterId>,
+) -> (Rating, Option<Rating>) {
+    let (total, count) = roles
+        .iter()
+        .fold((0_u32, 0_u32), |(total, count), (role, character)| {
+            let capability = execution
+                .capability_for_role(*role)
+                .expect("assigned operation role must have an authored capability mapping");
+            let value = state
+                .world
+                .get_character(*character)
+                .expect("operation role must reference a persisted participant")
+                .capability(capability)
+                .map(|rating| u32::from(rating.value()))
+                .unwrap_or(0);
+            (total + value, count + 1)
+        });
     let average = total.checked_div(count).unwrap_or(0);
-    Rating::try_new(u8::try_from(average).expect("rating average must fit u8"))
-        .expect("rating average must remain within rating bounds")
+    let role_average = Rating::try_new(u8::try_from(average).expect("rating average must fit u8"))
+        .expect("rating average must remain within rating bounds");
+    let leader_capability = state
+        .world()
+        .get_character(leader)
+        .expect("operation leader must reference a persisted character")
+        .capability(execution.leader_capability());
+    (role_average, leader_capability)
 }
 
 /// Converts contextual business-owner fear into bounded leverage for collection/intimidation
@@ -545,7 +547,7 @@ pub(crate) fn resolve_exposure_level(
     }
 }
 
-fn resolve_stealth_average(
+pub(crate) fn resolve_stealth_average(
     state: &AppState,
     record: &crate::operations::OperationRecord,
 ) -> Rating {
@@ -660,7 +662,7 @@ pub(crate) fn resolve_time_pressure(
     u8::try_from(pressure.min(u64::from(maximum))).expect("bounded time pressure must fit u8")
 }
 
-fn weighted_ability(
+pub(crate) fn weighted_ability(
     execution: &OperationExecutionDefinition,
     role_average: Rating,
     leader_capability: Option<Rating>,

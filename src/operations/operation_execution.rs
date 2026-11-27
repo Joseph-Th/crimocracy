@@ -14,15 +14,15 @@ pub(crate) use resolution_commit::{
 };
 
 pub(crate) use resolution_factors::{
-    has_police_response_arrived_by, resolve_execution_margin, resolve_exposure_level,
-    resolve_exposure_score, resolve_intelligence_factors,
+    has_police_response_arrived_by, resolve_crew_capabilities, resolve_execution_margin,
+    resolve_exposure_level, resolve_exposure_score, resolve_intelligence_factors,
     resolve_investigation_target_neighborhoods, resolve_objective_outcome,
-    resolve_operation_police_alert_context, resolve_time_pressure,
+    resolve_operation_police_alert_context, resolve_stealth_average, resolve_time_pressure,
+    weighted_ability,
 };
 use resolution_factors::{
     resolve_exposure_plan, resolve_intimidation_business_fear_adjustment,
-    resolve_operation_venue_entities, resolve_role_capability_average,
-    resolve_target_police_interval_snapshot,
+    resolve_operation_venue_entities, resolve_target_police_interval_snapshot,
 };
 
 use crate::core::entity::EntityRef;
@@ -375,12 +375,8 @@ pub(crate) fn decide_operation_resolution(
         });
     }
 
-    let role_capability_average = resolve_role_capability_average(registry, state, operation);
-    let leader = state
-        .world
-        .get_character(record.leader())
-        .expect("validated operation leader must reference a persisted character");
-    let leader_capability = leader.capability(execution.leader_capability());
+    let (role_capability_average, leader_capability) =
+        resolve_crew_capabilities(execution, state, record.leader(), record.roles());
     let (
         intelligence_quality,
         intelligence_adjustment,

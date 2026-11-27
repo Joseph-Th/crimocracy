@@ -392,6 +392,16 @@ fn validate_authored_operation_resolution(
     resolution: &crate::operations::OperationResolutionRecord,
 ) -> Result<bool, StateValidationError> {
     let factors = resolution.factors();
+    // Crew capabilities are immutable in the current world model, so even historical
+    // resolutions can be checked against their actual participants rather than only
+    // against the arithmetic of their persisted factors.
+    let (role_average, leader_capability) =
+        resolve_crew_capabilities(execution, state, operation.leader(), operation.roles());
+    if factors.role_capability_average() != role_average
+        || factors.leader_capability() != leader_capability
+    {
+        return Err(invalid_operation_definition(operation));
+    }
     let expected_margin = resolve_execution_margin(execution, factors);
     let base_expected_outcome = resolve_objective_outcome(execution, expected_margin);
     validate_resolution_objective_context(state, operation, resolution, base_expected_outcome)?;
