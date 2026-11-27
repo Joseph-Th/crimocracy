@@ -116,14 +116,30 @@ fn first_demand(
 
 #[test]
 fn unanswered_protection_demand_only_suspends_rival_for_one_day() {
+    use crate::core::entity::EntityRef;
+    use crate::operations::OperationKind;
+    use crate::operations::operation_system::is_actionable_opportunity_target;
+
     let (registry, mut city, district) = exposed_city();
     let (request, terms) = first_demand(&registry, &mut city);
     assert_eq!(terms.district(), district);
+    let actionable = |state: &AppState, kind| {
+        is_actionable_opportunity_target(
+            &registry,
+            state,
+            terms.attacker(),
+            kind,
+            EntityRef::Business(terms.business()),
+        )
+    };
     assert!(rival_pressure_blocked(
         &city.state,
         terms.attacker(),
         district
     ));
+    for kind in [OperationKind::Surveillance, OperationKind::Sabotage] {
+        assert!(!actionable(&city.state, kind));
+    }
     city.state.advance_clock(SimDuration::from_minutes(
         u32::try_from(DAY_MINUTES - 1).unwrap(),
     ));
@@ -137,6 +153,9 @@ fn unanswered_protection_demand_only_suspends_rival_for_one_day() {
         !rival_pressure_blocked(&city.state, terms.attacker(), district),
         "leaving a demand unanswered must not buy indefinite protection"
     );
+    for kind in [OperationKind::Surveillance, OperationKind::Sabotage] {
+        assert!(actionable(&city.state, kind));
+    }
     assert_eq!(
         city.state
             .decisions()

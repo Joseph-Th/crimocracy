@@ -512,6 +512,13 @@ restore validation rejects duplicate case/root evidence provenance.
 
 ## Source map — one owner per field
 
+The operation objective owner, `operations::operation_objective`, resolves
+live commercial agreement restrictions once for discovery, authorization,
+held authorization commit, and execution. The rival planner rejects targets
+through this same objective gate before forecasting commercial pressure.
+Protection negotiations and payments retain their existing scope; territorial
+standstills retain the distinction between reconnaissance and offensive action.
+
 Every `src/` subsystem owns its records and canonical mutation paths. Invariants
 are validated by `src/core/invariants/`. The top-level tick is
 `core::simulation::run_tick`, driven from `AppState` and `Registry`. Its root file owns

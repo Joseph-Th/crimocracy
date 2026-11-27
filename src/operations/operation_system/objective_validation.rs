@@ -8,6 +8,9 @@ use crate::enterprises::EnterpriseStatus;
 use crate::intelligence::{
     InformationSignal, InformationTopic, KnowledgeHolder, LegalPersonStatusSignal,
 };
+use crate::operations::operation_objective::{
+    CommercialAgreementBlocker, commercial_agreement_blocker,
+};
 use crate::operations::{
     ACTIVE_ASSIGNMENT_STATUSES, OperationBusinessTargetOwnership, OperationKind,
     OperationObjective, OperationObjectiveKind,
@@ -568,50 +571,17 @@ pub(super) fn validate_operation_objective(
         kind,
         objective,
     )?;
-    // Paying the actual threatening gang buys a temporary halt to the attacks
-    // it can authorize, including reconnaissance for a later sabotage. This
-    // is also checked again before the operation starts and resolves.
-    if matches!(kind, OperationKind::Surveillance | OperationKind::Sabotage)
-        && let Some(business) = objective.business_target()
-        && let Some(venue) = state.world().get_business(business)
-        && matches!(venue.owner(), crate::world::BusinessOwner::Organization(owner)
-            if state.player_organization() == Some(owner))
-        && crate::decisions::decision_system::rival_pressure_blocked(
-            state,
-            responsible_organization,
-            venue.neighborhood(),
-        )
+    if let Some(blocker) =
+        commercial_agreement_blocker(state, responsible_organization, kind, objective)
     {
-        return Err(OperationError::ProtectionAgreement(venue.neighborhood()));
-    }
-    // Reconnaissance remains permitted, but neither party can exploit a settlement
-    // with an offensive business operation. This is checked again at commit.
-    if kind.business_target_ownership()
-        == Some(crate::operations::OperationBusinessTargetOwnership::Foreign)
-    {
-        let target = match objective {
-            OperationObjective::AcquireProperty { target }
-            | OperationObjective::ObtainCash { target }
-            | OperationObjective::DisruptBusiness { target }
-            | OperationObjective::GatherInformation { target } => Some(*target),
-            OperationObjective::Frighten { .. } | OperationObjective::FreeDetainee { .. } => None,
-        };
-        if let Some(EntityRef::Business(business)) = target {
-            let district = state
-                .world()
-                .get_business(business)
-                .ok_or(OperationError::MissingEntity(EntityRef::Business(business)))?
-                .neighborhood();
-            if crate::world::territory_influence::active_standstill(
-                state,
-                responsible_organization,
-                district,
-            )
-            .is_some()
-            {
-                return Err(OperationError::TerritoryStandstill(district));
+        return Err(match blocker {
+            CommercialAgreementBlocker::Protection(district) => {
+                OperationError::ProtectionAgreement(district)
             }
-        }
+            CommercialAgreementBlocker::Standstill(district) => {
+                OperationError::TerritoryStandstill(district)
+            }
+        });
     }
     Ok(())
 }

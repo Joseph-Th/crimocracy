@@ -5,7 +5,7 @@
 //! practical effect for a tactically successful crew to achieve.
 
 use crate::core::entity::EntityRef;
-use crate::core::id::{BusinessId, CaseWitnessId, CharacterId, OrganizationId};
+use crate::core::id::{BusinessId, CaseWitnessId, CharacterId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::legal::{InvestigationStatus, WitnessCooperation};
 use crate::operations::{
@@ -38,6 +38,40 @@ pub(crate) fn cash_target_is_operating(state: &AppState, business: BusinessId) -
         .is_none_or(|economy| economy.is_operating())
 }
 
+/// A live commercial agreement constraining a particular district. Authorization
+/// needs the district for its error, while execution records the reason.
+pub(super) enum CommercialAgreementBlocker {
+    Protection(NeighborhoodId),
+    Standstill(NeighborhoodId),
+}
+
+/// The same live agreement check governs discovery, authorization, held-order
+/// commit, and execution. Protection includes preparatory surveillance; a
+/// territorial standstill restricts offensive business actions, not reconnaissance.
+pub(super) fn commercial_agreement_blocker(
+    state: &AppState,
+    organization: OrganizationId,
+    kind: OperationKind,
+    objective: &OperationObjective,
+) -> Option<CommercialAgreementBlocker> {
+    let venue = state.world().get_business(objective.business_target()?)?;
+    let district = venue.neighborhood();
+    if matches!(kind, OperationKind::Surveillance | OperationKind::Sabotage)
+        && matches!(venue.owner(), BusinessOwner::Organization(owner)
+            if state.player_organization() == Some(owner))
+        && crate::decisions::decision_system::rival_pressure_blocked(state, organization, district)
+    {
+        return Some(CommercialAgreementBlocker::Protection(district));
+    }
+    if kind.business_target_ownership() == Some(OperationBusinessTargetOwnership::Foreign)
+        && crate::world::territory_influence::active_standstill(state, organization, district)
+            .is_some()
+    {
+        return Some(CommercialAgreementBlocker::Standstill(district));
+    }
+    None
+}
+
 /// Mutable execution-time condition that prevents a non-failed objective from producing its
 /// authored effect. The operation record is assumed to have passed structural/authorship
 /// validation, so malformed objective shapes are not silently normalized here.
@@ -45,36 +79,20 @@ pub(crate) fn resolve_objective_blocker(
     state: &AppState,
     operation: &OperationRecord,
 ) -> Option<OperationObjectiveBlocker> {
-    // Protection applies to an already-authorized hostile operation too:
-    // a rival cannot evade a newly paid contract by starting its scouting
-    // or sabotage before the player answered the demand.
-    if matches!(
+    if let Some(blocker) = commercial_agreement_blocker(
+        state,
+        operation.responsible_organization(),
         operation.kind(),
-        OperationKind::Surveillance | OperationKind::Sabotage
-    ) && let Some(target) = operation.objective().business_target()
-        && let Some(venue) = state.world().get_business(target)
-        && matches!(venue.owner(), BusinessOwner::Organization(owner)
-            if state.player_organization() == Some(owner))
-        && crate::decisions::decision_system::rival_pressure_blocked(
-            state,
-            operation.responsible_organization(),
-            venue.neighborhood(),
-        )
-    {
-        return Some(OperationObjectiveBlocker::ProtectionAgreement);
-    }
-    if operation.kind().business_target_ownership()
-        == Some(OperationBusinessTargetOwnership::Foreign)
-        && let Some(business) = operation.objective().business_target()
-        && let Some(venue) = state.world().get_business(business)
-        && crate::world::territory_influence::active_standstill(
-            state,
-            operation.responsible_organization(),
-            venue.neighborhood(),
-        )
-        .is_some()
-    {
-        return Some(OperationObjectiveBlocker::TerritorialStandstill);
+        operation.objective(),
+    ) {
+        return Some(match blocker {
+            CommercialAgreementBlocker::Protection(_) => {
+                OperationObjectiveBlocker::ProtectionAgreement
+            }
+            CommercialAgreementBlocker::Standstill(_) => {
+                OperationObjectiveBlocker::TerritorialStandstill
+            }
+        });
     }
     if operation.kind().business_target_ownership().is_some()
         && let Some(business) = operation.objective().business_target()

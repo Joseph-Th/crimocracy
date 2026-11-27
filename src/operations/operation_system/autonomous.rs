@@ -14,7 +14,7 @@ use crate::core::entity::EntityRef;
 use crate::core::id::{BusinessId, CharacterId, IdKind, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, SimDuration, SimTime, is_day_boundary};
-use crate::decisions::decision_system::{recently_refused_protection, rival_pressure_blocked};
+use crate::decisions::decision_system::recently_refused_protection;
 use crate::delegation::delegation_system::resolve_mandate_authority;
 use crate::delegation::{MandateAuthority, ResponsibilityFunction, ResponsibilityScope};
 use crate::economy::business_economy_system::{
@@ -335,6 +335,18 @@ fn choose_plan<'r>(
         if owned.contains(&id) {
             continue;
         }
+        // A watch is only preparation for a viable strike. Reject unavailable
+        // targets through the canonical gate before estimating their value,
+        // including closed businesses and both forms of commercial agreement.
+        if !is_actionable_opportunity_target(
+            registry,
+            state,
+            organization,
+            OperationKind::Sabotage,
+            EntityRef::Business(id),
+        ) {
+            continue;
+        }
         let target_owner = state
             .world()
             .get_business(id)
@@ -355,9 +367,6 @@ fn choose_plan<'r>(
         let player_owned = state
             .player_organization()
             .is_some_and(|player| target_owner == Some(BusinessOwner::Organization(player)));
-        if player_owned && rival_pressure_blocked(state, organization, district) {
-            continue;
-        }
         let gain = sectors.get(&district).map_or(0, |stakes| {
             *gains.entry((district, kind)).or_insert_with(|| {
                 forecast_competitor_disruption_gain(registry, state, id, stakes).unwrap_or(0)
@@ -399,15 +408,6 @@ fn choose_plan<'r>(
             0
         };
         if gain <= 0 && political_stake == 0 && predatory_gain == 0 {
-            continue;
-        }
-        if !is_actionable_opportunity_target(
-            registry,
-            state,
-            organization,
-            OperationKind::Sabotage,
-            EntityRef::Business(id),
-        ) {
             continue;
         }
         let observed = state
