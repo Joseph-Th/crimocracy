@@ -694,20 +694,13 @@ fn validate_business_laundering_against_registry(
         let amounts =
             laundering_transaction_amounts(state, economy, organization.id(), transaction)
                 .ok_or_else(|| invalid_economy(economy))?;
-        let expected_fee = crate::finance::helpers::apply_basis_point_multiplier(
-            amounts.amount,
-            registry.laundering().fee_basis_points(),
-        )
-        .ok_or_else(|| invalid_economy(economy))?;
-        let expected_accounted = amounts
-            .amount
-            .checked_sub(expected_fee)
-            .ok_or_else(|| invalid_economy(economy))?;
-        if expected_fee <= Money::ZERO
-            || expected_accounted <= Money::ZERO
-            || amounts.fee != expected_fee
-            || amounts.accounted != expected_accounted
-        {
+        let (expected_fee, expected_accounted) =
+            crate::finance::finance_system::resolve_laundering_split(
+                amounts.amount,
+                registry.laundering().fee_basis_points(),
+            )
+            .map_err(|_| invalid_economy(economy))?;
+        if amounts.fee != expected_fee || amounts.accounted != expected_accounted {
             return Err(invalid_economy(economy));
         }
     }

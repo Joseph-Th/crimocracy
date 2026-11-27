@@ -12,7 +12,7 @@ use crate::economy::business_economy_system::resolve_business_current_gross;
 use crate::economy::{BusinessEconomyRecord, BusinessOperatingStatus};
 use crate::finance::{
     AccountKind, FinancialOwner, LedgerPosting, LedgerTransactionDraft, Money,
-    helpers::apply_basis_point_multiplier,
+    helpers::{apply_basis_point_multiplier, round_up_basis_point_fee},
 };
 use crate::registry::Registry;
 use crate::world::{BusinessOwner, BusinessRecord, OrganizationKind};
@@ -174,12 +174,11 @@ impl ValidatedLaundering<'_> {
     }
 }
 
-pub(super) fn resolve_laundering_split(
+pub(crate) fn resolve_laundering_split(
     amount: Money,
     fee_basis_points: u32,
 ) -> Result<(Money, Money), LaunderingError> {
-    let fee = apply_basis_point_multiplier(amount, fee_basis_points)
-        .ok_or(LaunderingError::ArithmeticOverflow)?;
+    let fee = round_up_basis_point_fee(amount, fee_basis_points);
     let credited = amount
         .checked_sub(fee)
         .ok_or(LaunderingError::ArithmeticOverflow)?;

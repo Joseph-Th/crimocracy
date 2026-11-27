@@ -155,13 +155,22 @@ pub(crate) fn resolve_basis_point_variance(amount: Money, basis_points: i16) -> 
 }
 
 /// Applies an unsigned basis-point multiplier to an amount, rounded half away from zero to
-/// match the crate's single money-rounding convention. `10_000` is 100%; larger multipliers
+/// match the crate's ordinary money-rounding convention. `10_000` is 100%; larger multipliers
 /// intentionally represent values above the source amount (for example operation take sizing).
 pub(crate) fn apply_basis_point_multiplier(amount: Money, basis_points: u32) -> Option<Money> {
     let scaled = i128::from(amount.cents()).checked_mul(i128::from(basis_points))?;
     let adjusted = round_basis_point_product(scaled)?;
     let cents = i64::try_from(adjusted).ok()?;
     Some(Money::from_cents(cents))
+}
+
+/// Round a proportional charge up to a whole cent. Splitting a payment cannot
+/// reduce its aggregate fee. Unlike ordinary monetary scaling, every positive
+/// amount at a positive fee rate incurs a charge.
+pub(crate) fn round_up_basis_point_fee(amount: Money, basis_points: u32) -> Money {
+    debug_assert!(amount >= Money::ZERO && basis_points <= 10_000);
+    let cents = (i128::from(amount.cents()) * i128::from(basis_points) + 9_999) / 10_000;
+    Money::from_cents(i64::try_from(cents).expect("bounded fee cannot exceed its gross amount"))
 }
 
 /// Builds a balanced two-posting settlement for a net cash amount.

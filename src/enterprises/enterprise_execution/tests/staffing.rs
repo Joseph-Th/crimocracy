@@ -800,6 +800,88 @@ fn executive_command_is_a_real_bottleneck_until_an_underboss_delegates_the_crews
             .required,
         2
     );
+    // Leadership must be able to repair a divided workload incrementally.
+    // Moving one existing racket under the other branch helps, even if the
+    // executive still lacks capacity until the next command adjustment.
+    let mut repair = fixture.state.clone();
+    crate::world::world_system::validate_set_character_autonomy(
+        &repair,
+        fixture.organization,
+        underboss,
+        AutonomyLevel::Guided,
+    )
+    .unwrap()
+    .commit(&mut repair)
+    .unwrap();
+    let second_scope = captains[1].scope;
+    let repair_mandate = validate_assign_mandate(
+        &repair,
+        MandateDraft {
+            organization: fixture.organization,
+            manager: underboss,
+            scopes: BTreeSet::from([second_scope]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut repair)
+    .unwrap();
+    let successor = MandateAuthority {
+        mandate: repair_mandate,
+        manager: underboss,
+        scope: second_scope,
+    };
+    let load = manager_workload(&repair, executive).unwrap();
+    assert_eq!((load.required, load.available), (3, 1));
+    let next_cycle = repair
+        .enterprises()
+        .get_enterprise(second)
+        .unwrap()
+        .next_cycle_at();
+    let mut repair_replay =
+        restore_save(&registry, build_save(&registry, &repair).unwrap()).unwrap();
+    for state in [&mut repair, &mut repair_replay] {
+        validate_reassign_enterprise(state, second, successor)
+            .expect("a real reduction in supervisory overload must be permitted")
+            .commit(state)
+            .unwrap();
+        let load = manager_workload(state, executive).unwrap();
+        assert_eq!((load.required, load.available), (2, 1));
+        let record = state.enterprises().get_enterprise(second).unwrap();
+        assert_eq!(record.manager(), underboss);
+        assert_eq!(record.status(), EnterpriseStatus::Active);
+        assert_eq!(record.next_cycle_at(), next_cycle);
+
+        let before = bincode::serialize(state).unwrap();
+        assert_eq!(
+            validate_reassign_enterprise(state, second, captains[1]).err(),
+            Some(EnterpriseError::ManagerWorkloadExceeded {
+                manager: executive,
+                required: 3,
+                available: 1,
+            })
+        );
+        assert_eq!(bincode::serialize(state).unwrap(), before);
+        crate::world::world_system::validate_set_character_autonomy(
+            state,
+            fixture.organization,
+            underboss,
+            AutonomyLevel::Delegated,
+        )
+        .unwrap()
+        .commit(state)
+        .unwrap();
+        let load = manager_workload(state, executive).unwrap();
+        assert_eq!((load.required, load.available), (1, 1));
+        assert!(apply_due_overstretched_manager_suspensions(state).is_empty());
+        validate_state_against_registry(&registry, state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&repair).unwrap(),
+        bincode::serialize(&repair_replay).unwrap()
+    );
+
     // A weak intermediate supervisor cannot manage a tightly controlled branch.
     // Resolve that branch before the executive, whose overload disappears with it.
     let mut nested = fixture.state.clone();

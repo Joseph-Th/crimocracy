@@ -419,38 +419,11 @@ fn laundering_rejects_non_criminal_organization() {
 }
 
 #[test]
-fn laundering_rejects_amount_that_would_bypass_the_laundering_fee() {
+fn laundering_rejects_amount_entirely_consumed_by_fee() {
     let registry = build_registry();
     let mut fixture = make_laundering_fixture();
-    let reserve = insert_account(
-        &mut fixture.state,
-        FinancialAccountDraft {
-            owner: FinancialOwner::Organization(fixture.organization),
-            kind: AccountKind::ConcealedCash,
-        },
-    )
-    .expect("reserve account should validate");
-    validate_record_transaction(
-        &fixture.state,
-        LedgerTransactionDraft {
-            occurred_at: fixture.state.now(),
-            memo: "Seed tiny laundering amount".to_owned(),
-            postings: vec![
-                LedgerPosting {
-                    account: reserve,
-                    amount: Money::from_cents(-3),
-                },
-                LedgerPosting {
-                    account: fixture.street,
-                    amount: Money::from_cents(3),
-                },
-            ],
-            authorization: None,
-        },
-    )
-    .expect("tiny seed transfer should validate")
-    .commit(&mut fixture.state)
-    .expect("tiny seed transfer should commit");
+    fund_street_cash(&mut fixture);
+    let before = bincode::serialize(&fixture.state).unwrap();
 
     let error = validate_launder_funds(
         &registry,
@@ -460,12 +433,13 @@ fn laundering_rejects_amount_that_would_bypass_the_laundering_fee() {
             street_accounts: BTreeSet::from([fixture.street]),
             business: fixture.business,
             accounted_account: fixture.accounted,
-            amount: Money::from_cents(3),
+            amount: Money::from_cents(1),
         },
     )
     .err()
-    .expect("a laundering transfer must produce a nonzero laundering fee");
+    .expect("a laundering transfer must produce a positive net receipt");
     assert_eq!(error, LaunderingError::AmountTooSmallForSplit);
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
     assert_eq!(
         fixture
             .state
@@ -476,6 +450,92 @@ fn laundering_rejects_amount_that_would_bypass_the_laundering_fee() {
         Money::ZERO
     );
     validate_invariants(&fixture.state);
+}
+
+#[test]
+fn laundering_fragmentation_cannot_reduce_the_authored_fee() {
+    let registry = build_registry();
+    let mut fixture = make_laundering_fixture();
+    fund_street_cash(&mut fixture);
+    let draft = LaunderingDraft {
+        organization: fixture.organization,
+        street_accounts: BTreeSet::from([fixture.street]),
+        business: fixture.business,
+        accounted_account: fixture.accounted,
+        amount: Money::from_cents(90),
+    };
+    let mut whole = fixture.state.clone();
+    validate_launder_funds(&registry, &whole, draft.clone())
+        .unwrap()
+        .commit(&mut whole)
+        .unwrap();
+
+    let settlement = fixture
+        .state
+        .economy()
+        .get_business_economy(fixture.business)
+        .unwrap()
+        .settlement_account();
+    let mut split = fixture.state.clone();
+    for _ in 0..5 {
+        validate_launder_funds(
+            &registry,
+            &split,
+            LaunderingDraft {
+                amount: Money::from_cents(9),
+                ..draft.clone()
+            },
+        )
+        .unwrap()
+        .commit(&mut split)
+        .unwrap();
+    }
+    let mut restored = restore_save(&registry, build_save(&registry, &split).unwrap()).unwrap();
+    for state in [&mut split, &mut restored] {
+        for _ in 0..5 {
+            validate_launder_funds(
+                &registry,
+                state,
+                LaunderingDraft {
+                    amount: Money::from_cents(9),
+                    ..draft.clone()
+                },
+            )
+            .unwrap()
+            .commit(state)
+            .unwrap();
+        }
+    }
+    let balance = |state: &AppState, account| {
+        state
+            .finance()
+            .get_account(account)
+            .unwrap()
+            .balance()
+            .cents()
+    };
+    assert_eq!(balance(&whole, settlement), 14);
+    assert_eq!(balance(&whole, fixture.accounted), 76);
+    assert!(
+        balance(&split, settlement) >= balance(&whole, settlement),
+        "fragmenting an identical volume must not reduce the fee"
+    );
+    assert_eq!(balance(&split, settlement), 20);
+    assert_eq!(balance(&split, fixture.accounted), 70);
+    assert_eq!(
+        balance(&split, fixture.street),
+        balance(&whole, fixture.street)
+    );
+    assert_eq!(
+        remaining_laundering_capacity(&registry, &split, fixture.organization, fixture.business),
+        remaining_laundering_capacity(&registry, &whole, fixture.organization, fixture.business)
+    );
+    assert_eq!(
+        bincode::serialize(&split).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+    crate::core::invariants::validate_state_against_registry(&registry, &split).unwrap();
+    validate_invariants(&split);
 }
 
 #[test]
@@ -550,11 +610,7 @@ fn laundering_moves_street_cash_to_accounted_funds_minus_the_authored_fee() {
     .commit(&mut fixture.state)
     .expect("in-capacity laundering should commit");
 
-    let fee = crate::finance::helpers::apply_basis_point_multiplier(
-        capacity,
-        registry.laundering().fee_basis_points(),
-    )
-    .expect("fee should fit money");
+    let fee = Money::from_cents(((i128::from(capacity.cents()) * 1_500 + 9_999) / 10_000) as i64);
     let transaction = fixture
         .state
         .finance()

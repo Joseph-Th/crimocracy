@@ -260,9 +260,17 @@ pub(crate) fn ensure_manager_capacity(
         &[],
     )?;
     ensure_workload_fits(manager, workload)?;
-    // A newly operating branch also consumes capacity up the actual command
-    // chain. Strong captains no longer permit an unskilled boss to personally
-    // supervise an unlimited number of independent crews.
+    // Replacing the captain of an existing active job can repair an already
+    // overloaded chain incrementally. The receiving captain must fit; no
+    // superior may acquire a new overload or deepen an existing one.
+    // Establishment, resumption and staffing increases remain strict.
+    let active_reassignment = excluding
+        .and_then(|id| state.enterprises().get_enterprise(id))
+        .is_some_and(|record| {
+            record.organization() == organization
+                && record.status() == EnterpriseStatus::Active
+                && record.manager() != manager
+        });
     let mut child = manager;
     while let Some(supervisor) = state
         .world()
@@ -278,7 +286,16 @@ pub(crate) fn ensure_manager_capacity(
             excluding,
             &[],
         )?;
-        ensure_workload_fits(supervisor, upstream)?;
+        let previous_overload = if active_reassignment && upstream.required > upstream.available {
+            let current =
+                resolve_management_workload(state, organization, supervisor, None, None, &[])?;
+            current.required.saturating_sub(current.available)
+        } else {
+            0
+        };
+        if upstream.required.saturating_sub(upstream.available) > previous_overload {
+            ensure_workload_fits(supervisor, upstream)?;
+        }
         child = supervisor;
     }
     Ok(())

@@ -118,9 +118,5 @@ pub(crate) fn daily_owner_net(cycle_net: Money, cycle_minutes: u32, basis_points
 /// reduce the expense. The rate is capped, so the owner retains positive proceeds.
 pub fn portfolio_overhead_charge(gross: Money, basis_points: u16) -> Money {
     debug_assert!(gross >= Money::ZERO && basis_points <= 5_500);
-    if gross == Money::ZERO || basis_points == 0 {
-        return Money::ZERO;
-    }
-    let cents = (i128::from(gross.cents()) * i128::from(basis_points) + 9_999) / 10_000;
-    Money::from_cents(i64::try_from(cents).expect("fee never exceeds gross payment"))
+    crate::finance::helpers::round_up_basis_point_fee(gross, u32::from(basis_points))
 }
