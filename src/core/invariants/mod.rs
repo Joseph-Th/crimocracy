@@ -444,6 +444,11 @@ use self::social::validate_social;
 use self::world::validate_world_state;
 
 pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
+    // Cross-domain validators below use indexed lookups that assume their
+    // referenced records exist. Prove primary keys and index consistency first,
+    // particularly when validating a freshly decoded save.
+    validate_id_allocators(state)?;
+    validate_indexes(state)?;
     if !crate::politics::political_system::valid_political_state(state) {
         return Err(StateValidationError::InvalidPoliticalCampaign);
     }
@@ -453,8 +458,6 @@ pub fn validate_state(state: &AppState) -> Result<(), StateValidationError> {
     if !crate::world::freelance_contracts::valid_freelance_contracts(state) {
         return Err(StateValidationError::InvalidFreelanceContract);
     }
-    validate_id_allocators(state)?;
-    validate_indexes(state)?;
     validate_campaign(state)?;
     validate_world_state(state)?;
     validate_social(state)?;

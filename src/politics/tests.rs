@@ -216,6 +216,56 @@ fn political_investment_requires_clean_funds_and_loses_influence_without_staff()
 }
 
 #[test]
+fn restore_rejects_campaign_transaction_with_mismatched_record_id() {
+    use crate::core::id::LedgerTransactionId;
+    use crate::core::invariants::StateValidationError;
+    use crate::core::persistence::LoadError;
+
+    let registry = build_registry();
+    let mut city = generate_city(&registry, CityScale::Small.config(8_731)).unwrap();
+    fund(&mut city.state, city.player, 1_000_000);
+    validate_invest_influence(&city.state, city.home, 500_000)
+        .unwrap()
+        .commit(&mut city.state)
+        .unwrap();
+    let clearing = city
+        .state
+        .politics()
+        .organization(city.player)
+        .unwrap()
+        .clearing_account
+        .unwrap();
+    let transaction = city
+        .state
+        .finance()
+        .transactions_for_account_through(clearing, city.state.now())
+        .next()
+        .unwrap();
+    let entry = bincode::serialize(&(transaction.id(), transaction)).unwrap();
+    let key = bincode::serialize(&transaction.id()).unwrap();
+    assert_eq!(&entry[key.len()..2 * key.len()], key.as_slice());
+    let mut bytes = bincode::serialize(&build_save(&registry, &city.state).unwrap()).unwrap();
+    let positions: Vec<_> = bytes
+        .windows(entry.len())
+        .enumerate()
+        .filter_map(|(i, window)| (window == entry).then_some(i))
+        .collect();
+    assert_eq!(positions.len(), 1);
+    let wrong = LedgerTransactionId::from_raw(u32::MAX);
+    assert!(city.state.finance().get_transaction(wrong).is_none());
+    let start = positions[0] + key.len();
+    bytes[start..start + key.len()].copy_from_slice(&bincode::serialize(&wrong).unwrap());
+    assert_eq!(
+        restore_save(&registry, bincode::deserialize(&bytes).unwrap()).err(),
+        Some(LoadError::InvalidState(
+            StateValidationError::IndexInconsistency {
+                subsystem: "finance"
+            }
+        )),
+    );
+}
+
+#[test]
 fn political_spending_is_bound_to_the_paying_organization_and_actual_ledger() {
     use crate::core::invariants::StateValidationError;
     use crate::core::persistence::LoadError;
