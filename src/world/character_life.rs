@@ -11,6 +11,10 @@ use crate::core::id::{BusinessId, CharacterId, NeighborhoodId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{DAY_MINUTES, is_day_boundary};
 use crate::core::version::ensure_version_can_advance;
+use crate::decisions::decision_system::{
+    ValidatedRecruitmentApprovalCancellations,
+    validate_cancel_recruitment_approvals_for_manager_change,
+};
 use crate::legal::InvestigationStatus;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -31,6 +35,8 @@ pub enum CivicPersonError {
     Unchanged(CharacterId),
     #[error("character {0} changed after occupation validation")]
     StaleCharacter(CharacterId),
+    #[error("pending recruitment approvals for character {0} changed after occupation validation")]
+    RecruitmentApprovalSetChanged(CharacterId),
     #[error(transparent)]
     Version(#[from] crate::core::version::VersionCapacityError),
 }
@@ -41,6 +47,7 @@ pub struct ValidatedCivicOccupation {
     home: NeighborhoodId,
     vocation: IndependentVocation,
     expected_version: u32,
+    approval_cancellations: ValidatedRecruitmentApprovalCancellations,
 }
 
 impl ValidatedCivicOccupation {
@@ -53,9 +60,15 @@ impl ValidatedCivicOccupation {
             return Err(CivicPersonError::StaleCharacter(self.character));
         }
         validate_occupation(state, self.character, self.home, self.vocation, false)?;
+        if !self.approval_cancellations.is_current(state) {
+            return Err(CivicPersonError::RecruitmentApprovalSetChanged(
+                self.character,
+            ));
+        }
         state
             .world
             .set_character_vocation(self.character, self.home, self.vocation);
+        self.approval_cancellations.commit_preflighted(state);
         Ok(())
     }
 }
@@ -76,6 +89,9 @@ pub fn validate_set_civic_occupation(
             .get_character(character)
             .expect("validated person exists")
             .version(),
+        approval_cancellations: validate_cancel_recruitment_approvals_for_manager_change(
+            state, character,
+        )?,
     })
 }
 

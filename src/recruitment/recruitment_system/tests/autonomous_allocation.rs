@@ -3,6 +3,85 @@
 use super::*;
 
 #[test]
+fn institutional_personnel_mandates_do_not_enter_criminal_recruitment() {
+    let mut fixture = fixture();
+    assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::Delegated));
+    let precinct = insert_organization(
+        &fixture.registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Precinct Personnel Office".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .unwrap();
+    let officer = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Precinct Personnel Manager".to_owned(),
+            organization: Some(precinct),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let mandate = validate_assign_mandate(
+        &fixture.state,
+        MandateDraft {
+            organization: precinct,
+            manager: officer,
+            scopes: BTreeSet::from([ResponsibilityScope::Function(
+                ResponsibilityFunction::Personnel,
+            )]),
+            standing_orders: BTreeMap::new(),
+            budget: None,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    fixture.state.advance_clock(SimDuration::from_minutes(
+        fixture
+            .registry
+            .recruitment()
+            .autonomous_attempt_cadence()
+            .as_minutes()
+            - 1,
+    ));
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        let tick = run_tick(&fixture.registry, state);
+        assert_eq!(tick.recruitment_attempts.len(), 1);
+        let attempt = state
+            .recruitment()
+            .get_attempt(tick.recruitment_attempts[0])
+            .unwrap();
+        assert_eq!(attempt.target_organization(), fixture.target);
+        assert_eq!(attempt.candidate(), fixture.candidate);
+        assert_eq!(
+            state.delegation().active_for_manager(officer).unwrap().id(),
+            mandate
+        );
+        assert_eq!(
+            state.world().get_character(officer).unwrap().organization(),
+            Some(precinct)
+        );
+        validate_state(state).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&restored).unwrap()
+    );
+}
+
+#[test]
 fn rival_recruitment_approval_requires_sole_available_executive() {
     let mut fixture = fixture();
     assign_personnel_mandate(&mut fixture, Some(ApprovalPolicy::RequireApproval));

@@ -645,7 +645,11 @@ fn validate_cancelled_recruitment_approval(
                 .get_mandate(mandate_id)
                 .ok_or_else(|| invalid_decision_context(decision))?;
             authority.authority().mandate == mandate_id
-                && authority.mandate_version() < mandate.version()
+                && (authority.mandate_version() < mandate.version()
+                    || state
+                        .world
+                        .get_character(context.recruiter())
+                        .is_some_and(|recruiter| authority.manager_version() < recruiter.version()))
         }
         DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(organization) => {
             context.target_organization() == organization

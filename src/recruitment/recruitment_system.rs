@@ -222,19 +222,13 @@ pub(crate) struct RecruitmentPlan {
 #[derive(Debug)]
 pub(crate) struct ValidatedRecruitmentProposal {
     plan: RecruitmentPlan,
+    reassignment: ValidatedCharacterReassignment,
 }
 
 impl ValidatedRecruitmentProposal {
     pub(crate) fn revalidate_state(&self, state: &AppState) -> Result<(), RecruitmentError> {
         validate_plan_state_snapshot(state, &self.plan)?;
-        if self.plan.context.outcome == RecruitmentOutcome::Accepted {
-            validate_reassign_character(
-                state,
-                self.plan.draft.candidate,
-                Some(self.plan.draft.target_organization),
-                Some(self.plan.draft.recruiter),
-            )?;
-        }
+        self.reassignment.ensure_current(state)?;
         Ok(())
     }
 }
@@ -258,15 +252,10 @@ pub(crate) fn validate_recruitment_proposal(
     let plan = decide_recruitment_attempt(registry, state, draft)?;
     validate_plan_state_snapshot(state, &plan)?;
     validate_plan_definition(registry, state, &plan)?;
-    if plan.context.outcome == RecruitmentOutcome::Accepted {
-        validate_reassign_character(
-            state,
-            plan.draft.candidate,
-            Some(plan.draft.target_organization),
-            Some(plan.draft.recruiter),
-        )?;
-    }
-    Ok(ValidatedRecruitmentProposal { plan })
+    // An approval is a request to make an actionable pitch, even when the current
+    // willingness calculation predicts refusal. Preserve the full availability token.
+    let reassignment = validate_recruitment_reassignment(state, plan.draft, None)?;
+    Ok(ValidatedRecruitmentProposal { plan, reassignment })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,6 +398,7 @@ fn candidate_reassignment_is_unavailable(error: WorldError) -> bool {
         | WorldError::SupervisionCycle { .. }
         | WorldError::DetainedSupervisor { .. }
         | WorldError::StaleCharacter { .. }
+        | WorldError::RecruitmentApprovalSetChanged { .. }
         | WorldError::InvalidPlayerOrganization(_)
         | WorldError::PlayerOrganizationAlreadyDesignated { .. }
         | WorldError::IdExhaustion(_) => false,

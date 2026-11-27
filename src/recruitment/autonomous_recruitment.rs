@@ -22,7 +22,9 @@ use crate::recruitment::{
     ALL_RECRUITMENT_APPROACHES, RecruitmentApproach, RecruitmentDraft, RecruitmentOutcome,
 };
 use crate::registry::{RecruitmentDefinition, Registry};
-use crate::world::{ApprovalPolicy, AutonomyLevel, PolicyKind, PolicySetting, TraitKind};
+use crate::world::{
+    ApprovalPolicy, AutonomyLevel, OrganizationKind, PolicyKind, PolicySetting, TraitKind,
+};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -368,6 +370,15 @@ fn prepare_recruitment_authorities(
     let mut refused_approvals = None;
     for mandate in state.delegation().active_for_scope(personnel_scope) {
         let organization = mandate.organization();
+        // Personnel mandates are shared world infrastructure. Criminal recruitment must not
+        // turn a valid institutional personnel office into an invalid recruitment request.
+        if state
+            .world()
+            .get_organization(organization)
+            .is_none_or(|record| record.kind() != OrganizationKind::Criminal)
+        {
+            continue;
+        }
         let manager = mandate.manager();
         let manager_record = state
             .world()

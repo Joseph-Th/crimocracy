@@ -188,8 +188,8 @@ impl DecisionResolution {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionCancellationReason {
     OperationParticipantDetained(CharacterId),
-    /// The mandate snapshot behind a recruitment approval was permanently superseded by a
-    /// revision or revocation, so the old request can no longer be approved coherently.
+    /// The mandate authority snapshot behind a recruitment approval was permanently superseded
+    /// by a mandate revision/revocation or a new manager version.
     RecruitmentAuthorityChanged(MandateId),
     /// The organization-level recruitment policy that supplied this approval's effective rule
     /// changed, so the pending request no longer represents current delegated authority.

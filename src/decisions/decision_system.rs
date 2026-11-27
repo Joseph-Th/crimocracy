@@ -11,6 +11,7 @@ pub(crate) use protection::{
 use recruitment_approval::validate_recruitment_approval_authority_snapshot;
 pub(crate) use recruitment_approval::{
     ValidatedAutonomousRecruitmentApproval, ValidatedRecruitmentApprovalCancellations,
+    validate_cancel_recruitment_approvals_for_manager_change,
     validate_cancel_recruitment_approvals_for_mandate_change,
     validate_cancel_recruitment_approvals_for_organization_policy_change,
 };

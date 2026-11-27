@@ -9,6 +9,10 @@ use crate::core::state::AppState;
 use crate::core::version::{
     VersionCapacityError, advance_version_preflighted, ensure_version_can_advance,
 };
+use crate::decisions::decision_system::{
+    ValidatedRecruitmentApprovalCancellations,
+    validate_cancel_recruitment_approvals_for_manager_change,
+};
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
 use crate::legal::ProsecutionCaseStatus;
 use crate::registry::Registry;
@@ -65,6 +69,8 @@ pub enum WorldError {
         organization: OrganizationId,
         decision: DecisionRequestId,
     },
+    #[error("pending recruitment approvals for character {character} changed after validation")]
+    RecruitmentApprovalSetChanged { character: CharacterId },
     #[error(
         "business {business} changed after validation; expected version {expected}, found {found}"
     )]
@@ -325,6 +331,7 @@ pub struct ValidatedCharacterAutonomy {
     character: CharacterId,
     autonomy: AutonomyLevel,
     expected_version: u32,
+    approval_cancellations: ValidatedRecruitmentApprovalCancellations,
 }
 
 impl ValidatedCharacterAutonomy {
@@ -342,9 +349,16 @@ impl ValidatedCharacterAutonomy {
             .into());
         }
         validate_set_character_autonomy(state, self.organization, self.character, self.autonomy)?;
+        if !self.approval_cancellations.is_current(state) {
+            return Err(WorldError::RecruitmentApprovalSetChanged {
+                character: self.character,
+            }
+            .into());
+        }
         state
             .world
             .set_character_autonomy(self.character, self.autonomy);
+        self.approval_cancellations.commit_preflighted(state);
         Ok(())
     }
 }
@@ -384,6 +398,10 @@ pub fn validate_set_character_autonomy(
         character,
         autonomy,
         expected_version: record.version(),
+        approval_cancellations: validate_cancel_recruitment_approvals_for_manager_change(
+            state, character,
+        )
+        .map_err(WorldError::from)?,
     })
 }
 
@@ -394,6 +412,7 @@ pub struct ValidatedCharacterReassignment {
     supervisor: Option<CharacterId>,
     allowed_recruitment_approval: Option<DecisionRequestId>,
     expected_version: u32,
+    approval_cancellations: ValidatedRecruitmentApprovalCancellations,
 }
 
 impl ValidatedCharacterReassignment {
@@ -420,7 +439,13 @@ impl ValidatedCharacterReassignment {
             self.organization,
             self.supervisor,
             self.allowed_recruitment_approval,
-        )
+        )?;
+        if !self.approval_cancellations.is_current(state) {
+            return Err(WorldError::RecruitmentApprovalSetChanged {
+                character: self.character,
+            });
+        }
+        Ok(())
     }
 
     pub fn commit(self, state: &mut AppState) -> Result<(), WorldError> {
@@ -436,6 +461,7 @@ impl ValidatedCharacterReassignment {
             self.supervisor,
             state.now(),
         );
+        self.approval_cancellations.commit_preflighted(state);
     }
 }
 
@@ -520,6 +546,9 @@ fn validate_reassign_character_with_approval(
         supervisor,
         allowed_recruitment_approval,
         expected_version: record.version(),
+        approval_cancellations: validate_cancel_recruitment_approvals_for_manager_change(
+            state, character,
+        )?,
     })
 }
 

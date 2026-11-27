@@ -51,6 +51,7 @@ use crate::world::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod approval_freshness;
 mod autonomous_allocation;
 
 struct Fixture {

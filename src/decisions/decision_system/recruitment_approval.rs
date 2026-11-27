@@ -8,13 +8,13 @@ use super::{
     DecisionError, DecisionRequestOutcome, DecisionResolutionOutcome,
     insert_pending_decision_request, validate_request_metadata,
 };
-use crate::core::id::{DecisionRequestId, IdKind, MandateId, OrganizationId};
+use crate::core::id::{CharacterId, DecisionRequestId, IdKind, MandateId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::SimTime;
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance};
 use crate::decisions::{
     DecisionCancellationReason, DecisionContext, DecisionRecordParts, DecisionRequestDraft,
-    DecisionRequestRecord, DecisionResponse, DecisionStatus, RecruitmentApprovalContext,
+    DecisionRequestRecord, DecisionResponse, RecruitmentApprovalContext,
     RecruitmentApprovalRequestDraft, build_cancellation,
     build_recruitment_approval_authority_snapshot, build_recruitment_approval_context,
     build_resolution,
@@ -33,35 +33,34 @@ use std::collections::BTreeSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecruitmentApprovalCancellationScope {
     Mandate(MandateId),
+    Manager(CharacterId),
     OrganizationPolicy(OrganizationId),
 }
 
+type PendingApprovalCancellation = (DecisionRequestId, u32, DecisionCancellationReason);
+
 /// Frozen set of pending recruitment approvals whose effective authority is about to be
-/// superseded. Mandate and organization-policy mutations compose this decision-owned lifecycle
-/// change so an obsolete approval never remains pending with an Approve option that cannot work.
+/// superseded. Mandate, manager and organization-policy mutations compose this decision-owned
+/// lifecycle change so an obsolete approval never remains pending with an unusable Approve option.
 #[derive(Debug)]
 pub(crate) struct ValidatedRecruitmentApprovalCancellations {
     scope: RecruitmentApprovalCancellationScope,
-    decisions: Vec<(DecisionRequestId, u32)>,
+    decisions: Vec<PendingApprovalCancellation>,
     cancelled_at: SimTime,
 }
 
 impl ValidatedRecruitmentApprovalCancellations {
     pub(crate) fn is_current(&self, state: &AppState) -> bool {
-        state.now() == self.cancelled_at
+        // Ordinary character changes need no timestamp pin when there is no approval to
+        // cancel. A newly created request still invalidates the empty snapshot.
+        (state.now() == self.cancelled_at
+            || (matches!(self.scope, RecruitmentApprovalCancellationScope::Manager(_))
+                && self.decisions.is_empty()))
             && pending_recruitment_approvals_for_scope(state, self.scope) == self.decisions
     }
 
     pub(crate) fn commit_preflighted(self, state: &mut AppState) {
-        let reason = match self.scope {
-            RecruitmentApprovalCancellationScope::Mandate(mandate) => {
-                DecisionCancellationReason::RecruitmentAuthorityChanged(mandate)
-            }
-            RecruitmentApprovalCancellationScope::OrganizationPolicy(organization) => {
-                DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(organization)
-            }
-        };
-        for (decision, _) in self.decisions {
+        for (decision, _, reason) in self.decisions {
             state
                 .decisions
                 .cancel(decision, build_cancellation(self.cancelled_at, reason));
@@ -76,6 +75,16 @@ pub(crate) fn validate_cancel_recruitment_approvals_for_mandate_change(
     validate_cancel_recruitment_approvals_for_scope(
         state,
         RecruitmentApprovalCancellationScope::Mandate(mandate),
+    )
+}
+
+pub(crate) fn validate_cancel_recruitment_approvals_for_manager_change(
+    state: &AppState,
+    manager: CharacterId,
+) -> Result<ValidatedRecruitmentApprovalCancellations, VersionCapacityError> {
+    validate_cancel_recruitment_approvals_for_scope(
+        state,
+        RecruitmentApprovalCancellationScope::Manager(manager),
     )
 }
 
@@ -94,12 +103,8 @@ fn validate_cancel_recruitment_approvals_for_scope(
     scope: RecruitmentApprovalCancellationScope,
 ) -> Result<ValidatedRecruitmentApprovalCancellations, VersionCapacityError> {
     let decisions = pending_recruitment_approvals_for_scope(state, scope);
-    for (decision, _) in &decisions {
-        let record = state
-            .decisions
-            .get_decision(*decision)
-            .expect("pending recruitment approval scan must reference a persisted decision");
-        ensure_version_can_advance(record.version(), "decision request")?;
+    for (_, version, _) in &decisions {
+        ensure_version_can_advance(*version, "decision request")?;
     }
     Ok(ValidatedRecruitmentApprovalCancellations {
         scope,
@@ -111,32 +116,60 @@ fn validate_cancel_recruitment_approvals_for_scope(
 fn pending_recruitment_approvals_for_scope(
     state: &AppState,
     scope: RecruitmentApprovalCancellationScope,
-) -> Vec<(DecisionRequestId, u32)> {
+) -> Vec<PendingApprovalCancellation> {
+    // Live approvals belong to their recipient's active authority. Query only that
+    // organization's pending index; ordinary character revisions without a mandate
+    // do not traverse any decision records, and resolved history never enters this scan.
+    let organization = match scope {
+        RecruitmentApprovalCancellationScope::Mandate(mandate) => state
+            .delegation
+            .get_mandate(mandate)
+            .map(|record| record.organization()),
+        RecruitmentApprovalCancellationScope::Manager(manager) => state
+            .delegation
+            .active_for_manager(manager)
+            .map(|record| record.organization()),
+        RecruitmentApprovalCancellationScope::OrganizationPolicy(organization) => {
+            Some(organization)
+        }
+    };
+    let Some(organization) = organization else {
+        return Vec::new();
+    };
     state
         .decisions
-        .decisions()
-        .filter(|decision| decision.status() == DecisionStatus::Pending)
-        .filter(|decision| {
+        .pending_for_recipient(organization)
+        .filter_map(|decision| {
             let DecisionContext::RecruitmentApproval(context) = decision.context() else {
-                return false;
+                return None;
             };
-            match scope {
+            let authority = context.authority().authority();
+            let reason = match scope {
                 RecruitmentApprovalCancellationScope::Mandate(mandate) => {
-                    context.authority().authority().mandate == mandate
+                    if authority.mandate != mandate {
+                        return None;
+                    }
+                    DecisionCancellationReason::RecruitmentAuthorityChanged(mandate)
+                }
+                RecruitmentApprovalCancellationScope::Manager(manager) => {
+                    if context.recruiter() != manager {
+                        return None;
+                    }
+                    DecisionCancellationReason::RecruitmentAuthorityChanged(authority.mandate)
                 }
                 RecruitmentApprovalCancellationScope::OrganizationPolicy(organization) => {
-                    context.target_organization() == organization
-                        && matches!(
-                            context.authority().policy_source(),
-                            RecruitmentPolicySource::Organization {
-                                organization: source,
-                                ..
-                            } if source == organization
-                        )
+                    if !matches!(
+                        context.authority().policy_source(),
+                        RecruitmentPolicySource::Organization { organization: source, .. }
+                            if source == organization
+                    ) {
+                        return None;
+                    }
+                    DecisionCancellationReason::RecruitmentOrganizationPolicyChanged(organization)
                 }
-            }
+            };
+            Some((decision.id(), decision.version(), reason))
         })
-        .map(|decision| (decision.id(), decision.version()))
         .collect()
 }
 
