@@ -17,7 +17,7 @@ use crate::registry::{OperationExecutionDefinition, Registry};
 use crate::world::{BusinessOwner, Rating};
 use std::collections::BTreeSet;
 
-fn resolve_incident_witness(
+pub(super) fn resolve_incident_witness(
     execution: &OperationExecutionDefinition,
     state: &AppState,
     operation: &OperationRecord,

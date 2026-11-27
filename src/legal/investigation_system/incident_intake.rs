@@ -35,6 +35,10 @@ pub struct ValidatedIncidentIntake {
 }
 
 impl ValidatedIncidentIntake {
+    pub(crate) fn witness_character(&self) -> Option<crate::core::id::CharacterId> {
+        self.draft.witness.as_ref().map(|witness| witness.character)
+    }
+
     pub(crate) fn evidence_count(&self) -> Result<u32, InvestigationError> {
         u32::try_from(self.draft.evidence.len())
             .map_err(|_| InvestigationError::IncidentEvidenceCountOverflow)

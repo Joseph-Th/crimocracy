@@ -55,6 +55,10 @@ pub struct ValidatedReport {
     planned_information: Option<PlannedInformationSource>,
 }
 impl ValidatedReport {
+    pub(crate) fn recipient(&self) -> crate::core::id::OrganizationId {
+        self.draft.recipient
+    }
+
     pub fn commit(self, state: &mut AppState) -> Result<ReportId, ReportError> {
         crate::core::time::ensure_time_current(state.now(), self.validated_at)
             .map_err(|(expected, found)| ReportError::StaleTime { expected, found })?;

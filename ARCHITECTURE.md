@@ -311,6 +311,14 @@ historical settlements remain intact for their original owners and accounting hi
 Financial findings and court notices render money with the finance owner's currency formatter,
 not raw diagnostic cent counts.
 
+Operation resolution retains the immutable registry for held-plan validation.
+The operation owner re-derives the actual business-standing difficulty adjustment
+at validation and commit. Before committing an incident or a damage notification,
+it also rechecks the same on-scene witness and player-victim selection used when
+the artifacts were prepared. Custody, affiliation, and title changes within the
+same minute can invalidate those selections without changing the operation version;
+stale selections reject before any legal, report, or economic mutation.
+
 The planner attaches the registry's supported police contingencies, bounded
 relative scheduling, completion deadlines and known-topic requirements to
 `OperationDraft`; `operation_system` validates entry-stage support,

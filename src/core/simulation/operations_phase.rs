@@ -499,6 +499,9 @@ fn operation_resolution_is_terminally_blocked(error: &OperationResolutionError) 
         | OperationResolutionError::StaleResolutionTime { .. }
         | OperationResolutionError::StalePoliceDeploymentContext { .. }
         | OperationResolutionError::StalePoliceResponseContext { .. }
+        | OperationResolutionError::StaleBusinessFearContext { .. }
+        | OperationResolutionError::StaleIncidentWitnessContext { .. }
+        | OperationResolutionError::StaleDisruptionVictimContext { .. }
         | OperationResolutionError::StaleIncidentRouting { .. }
         | OperationResolutionError::StaleIncidentJurisdictionVersion { .. }
         | OperationResolutionError::Intelligence(_)

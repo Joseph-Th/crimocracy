@@ -3,7 +3,7 @@
 //! The parent module owns outcome planning. This module turns a frozen plan into validated
 //! cross-domain artifacts, then commits that transaction after all freshness checks succeed.
 
-use super::incident_intake::validate_exposure_incident;
+use super::incident_intake::{resolve_incident_witness, validate_exposure_incident};
 use super::resolution_effects::validate_resolution_effects;
 use super::{
     OperationResolutionError, OperationResolutionPlan, completion_history_summary,
@@ -11,7 +11,7 @@ use super::{
 };
 use crate::core::attention::AttentionClass;
 use crate::core::entity::EntityRef;
-use crate::core::id::{CharacterId, IdKind, OperationId};
+use crate::core::id::{BusinessId, CharacterId, IdKind, OperationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::version::ensure_version_can_advance;
 use crate::economy::business_economy_system::ValidatedBusinessDisruption;
@@ -39,9 +39,9 @@ use crate::reports::report_system::{ValidatedReport, validate_record_report};
 use crate::reports::{ReportDraft, ReportEntry, ReportKind};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) struct ValidatedOperationResolution {
+pub(crate) struct ValidatedOperationResolution<'registry> {
     plan: OperationResolutionPlan,
-    off_window_patrol_presence_percent: u8,
+    registry: &'registry Registry,
     incident: Option<ValidatedIncidentIntake>,
     incident_authority: Option<CaseIntakeAuthoritySnapshot>,
     acquired_information: Vec<ValidatedInformation>,
@@ -55,7 +55,7 @@ pub(crate) struct ValidatedOperationResolution {
     participant_information: Vec<(CharacterId, ValidatedInformation)>,
 }
 
-impl ValidatedOperationResolution {
+impl ValidatedOperationResolution<'_> {
     /// Commits the whole resolution atomically. Every fallible effect is validated before the
     /// first mutation and re-checks only its freshness token here.
     pub(crate) fn commit(
@@ -79,7 +79,7 @@ impl ValidatedOperationResolution {
             budget.push((IdKind::Report, 1));
         }
         state.ids.reserve_many(&budget)?;
-        validate_plan_snapshot(state, &self.plan, self.off_window_patrol_presence_percent)?;
+        validate_plan_snapshot(self.registry, state, &self.plan)?;
         let operation = state
             .operations
             .get_operation(self.plan.snapshot.operation)
@@ -111,6 +111,24 @@ impl ValidatedOperationResolution {
                 },
             )?;
         }
+        // The incident owner validates the selected witness's legal references, not the
+        // operation's on-scene selection policy. Recheck that policy here; custody,
+        // affiliation or title changes can remove or introduce a witness in this minute.
+        if let Some(incident) = &self.incident {
+            let execution = self.registry.get_operation(operation.kind()).execution();
+            let witness = resolve_incident_witness(
+                execution,
+                state,
+                operation,
+                &self.plan.outcome.exposure,
+                self.plan.outcome.factors.target_police_presence(),
+            );
+            if witness.map(|witness| witness.character) != incident.witness_character() {
+                return Err(OperationResolutionError::StaleIncidentWitnessContext {
+                    operation: operation.id(),
+                });
+            }
+        }
         if let Some(release) = &self.detainee_release {
             let character = match state
                 .operations
@@ -140,6 +158,13 @@ impl ValidatedOperationResolution {
         }
         if let Some(disruption) = &self.business_disruption {
             disruption.ensure_current(state)?;
+            if resolve_player_disruption_victim(state, operation).map(|(_, owner)| owner)
+                != self.victim_report.as_ref().map(ValidatedReport::recipient)
+            {
+                return Err(OperationResolutionError::StaleDisruptionVictimContext {
+                    operation: operation.id(),
+                });
+            }
         }
         let incident = self
             .incident
@@ -267,13 +292,12 @@ pub(crate) fn mandatory_operation_resolution_id_budget(
     ]
 }
 
-pub(crate) fn validate_operation_resolution_plan(
-    registry: &Registry,
+pub(crate) fn validate_operation_resolution_plan<'registry>(
+    registry: &'registry Registry,
     state: &AppState,
     plan: OperationResolutionPlan,
-) -> Result<ValidatedOperationResolution, OperationResolutionError> {
-    let off_window_patrol_presence_percent = registry.legal().off_window_patrol_presence_percent();
-    validate_plan_snapshot(state, &plan, off_window_patrol_presence_percent)?;
+) -> Result<ValidatedOperationResolution<'registry>, OperationResolutionError> {
+    validate_plan_snapshot(registry, state, &plan)?;
     let record = state
         .operations
         .get_operation(plan.snapshot.operation)
@@ -337,54 +361,42 @@ pub(crate) fn validate_operation_resolution_plan(
     )?;
     // Notify the damaged shop's owner, not just the gang that authorized the job. The
     // recipient learns about the attack, but not the attacker's undiscovered identity.
-    let victim_report = match (effects.business_disruption.as_ref(), record.objective()) {
-        (
-            Some(_),
-            OperationObjective::DisruptBusiness {
-                target: EntityRef::Business(business),
-            },
-        ) => {
+    let victim_report = match (
+        effects.business_disruption.as_ref(),
+        resolve_player_disruption_victim(state, record),
+    ) {
+        (Some(_), Some((business, owner))) => {
             let shop = state
                 .world()
-                .get_business(*business)
+                .get_business(business)
                 .expect("validated disruption must target a live business");
-            match shop.owner() {
-                crate::world::BusinessOwner::Organization(owner)
-                    if state.player_organization() == Some(owner)
-                        && owner != record.responsible_organization() =>
-                {
-                    let district = shop.neighborhood();
-                    let district_name = state
-                        .world()
-                        .get_neighborhood(district)
-                        .expect("business district must exist")
-                        .name();
-                    Some(validate_record_report(
-                        state,
-                        ReportDraft {
-                            recipient: owner,
-                            kind: ReportKind::AfterAction,
-                            title: format!("Hostile attack on {}", shop.name()),
-                            entries: vec![ReportEntry {
-                                attention: AttentionClass::Crisis,
-                                summary: format!(
-                                    "A hostile crew damaged {} in {district_name}. Earnings will be reduced during repairs.",
-                                    shop.name()
-                                ),
-                                sources: Vec::new(),
-                                entities: BTreeSet::from([
-                                    EntityRef::Business(*business),
-                                    EntityRef::Neighborhood(district),
-                                ]),
-                                decision: None,
-                            }],
-                        },
-                    )?)
-                }
-                crate::world::BusinessOwner::Independent
-                | crate::world::BusinessOwner::Character(_)
-                | crate::world::BusinessOwner::Organization(_) => None,
-            }
+            let district = shop.neighborhood();
+            let district_name = state
+                .world()
+                .get_neighborhood(district)
+                .expect("business district must exist")
+                .name();
+            Some(validate_record_report(
+                state,
+                ReportDraft {
+                    recipient: owner,
+                    kind: ReportKind::AfterAction,
+                    title: format!("Hostile attack on {}", shop.name()),
+                    entries: vec![ReportEntry {
+                        attention: AttentionClass::Crisis,
+                        summary: format!(
+                            "A hostile crew damaged {} in {district_name}. Earnings will be reduced during repairs.",
+                            shop.name()
+                        ),
+                        sources: Vec::new(),
+                        entities: BTreeSet::from([
+                            EntityRef::Business(business),
+                            EntityRef::Neighborhood(district),
+                        ]),
+                        decision: None,
+                    }],
+                },
+            )?)
         }
         _ => None,
     };
@@ -414,7 +426,7 @@ pub(crate) fn validate_operation_resolution_plan(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ValidatedOperationResolution {
         plan,
-        off_window_patrol_presence_percent,
+        registry,
         incident,
         incident_authority,
         acquired_information,
@@ -427,4 +439,24 @@ pub(crate) fn validate_operation_resolution_plan(
         business_disruption: effects.business_disruption,
         participant_information,
     })
+}
+
+/// Resolve the notification audience through one policy for both validation and held commit.
+/// The damage itself is validated independently by the business economy owner.
+fn resolve_player_disruption_victim(
+    state: &AppState,
+    record: &OperationRecord,
+) -> Option<(BusinessId, OrganizationId)> {
+    let OperationObjective::DisruptBusiness {
+        target: EntityRef::Business(business),
+    } = record.objective()
+    else {
+        return None;
+    };
+    let shop = state.world().get_business(*business)?;
+    let crate::world::BusinessOwner::Organization(owner) = shop.owner() else {
+        return None;
+    };
+    (state.player_organization() == Some(owner) && owner != record.responsible_organization())
+        .then_some((*business, owner))
 }

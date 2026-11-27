@@ -127,6 +127,14 @@ pub(crate) enum OperationResolutionError {
         "police response context affecting operation {operation} changed after resolution planning"
     )]
     StalePoliceResponseContext { operation: OperationId },
+    #[error("business standing affecting operation {operation} changed after resolution planning")]
+    StaleBusinessFearContext { operation: OperationId },
+    #[error("on-scene witness for operation {operation} changed after incident validation")]
+    StaleIncidentWitnessContext { operation: OperationId },
+    #[error(
+        "player damage-notification recipient for operation {operation} changed after validation"
+    )]
+    StaleDisruptionVictimContext { operation: OperationId },
     #[error(
         "operation incident routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
     )]
@@ -728,10 +736,11 @@ pub(crate) fn find_due_in_progress_operations(state: &AppState) -> Vec<Operation
 }
 
 fn validate_plan_snapshot(
+    registry: &Registry,
     state: &AppState,
     plan: &OperationResolutionPlan,
-    off_window_patrol_presence_percent: u8,
 ) -> Result<(), OperationResolutionError> {
+    let off_window_patrol_presence_percent = registry.legal().off_window_patrol_presence_percent();
     let record = state
         .operations
         .get_operation(plan.snapshot.operation)
@@ -803,6 +812,13 @@ fn validate_plan_snapshot(
     crate::core::time::ensure_time_current(state.now(), plan.snapshot.resolved_at).map_err(
         |(expected, found)| OperationResolutionError::StaleResolutionTime { expected, found },
     )?;
+    if resolve_intimidation_business_fear_adjustment(registry, state, record)
+        != plan.outcome.factors.business_fear_adjustment()
+    {
+        return Err(OperationResolutionError::StaleBusinessFearContext {
+            operation: record.id(),
+        });
+    }
     // Information-acquisition operations own richer target snapshots than the generic
     // venue/police derivation. Check those first so target-specific staleness is reported
     // precisely rather than surfacing as a secondary police-context change.

@@ -383,6 +383,15 @@ identity plus byte-identical continued delivery after restore.
 checks the real load boundary against missing, multiple, cyclic and forward
 parents and duplicate root recipients.
 
+Operation resolution freshness is exercised through
+`held_intimidation_resolution_rejects_changed_business_standing`,
+`held_incident_resolution_rejects_changed_on_scene_witness`, and
+`held_disruption_resolution_rejects_changed_victim_notification`. These
+hold real resolution tokens through same-minute reputation, witness eligibility,
+and title changes, check typed rejection with byte-identical state, then
+replan and verify the current outcome, witness registration, or notification
+through the save/restore boundary.
+
 `finance_play_tests.rs` proves ownership isolation, same-minute ordering,
 non-mutating rejection, real laundering fees, and save/restore stability.
 `laundering_fragmentation_cannot_reduce_the_authored_fee` compares equal-volume whole and fragmented transfers, checks actual ledger debits and credits and consumed capacity, and continues identically across save/restore. `finance_system/tests/laundering.rs` also verifies that a held transfer rejects a same-minute market capacity reduction caused by establishing a competing business, with the ledger and laundering consumption unchanged.

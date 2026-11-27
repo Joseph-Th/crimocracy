@@ -99,6 +99,128 @@ fn record_known_witness_status(
 }
 
 #[test]
+fn held_disruption_resolution_rejects_changed_victim_notification() {
+    let (registry, mut state, _, _, operation) =
+        make_exposed_operation_fixture(OperationKind::Sabotage, false, Vec::new());
+    let business = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .objective()
+        .business_target()
+        .unwrap();
+    let player = insert_organization(
+        &registry,
+        &mut state,
+        OrganizationDraft {
+            name: "Victim Organization".to_owned(),
+            kind: OrganizationKind::Criminal,
+        },
+    )
+    .unwrap();
+    insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Victim Executive".to_owned(),
+            organization: Some(player),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    designate_player_organization(&mut state, player).unwrap();
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    let due = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .resolution_due_at()
+        .unwrap();
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due.as_minutes() - state.now().as_minutes()).unwrap(),
+    ));
+    let randomness = OperationResolutionRandomness::new(
+        i8::try_from(
+            registry
+                .get_operation(OperationKind::Sabotage)
+                .execution()
+                .variance_limit(),
+        )
+        .unwrap(),
+        0,
+    );
+    let plan = decide_operation_resolution(&registry, &state, operation, randomness).unwrap();
+    assert_ne!(
+        plan.outcome.objective_outcome,
+        OperationObjectiveOutcome::Failed
+    );
+    let validated = validate_operation_resolution_plan(&registry, &state, plan).unwrap();
+    validate_transfer_business_ownership(&state, business, BusinessOwner::Organization(player))
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let before = bincode::serialize(&state).unwrap();
+    assert_eq!(
+        validated.commit(&mut state),
+        Err(OperationResolutionError::StaleDisruptionVictimContext { operation }),
+        "a newly affected player must not lose the damage notification"
+    );
+    assert_eq!(bincode::serialize(&state).unwrap(), before);
+    let current = decide_operation_resolution(&registry, &state, operation, randomness).unwrap();
+    let mut sold = state.clone();
+    let validated = validate_operation_resolution_plan(&registry, &sold, current.clone()).unwrap();
+    validate_transfer_business_ownership(&sold, business, BusinessOwner::Independent)
+        .unwrap()
+        .commit(&mut sold)
+        .unwrap();
+    let sold_before = bincode::serialize(&sold).unwrap();
+    assert_eq!(
+        validated.commit(&mut sold),
+        Err(OperationResolutionError::StaleDisruptionVictimContext { operation }),
+        "the former owner must not receive the current damage notification"
+    );
+    assert_eq!(bincode::serialize(&sold).unwrap(), sold_before);
+    let current_sold =
+        decide_operation_resolution(&registry, &sold, operation, randomness).unwrap();
+    validate_operation_resolution_plan(&registry, &sold, current_sold)
+        .unwrap()
+        .commit(&mut sold)
+        .unwrap();
+    assert!(
+        !sold
+            .reports()
+            .reports_for(player)
+            .any(|report| report.title().starts_with("Hostile attack on"))
+    );
+    restore_save(&registry, build_save(&registry, &sold).unwrap()).unwrap();
+    validate_operation_resolution_plan(&registry, &state, current)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    assert_eq!(
+        state
+            .reports()
+            .reports_for(player)
+            .filter(|report| {
+                report.title().starts_with("Hostile attack on")
+                    && report
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.entities.contains(&EntityRef::Business(business)))
+            })
+            .count(),
+        1
+    );
+    restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+}
+
+#[test]
 fn achieved_surveillance_after_action_leads_with_findings_not_missing_recon_boilerplate() {
     let factors = OperationResolutionFactors {
         role_capability_average: Rating::try_new(90).expect("fixture rating should be valid"),
@@ -498,6 +620,194 @@ fn detention_cancels_pending_operation_decision_and_aborts_operation() {
     assert!(state.decisions().pending_for_operation(operation).is_none());
     validate_state(&state).expect("detention-preempted decision state should validate");
     validate_invariants(&state);
+}
+
+#[test]
+fn held_intimidation_resolution_rejects_changed_business_standing() {
+    let (registry, mut state, _, _, operation) =
+        make_exposed_operation_fixture(OperationKind::Intimidation, false, Vec::new());
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .responsible_organization();
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    let due = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .resolution_due_at()
+        .unwrap();
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due.as_minutes() - state.now().as_minutes()).unwrap(),
+    ));
+    let randomness = OperationResolutionRandomness::new(0, 0);
+    let plan = decide_operation_resolution(&registry, &state, operation, randomness).unwrap();
+    assert_eq!(plan.outcome.factors.business_fear_adjustment(), 0);
+    let validated = validate_operation_resolution_plan(&registry, &state, plan.clone()).unwrap();
+    apply_reputation_delta(
+        &registry,
+        &mut state,
+        organization,
+        AudienceKind::Businesses,
+        50,
+    )
+    .unwrap();
+    let before = bincode::serialize(&state).unwrap();
+    assert_eq!(
+        validate_operation_resolution_plan(&registry, &state, plan).err(),
+        Some(OperationResolutionError::StaleBusinessFearContext { operation }),
+        "planning must not preserve a superseded intimidation difficulty"
+    );
+    assert_eq!(
+        validated.commit(&mut state),
+        Err(OperationResolutionError::StaleBusinessFearContext { operation }),
+        "commit must not preserve a superseded intimidation difficulty"
+    );
+    assert_eq!(bincode::serialize(&state).unwrap(), before);
+    let current = decide_operation_resolution(&registry, &state, operation, randomness).unwrap();
+    let expected_adjustment = current.outcome.factors.business_fear_adjustment();
+    assert!(expected_adjustment < 0);
+    validate_operation_resolution_plan(&registry, &state, current)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let restored = restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .operations()
+            .get_operation(operation)
+            .unwrap()
+            .resolution()
+            .unwrap()
+            .factors()
+            .business_fear_adjustment(),
+        expected_adjustment
+    );
+}
+
+#[test]
+fn held_incident_resolution_rejects_changed_on_scene_witness() {
+    let (registry, mut state, _, _, operation) =
+        make_exposed_operation_fixture(OperationKind::Burglary, true, Vec::new());
+    let business = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .objective()
+        .taken_business()
+        .unwrap();
+    let owner = insert_character(
+        &mut state,
+        CharacterDraft {
+            name: "Original Store Owner".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_transfer_business_ownership(&state, business, BusinessOwner::Character(owner))
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    assert_eq!(
+        run_tick(&registry, &mut state).started_operations,
+        vec![operation]
+    );
+    let due = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .resolution_due_at()
+        .unwrap();
+    state.advance_clock(SimDuration::from_minutes(
+        u32::try_from(due.as_minutes() - state.now().as_minutes()).unwrap(),
+    ));
+    let randomness = OperationResolutionRandomness::new(
+        0,
+        i8::try_from(
+            registry
+                .get_operation(OperationKind::Burglary)
+                .execution()
+                .exposure_variance_limit(),
+        )
+        .unwrap(),
+    );
+    let plan = decide_operation_resolution(&registry, &state, operation, randomness).unwrap();
+    assert!(matches!(
+        plan.outcome.exposure.level(),
+        OperationExposureLevel::Witnessed | OperationExposureLevel::Identifying
+    ));
+    let organization = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .responsible_organization();
+    // Neither a former owner nor an owner who joins the sponsoring crew may be
+    // preserved as the incident's on-scene witness. Both changes leave police
+    // routing and the operation's practical objective unchanged.
+    for transfer_title in [true, false] {
+        let mut branch = state.clone();
+        let validated =
+            validate_operation_resolution_plan(&registry, &branch, plan.clone()).unwrap();
+        if transfer_title {
+            validate_transfer_business_ownership(&branch, business, BusinessOwner::Independent)
+                .unwrap()
+                .commit(&mut branch)
+                .unwrap();
+        } else {
+            validate_reassign_character(&branch, owner, Some(organization), None)
+                .unwrap()
+                .commit(&mut branch)
+                .unwrap();
+        }
+        let before = bincode::serialize(&branch).unwrap();
+        assert_eq!(
+            validated.commit(&mut branch),
+            Err(OperationResolutionError::StaleIncidentWitnessContext { operation })
+        );
+        assert_eq!(bincode::serialize(&branch).unwrap(), before);
+        let current =
+            decide_operation_resolution(&registry, &branch, operation, randomness).unwrap();
+        validate_operation_resolution_plan(&registry, &branch, current)
+            .unwrap()
+            .commit(&mut branch)
+            .unwrap();
+        let restored = restore_save(&registry, build_save(&registry, &branch).unwrap()).unwrap();
+        let case = restored
+            .operations()
+            .get_operation(operation)
+            .unwrap()
+            .resolution()
+            .unwrap()
+            .exposure()
+            .investigation()
+            .unwrap();
+        assert!(restored.legal().case_witness_for(case, owner).is_none());
+    }
+    // A still-eligible owner receives the named registration under the same plan.
+    validate_operation_resolution_plan(&registry, &state, plan)
+        .unwrap()
+        .commit(&mut state)
+        .unwrap();
+    let case = state
+        .operations()
+        .get_operation(operation)
+        .unwrap()
+        .resolution()
+        .unwrap()
+        .exposure()
+        .investigation()
+        .unwrap();
+    assert!(state.legal().case_witness_for(case, owner).is_some());
+    restore_save(&registry, build_save(&registry, &state).unwrap()).unwrap();
 }
 
 /// Compact cash-capable target for operation fixtures. When `owner` is set the business
