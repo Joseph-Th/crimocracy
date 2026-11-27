@@ -3,7 +3,6 @@
 use crate::core::id::{CharacterId, OperationId};
 use crate::core::state::AppState;
 use crate::core::time::{SimDuration, SimTime};
-use crate::operations::operation_state::{checked_shift_past_pause, pause_duration_minutes};
 use crate::operations::{OperationConstraint, OperationKind, OperationRecord, OperationStatus};
 use crate::registry::{OperationExecutionDefinition, Registry};
 use std::collections::BTreeSet;
@@ -78,6 +77,62 @@ pub(crate) fn resolve_deadline_without_execution_window(
         .min()
 }
 
+/// The authored runtime schedule, before or after a leadership pause. This is a
+/// read-only projection; only the operation owner persists these two instants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OperationTiming {
+    pub(crate) due_at: SimTime,
+    pub(crate) entry_at: Option<SimTime>,
+}
+
+impl OperationTiming {
+    /// Preserve remaining execution time during a decision pause. Entry moves only
+    /// if it had not yet occurred. A hard completion deadline never moves.
+    pub(crate) fn after_pause(self, paused_at: SimTime, resumed_at: SimTime) -> Option<Self> {
+        let minutes = resumed_at
+            .as_minutes()
+            .checked_sub(paused_at.as_minutes())?;
+        let due_at = checked_shift_past_pause(self.due_at, minutes)?;
+        let entry_at = match self.entry_at {
+            Some(entry) if entry > paused_at => Some(checked_shift_past_pause(entry, minutes)?),
+            other => other,
+        };
+        Some(Self { due_at, entry_at })
+    }
+}
+
+fn checked_shift_past_pause(time: SimTime, paused_minutes: u64) -> Option<SimTime> {
+    time.as_minutes()
+        .checked_add(paused_minutes)
+        .map(SimTime::from_minutes)
+}
+
+fn bound_due_at(end: SimTime, constraints: &[OperationConstraint]) -> SimTime {
+    constraints
+        .iter()
+        .filter_map(|constraint| match constraint {
+            OperationConstraint::CompleteBy(deadline) => Some(*deadline),
+            OperationConstraint::RequireIntelligenceTopic(_) => None,
+        })
+        .fold(end, SimTime::min)
+}
+
+/// Resolve the exact initial schedule for an actual begin, including an authored
+/// entry milestone and any compression by the earliest hard deadline.
+pub(crate) fn initial_operation_timing(
+    execution: &OperationExecutionDefinition,
+    start: SimTime,
+    constraints: &[OperationConstraint],
+) -> Option<OperationTiming> {
+    Some(OperationTiming {
+        due_at: bound_due_at(start.checked_add(execution.duration())?, constraints),
+        entry_at: match execution.operation_entry_offset() {
+            Some(offset) => Some(start.checked_add(offset)?),
+            None => None,
+        },
+    })
+}
+
 /// Occupancy window for an operation that is still awaiting its begin transition.
 pub(crate) fn projected_authorized_operation_window(
     registry: &Registry,
@@ -87,18 +142,10 @@ pub(crate) fn projected_authorized_operation_window(
     constraints: &[OperationConstraint],
 ) -> (SimTime, SimTime) {
     let start = earliest_operation_start_from_authorization(authorized_at, scheduled_for);
-    let mut end = start
+    let end = start
         .checked_add(registry.get_operation(kind).execution().duration())
         .unwrap_or(SimTime::MAX);
-    for constraint in constraints {
-        let OperationConstraint::CompleteBy(deadline) = constraint else {
-            continue;
-        };
-        if *deadline < end {
-            end = *deadline;
-        }
-    }
-    (start, end)
+    (start, bound_due_at(end, constraints))
 }
 
 /// Effective occupancy window of a started non-terminal operation, projecting any unresolved
@@ -132,7 +179,7 @@ fn projected_started_window(
         && let Some(paused_at) = operation.awaiting_decision_since()
         && paused_at <= at
     {
-        end = checked_shift_past_pause(end, pause_duration_minutes(paused_at, at))
+        end = checked_shift_past_pause(end, at.as_minutes() - paused_at.as_minutes())
             .unwrap_or(SimTime::MAX);
         if let Some(deadline) = operation.completion_deadline() {
             let cleanup = deadline

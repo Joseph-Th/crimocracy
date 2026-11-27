@@ -5,14 +5,14 @@ use crate::core::invariants::StateValidationError;
 use crate::core::state::AppState;
 use crate::legal::{EvidenceReliability, EvidenceStrength};
 use crate::operations::operation_execution::{
-    resolve_exposure_level, resolve_exposure_score, resolve_stealth_average,
+    resolve_exposure_level, resolve_exposure_score, resolve_identified_character,
+    resolve_stealth_average,
 };
 use crate::operations::{
     OperationExposureLevel, OperationExposureRecord, OperationRecord, OperationResolutionRecord,
 };
 use crate::registry::OperationExecutionDefinition;
 use crate::world::OrganizationKind;
-use std::collections::BTreeSet;
 
 pub(super) fn validate_operation_exposure_links(
     state: &AppState,
@@ -21,7 +21,11 @@ pub(super) fn validate_operation_exposure_links(
 ) -> Result<(), StateValidationError> {
     let exposure = resolution.exposure();
     validate_exposure_location(state, operation, exposure)?;
-    validate_exposure_identity(operation, exposure)?;
+    if exposure.identified_character()
+        != resolve_identified_character(state, operation, exposure.level())
+    {
+        return Err(invalid_operation_exposure(operation));
+    }
     match exposure.investigation() {
         None => {
             if !exposure.evidence().is_empty() {
@@ -88,33 +92,6 @@ fn validate_exposure_location(
         && state.world.get_neighborhood(neighborhood).is_none()
     {
         return Err(invalid_operation_exposure(operation));
-    }
-    Ok(())
-}
-
-fn validate_exposure_identity(
-    operation: &OperationRecord,
-    exposure: &OperationExposureRecord,
-) -> Result<(), StateValidationError> {
-    let participants: BTreeSet<_> = std::iter::once(operation.leader())
-        .chain(operation.roles().values().copied())
-        .collect();
-    match exposure.level() {
-        OperationExposureLevel::Identifying => {
-            if !exposure
-                .identified_character()
-                .is_some_and(|character| participants.contains(&character))
-            {
-                return Err(invalid_operation_exposure(operation));
-            }
-        }
-        OperationExposureLevel::None
-        | OperationExposureLevel::Trace
-        | OperationExposureLevel::Witnessed => {
-            if exposure.identified_character().is_some() {
-                return Err(invalid_operation_exposure(operation));
-            }
-        }
     }
     Ok(())
 }

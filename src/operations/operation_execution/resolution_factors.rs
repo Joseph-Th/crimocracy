@@ -492,11 +492,7 @@ pub(super) fn resolve_exposure_plan(
     };
     let score = resolve_exposure_score(execution, factors);
     let level = resolve_exposure_level(execution, score);
-    let identified_character = if level == OperationExposureLevel::Identifying {
-        find_most_exposed_participant(state, record)
-    } else {
-        None
-    };
+    let identified_character = resolve_identified_character(state, record, level);
     OperationExposurePlan {
         level,
         score,
@@ -626,10 +622,16 @@ pub(crate) fn has_police_response_arrived_by(
         .is_some_and(|arrived_at| arrived_at <= at)
 }
 
-fn find_most_exposed_participant(
+/// Identifying exposure is attributed to the least stealthy actual participant,
+/// with stable identity breaking equal capability. Other exposure levels identify nobody.
+pub(crate) fn resolve_identified_character(
     state: &AppState,
     record: &crate::operations::OperationRecord,
+    level: OperationExposureLevel,
 ) -> Option<CharacterId> {
+    if level != OperationExposureLevel::Identifying {
+        return None;
+    }
     record.participant_ids().min_by_key(|character| {
         let participant = state
             .world

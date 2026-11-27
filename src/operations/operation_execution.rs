@@ -15,10 +15,10 @@ pub(crate) use resolution_commit::{
 
 pub(crate) use resolution_factors::{
     has_police_response_arrived_by, resolve_crew_capabilities, resolve_execution_margin,
-    resolve_exposure_level, resolve_exposure_score, resolve_intelligence_factors,
-    resolve_investigation_target_neighborhoods, resolve_objective_outcome,
-    resolve_operation_police_alert_context, resolve_stealth_average, resolve_time_pressure,
-    weighted_ability,
+    resolve_exposure_level, resolve_exposure_score, resolve_identified_character,
+    resolve_intelligence_factors, resolve_investigation_target_neighborhoods,
+    resolve_objective_outcome, resolve_operation_police_alert_context, resolve_stealth_average,
+    resolve_time_pressure, weighted_ability,
 };
 use resolution_factors::{
     resolve_exposure_plan, resolve_intimidation_business_fear_adjustment,

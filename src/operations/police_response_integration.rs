@@ -5,7 +5,7 @@
 use crate::core::entity::EntityRef;
 use crate::core::id::{IdExhaustionError, IdKind, OperationId, PoliceResponseId};
 use crate::core::state::AppState;
-use crate::core::time::{SimDuration, SimTime};
+use crate::core::time::SimDuration;
 use crate::decisions::decision_system::{
     DecisionError, DecisionRequestOutcome, ValidatedDecisionRequest,
     validate_request_police_arrival_decision_on_arrival,
@@ -67,15 +67,10 @@ pub(crate) struct PoliceResponseProcessingOutcome {
 
 #[derive(Debug)]
 pub(crate) struct OperationPoliceResponseStartPlan {
-    entry_at: Option<SimTime>,
     dispatch: Option<ValidatedPoliceResponseDispatch>,
 }
 
 impl OperationPoliceResponseStartPlan {
-    pub(crate) fn entry_at(&self) -> Option<SimTime> {
-        self.entry_at
-    }
-
     pub(crate) fn commit_dispatch(
         self,
         state: &mut AppState,
@@ -111,33 +106,15 @@ pub(crate) fn decide_operation_police_response_start(
         .get_operation(operation)
         .ok_or(PoliceResponseStartError::MissingOperation(operation))?;
     let execution = registry.get_operation(record.kind()).execution();
-    let entry_at = execution
-        .operation_entry_offset()
-        .map(|offset| {
-            state
-                .now()
-                .checked_add(offset)
-                .ok_or(PoliceResponseStartError::SimulationTimeOverflow)
-        })
-        .transpose()?;
     let alert = resolve_operation_police_alert_context(registry, state, operation, state.now());
     let Some(neighborhood) = alert.neighborhood() else {
-        return Ok(OperationPoliceResponseStartPlan {
-            entry_at,
-            dispatch: None,
-        });
+        return Ok(OperationPoliceResponseStartPlan { dispatch: None });
     };
     if alert.score() < execution.police_dispatch_threshold() {
-        return Ok(OperationPoliceResponseStartPlan {
-            entry_at,
-            dispatch: None,
-        });
+        return Ok(OperationPoliceResponseStartPlan { dispatch: None });
     }
     let Some(authority) = resolve_police_response_authority(state, neighborhood) else {
-        return Ok(OperationPoliceResponseStartPlan {
-            entry_at,
-            dispatch: None,
-        });
+        return Ok(OperationPoliceResponseStartPlan { dispatch: None });
     };
     let patrol = resolve_authority_patrol_presence_snapshot(
         registry,
@@ -163,7 +140,6 @@ pub(crate) fn decide_operation_police_response_start(
         },
     )?;
     Ok(OperationPoliceResponseStartPlan {
-        entry_at,
         dispatch: Some(dispatch),
     })
 }

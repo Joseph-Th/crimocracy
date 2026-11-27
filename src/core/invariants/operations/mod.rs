@@ -30,16 +30,16 @@ use crate::operations::operation_execution::{
     completion_history_summary, has_police_response_arrived_by, participant_after_action_summary,
     render_persisted_after_action_summary, resolve_completion_history_entities,
     resolve_crew_capabilities, resolve_execution_margin, resolve_intelligence_factors,
-    resolve_objective_outcome,
+    resolve_objective_outcome, resolve_time_pressure,
 };
 use crate::operations::operation_intelligence::resolve_information_score;
 use crate::operations::operation_objective::{
     blocker_matches_objective, resolve_effective_objective_outcome,
 };
 use crate::operations::operation_scheduling::{
-    resolve_deadline_without_execution_window, resolve_operation_booking_window,
-    resolve_operation_booking_window_at, resolve_operation_earliest_start,
-    try_resolve_operation_earliest_start,
+    initial_operation_timing, resolve_deadline_without_execution_window,
+    resolve_operation_booking_window, resolve_operation_booking_window_at,
+    resolve_operation_earliest_start, try_resolve_operation_earliest_start,
 };
 use crate::operations::operation_system::{
     is_information_subject_relevant, is_valid_operation_objective,

@@ -33,9 +33,9 @@ use crate::intelligence::intelligence_system::IntelligenceError;
 use crate::operations::operation_abort::validate_authority_abort_operation;
 use crate::operations::operation_basis_knowledge::known_witness_cases;
 use crate::operations::operation_scheduling::{
-    find_busy_participant, projected_operation_window, resolve_operation_earliest_start,
+    OperationTiming, find_busy_participant, projected_operation_window,
+    resolve_operation_earliest_start,
 };
-use crate::operations::operation_state::{checked_shift_past_pause, pause_duration_minutes};
 use crate::operations::surveillance_integration::{
     SurveillanceRequestError, validate_surveillance_request,
 };
@@ -877,9 +877,13 @@ pub(crate) fn validate_operation_resume(
     let due_at = record
         .resolution_due_at()
         .expect("decision-blocked operation must retain its resolution due time");
-    let paused_minutes = pause_duration_minutes(paused_at, resumed_at);
-    let shifted_due_at = checked_shift_past_pause(due_at, paused_minutes)
-        .ok_or(OperationError::SimulationTimeOverflow)?;
+    let shifted_due_at = OperationTiming {
+        due_at,
+        entry_at: record.entry_at(),
+    }
+    .after_pause(paused_at, resumed_at)
+    .map(|timing| timing.due_at)
+    .ok_or(OperationError::SimulationTimeOverflow)?;
     if let Some(deadline) = record.completion_deadline()
         && shifted_due_at > deadline
     {
@@ -888,12 +892,6 @@ pub(crate) fn validate_operation_resume(
             projected_due_at: shifted_due_at,
             deadline,
         });
-    }
-    if let Some(entry_at) = record.entry_at()
-        && entry_at > paused_at
-        && checked_shift_past_pause(entry_at, paused_minutes).is_none()
-    {
-        return Err(OperationError::SimulationTimeOverflow);
     }
     let window_start = record.started_at().unwrap_or(record.scheduled_for());
     for participant in record.participants() {

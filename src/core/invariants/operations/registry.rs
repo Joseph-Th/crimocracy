@@ -215,12 +215,7 @@ fn validate_authored_operation_plan(
         operation.constraints(),
     )
     .is_none();
-    let authored_window_is_representable = operation
-        .started_at()
-        .unwrap_or_else(|| resolve_operation_earliest_start(operation))
-        .as_minutes()
-        .checked_add(u64::from(execution.duration().as_minutes()))
-        .is_some();
+    let authored_timing_is_valid = authored_operation_timing_is_valid(state, operation, execution);
     let before_start_deadline_abort_is_valid = operation.abort_record().is_none_or(|abort| {
         if abort.phase() != OperationAbortPhase::BeforeStart
             || abort.cause() != OperationAbortCause::DeadlineMissed
@@ -327,11 +322,7 @@ fn validate_authored_operation_plan(
                 })
         })
         || (has_police_entry_contingency && execution.operation_entry_offset().is_none())
-        || (execution.operation_entry_offset().is_none() && operation.entry_at().is_some())
-        || (operation.started_at().is_some()
-            && execution.operation_entry_offset().is_some()
-            && operation.entry_at().is_none())
-        || !authored_window_is_representable
+        || !authored_timing_is_valid
         || !deadline_window_is_valid
         || !before_start_deadline_abort_is_valid
         || !police_response_matches_authorship
@@ -344,6 +335,46 @@ fn validate_authored_operation_plan(
         return Err(invalid_operation_definition(operation));
     }
     Ok(())
+}
+
+/// The durable schedule must match actual admission and every completed Continue.
+/// An unresolved or aborted pause has not shifted either milestone. The decision
+/// history already supplies the exact pause interval, so no extra persisted clock
+/// or inferred elapsed duration is necessary.
+fn authored_operation_timing_is_valid(
+    state: &AppState,
+    operation: &OperationRecord,
+    execution: &OperationExecutionDefinition,
+) -> bool {
+    let Some(mut timing) = initial_operation_timing(
+        execution,
+        operation
+            .started_at()
+            .unwrap_or_else(|| resolve_operation_earliest_start(operation)),
+        operation.constraints(),
+    ) else {
+        return false;
+    };
+    if operation.started_at().is_none() {
+        return operation.resolution_due_at().is_none() && operation.entry_at().is_none();
+    }
+    for decision in state.decisions.decisions_for_operation(operation.id()) {
+        if let Some(resolution) = decision.resolution()
+            && resolution.response() == DecisionResponse::Continue
+        {
+            let Some(shifted) =
+                timing.after_pause(decision.requested_at(), resolution.resolved_at())
+            else {
+                return false;
+            };
+            timing = shifted;
+        }
+    }
+    operation.resolution_due_at() == Some(timing.due_at)
+        && operation.entry_at() == timing.entry_at
+        && operation
+            .completion_deadline()
+            .is_none_or(|deadline| timing.due_at <= deadline)
 }
 
 fn authored_business_target_is_valid(
@@ -397,6 +428,16 @@ fn validate_authored_operation_resolution(
     // against the arithmetic of their persisted factors.
     let (role_average, leader_capability) =
         resolve_crew_capabilities(execution, state, operation.leader(), operation.roles());
+    let (Some(started_at), Some(due_at)) = (operation.started_at(), operation.resolution_due_at())
+    else {
+        return Err(invalid_operation_definition(operation));
+    };
+    let expected_time_pressure = resolve_time_pressure(
+        started_at,
+        due_at,
+        execution.duration().as_minutes(),
+        execution.max_time_pressure(),
+    );
     if factors.role_capability_average() != role_average
         || factors.leader_capability() != leader_capability
     {
@@ -457,7 +498,7 @@ fn validate_authored_operation_resolution(
         expected_cash_proceeds.proceeds.as_ref(),
     );
     if factors.variance().unsigned_abs() > execution.variance_limit()
-        || factors.time_pressure() > execution.max_time_pressure()
+        || factors.time_pressure() != expected_time_pressure
         || factors.approach_adjustment()
             != execution
                 .approach_difficulty_adjustment(operation.approach())

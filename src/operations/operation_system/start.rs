@@ -11,8 +11,8 @@ use crate::core::time::SimTime;
 use crate::core::version::ensure_version_can_advance;
 use crate::operations::OperationStatus;
 use crate::operations::operation_scheduling::{
-    find_busy_participant_for_begin, resolve_deadline_without_execution_window,
-    resolve_operation_earliest_start,
+    OperationTiming, find_busy_participant_for_begin, initial_operation_timing,
+    resolve_deadline_without_execution_window, resolve_operation_earliest_start,
 };
 use crate::operations::police_response_integration::{
     OperationPoliceResponseStartPlan, PoliceResponseStartError,
@@ -24,7 +24,7 @@ pub(crate) struct ValidatedOperationStart {
     operation: OperationId,
     expected_version: u32,
     started_at: SimTime,
-    resolution_due_at: SimTime,
+    timing: OperationTiming,
     police_response: OperationPoliceResponseStartPlan,
 }
 
@@ -60,14 +60,13 @@ impl ValidatedOperationStart {
         // canonical admission before dispatch and use its current response plan, rather than
         // beginning an objective that has become impossible or omitting a newly due dispatch.
         let current = validate_begin_operation(registry, state, self.operation)?;
-        debug_assert_eq!(self.resolution_due_at, current.resolution_due_at);
-        let entry_at = current.police_response.entry_at();
+        debug_assert_eq!(self.timing, current.timing);
         let response = current.police_response.commit_dispatch(state)?;
         state.operations.begin(
             self.operation,
             self.started_at,
-            self.resolution_due_at,
-            entry_at,
+            self.timing.due_at,
+            self.timing.entry_at,
             response,
         );
         Ok(())
@@ -144,18 +143,8 @@ pub(crate) fn validate_begin_operation(
             now: state.now(),
         });
     }
-    let mut resolution_due_at = state
-        .now()
-        .checked_add(execution.duration())
+    let timing = initial_operation_timing(execution, state.now(), record.constraints())
         .ok_or(OperationError::SimulationTimeOverflow)?;
-    for constraint in record.constraints() {
-        let crate::operations::OperationConstraint::CompleteBy(deadline) = constraint else {
-            continue;
-        };
-        if *deadline < resolution_due_at {
-            resolution_due_at = *deadline;
-        }
-    }
     let participants = record.participants();
     for character in &participants {
         if let Some(arrest) = state.legal.active_arrest_for_character(*character) {
@@ -171,7 +160,7 @@ pub(crate) fn validate_begin_operation(
         &participants,
         operation,
         state.now(),
-        resolution_due_at,
+        timing.due_at,
     ) {
         return Err(OperationError::ParticipantBusy {
             character,
@@ -184,7 +173,7 @@ pub(crate) fn validate_begin_operation(
         operation,
         expected_version: record.version(),
         started_at: state.now(),
-        resolution_due_at,
+        timing,
         police_response,
     })
 }

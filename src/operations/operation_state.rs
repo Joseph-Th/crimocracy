@@ -8,6 +8,7 @@ use crate::core::id::{
 };
 use crate::core::time::{SimDuration, SimTime};
 use crate::core::version::advance_version_preflighted;
+use crate::operations::operation_scheduling::OperationTiming;
 use crate::operations::{
     OperationAbortPhase, OperationAbortRecord, OperationCashDispositionRecord, OperationKind,
     OperationPropertyDispositionRecord, OperationRecord, OperationResolutionRecord,
@@ -43,28 +44,6 @@ impl TakeDepletionPool {
             | OperationKind::Infiltration => Self::Operation(kind),
         }
     }
-}
-
-/// Minutes elapsed between a decision pause's start and its resumption instant. Shared by
-/// resume validation and commit so pause arithmetic cannot drift between the two phases.
-pub(crate) fn pause_duration_minutes(paused_at: SimTime, resumed_at: SimTime) -> u64 {
-    resumed_at
-        .as_minutes()
-        .checked_sub(paused_at.as_minutes())
-        .expect("operation cannot resume before its decision pause began")
-}
-
-/// Read-only timing-capacity check shared by resume validation and overlap projection.
-pub(crate) fn checked_shift_past_pause(time: SimTime, paused_minutes: u64) -> Option<SimTime> {
-    time.as_minutes()
-        .checked_add(paused_minutes)
-        .map(SimTime::from_minutes)
-}
-
-/// Applies a shift already proved representable by the canonical resume validator.
-fn shift_past_pause_preflighted(time: SimTime, paused_minutes: u64) -> SimTime {
-    checked_shift_past_pause(time, paused_minutes)
-        .expect("operation resume timing capacity must be preflighted before mutation")
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -594,27 +573,21 @@ impl OperationState {
                     .expect("awaiting operation must retain its pause time"),
             )
         };
-        let paused_minutes = pause_duration_minutes(paused_at, resumed_at);
-        let shifted_due_at = shift_past_pause_preflighted(due_at, paused_minutes);
-        let shifted_entry_at = entry_at.map(|entry_at| {
-            if entry_at > paused_at {
-                shift_past_pause_preflighted(entry_at, paused_minutes)
-            } else {
-                entry_at
-            }
-        });
+        let shifted = OperationTiming { due_at, entry_at }
+            .after_pause(paused_at, resumed_at)
+            .expect("operation resume timing capacity was preflighted");
         {
             let record = self
                 .records
                 .get_mut(&id)
                 .expect("validated operation disappeared before resume commit");
-            record.runtime.resolution_due_at = Some(shifted_due_at);
-            record.runtime.entry_at = shifted_entry_at;
+            record.runtime.resolution_due_at = Some(shifted.due_at);
+            record.runtime.entry_at = shifted.entry_at;
             record.runtime.awaiting_decision_since = None;
         }
         self.set_status(id, OperationStatus::InProgress);
         self.in_progress_by_resolution_due
-            .entry(shifted_due_at)
+            .entry(shifted.due_at)
             .or_default()
             .insert(id);
     }
@@ -975,12 +948,19 @@ mod tests {
 
     #[test]
     fn pause_shift_reports_clock_capacity_instead_of_panicking() {
+        let timing = OperationTiming {
+            due_at: SimTime::from_minutes(u64::MAX - 4),
+            entry_at: None,
+        };
         assert_eq!(
-            checked_shift_past_pause(SimTime::from_minutes(u64::MAX - 4), 4),
-            Some(SimTime::from_minutes(u64::MAX))
+            timing.after_pause(SimTime::ZERO, SimTime::from_minutes(4)),
+            Some(OperationTiming {
+                due_at: SimTime::MAX,
+                entry_at: None
+            })
         );
         assert_eq!(
-            checked_shift_past_pause(SimTime::from_minutes(u64::MAX - 4), 5),
+            timing.after_pause(SimTime::ZERO, SimTime::from_minutes(5)),
             None
         );
     }

@@ -67,6 +67,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod extraction;
 mod financial_reporting;
+mod persistence_timing;
 mod police_response;
 mod property_economics;
 
