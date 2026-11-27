@@ -123,12 +123,13 @@ pub fn decide_enterprise_cycle(
         .enterprises()
         .active_for_organization(record.organization())
         .count();
+    let enforcement_per_source = economics.enforcement_attention_basis_points_per_exposure_source();
     let enforcement_chance_basis_points = vice_inquiry_chance_basis_points(
         state,
         record.organization(),
         active_rackets,
         active_district_cases,
-        economics.enforcement_attention_basis_points_per_exposure_source(),
+        enforcement_per_source,
     );
     let had_active_enterprise_inquiry = has_active_enterprise_inquiry(state, enterprise);
     let enforcement_roll_hits = !had_active_enterprise_inquiry
@@ -196,6 +197,8 @@ pub fn decide_enterprise_cycle(
             active_district_cases,
             direct_cases,
             had_active_enterprise_inquiry,
+            enforcement_per_source,
+            enforcement_chance_basis_points,
         },
         economics: EnterpriseCycleEconomics {
             gross_revenue,

@@ -671,6 +671,54 @@ fn economic_definitions_reject_values_that_can_overflow_normal_settlement() {
 }
 
 #[test]
+fn enterprise_arithmetic_bounds_include_staffing_and_one_heat_surcharge() {
+    let registry = build_registry();
+    let kind = EnterpriseKind::Protection;
+    let definition = registry.get_enterprise(kind);
+    let register = |economics: EnterpriseEconomicsDefinition| {
+        RegistryBuilder::default().register_enterprise(
+            kind,
+            economics,
+            definition.required_business_functions().clone(),
+            definition.required_network_functions().clone(),
+            definition.network_mode(),
+        )
+    };
+    // Eight additional workers at maximum demand, commerce and wealth produce
+    // 28,800 cents and cost 12,000 cents per cycle under the current labor rule.
+    let mut economics = definition.economics().clone();
+    economics.demand_revenue_per_point = Money::ZERO;
+    economics.commerce_revenue_per_point = Money::ZERO;
+    economics.wealth_revenue_per_point = Money::ZERO;
+    economics.management_revenue_per_point = Money::ZERO;
+    economics.police_cost_per_point = Money::ZERO;
+    economics.support_surcharge_per_business = Money::ZERO;
+    economics.heat_surcharge_per_active_case = Money::ZERO;
+    economics.gross_variance_basis_points = 0;
+    economics.notable_variance_basis_points = 0;
+    economics.base_gross = Money::from_cents(i64::MAX - 28_800);
+    economics.base_operating_cost = Money::from_cents(i64::MAX - 12_000);
+    register(economics.clone()).expect("exact staffed bounds are representable");
+    let mut overflowing_gross = economics.clone();
+    overflowing_gross.base_gross = Money::from_cents(i64::MAX - 28_799);
+    assert!(
+        matches!(register(overflowing_gross), Err(RegistryBuildError::EnterpriseEconomicArithmeticOutOfRange(error_kind)) if error_kind == kind)
+    );
+    let mut overflowing_cost = economics.clone();
+    overflowing_cost.base_operating_cost = Money::from_cents(i64::MAX - 11_999);
+    assert!(
+        matches!(register(overflowing_cost), Err(RegistryBuildError::EnterpriseEconomicArithmeticOutOfRange(error_kind)) if error_kind == kind)
+    );
+    economics.base_operating_cost = Money::ZERO;
+    economics.heat_surcharge_per_active_case = Money::from_cents(i64::MAX - 12_000);
+    register(economics.clone()).expect("only one district heat surcharge is possible");
+    economics.heat_surcharge_per_active_case = Money::from_cents(i64::MAX - 11_999);
+    assert!(
+        matches!(register(economics), Err(RegistryBuildError::EnterpriseEconomicArithmeticOutOfRange(error_kind)) if error_kind == kind)
+    );
+}
+
+#[test]
 fn enterprise_economic_validation_preserves_inclusive_authored_boundaries() {
     let registry = build_registry();
     let kind = EnterpriseKind::Protection;

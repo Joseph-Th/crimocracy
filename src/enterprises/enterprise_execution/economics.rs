@@ -36,6 +36,53 @@ pub(crate) fn additional_associate_economics(
     ))
 }
 
+/// Registry-time arithmetic proof for the most expensive and productive legal
+/// staffing configuration. Every input is nonnegative when registration calls
+/// this, so maximum ratings, staffing, variance and support count bound all
+/// runtime compositions. Use the production rules rather than a second model.
+pub(crate) fn enterprise_economics_fit_production_arithmetic(
+    kind: EnterpriseKind,
+    economics: &EnterpriseEconomicsDefinition,
+) -> bool {
+    use crate::world::{NeighborhoodEconomyProfile, NeighborhoodInstitutionProfile};
+
+    let maximum = Rating::try_new(Rating::MAX).expect("maximum rating is valid");
+    let profile = NeighborhoodProfile {
+        economy: NeighborhoodEconomyProfile {
+            wealth: maximum,
+            commercial_activity: maximum,
+            illicit_demand: maximum,
+        },
+        institutions: NeighborhoodInstitutionProfile {
+            police_presence: maximum,
+        },
+    };
+    let Some((labor_revenue, labor_cost)) =
+        additional_associate_economics(kind, profile, kind.max_associates())
+    else {
+        return false;
+    };
+    let maximum_gross = resolve_gross_before_variance_value(economics, profile, Some(maximum))
+        .and_then(|gross| gross.checked_add(labor_revenue))
+        .and_then(|gross| {
+            crate::finance::helpers::apply_basis_point_multiplier(
+                gross,
+                10_000 + u32::from(economics.gross_variance_basis_points()),
+            )
+        });
+    // Supporting businesses have persistent u32 IDs. This conservative count
+    // bounds their cost, while the production heat rule charges only once.
+    maximum_gross.is_some()
+        && resolve_projected_operating_cost(
+            economics,
+            profile,
+            u32::MAX as usize,
+            u32::MAX,
+            labor_cost,
+        )
+        .is_some()
+}
+
 pub(super) fn resolve_gross_before_variance(
     enterprise: EnterpriseId,
     economics: &EnterpriseEconomicsDefinition,

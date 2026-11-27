@@ -27,8 +27,8 @@ pub(crate) use cycle_planning::enterprise_heat_change_is_reportable;
 pub use economics::ASSOCIATE_ADDITIONAL_DAILY_WAGE;
 pub(crate) use economics::{
     EnterpriseProjectionStaffing, decode_enterprise_investigation_case_count,
-    resolve_enterprise_financial_projection, resolve_enterprise_operating_cost_projection,
-    resolve_historical_enterprise_cycle_financials,
+    enterprise_economics_fit_production_arithmetic, resolve_enterprise_financial_projection,
+    resolve_enterprise_operating_cost_projection, resolve_historical_enterprise_cycle_financials,
 };
 #[cfg(test)]
 use establishment::enterprise_location_is_occupied;
@@ -277,6 +277,14 @@ pub enum EnterpriseError {
         found_active_inquiry: bool,
     },
     #[error(
+        "enterprise {enterprise} inquiry chance changed after cycle planning: {expected} to {found} basis points"
+    )]
+    StaleEnforcementExposure {
+        enterprise: EnterpriseId,
+        expected: u32,
+        found: u32,
+    },
+    #[error(
         "enterprise {enterprise} racket intake routing changed for neighborhood {neighborhood}; expected authority {expected:?}, found {found:?}"
     )]
     StaleEnforcementIntakeRouting {
@@ -338,6 +346,9 @@ struct EnterpriseCycleSnapshot {
     /// dependency from district case count because a case can open or close without changing
     /// the total district pressure count.
     had_active_enterprise_inquiry: bool,
+    /// Frozen authored coefficient and its live footprint-dependent result.
+    enforcement_per_source: u16,
+    enforcement_chance_basis_points: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -467,6 +478,23 @@ fn validate_legal_pressure_context(
             found_direct_cases: direct_cases,
             expected_active_inquiry: snapshot.had_active_enterprise_inquiry,
             found_active_inquiry: active_inquiry,
+        });
+    }
+    let found = crate::world::organization_pressure::vice_inquiry_chance_basis_points(
+        state,
+        record.organization(),
+        state
+            .enterprises()
+            .active_for_organization(record.organization())
+            .count(),
+        active_district_cases,
+        snapshot.enforcement_per_source,
+    );
+    if found != snapshot.enforcement_chance_basis_points {
+        return Err(EnterpriseError::StaleEnforcementExposure {
+            enterprise: record.id(),
+            expected: snapshot.enforcement_chance_basis_points,
+            found,
         });
     }
     Ok(())

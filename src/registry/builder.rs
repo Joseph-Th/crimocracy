@@ -7,6 +7,7 @@ pub(crate) use super::build_error::RegistryBuildError;
 use super::definitions::*;
 use super::{LegalConfigDefinition, Registry};
 use crate::core::attention::AttentionClass;
+use crate::enterprises::enterprise_execution::enterprise_economics_fit_production_arithmetic;
 use crate::enterprises::{ALL_ENTERPRISE_KINDS, EnterpriseKind};
 use crate::legal::{ALL_INVESTIGATION_WORK_KINDS, InvestigationWorkKind};
 use crate::operations::{ALL_OPERATION_KINDS, OperationApproach, OperationKind, RoleKind};
@@ -76,31 +77,6 @@ fn business_economics_fit_production_arithmetic(economics: &BusinessEconomicsDef
     }
     let maximum_operating_cost = i128::from(economics.base_operating_cost.cents())
         + i128::from(economics.police_cost_per_point.cents()) * 100;
-    maximum_operating_cost <= i128::from(i64::MAX)
-}
-
-fn enterprise_economics_fit_production_arithmetic(
-    economics: &EnterpriseEconomicsDefinition,
-) -> bool {
-    if !maximum_varied_gross_fits_i64(
-        economics.base_gross.cents(),
-        &[
-            economics.demand_revenue_per_point.cents(),
-            economics.commerce_revenue_per_point.cents(),
-            economics.wealth_revenue_per_point.cents(),
-            economics.management_revenue_per_point.cents(),
-        ],
-        economics.gross_variance_basis_points,
-    ) {
-        return false;
-    }
-    // Both supporting businesses and active investigations are keyed by persistent u32 IDs, so
-    // u32::MAX is a conservative upper bound for either unique count in one enterprise cycle.
-    let maximum_count = i128::from(u32::MAX);
-    let maximum_operating_cost = i128::from(economics.base_operating_cost.cents())
-        + i128::from(economics.police_cost_per_point.cents()) * 100
-        + i128::from(economics.support_surcharge_per_business.cents()) * maximum_count
-        + i128::from(economics.heat_surcharge_per_active_case.cents()) * maximum_count;
     maximum_operating_cost <= i128::from(i64::MAX)
 }
 
@@ -607,7 +583,7 @@ impl RegistryBuilder {
         if authored_money.iter().any(|money| money.cents() < 0) {
             return Err(RegistryBuildError::NegativeEnterpriseEconomicValue(kind));
         }
-        if !enterprise_economics_fit_production_arithmetic(&economics) {
+        if !enterprise_economics_fit_production_arithmetic(kind, &economics) {
             return Err(RegistryBuildError::EnterpriseEconomicArithmeticOutOfRange(
                 kind,
             ));

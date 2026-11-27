@@ -3266,6 +3266,101 @@ fn cycle_plan_rejects_when_district_case_pressure_changes_before_settlement() {
     validate_invariants(&fixture.state);
 }
 
+#[test]
+fn cycle_plan_rejects_changed_public_exposure_before_settlement() {
+    let registry = build_registry();
+    let mut fixture = make_test_enterprise_fixture();
+    let enterprise = establish_protection(&registry, &mut fixture);
+    let owner = BusinessOwner::Organization(fixture.organization);
+    for index in 0..12 {
+        insert_support_business(
+            &registry,
+            &mut fixture,
+            &format!("Store {index}"),
+            BusinessKind::Retail,
+            BTreeSet::from([BusinessFunction::CustomerAccess]),
+            owner,
+        );
+    }
+    let last = insert_support_business(
+        &registry,
+        &mut fixture,
+        "Independent store",
+        BusinessKind::Retail,
+        BTreeSet::from([BusinessFunction::CustomerAccess]),
+        BusinessOwner::Independent,
+    );
+    let district = fixture
+        .location
+        .neighborhood(fixture.state.world())
+        .unwrap();
+    let police = insert_organization(
+        &registry,
+        &mut fixture.state,
+        OrganizationDraft {
+            name: "Prominence Police".to_owned(),
+            kind: OrganizationKind::LawEnforcement,
+        },
+    )
+    .unwrap();
+    validate_set_jurisdiction(
+        &fixture.state,
+        JurisdictionDraft {
+            organization: police,
+            neighborhoods: BTreeSet::from([district]),
+            case_intake_priority: rating(80),
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(1_440));
+    let per_source = registry
+        .get_enterprise(EnterpriseKind::Protection)
+        .economics()
+        .enforcement_attention_basis_points_per_exposure_source();
+    let randomness = EnterpriseCycleRandomness::new(0, per_source);
+    let plan = decide_enterprise_cycle(&registry, &fixture.state, enterprise, randomness).unwrap();
+    assert!(plan.enforcement_incident.is_none());
+    let held = validate_enterprise_cycle_plan(&fixture.state, plan.clone()).unwrap();
+    validate_transfer_business_ownership(&fixture.state, last, owner)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let fresh = decide_enterprise_cycle(&registry, &fixture.state, enterprise, randomness).unwrap();
+    assert!(
+        fresh.enforcement_incident.is_some(),
+        "same roll must now draw an inquiry"
+    );
+    let before = bincode::serialize(&fixture.state).unwrap();
+    let expected = EnterpriseError::StaleEnforcementExposure {
+        enterprise,
+        expected: u32::from(per_source),
+        found: u32::from(per_source) * 2,
+    };
+    assert_eq!(
+        validate_enterprise_cycle_plan(&fixture.state, plan).err(),
+        Some(expected.clone())
+    );
+    assert_eq!(held.commit(&mut fixture.state).unwrap_err(), expected);
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    validate_enterprise_cycle_plan(&fixture.state, fresh)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert!(
+        fixture
+            .state
+            .enterprises()
+            .latest_cycle(enterprise)
+            .unwrap()
+            .drew_enforcement_attention()
+    );
+    restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+}
+
 /// Settles one due cycle for `enterprise` and returns its committed attention class.
 fn settle_cycle_inner(
     registry: &Registry,
