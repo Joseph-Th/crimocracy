@@ -187,7 +187,7 @@ pub enum InvestigationError {
         witness: CharacterId,
         existing: CaseWitnessId,
     },
-    #[error("lead case-activity knowledge could not be recorded: {0}")]
+    #[error("lead case knowledge could not be recorded: {0}")]
     CaseKnowledge(#[from] crate::intelligence::intelligence_system::IntelligenceError),
     #[error(transparent)]
     IdExhaustion(#[from] IdExhaustionError),

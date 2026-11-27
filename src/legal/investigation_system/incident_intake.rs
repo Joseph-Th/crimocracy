@@ -10,8 +10,9 @@ use crate::core::id::{EvidenceId, IdKind, InvestigationId, OrganizationId};
 use crate::core::state::AppState;
 use crate::core::time::{SimTime, ensure_time_current};
 use crate::core::version::{VersionCapacityError, ensure_version_can_advance_by};
+use crate::intelligence::intelligence_system::ValidatedInformation;
 use crate::legal::{
-    CaseWitnessRecord, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceRecord,
+    CaseWitnessDraft, EvidenceAssessment, EvidenceConnection, EvidenceIdentity, EvidenceRecord,
     IncidentIntakeDraft, InvestigationDraft, InvestigationRecord, InvestigationStatus,
 };
 use std::cmp::Reverse;
@@ -32,6 +33,9 @@ pub struct ValidatedIncidentIntake {
     /// Existing originated case and its pinned version, whether active or suspended.
     /// Recompute routing at commit, including new matching cases.
     continuing: Option<(InvestigationId, u32)>,
+    /// A continued staffed case teaches its existing lead about the newly registered witness.
+    /// Time and case version pin this artifact alongside the intake's other dependencies.
+    witness_knowledge: Option<ValidatedInformation>,
 }
 
 impl ValidatedIncidentIntake {
@@ -45,12 +49,15 @@ impl ValidatedIncidentIntake {
     }
 
     pub(crate) fn id_budget(&self) -> Result<Vec<(IdKind, u32)>, InvestigationError> {
-        let mut budget = Vec::with_capacity(3);
+        let mut budget = Vec::with_capacity(4);
         if self.continuing.is_none() {
             budget.push((IdKind::Investigation, 1));
         }
         budget.push((IdKind::Evidence, self.evidence_count()?));
         budget.push((IdKind::CaseWitness, u32::from(self.draft.witness.is_some())));
+        if self.witness_knowledge.is_some() {
+            budget.push((IdKind::Information, 1));
+        }
         Ok(budget)
     }
 
@@ -216,25 +223,18 @@ impl ValidatedIncidentIntake {
             }
         };
         let case_witness = if let Some(witness) = self.draft.witness {
-            let id = state
-                .ids
-                .next_case_witness()
-                .expect("incident witness ID was preflighted before mutation");
-            state.legal.insert_case_witness(
-                CaseWitnessRecord {
-                    id,
-                    investigation,
-                    witness: witness.character,
-                    subject: witness.subject,
-                    cooperation: witness.cooperation,
-                    registered_at: self.validated_at,
-                    statements: Default::default(),
-                    interview_attempts: 0,
-                    version: 1,
-                },
-                self.validated_at,
-            );
-            Some(id)
+            Some(
+                crate::legal::witness_system::commit_case_witness_registration_preflighted(
+                    state,
+                    CaseWitnessDraft {
+                        investigation,
+                        witness: witness.character,
+                        subject: witness.subject,
+                        cooperation: witness.cooperation,
+                    },
+                    self.witness_knowledge,
+                ),
+            )
         } else {
             None
         };
@@ -284,12 +284,23 @@ pub fn validate_incident_intake(
 ) -> Result<ValidatedIncidentIntake, InvestigationError> {
     validate_incident_intake_dependencies(state, &draft)?;
     let continuing = find_incident_target(state, &draft);
-    let validated = ValidatedIncidentIntake {
+    let mut validated = ValidatedIncidentIntake {
         draft,
         continuing,
         validated_at: state.now(),
+        witness_knowledge: None,
     };
     validated.ensure_current(state)?;
+    if let (Some((investigation, _)), Some(witness)) =
+        (validated.continuing, &validated.draft.witness)
+    {
+        validated.witness_knowledge =
+            crate::legal::case_knowledge::prepare_case_witness_knowledge_for_registration(
+                state,
+                investigation,
+                witness.character,
+            )?;
+    }
     Ok(validated)
 }
 

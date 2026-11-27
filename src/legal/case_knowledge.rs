@@ -107,7 +107,8 @@ pub(crate) fn prepare_case_activity_knowledge(
 /// Builds first-hand knowledge that a staffed law-enforcement case has registered a named
 /// witness. This deliberately lives on the lead investigator rather than the institution so a
 /// police contact can disclose it through the same provenance-preserving path as case activity.
-/// Registration and later lead assignment both call this helper, covering either event order.
+/// Later lead assignment uses the persisted witness; registration uses the same draft before
+/// the registration exists.
 pub(crate) fn prepare_case_witness_knowledge(
     state: &AppState,
     investigation: InvestigationId,
@@ -119,21 +120,63 @@ pub(crate) fn prepare_case_witness_knowledge(
         .legal
         .get_investigation(investigation)
         .expect("case-witness knowledge must reference a persisted investigation");
+    let Some(draft) = case_witness_information_draft(state, record, witness, lead) else {
+        return Ok(None);
+    };
+    validate_record_information_with_signal(
+        state,
+        draft,
+        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+            investigation,
+        }),
+    )
+    .map(Some)
+}
+
+/// Registration-time counterpart to the persisted-witness helper. Both the standalone
+/// registration and incident intake have validated the pending witness before preparing
+/// this exact same-minute fact and reserving their complete artifact budget.
+pub(in crate::legal) fn prepare_case_witness_knowledge_for_registration(
+    state: &AppState,
+    investigation: InvestigationId,
+    witness: CharacterId,
+) -> Result<Option<ValidatedInformation>, crate::intelligence::intelligence_system::IntelligenceError>
+{
+    let record = state
+        .legal
+        .get_investigation(investigation)
+        .expect("case-witness knowledge must reference a persisted investigation");
+    let Some(lead) = record.lead_investigator() else {
+        return Ok(None);
+    };
+    let Some(draft) = case_witness_information_draft(state, record, witness, lead) else {
+        return Ok(None);
+    };
+    validate_record_planned_case_witness_information(state, draft, investigation, witness).map(Some)
+}
+
+/// The observation has identical provenance, scope, quality and presentation whether
+/// the lead takes over an existing witness or learns one from a new incident.
+fn case_witness_information_draft(
+    state: &AppState,
+    record: &crate::legal::InvestigationRecord,
+    witness: CharacterId,
+    lead: CharacterId,
+) -> Option<InformationDraft> {
     let owner = record.owner();
     let organization = state
         .world
         .get_organization(owner)
         .expect("investigation owner must reference a persisted organization");
     if organization.kind() != OrganizationKind::LawEnforcement {
-        return Ok(None);
+        return None;
     }
     let witness_name = state
         .world
         .get_character(witness)
         .expect("case witness must reference a persisted character")
-        .name()
-        .to_owned();
-    let draft = InformationDraft {
+        .name();
+    Some(InformationDraft {
         holder: KnowledgeHolder::Character(lead),
         source_kind: InformationSourceKind::DirectObservation,
         topic: InformationTopic::LegalActivity,
@@ -146,66 +189,7 @@ pub(crate) fn prepare_case_witness_knowledge(
             "Case witness identified: {witness_name} is registered in case \"{}\".",
             record.title()
         ),
-    };
-    validate_record_information_with_signal(
-        state,
-        draft,
-        InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
-            investigation,
-        }),
-    )
-    .map(Some)
-}
-
-/// Registration-time counterpart to the persisted-witness helper. The canonical witness
-/// transaction has already validated the pending registration but deliberately has not inserted
-/// it yet, so this path prevalidates only that exact same-minute fact before the transaction's
-/// aggregate ID reservation.
-pub(crate) fn prepare_case_witness_knowledge_for_registration(
-    state: &AppState,
-    investigation: InvestigationId,
-    witness: CharacterId,
-    lead: CharacterId,
-) -> Result<Option<ValidatedInformation>, crate::intelligence::intelligence_system::IntelligenceError>
-{
-    let record = state
-        .legal
-        .get_investigation(investigation)
-        .expect("case-witness knowledge must reference a persisted investigation");
-    let owner = record.owner();
-    let organization = state
-        .world
-        .get_organization(owner)
-        .expect("investigation owner must reference a persisted organization");
-    if organization.kind() != OrganizationKind::LawEnforcement {
-        return Ok(None);
-    }
-    let witness_name = state
-        .world
-        .get_character(witness)
-        .expect("case witness must reference a persisted character")
-        .name()
-        .to_owned();
-    validate_record_planned_case_witness_information(
-        state,
-        InformationDraft {
-            holder: KnowledgeHolder::Character(lead),
-            source_kind: InformationSourceKind::DirectObservation,
-            topic: InformationTopic::LegalActivity,
-            source_entity: Some(EntityRef::Organization(owner)),
-            subject: EntityRef::Character(witness),
-            observed_at: state.now(),
-            reliability: Reliability::DirectAccess,
-            specificity: Specificity::Precise,
-            summary: format!(
-                "Case witness identified: {witness_name} is registered in case \"{}\".",
-                record.title()
-            ),
-        },
-        investigation,
-        witness,
-    )
-    .map(Some)
+    })
 }
 
 /// Convenience mapping for callers that hold an `InvestigationStatus` (for example the

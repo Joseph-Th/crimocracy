@@ -133,48 +133,55 @@ impl ValidatedCaseWitnessRegistration {
             self.expected_investigation_version,
             self.expected_character_version,
         )?;
-        let lead = state
-            .legal
-            .get_investigation(self.draft.investigation)
-            .expect("validated investigation must still exist")
-            .lead_investigator();
-        let knowledge = match lead {
-            Some(lead) => {
-                crate::legal::case_knowledge::prepare_case_witness_knowledge_for_registration(
-                    state,
-                    self.draft.investigation,
-                    self.draft.witness,
-                    lead,
-                )?
-            }
-            None => None,
-        };
+        let knowledge =
+            crate::legal::case_knowledge::prepare_case_witness_knowledge_for_registration(
+                state,
+                self.draft.investigation,
+                self.draft.witness,
+            )?;
         state.ids.reserve_many(&[
             (IdKind::CaseWitness, 1),
             (IdKind::Information, u32::from(knowledge.is_some())),
         ])?;
-        let id = state.ids.next_case_witness()?;
-        state.legal.insert_case_witness(
-            CaseWitnessRecord {
-                id,
-                investigation: self.draft.investigation,
-                witness: self.draft.witness,
-                subject: self.draft.subject,
-                cooperation: self.draft.cooperation,
-                registered_at: self.validated_at,
-                statements: Default::default(),
-                interview_attempts: 0,
-                version: 1,
-            },
-            self.validated_at,
-        );
-        if let Some(knowledge) = knowledge {
-            knowledge
-                .commit(state)
-                .expect("case-witness information ID was preflighted before registration mutation");
-        }
-        Ok(id)
+        Ok(commit_case_witness_registration_preflighted(
+            state, self.draft, knowledge,
+        ))
     }
+}
+
+/// Common registration mutation for standalone registration and composite incident intake.
+/// The caller proves case membership, witness eligibility, time, version capacity and the
+/// complete ID budget before invoking this hook. A new, unstaffed case has no lead knowledge.
+pub(in crate::legal) fn commit_case_witness_registration_preflighted(
+    state: &mut AppState,
+    draft: CaseWitnessDraft,
+    knowledge: Option<crate::intelligence::intelligence_system::ValidatedInformation>,
+) -> CaseWitnessId {
+    let id = state
+        .ids
+        .next_case_witness()
+        .expect("case-witness ID was preflighted before registration mutation");
+    let registered_at = state.now();
+    state.legal.insert_case_witness(
+        CaseWitnessRecord {
+            id,
+            investigation: draft.investigation,
+            witness: draft.witness,
+            subject: draft.subject,
+            cooperation: draft.cooperation,
+            registered_at,
+            statements: Default::default(),
+            interview_attempts: 0,
+            version: 1,
+        },
+        registered_at,
+    );
+    if let Some(knowledge) = knowledge {
+        knowledge
+            .commit(state)
+            .expect("case-witness information ID was preflighted before registration mutation");
+    }
+    id
 }
 
 pub fn validate_register_case_witness(

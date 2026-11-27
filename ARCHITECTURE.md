@@ -526,6 +526,14 @@ root/recipient delivery; structural validation separately checks the original
 observation, source entity and chronology. The root projection is not serialized
 and neither restore nor repeated legal reads traverse the entire internal chain.
 
+The witness owner commits named witness registration through one shared mutation
+for direct registration and incident intake. Continuing an already staffed
+police case prepares the lead's personal witness observation alongside the
+incident evidence and reserves its information ID in the complete intake budget.
+Later staffing of an unstaffed case uses the same observation draft, validated
+against the existing witness. The typed witness fact becomes organization
+knowledge only through a permitted information transfer or contact disclosure.
+
 ## Source map — one owner per field
 
 The operation objective owner, `operations::operation_objective`, resolves

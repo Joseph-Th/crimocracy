@@ -392,6 +392,12 @@ and title changes, check typed rejection with byte-identical state, then
 replan and verify the current outcome, witness registration, or notification
 through the save/restore boundary.
 
+`continued_staffed_incident_delivers_witness_knowledge_through_contact`
+appends an identified incident to a staffed case through canonical intake,
+checks atomic rejection under information-ID exhaustion, and verifies the
+lead's new personal witness observation can be disclosed exactly once through
+a standing police contact and survives restoration.
+
 `finance_play_tests.rs` proves ownership isolation, same-minute ordering,
 non-mutating rejection, real laundering fees, and save/restore stability.
 `laundering_fragmentation_cannot_reduce_the_authored_fee` compares equal-volume whole and fragmented transfers, checks actual ledger debits and credits and consumed capacity, and continues identically across save/restore. `finance_system/tests/laundering.rs` also verifies that a held transfer rejects a same-minute market capacity reduction caused by establishing a competing business, with the ledger and laundering consumption unchanged.

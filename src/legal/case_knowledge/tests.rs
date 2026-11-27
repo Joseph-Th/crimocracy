@@ -254,6 +254,199 @@ fn staffing_records_lead_held_active_case_knowledge() {
 }
 
 #[test]
+fn continued_staffed_incident_delivers_witness_knowledge_through_contact() {
+    use crate::core::id::{IdExhaustionError, IdKind};
+    use crate::legal::investigation_system::InvestigationError;
+    use crate::legal::{IncidentWitnessDraft, WitnessCooperation};
+    use crate::operations::operation_system::validate_authorize_operation;
+    use crate::operations::{
+        OperationApproach, OperationDraft, OperationKind, OperationObjective, RoleKind,
+    };
+
+    let registry = build_registry();
+    let mut fixture = make_test_knowledge_fixture();
+    let police = police_of(&fixture.state);
+    let sponsor = fixture.criminal;
+    let handler = fixture
+        .state
+        .world()
+        .characters_in_organization(sponsor)
+        .next()
+        .unwrap()
+        .id();
+    let suspect = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Repeated Incident Participant".to_owned(),
+            organization: Some(sponsor),
+            supervisor: Some(handler),
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::from([(CapabilityKind::Surveillance, rating(60))]),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let authorize = |state: &mut AppState, title: &str, delay: u32| {
+        validate_authorize_operation(
+            &registry,
+            state,
+            OperationDraft {
+                title: title.to_owned(),
+                kind: OperationKind::Surveillance,
+                responsible_organization: sponsor,
+                leader: suspect,
+                objective: OperationObjective::GatherInformation {
+                    target: EntityRef::Organization(police),
+                },
+                approach: OperationApproach::Covert,
+                roles: BTreeMap::from([(RoleKind::Surveillance, suspect)]),
+                intelligence: BTreeSet::new(),
+                constraints: Vec::new(),
+                contingencies: Vec::new(),
+                scheduled_for: state.now() + SimDuration::from_minutes(delay),
+            },
+        )
+        .unwrap()
+        .commit(state)
+        .unwrap()
+    };
+    let first = authorize(&mut fixture.state, "First incident", 1);
+    let second = authorize(&mut fixture.state, "Second incident", 360);
+    let draft = |state: &AppState, origin, witness| IncidentIntakeDraft {
+        owner: police,
+        title: "Related identified incident".to_owned(),
+        subjects: BTreeSet::from([EntityRef::Operation(origin), EntityRef::Character(suspect)]),
+        evidence: vec![IncidentEvidenceDraft {
+            subject: EntityRef::Character(suspect),
+            origin: Some(EntityRef::Operation(origin)),
+            kind: EvidenceKind::Surveillance,
+            strength: EvidenceStrength::Strong,
+            reliability: EvidenceReliability::HighlyReliable,
+            admissibility: Admissibility::Unknown,
+            discovered_at: state.now(),
+        }],
+        origin: Some(EntityRef::Operation(origin)),
+        witness,
+    };
+    let investigation =
+        validate_incident_intake(&fixture.state, draft(&fixture.state, first, None))
+            .unwrap()
+            .commit(&mut fixture.state)
+            .unwrap()
+            .investigation;
+    assert_eq!(
+        apply_autonomous_investigator_staffing(&mut fixture.state).unwrap(),
+        vec![(investigation, fixture.detective)]
+    );
+    let contact = validate_establish_contact(
+        &fixture.state,
+        InstitutionalContactDraft {
+            sponsor,
+            handler,
+            contact: fixture.detective,
+        },
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let pending = find_pending_disclosure_sources(&fixture.state, contact);
+    assert_eq!(pending.len(), 1);
+    validate_contact_disclosure(&fixture.state, contact, pending[0])
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let witness = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Second Incident Witness".to_owned(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let second_draft = |state: &AppState| {
+        draft(
+            state,
+            second,
+            Some(IncidentWitnessDraft {
+                character: witness,
+                subject: EntityRef::Character(suspect),
+                cooperation: WitnessCooperation::Cooperative,
+            }),
+        )
+    };
+    // Exhaustion must reject the complete intake rather than register an undisclosable
+    // witness, append evidence or consume any other artifact IDs.
+    let mut exhausted = fixture.state.clone();
+    let held = validate_incident_intake(&exhausted, second_draft(&exhausted)).unwrap();
+    exhausted
+        .ids
+        .set_next_raw_for_test(IdKind::Information, u32::MAX);
+    let before = bincode::serialize(&exhausted).unwrap();
+    let result = held.commit(&mut exhausted);
+    assert!(matches!(
+        result,
+        Err(InvestigationError::IdExhaustion(
+            IdExhaustionError::Exhausted {
+                kind: "information",
+                ..
+            }
+        ))
+    ));
+    assert_eq!(bincode::serialize(&exhausted).unwrap(), before);
+
+    let outcome = validate_incident_intake(&fixture.state, second_draft(&fixture.state))
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    assert_eq!(outcome.investigation, investigation);
+    assert!(outcome.case_witness.is_some());
+    assert_eq!(fixture.state.legal().investigations().count(), 1);
+    let pending = find_pending_disclosure_sources(&fixture.state, contact);
+    assert_eq!(
+        pending.len(),
+        1,
+        "the staffed case's newly registered witness must reach the lead's contact channel"
+    );
+    let signal = InformationSignal::LegalPersonStatus(LegalPersonStatusSignal::CaseWitness {
+        investigation,
+    });
+    let known = fixture
+        .state
+        .intelligence()
+        .get_information(pending[0])
+        .unwrap();
+    assert_eq!(
+        known.holder(),
+        KnowledgeHolder::Character(fixture.detective)
+    );
+    assert_eq!(known.subject(), EntityRef::Character(witness));
+    assert_eq!(known.signal(), Some(&signal));
+    let disclosure = validate_contact_disclosure(&fixture.state, contact, pending[0])
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let disclosed = fixture
+        .state
+        .contacts()
+        .get_disclosure(disclosure)
+        .unwrap()
+        .disclosed_information();
+    assert!(find_pending_disclosure_sources(&fixture.state, contact).is_empty());
+    let restored = restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    let record = restored.intelligence().get_information(disclosed).unwrap();
+    assert_eq!(record.holder(), KnowledgeHolder::Organization(sponsor));
+    assert_eq!(record.signal(), Some(&signal));
+    assert_eq!(record.subject(), EntityRef::Character(witness));
+    assert!(find_pending_disclosure_sources(&restored, contact).is_empty());
+}
+
+#[test]
 fn cold_shelving_refreshes_the_leads_knowledge_to_shelved() {
     let registry = build_registry();
     let mut fixture = make_test_knowledge_fixture();
