@@ -16,7 +16,8 @@ use crate::finance::{
     Money,
 };
 use crate::world::world_system::{
-    ValidatedCharacterReassignment, WorldError, validate_reassign_character,
+    ValidatedCharacterReassignment, WorldError, validate_payroll_return,
+    validate_reassign_character,
 };
 use crate::world::{
     CapabilityKind, CharacterRecord, CivicProfession, IndependentVocation, OrganizationKind,
@@ -172,6 +173,7 @@ impl ValidatedFreelanceContract {
         ensure_eligible(state, self.sponsor, self.freelancer, self.manager)?;
         self.membership.ensure_current(state)?;
         self.payment.ensure_current(state)?;
+        validate_payroll_return(state, self.freelancer, self.sponsor, Some(&self.payment))?;
         state.ids.reserve_many(&self.payment.id_budget())?;
         let transaction = self.payment.commit_preflighted(state);
         self.membership.commit_preflighted(state);
@@ -335,6 +337,7 @@ pub fn validate_hire_freelancer(
         Some(openings) => validate_record_transaction_with_openings(state, openings, draft)?,
         None => validate_record_transaction(state, draft)?,
     };
+    validate_payroll_return(state, freelancer, sponsor, Some(&payment))?;
     let expires_at = state
         .now()
         .checked_add(crate::core::time::SimDuration::from_minutes(

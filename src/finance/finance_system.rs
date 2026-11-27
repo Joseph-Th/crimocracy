@@ -289,6 +289,24 @@ impl ValidatedLedgerTransaction {
         Ok(self.commit_preflighted(state))
     }
 
+    /// Spendable balance of an existing account after this validated transaction.
+    /// Call only against the state used to validate the token, or after ensure_current.
+    /// A posting that consumes the final account version also consumes its future
+    /// payment capacity, even if its remaining recorded balance is positive.
+    pub(crate) fn available_payment_balance_after(
+        &self,
+        account: &crate::finance::FinancialAccountRecord,
+    ) -> Money {
+        let Some(balance) = self.balances.get(&account.id()) else {
+            return account.available_payment_balance();
+        };
+        if account.kind().is_liquid() && account.version() < u32::MAX - 1 {
+            (*balance).max(Money::ZERO)
+        } else {
+            Money::ZERO
+        }
+    }
+
     pub(crate) fn id_budget(&self) -> Vec<(IdKind, u32)> {
         let opening_count = self
             .openings

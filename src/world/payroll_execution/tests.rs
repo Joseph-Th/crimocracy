@@ -332,6 +332,182 @@ fn payroll_departures_block_immediate_and_unfunded_rehire_after_reload() {
 }
 
 #[test]
+fn returning_freelancer_must_retain_wage_reserve_after_signing_fee() {
+    use crate::world::character_life::validate_set_civic_occupation;
+    use crate::world::freelance_contracts::{FreelanceError, validate_hire_freelancer};
+    use crate::world::world_system::{WorldError, insert_neighborhood};
+    use crate::world::{
+        IndependentVocation, NeighborhoodDraft, NeighborhoodEconomyProfile,
+        NeighborhoodInstitutionProfile, NeighborhoodProfile, Rating,
+    };
+
+    let registry = build_registry();
+    let mut fixture = make_test_payroll_fixture();
+    let rating = Rating::try_new(50).unwrap();
+    let ward = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Contract ward".into(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating,
+                    commercial_activity: rating,
+                    illicit_demand: rating,
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating,
+                },
+            },
+        },
+    )
+    .unwrap();
+    let freelancer = insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Returning contractor".into(),
+            organization: None,
+            supervisor: None,
+            autonomy: AutonomyLevel::Guided,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    validate_set_civic_occupation(
+        &fixture.state,
+        freelancer,
+        ward,
+        IndependentVocation::FreelanceCriminal,
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    let mut relationship = RelationshipDimensions::zero();
+    relationship.trust = RelationshipLevel::try_new(100).unwrap();
+    relationship.resentment = RelationshipLevel::try_new(100).unwrap();
+    validate_set_relationship(&fixture.state, freelancer, fixture.boss, relationship)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    let reserve = registry.upkeep().per_member_daily().cents() * 7;
+    credit_account(&mut fixture.state, fixture.boss, fixture.treasury, 100_000);
+    let hire = validate_hire_freelancer(
+        &fixture.state,
+        fixture.organization,
+        freelancer,
+        fixture.boss,
+        2,
+    )
+    .unwrap();
+    let fee = hire.fee_cents();
+    hire.commit(&mut fixture.state).unwrap();
+    credit_account(
+        &mut fixture.state,
+        fixture.boss,
+        fixture.treasury,
+        -(100_000 - fee),
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(DAY_MINUTES - 1));
+    let tick = crate::core::simulation::run_tick(&registry, &mut fixture.state).unwrap();
+    assert_eq!(tick.payroll_departures, vec![freelancer]);
+    assert!(
+        fixture
+            .state
+            .world()
+            .active_freelance_contract(freelancer)
+            .is_none()
+    );
+    assert!(
+        fixture
+            .state
+            .history()
+            .latest_payroll_departure(freelancer, fixture.organization)
+            .is_some()
+    );
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(7 * DAY_MINUTES));
+    // The exact signing fee comes from street cash; a separate clean pocket
+    // supplies the promised wages and is not touched by the signing ledger.
+    let clean = insert_account(
+        &mut fixture.state,
+        FinancialAccountDraft {
+            owner: FinancialOwner::Organization(fixture.organization),
+            kind: AccountKind::AccountedFunds,
+        },
+    )
+    .unwrap();
+    credit_account(&mut fixture.state, fixture.boss, fixture.treasury, fee);
+    credit_account(&mut fixture.state, fixture.boss, clean, reserve - 1);
+    let organization = fixture.organization;
+    let boss = fixture.boss;
+    let validate =
+        |state: &AppState| validate_hire_freelancer(state, organization, freelancer, boss, 2);
+    let assert_unfunded = |error: Option<FreelanceError>| {
+        assert_eq!(
+            error,
+            Some(FreelanceError::World(
+                WorldError::PayrollDepartureUnfunded {
+                    character: freelancer,
+                    organization,
+                    required_cents: i128::from(reserve),
+                    available_cents: i128::from(reserve - 1),
+                }
+            ))
+        )
+    };
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_unfunded(validate(&fixture.state).err());
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    credit_account(&mut fixture.state, boss, clean, 1);
+    let held = validate(&fixture.state).unwrap();
+    credit_account(&mut fixture.state, boss, clean, -1);
+    let before = bincode::serialize(&fixture.state).unwrap();
+    assert_unfunded(held.commit(&mut fixture.state).err());
+    assert_eq!(bincode::serialize(&fixture.state).unwrap(), before);
+    credit_account(&mut fixture.state, boss, clean, 1);
+    let mut replay =
+        restore_save(&registry, build_save(&registry, &fixture.state).unwrap()).unwrap();
+    for state in [&mut fixture.state, &mut replay] {
+        validate(state).unwrap().commit(state).unwrap();
+        assert_eq!(
+            state.finance().get_account(clean).unwrap().balance(),
+            Money::from_cents(reserve)
+        );
+        assert_eq!(
+            state
+                .finance()
+                .get_account(fixture.treasury)
+                .unwrap()
+                .balance(),
+            Money::ZERO
+        );
+        assert_eq!(
+            state
+                .world()
+                .get_character(freelancer)
+                .unwrap()
+                .organization(),
+            Some(organization)
+        );
+        assert!(
+            state
+                .world()
+                .active_freelance_contract(freelancer)
+                .is_some()
+        );
+        restore_save(&registry, build_save(&registry, state).unwrap()).unwrap();
+    }
+    assert_eq!(
+        bincode::serialize(&fixture.state).unwrap(),
+        bincode::serialize(&replay).unwrap()
+    );
+}
+
+#[test]
 fn payroll_is_due_only_on_nonzero_day_boundaries() {
     assert!(!is_payroll_due(SimTime::ZERO));
     assert!(!is_payroll_due(SimTime::from_minutes(1_439)));

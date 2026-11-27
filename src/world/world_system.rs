@@ -14,6 +14,7 @@ use crate::decisions::decision_system::{
     validate_cancel_recruitment_approvals_for_manager_change,
 };
 use crate::enterprises::{EnterpriseLocation, EnterpriseStatus};
+use crate::finance::finance_system::ValidatedLedgerTransaction;
 use crate::legal::ProsecutionCaseStatus;
 use crate::registry::Registry;
 use crate::world::{
@@ -348,7 +349,7 @@ impl ValidatedCharacterAutonomy {
             }
             .into());
         }
-        validate_set_character_autonomy(state, self.organization, self.character, self.autonomy)?;
+        validate_autonomy_preconditions(state, self.organization, self.character, self.autonomy)?;
         if !self.approval_cancellations.is_current(state) {
             return Err(WorldError::RecruitmentApprovalSetChanged {
                 character: self.character,
@@ -369,6 +370,27 @@ pub fn validate_set_character_autonomy(
     character: CharacterId,
     autonomy: AutonomyLevel,
 ) -> Result<ValidatedCharacterAutonomy, CharacterAutonomyError> {
+    let record = validate_autonomy_preconditions(state, organization, character, autonomy)?;
+    Ok(ValidatedCharacterAutonomy {
+        organization,
+        character,
+        autonomy,
+        expected_version: record.version(),
+        approval_cancellations: validate_cancel_recruitment_approvals_for_manager_change(
+            state, character,
+        )
+        .map_err(WorldError::from)?,
+    })
+}
+
+/// Shared eligibility checks; a held order rechecks its original cancellation
+/// snapshot rather than constructing a second approval-cancellation token.
+fn validate_autonomy_preconditions(
+    state: &AppState,
+    organization: OrganizationId,
+    character: CharacterId,
+    autonomy: AutonomyLevel,
+) -> Result<&CharacterRecord, CharacterAutonomyError> {
     let record = state
         .world
         .get_character(character)
@@ -393,16 +415,7 @@ pub fn validate_set_character_autonomy(
         });
     }
     ensure_version_can_advance(record.version(), "character").map_err(WorldError::from)?;
-    Ok(ValidatedCharacterAutonomy {
-        organization,
-        character,
-        autonomy,
-        expected_version: record.version(),
-        approval_cancellations: validate_cancel_recruitment_approvals_for_manager_change(
-            state, character,
-        )
-        .map_err(WorldError::from)?,
-    })
+    Ok(record)
 }
 
 #[derive(Debug)]
@@ -607,7 +620,7 @@ fn validate_reassignment_preconditions(
             });
         }
         if let Some(organization) = organization {
-            validate_payroll_return(state, character, organization)?;
+            validate_payroll_return(state, character, organization, None)?;
         }
         validate_organization_change_release(state, character, organization)?;
     }
@@ -642,10 +655,15 @@ fn validate_reassignment_preconditions(
     Ok(())
 }
 
-fn validate_payroll_return(
+/// A returning worker requires a credible wage reserve. A composed hire
+/// that pays a signing fee must prove this against the remaining spendable
+/// funds, not the balance before its own debit. The optional payment is
+/// already validated and credits no new accounts of the hiring organization.
+pub(crate) fn validate_payroll_return(
     state: &AppState,
     character: CharacterId,
     organization: OrganizationId,
+    payment: Option<&ValidatedLedgerTransaction>,
 ) -> Result<(), WorldError> {
     use crate::history::HistoryEventKind;
     let Some(event) = state
@@ -674,7 +692,16 @@ fn validate_payroll_return(
     let available_cents = state
         .finance()
         .accounts_for(crate::finance::FinancialOwner::Organization(organization))
-        .map(|account| i128::from(account.available_payment_balance().cents()))
+        .map(|account| {
+            i128::from(
+                payment
+                    .map_or_else(
+                        || account.available_payment_balance(),
+                        |payment| payment.available_payment_balance_after(account),
+                    )
+                    .cents(),
+            )
+        })
         .sum::<i128>();
     if available_cents < required_cents {
         return Err(WorldError::PayrollDepartureUnfunded {
