@@ -278,53 +278,7 @@ impl ValidatedBusinessCycle {
     }
 
     pub(crate) fn ensure_current(&self, state: &AppState) -> Result<(), BusinessEconomyError> {
-        let business = validate_business(state, self.plan.snapshot.business)?;
-        if business.version() != self.plan.snapshot.expected_business_version {
-            return Err(BusinessEconomyError::StaleBusiness {
-                business: self.plan.snapshot.business,
-                expected: self.plan.snapshot.expected_business_version,
-                found: business.version(),
-            });
-        }
-        let economy = state
-            .economy
-            .get_business_economy(self.plan.snapshot.business)
-            .ok_or(BusinessEconomyError::MissingBusinessEconomy(
-                self.plan.snapshot.business,
-            ))?;
-        if economy.version() != self.plan.snapshot.expected_economy_version {
-            return Err(BusinessEconomyError::StaleEconomy {
-                business: self.plan.snapshot.business,
-                expected: self.plan.snapshot.expected_economy_version,
-                found: economy.version(),
-            });
-        }
-        ensure_version_can_advance(economy.version(), "business economy")?;
-        if economy.status() != BusinessOperatingStatus::Active {
-            return Err(BusinessEconomyError::EconomyNotActive(
-                self.plan.snapshot.business,
-            ));
-        }
-        if resolve_market_snapshot(state, self.plan.snapshot.business)?
-            != self.plan.economics.market
-        {
-            return Err(BusinessEconomyError::StaleMarket(
-                self.plan.snapshot.business,
-            ));
-        }
-        validate_business_cycle_enterprise_dependency(state, &self.plan.snapshot)?;
-        crate::core::time::ensure_time_current(state.now(), self.plan.snapshot.occurred_at)
-            .map_err(|(expected, found)| BusinessEconomyError::StaleCycleTime {
-                expected,
-                found,
-            })?;
-        validate_accounts(
-            state,
-            self.plan.snapshot.business,
-            self.plan.accounts.operating_account,
-            self.plan.accounts.settlement_account,
-            Some(self.plan.snapshot.business),
-        )?;
+        validate_business_cycle_snapshot_current(state, &self.plan)?;
         if let Some(ledger) = &self.ledger {
             ledger.ensure_current(state)?;
         }
@@ -378,10 +332,10 @@ impl ValidatedBusinessCycle {
     }
 }
 
-pub fn validate_business_cycle_plan(
+fn validate_business_cycle_snapshot_current(
     state: &AppState,
-    plan: BusinessCyclePlan,
-) -> Result<ValidatedBusinessCycle, BusinessEconomyError> {
+    plan: &BusinessCyclePlan,
+) -> Result<(), BusinessEconomyError> {
     let business = validate_business(state, plan.snapshot.business)?;
     if business.version() != plan.snapshot.expected_business_version {
         return Err(BusinessEconomyError::StaleBusiness {
@@ -421,7 +375,14 @@ pub fn validate_business_cycle_plan(
         plan.accounts.operating_account,
         plan.accounts.settlement_account,
         Some(plan.snapshot.business),
-    )?;
+    )
+}
+
+pub fn validate_business_cycle_plan(
+    state: &AppState,
+    plan: BusinessCyclePlan,
+) -> Result<ValidatedBusinessCycle, BusinessEconomyError> {
+    validate_business_cycle_snapshot_current(state, &plan)?;
     // A balanced settlement moves no money, and the ledger rejects zero-value postings, so
     // net-zero cycles record their modeled gross/cost financials without a ledger transaction
     // (see `core::invariants::business` for the matching validity rule).

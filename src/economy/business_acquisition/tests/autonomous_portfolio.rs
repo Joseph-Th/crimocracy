@@ -230,6 +230,166 @@ fn rival_avoids_reopening_positive_margin_shop_that_destroys_its_other_earnings(
 }
 
 #[test]
+fn rival_rejects_damaged_dormant_purchase_that_loses_income_after_repair() {
+    let mut fixture = make_independent_fixture();
+    let rival = fixture.organization;
+    insert_character(
+        &mut fixture.state,
+        CharacterDraft {
+            name: "Rival executive".to_owned(),
+            organization: Some(rival),
+            supervisor: None,
+            autonomy: AutonomyLevel::Delegated,
+            capabilities: BTreeMap::new(),
+            traits: BTreeSet::new(),
+            drives: BTreeMap::new(),
+        },
+    )
+    .unwrap();
+    let neighborhood = insert_neighborhood(
+        &mut fixture.state,
+        NeighborhoodDraft {
+            name: "Marginal retail ward".to_owned(),
+            profile: NeighborhoodProfile {
+                economy: NeighborhoodEconomyProfile {
+                    wealth: rating(35),
+                    commercial_activity: rating(30),
+                    illicit_demand: rating(30),
+                },
+                institutions: NeighborhoodInstitutionProfile {
+                    police_presence: rating(100),
+                },
+            },
+        },
+    )
+    .unwrap();
+    let dormant = established_shop(
+        &mut fixture,
+        BusinessKind::Retail,
+        BusinessOwner::Independent,
+        neighborhood,
+    );
+    let pharmacy = established_shop(
+        &mut fixture,
+        BusinessKind::Pharmacy,
+        BusinessOwner::Organization(rival),
+        neighborhood,
+    );
+    let price = acquisition_offer(&fixture.registry, &fixture.state, rival, dormant)
+        .unwrap()
+        .0;
+    let reserve = fixture.registry.upkeep().per_member_daily().cents() * 7;
+    fund_accounted_from_street(&mut fixture, price.cents() + reserve);
+    fixture
+        .state
+        .advance_clock(SimDuration::from_minutes(7 * DAY_MINUTES as u32));
+    business_economy_system::validate_disrupt_business_economy(
+        &fixture.registry,
+        &fixture.state,
+        dormant,
+    )
+    .unwrap()
+    .commit(&mut fixture.state)
+    .unwrap();
+    validate_suspend_business_economy(&fixture.state, dormant)
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+
+    let appraisal = appraise_business(&fixture.registry, &fixture.state, dormant).unwrap();
+    assert!(appraisal.expected_cycle_net > Money::ZERO);
+    assert!(
+        fixture
+            .state
+            .economy()
+            .get_business_economy(dormant)
+            .unwrap()
+            .is_disrupted(fixture.state.now())
+    );
+    let mut purchased = fixture.state.clone();
+    validate_acquire_business(
+        &fixture.registry,
+        &purchased,
+        BusinessAcquisitionDraft {
+            organization: rival,
+            business: dormant,
+            funding_accounts: BTreeSet::from([fixture.accounted]),
+        },
+    )
+    .unwrap()
+    .commit(&fixture.registry, &mut purchased)
+    .unwrap();
+    // Inspect the actual settled books after damage expires, rather than comparing
+    // the planner's two formulas against each other. Neither branch changes title
+    // or closes another shop during the matched settlement.
+    let mut retained = fixture.state.clone();
+    for state in [&mut purchased, &mut retained] {
+        state.advance_clock(fixture.registry.business_disruption().duration());
+        assert!(
+            !state
+                .economy()
+                .get_business_economy(dormant)
+                .unwrap()
+                .is_disrupted(state.now())
+        );
+        for business in [pharmacy, dormant] {
+            if !state
+                .economy()
+                .get_business_economy(business)
+                .unwrap()
+                .is_operating()
+            {
+                continue;
+            }
+            let plan = business_economy_system::decide_business_cycle(
+                &fixture.registry,
+                state,
+                business,
+                0,
+            )
+            .unwrap();
+            business_economy_system::validate_business_cycle_plan(state, plan)
+                .unwrap()
+                .commit(state)
+                .unwrap();
+        }
+        restore_save(
+            &fixture.registry,
+            build_save(&fixture.registry, state).unwrap(),
+        )
+        .unwrap();
+    }
+    let settled_net = |state: &AppState, business| {
+        state
+            .economy()
+            .cycles_for(business)
+            .next_back()
+            .unwrap()
+            .net_cash()
+            .cents()
+    };
+    assert!(settled_net(&purchased, dormant) > 0);
+    assert!(
+        settled_net(&purchased, pharmacy) + settled_net(&purchased, dormant)
+            < settled_net(&retained, pharmacy)
+    );
+
+    let before = bincode::serialize(&fixture.state).unwrap();
+    let mut restored = restore_save(
+        &fixture.registry,
+        build_save(&fixture.registry, &fixture.state).unwrap(),
+    )
+    .unwrap();
+    for state in [&mut fixture.state, &mut restored] {
+        assert!(
+            apply_due_autonomous_acquisitions(&fixture.registry, state).is_empty(),
+            "the buyer must not price healthy revenue against permanently damaged competition"
+        );
+        assert_eq!(bincode::serialize(state).unwrap(), before);
+    }
+}
+
+#[test]
 fn rival_reopens_viable_dormant_listing_without_harming_its_portfolio() {
     let mut fixture = make_independent_fixture();
     let rival = fixture.organization;

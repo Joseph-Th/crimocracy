@@ -212,8 +212,11 @@ pub(super) fn owner_reopening_daily_displacement(
 /// A suspended property bought by a new owner is restarted, not kept dormant. Estimate the
 /// lost sales of that buyer's *existing* operating stores before deciding to purchase. An
 /// already-active target has already competed for those customers, so changing its owner does
-/// not create new market pressure. This read-only calculation only affects an internal NPC
-/// purchasing decision; no foreign operating details are disclosed to another organization.
+/// not create new market pressure. Use the same normally operating assumption as
+/// `forecast_acquisition_business_net` for a dormant acquisition: temporary damage
+/// cannot permanently discount the customer revenue that the acquired shop will displace.
+/// Unlike a decision to reopen an already-owned damaged shop today, acquisition is
+/// a long-term capital investment valued at its normal earning power.
 pub(crate) fn acquisition_owner_daily_displacement(
     registry: &Registry,
     state: &AppState,
@@ -234,7 +237,7 @@ pub(crate) fn acquisition_owner_daily_displacement(
         registry,
         state,
         business,
-        economy.is_disrupted(state.now()),
+        false,
         BusinessOwner::Organization(buyer),
         overhead,
         excluded,
