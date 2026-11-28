@@ -10,6 +10,15 @@ use std::collections::BTreeMap;
 
 #[test]
 fn selling_closed_shop_accounts_for_reopened_competition_in_retained_wage_base() {
+    check_closed_shop_sale_wage_base(false);
+}
+
+#[test]
+fn selling_damaged_closed_shop_protects_wage_base_after_repair() {
+    check_closed_shop_sale_wage_base(true);
+}
+
+fn check_closed_shop_sale_wage_base(damaged: bool) {
     let mut fixture = make_independent_fixture();
     let buyer = fixture.organization;
     designate_player_organization(&mut fixture.state, buyer).unwrap();
@@ -52,6 +61,16 @@ fn selling_closed_shop_accounts_for_reopened_competition_in_retained_wage_base()
         BusinessOwner::Organization(seller),
         district,
     );
+    if damaged {
+        business_economy_system::validate_disrupt_business_economy(
+            &fixture.registry,
+            &fixture.state,
+            target,
+        )
+        .unwrap()
+        .commit(&mut fixture.state)
+        .unwrap();
+    }
     validate_suspend_business_economy(&fixture.state, target)
         .unwrap()
         .commit(&mut fixture.state)
@@ -68,6 +87,16 @@ fn selling_closed_shop_accounts_for_reopened_competition_in_retained_wage_base()
         .unwrap()
         .commit(&mut reopened)
         .unwrap();
+    if damaged {
+        assert!(
+            reopened
+                .economy()
+                .get_business_economy(target)
+                .unwrap()
+                .is_disrupted(reopened.now())
+        );
+        reopened.advance_clock(fixture.registry.business_disruption().duration());
+    }
     let after_income =
         business_economy_system::forecast_live_business_net(&fixture.registry, &reopened, retained)
             .unwrap()
@@ -134,6 +163,29 @@ fn selling_closed_shop_accounts_for_reopened_competition_in_retained_wage_base()
                 .unwrap()
                 .is_operating()
         );
+        if damaged {
+            assert!(
+                state
+                    .economy()
+                    .get_business_economy(target)
+                    .unwrap()
+                    .is_disrupted(state.now())
+            );
+            state.advance_clock(fixture.registry.business_disruption().duration());
+            let plan = business_economy_system::decide_business_cycle(
+                &fixture.registry,
+                state,
+                retained,
+                0,
+            )
+            .unwrap();
+            business_economy_system::validate_business_cycle_plan(state, plan)
+                .unwrap()
+                .commit(state)
+                .unwrap();
+            let settled = state.economy().cycles_for(retained).next_back().unwrap();
+            assert_eq!(i128::from(settled.net_cash().cents()), after_income);
+        }
         assert_eq!(
             business_economy_system::forecast_live_business_net(&fixture.registry, state, retained)
                 .unwrap()

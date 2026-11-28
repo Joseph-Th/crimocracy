@@ -125,9 +125,12 @@ fn operating_condition(state: &AppState, business: BusinessId) -> Option<bool> {
         .then(|| economy.is_disrupted(state.now()))
 }
 
-/// A conveyance restarts the transferred property's books, preserving existing
-/// disruption. Use this counterfactual for retained earnings and any replacement
-/// investment considered by the seller. A terminal restart cannot compete.
+/// A conveyance restarts the transferred property's books. For the seller's
+/// long-term retained earning base and replacement investment, newly reopened
+/// competition must be priced at normal capacity, just as for a dormant
+/// acquisition. Existing active competitors retain their known live condition:
+/// transferring title alone does not change their market presence. Actual
+/// conveyance preserves disruption until its authored expiry.
 fn operating_condition_after_sale(
     state: &AppState,
     business: BusinessId,
@@ -135,7 +138,8 @@ fn operating_condition_after_sale(
 ) -> Option<bool> {
     if sold == Some(business) {
         let economy = state.economy().get_business_economy(business)?;
-        (economy.version() < u32::MAX - 1).then(|| economy.is_disrupted(state.now()))
+        (economy.version() < u32::MAX - 1)
+            .then(|| economy.is_operating() && economy.is_disrupted(state.now()))
     } else {
         operating_condition(state, business)
     }
